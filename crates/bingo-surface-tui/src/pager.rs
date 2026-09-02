@@ -236,15 +236,18 @@ fn moved(open: &mut Pager, key: KeyEvent, window: Window) {
     }
 }
 
-/// Leaving the sheet folds the result it came from, so `ctrl+o` twice and
-/// `esc` once is a round trip rather than a state a person is left in.
+/// Leaving the sheet folds the block it came from back to where its kind
+/// starts — five rows for a result, the row alone for a thought — so the climb
+/// up and the `esc` down are a round trip rather than a state a person is left
+/// in. Forgetting the entry *is* the fold: the start is written in one place
+/// ([`crate::fold`]) and never copied here.
 fn closed(ui: &mut Ui, now: Now) {
     let opened = match &ui.layer.open {
         Open::Pager(open) => Some(open.item.clone()),
         _ => None,
     };
     if let Some(item) = opened {
-        ui.expanded.remove(&item);
+        ui.folds.remove(&item);
     }
     ui.layer.close(now.instant);
 }

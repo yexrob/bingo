@@ -13,13 +13,13 @@
 //! rather than the flat transcript: a window is walked in blocks and cut to
 //! the row, so what it hands back is always an exact slice of the whole.
 
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{Item, ItemBody, ItemId, ItemStatus, Seq, SessionState};
 use ratatui::text::Line;
 
 use crate::clock::{FRAME, Now};
+use crate::fold::{self, Fold, Folds};
 use crate::transcript::{self, Cue, Rows};
 use crate::tree::Agents;
 use crate::welcome;
@@ -38,16 +38,17 @@ struct Revision {
     /// Where the child this call spawned is, when it spawned one: its row is
     /// read from the child's state, so the child's seq is the row's revision.
     agent: Option<Seq>,
-    /// Opened whole with `ctrl+o`.
-    expanded: bool,
+    /// How much of the block is shown: what `ctrl+o` and a click both set, and
+    /// the start its kind has until they do.
+    fold: Fold,
 }
 
-fn revision(item: &Item, agent: Option<&SessionState>, expanded: bool) -> Revision {
+fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold) -> Revision {
     Revision {
         status: item.status,
         size: size(&item.body),
         agent: agent.map(|child| child.seq),
-        expanded,
+        fold,
     }
 }
 
@@ -193,7 +194,7 @@ impl Blocks {
         state: &SessionState,
         agents: &Agents<'_>,
         width: usize,
-        expanded: &BTreeSet<ItemId>,
+        folds: &Folds,
         live: Vec<Line<'static>>,
         now: Now,
     ) -> usize {
@@ -204,7 +205,7 @@ impl Blocks {
         let rows = Rows {
             cwd: &state.summary.cwd,
             width,
-            expanded,
+            folds,
             now,
             title: state.summary.title.as_deref(),
         };
@@ -253,7 +254,7 @@ impl Blocks {
     ) -> usize {
         let now = rows.now.instant;
         let agent = agents.get(&item.id).copied();
-        let revision = revision(item, agent, rows.expanded.contains(&item.id));
+        let revision = revision(item, agent, fold::fold_of(rows.folds, item));
         let held = self.blocks.get(at).filter(|entry| entry.id == item.id);
         let same = held.is_some_and(|entry| entry.revision == revision);
         // An item that has only just finished is not yet terminal for this
@@ -464,14 +465,7 @@ mod tests {
     }
 
     fn sync_at(blocks: &mut Blocks, state: &SessionState, width: usize, now: Now) -> usize {
-        blocks.sync(
-            state,
-            &Agents::new(),
-            width,
-            &BTreeSet::new(),
-            Vec::new(),
-            now,
-        )
+        blocks.sync(state, &Agents::new(), width, &Folds::new(), Vec::new(), now)
     }
 
     /// The rows the welcome box takes at the top, plus the blank under it.

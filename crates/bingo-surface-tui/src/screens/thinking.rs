@@ -1,8 +1,10 @@
 //! The screens a thought is read through (§4's thinking row, §6's): being had,
-//! over, opened, and the two it says nothing on — a thought the provider
-//! summarised nothing of, and one so long the row folds it.
+//! over, and each of the three states a click walks it through — plus the one
+//! it says nothing on, a thought the provider summarised nothing of.
 
 use super::*;
+
+use crate::fold::Fold;
 
 /// A thought that has finished, with what it thought and how long it took.
 fn thought(id: &str, text: &str, seconds: i64) -> bingo_sdk::Item {
@@ -46,9 +48,10 @@ fn thinking_and_its_decay() {
 }
 
 /// A thought streams as it is thought (2026-09-02, user-directed): `✻
-/// Thinking…` over the last three rows of what has arrived so far, dim under
-/// the `⎿` a running tool's tail hangs from — and no comet on them, because
-/// the glow is for words being said and thinking is where `dim` lives (§4).
+/// Thinking…` over the newest **two** rows of what has arrived so far, dim
+/// under the `⎿` a running tool's tail hangs from — and no comet on them,
+/// because the glow is for words being said and thinking is where `dim` lives
+/// (§4).
 #[test]
 fn a_thought_being_had_streams_under_its_own_row() {
     let text = "The manifest first, because the lockfile only says what the manifest \
@@ -70,11 +73,8 @@ fn a_thought_being_had_streams_under_its_own_row() {
     both("reasoning_streaming", &solo(&state), &ui, now);
 }
 
-/// A thought is readable where it happened (M34): the row says how long it
-/// took, what was thought hangs under it in dim, and the rest folds away
-/// behind the key a result folds behind.
-#[test]
-fn a_long_thought_is_read_under_its_own_row() {
+/// A question, and a thought long enough to have something to keep back.
+fn a_thought_worth_reading() -> bingo_sdk::SessionState {
     let text = "The manifest first, because the lockfile only says what the manifest \
                 already asked for.\n\
                 Then the crate map, which is the one place the layering is written down.\n\
@@ -82,12 +82,59 @@ fn a_long_thought_is_read_under_its_own_row() {
                 Only then the code, and only the file the plan names.\n\
                 Anything else is a second reading of the same three facts.\n\
                 So: manifest, map, plan.";
-    let state = folded(vec![
+    folded(vec![
         item(1, user("itm_1", "what is in this workspace?")),
         item(2, thought("itm_2", text, 4)),
-    ]);
+    ])
+}
+
+/// The thought's own item, which the two states below are set on.
+fn the_thought() -> bingo_sdk::ItemId {
+    bingo_sdk::ItemId::from_raw("itm_2")
+}
+
+/// What a person meets (2026-09-02, later still, user-directed): the row
+/// alone. A thought is working, and the rows under it belong to what came of
+/// it — the five a fold used to keep, and the line counting the rest, were six
+/// rows of the model's notes standing between the question and the answer.
+#[test]
+fn a_finished_thought_closes_to_its_own_row() {
     let (ui, now) = scene();
-    both("reasoning_inline", &solo(&state), &ui, now);
+    both(
+        "reasoning_closed",
+        &solo(&a_thought_worth_reading()),
+        &ui,
+        now,
+    );
+}
+
+/// One click, or one `ctrl+o`: the first two rows of it, from the top —
+/// nothing is moving, so there is no newest end to follow — under the same
+/// `… +N lines (ctrl+o to expand)` every other cut wears.
+#[test]
+fn a_finished_thought_peeks_at_its_first_rows() {
+    let (mut ui, now) = scene();
+    ui.folds.insert(the_thought(), Fold::Peek);
+    both(
+        "reasoning_peek",
+        &solo(&a_thought_worth_reading()),
+        &ui,
+        now,
+    );
+}
+
+/// Once more: the whole of it where it happened, still dim and still under the
+/// `⎿`, because it is still working and not an answer.
+#[test]
+fn a_finished_thought_opens_whole_where_it_sits() {
+    let (mut ui, now) = scene();
+    ui.folds.insert(the_thought(), Fold::Open);
+    both(
+        "reasoning_open",
+        &solo(&a_thought_worth_reading()),
+        &ui,
+        now,
+    );
 }
 
 /// Anthropic's redacted thinking, and an OpenAI turn the provider summarised

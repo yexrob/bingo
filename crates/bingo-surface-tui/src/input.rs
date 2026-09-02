@@ -19,6 +19,7 @@ use crate::commands::{self, Local};
 use crate::complete;
 use crate::cycle;
 use crate::effect::Effect;
+use crate::fold;
 use crate::keys;
 use crate::pager;
 use crate::rail::{self, CardId, Pin};
@@ -160,23 +161,29 @@ fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect>
         return vec![Effect::View(session.clone())];
     }
     if let Some(item) = &block {
-        toggle_fold(ui, item);
+        cycle_fold(ui, tree.viewed(), item);
     }
     ui.select.block = block;
     ui.select.start(cell);
     Vec::new()
 }
 
-/// A click on a block opens what is folded under it, and a second click folds
-/// it again — a result, a thought, a notice alike. A *key* never means two
-/// directions (§7, M11e); a click on the same row is one gesture, and the
-/// direction it takes is the one the row is not already in.
+/// A click on a block walks its fold one step and comes back to where its kind
+/// starts (§7). A *key* never means two directions (§7, M11e); a click on the
+/// same row is one gesture, and one gesture may go round.
 ///
-/// It fills the set `ctrl+o` fills, so a block is open in one way only.
-fn toggle_fold(ui: &mut Ui, item: &bingo_sdk::ItemId) {
-    if !ui.expanded.remove(item) {
-        ui.expanded.insert(item.clone());
-    }
+/// A result, a notice and an action have the two states they always had — open
+/// and their five-row cut — because that cut is where they start. A thought
+/// that is over starts shut, so the same walk gives it three: shut, its first
+/// two rows, the whole of it. Only a thought has a state worth skipping past.
+///
+/// It writes the map `ctrl+o` writes, so a block is open in one way only.
+fn cycle_fold(ui: &mut Ui, state: &SessionState, id: &bingo_sdk::ItemId) {
+    let Some(item) = item_of(state, id) else {
+        return;
+    };
+    let next = fold::cycled(item, fold::fold_of(&ui.folds, item));
+    ui.folds.insert(id.clone(), next);
 }
 
 /// A drag takes the far end of the run with it.
@@ -252,20 +259,27 @@ fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
     })
 }
 
-/// `ctrl+o` only ever opens further: the first press lifts the fold on the
-/// focused result — else the latest — and the second takes the whole of it into
-/// the pager, where `esc` folds it again. One key, one direction (§4's
-/// `ctrl+o to expand`).
+/// `ctrl+o` only ever opens further: each press lifts the focused block's fold
+/// one rung — else the latest block's — and from the whole of it the next press
+/// takes the sheet, where `esc` folds it again. One key, one direction (§4's
+/// `ctrl+o to expand`). A thought that is over has one rung more than a result,
+/// because it starts one rung lower.
 fn deepen(ui: &mut Ui, tree: &Tree, now: Now) {
     let focused = ui.select.block.clone();
     let Some(id) = latest(tree.viewed(), focused.as_ref(), folds) else {
         return;
     };
-    if ui.expanded.contains(&id) {
-        pager::open_block(ui, tree, now, Some(&id));
+    let Some(item) = item_of(tree.viewed(), &id) else {
         return;
+    };
+    match fold::deeper(fold::fold_of(&ui.folds, item)) {
+        Some(next) => {
+            ui.folds.insert(id, next);
+        }
+        None => {
+            pager::open_block(ui, tree, now, Some(&id));
+        }
     }
-    ui.expanded.insert(id);
 }
 
 /// `ctrl+b` hands the shell command that is running to the background: the
@@ -314,6 +328,12 @@ pub fn latest(
         .filter(|item| focused.is_none_or(|id| id == &item.id))
         .find(|item| what(item))
         .map(|item| item.id.clone())
+}
+
+/// The item a fold belongs to. A fold is a fact about a kind of block, so the
+/// id alone cannot answer what the block starts at or cycles through.
+fn item_of<'a>(state: &'a SessionState, id: &bingo_sdk::ItemId) -> Option<&'a bingo_sdk::Item> {
+    state.items.iter().find(|item| &item.id == id)
 }
 
 /// What `ctrl+o` opens further: a block whose row wears
@@ -2071,14 +2091,29 @@ mod tests {
         folded(vec![frame(1, bingo_sdk::Event::ItemCompleted { item })])
     }
 
-    /// `ctrl+o` reaches a thought as it reaches a result: the fold lifts, then
-    /// the whole of it takes the sheet.
+    /// The steps a thought that is over takes, deep enough that each one shows
+    /// something the last one did not.
+    fn steps() -> String {
+        (1..=9).map(|i| format!("step {i}\n")).collect()
+    }
+
+    /// `ctrl+o` only ever opens further (§7), and a thought has one rung more
+    /// than a result because it starts one lower: shut, its first two rows,
+    /// the whole of it, the sheet. `esc` out of the sheet puts it back where
+    /// its kind starts.
     #[test]
-    fn ctrl_o_lifts_a_thoughts_fold_and_then_opens_it() {
-        let text: String = (1..=9).map(|i| format!("step {i}\n")).collect();
-        let state = thought(&text);
+    fn ctrl_o_climbs_a_thought_from_shut_through_peek_and_whole_to_the_sheet() {
+        let state = thought(&steps());
         let (mut ui, now) = scene();
-        assert!(render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"));
+        let shut = render(&state, &ui, now);
+        assert!(shut.contains("Thought for 2s"), "{shut}");
+        assert!(!shut.contains("step 1"), "it starts shut: {shut}");
+
+        press(&mut ui, &state, ctrl('o'), now);
+        let peek = render(&state, &ui, now);
+        assert!(peek.contains("step 2"), "{peek}");
+        assert!(!peek.contains("step 3"), "two rows, from the top: {peek}");
+        assert!(peek.contains("+7 lines (ctrl+o to expand)"), "{peek}");
 
         press(&mut ui, &state, ctrl('o'), now);
         let opened = render(&state, &ui, now);
@@ -2089,6 +2124,39 @@ mod tests {
             render(&state, &ui, later(now, 200)).contains("Thinking"),
             "the sheet says what it is"
         );
+
+        press(&mut ui, &state, key(KeyCode::Esc), now);
+        assert!(ui.folds.is_empty(), "and esc folds it back to shut");
+    }
+
+    /// A click walks the same rungs and comes back round (§7): a thought that
+    /// is over is the one block with three states, because it is the one with
+    /// a state a person wants to skip.
+    #[test]
+    fn a_click_cycles_a_finished_thought_through_its_three_states() {
+        let state = thought(&steps());
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        assert!(!render(&state, &ui, now).contains("step 1"), "shut");
+
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
+        let peek = render(&state, &ui, now);
+        assert!(peek.contains("step 1") && peek.contains("step 2"), "{peek}");
+        assert!(!peek.contains("step 3"), "the peek is two rows: {peek}");
+
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
+        let opened = render(&state, &ui, now);
+        assert!(opened.contains("step 9"), "{opened}");
+        assert!(!opened.contains("+7 lines"), "{opened}");
+
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
+        assert!(
+            !render(&state, &ui, now).contains("step 1"),
+            "the third click is back where the first started"
+        );
     }
 
     /// A redacted thought promises nothing: no fold, no key, no sheet.
@@ -2098,18 +2166,18 @@ mod tests {
         let (mut ui, now) = scene();
         render(&state, &ui, now);
         press(&mut ui, &state, ctrl('o'), now);
-        assert!(ui.expanded.is_empty(), "there is nothing to lift");
+        assert!(ui.folds.is_empty(), "there is nothing to lift");
         ui.select.block = Some(bingo_sdk::ItemId::from_raw("itm_1"));
         press(&mut ui, &state, key(KeyCode::Enter), now);
         assert!(!ui.layer.showing(), "and nothing to open");
     }
 
-    /// A thought being had is not a fold: its tail is the last three rows and
-    /// cuts nothing, so `ctrl+o` walks past it to the result that does fold —
-    /// the same rule a running call keeps.
+    /// A thought being had is not a fold: its two tail rows scroll rather than
+    /// cut, and promise no key, so `ctrl+o` walks past it to the thought that
+    /// is over — the same rule a running call keeps.
     #[test]
     fn ctrl_o_walks_past_a_thought_that_is_still_being_had() {
-        let mut state = thought(&(1..=9).map(|i| format!("step {i}\n")).collect::<String>());
+        let mut state = thought(&steps());
         let being_had = crate::test_support::item(
             "itm_2",
             bingo_sdk::ItemStatus::Running,
@@ -2123,10 +2191,7 @@ mod tests {
         render(&state, &ui, now);
         press(&mut ui, &state, ctrl('o'), now);
         assert_eq!(
-            ui.expanded
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
+            ui.folds.keys().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["itm_1".to_string()],
             "the thought that is over is the one with a fold to lift"
         );
