@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Interrupt, SessionSummary, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
-    input_schema,
+    Interrupt, SessionSummary, Tone, Tool, ToolContext, ToolError, ToolOutput, ToolSpec,
+    ToolTraits, TreeNode, View, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -23,8 +23,9 @@ row is a name, a session and whether it is working or idle. Use it before \
 writing to one whose name you are unsure of, or to see whether the ones you \
 started are still running.";
 
-/// The line above the agents the caller did not start.
-const BESIDE: &str = "Beside you (the same agent started them):";
+/// What the agents the caller did not start are gathered under, in the
+/// listing and in the tree beside it (ADR-0024 §3).
+const BESIDE: &str = "Beside you";
 
 /// The arguments a listing takes, which is none. Named so the schema the
 /// model reads is an object like every other tool's.
@@ -61,9 +62,47 @@ fn listing(mine: &[SessionSummary], beside: &[SessionSummary]) -> String {
         block.push(lines(mine));
     }
     if !beside.is_empty() {
-        block.push(format!("{BESIDE}\n{}", lines(beside)));
+        block.push(format!(
+            "{BESIDE} (the same agent started them):\n{}",
+            lines(beside)
+        ));
     }
     block.join("\n\n")
+}
+
+/// The same roster a person reads (ADR-0013, the block lane): a node per
+/// agent wearing the one word [`state`] gives it, and the teammates under a
+/// node of their own. A caller that started nothing has no roster to draw —
+/// the words are the whole answer, so nothing is drawn at all.
+fn roster(mine: &[SessionSummary], beside: &[SessionSummary]) -> Option<View> {
+    if mine.is_empty() && beside.is_empty() {
+        return None;
+    }
+    let mut nodes: Vec<TreeNode> = mine.iter().map(node).collect();
+    if !beside.is_empty() {
+        nodes.push(TreeNode {
+            label: BESIDE.into(),
+            badge: None,
+            tone: Tone::Neutral,
+            children: beside.iter().map(node).collect(),
+        });
+    }
+    Some(View::Tree { nodes })
+}
+
+/// One agent as a node: its name, and what it is doing as a badge. The tone
+/// is `good` for one that is working and neutral for one that is not —
+/// `attention` is for what wants a person (ADR-0013 §1), and neither does.
+fn node(child: &SessionSummary) -> TreeNode {
+    TreeNode {
+        label: names::name_of(child).to_string(),
+        badge: Some(state(child).to_string()),
+        tone: match child.busy {
+            true => Tone::Good,
+            false => Tone::Neutral,
+        },
+        children: Vec::new(),
+    }
 }
 
 fn lines(children: &[SessionSummary]) -> String {
@@ -102,7 +141,9 @@ impl Tool for ListAgentsTool {
         let beside = names::siblings(&cx.host, &cx.session)
             .await
             .map_err(|e| ToolError::Failed(e.message))?;
-        Ok(ToolOutput::text(listing(&mine, &beside)))
+        let mut out = ToolOutput::text(listing(&mine, &beside));
+        out.display = roster(&mine, &beside);
+        Ok(out)
     }
 }
 
@@ -112,13 +153,26 @@ mod tests {
     use crate::tests::{Fleet, Recorder, tool_context};
     use serde_json::json;
 
-    async fn listed(fleet: &Fleet, session: &bingo_sdk::SessionId) -> String {
+    async fn answered(fleet: &Fleet, session: &bingo_sdk::SessionId) -> ToolOutput {
         let host = Recorder::new(fleet);
-        let out = ListAgentsTool
+        ListAgentsTool
             .call(json!({}), &tool_context(session, host))
             .await
-            .expect("a listing");
+            .expect("a listing")
+    }
+
+    async fn listed(fleet: &Fleet, session: &bingo_sdk::SessionId) -> String {
+        let out = answered(fleet, session).await;
         out.parts[0].as_text().unwrap_or_default().to_string()
+    }
+
+    fn node_of(name: &str, state: &str, tone: Tone) -> TreeNode {
+        TreeNode {
+            label: name.into(),
+            badge: Some(state.into()),
+            tone,
+            children: Vec::new(),
+        }
     }
 
     #[tokio::test]
@@ -173,6 +227,53 @@ mod tests {
         fleet.child(&root, "reviewer");
         let text = listed(&fleet, &root).await;
         assert!(!text.contains(BESIDE), "the root has no teammates: {text}");
+    }
+
+    /// The block lane (ADR-0013 §2): the roster a person reads, asserted as
+    /// the value it is.
+    #[tokio::test]
+    async fn the_tree_wears_each_state_as_a_badge_and_keeps_the_teammates_apart() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let reviewer = fleet.child(&root, "reviewer");
+        let scout = fleet.child(&root, "scout");
+        fleet.room(&root, "#design");
+        fleet.set_busy(&reviewer, true);
+
+        assert_eq!(
+            answered(&fleet, &root).await.display,
+            Some(View::Tree {
+                nodes: vec![
+                    node_of("reviewer", "busy", Tone::Good),
+                    node_of("scout", "idle", Tone::Neutral),
+                ]
+            }),
+            "the caller's own, and never the room that answers nobody"
+        );
+
+        assert_eq!(
+            answered(&fleet, &scout).await.display,
+            Some(View::Tree {
+                nodes: vec![TreeNode {
+                    label: BESIDE.into(),
+                    badge: None,
+                    tone: Tone::Neutral,
+                    children: vec![node_of("reviewer", "busy", Tone::Good)],
+                }]
+            }),
+            "a teammate is a teammate, under a node that says so"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_roster_with_nobody_on_it_draws_nothing() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        assert_eq!(
+            answered(&fleet, &root).await.display,
+            None,
+            "the words are the whole answer"
+        );
     }
 
     #[test]

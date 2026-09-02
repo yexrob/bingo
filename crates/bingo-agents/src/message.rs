@@ -8,7 +8,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use bingo_sdk::{
     Delivery, Driver, Input, IntentId, Origin, Subject, Tool, ToolContext, ToolError, ToolOutput,
-    ToolSpec, ToolTraits, input_schema,
+    ToolSpec, ToolTraits, View, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -52,6 +52,27 @@ fn receipt(to: &str, driver: Driver) -> String {
                 "Sent to {to}; it takes it up as its next turn, or reads it mid-run if it is already working."
             )
         }
+    }
+}
+
+/// The same delivery a person reads (ADR-0013, the block lane): where it
+/// went, whose name it arrives under, and when it will be read. The model has
+/// the sentence above; this is the receipt beside it.
+fn card(to: &str, from: &str, driver: Driver) -> View {
+    View::KeyValue {
+        rows: vec![
+            ("to".into(), to.to_string()),
+            ("from".into(), from.to_string()),
+            ("read".into(), read(driver).to_string()),
+        ],
+    }
+}
+
+/// When it will be read, in the few cells a card row has for it.
+fn read(driver: Driver) -> &'static str {
+    match driver {
+        Driver::Log => "by every member, as it lands",
+        Driver::Model => "as its next turn, or mid-run if it is working",
     }
 }
 
@@ -105,12 +126,15 @@ impl Tool for MessageTool {
         {
             return Ok(bounce);
         }
-        let input = Input::text(args.text, origin(Some(from)));
+        let input = Input::text(args.text, origin(Some(from.clone())));
         cx.host
             .deliver(&to.id, IntentId::mint(), input, Delivery::Wake)
             .await
             .map_err(|e| ToolError::Failed(e.message))?;
-        Ok(ToolOutput::text(receipt(args.to.trim(), to.driver)))
+        let addressed = args.to.trim();
+        let mut out = ToolOutput::text(receipt(addressed, to.driver));
+        out.display = Some(card(addressed, &from, to.driver));
+        Ok(out)
     }
 }
 
@@ -181,6 +205,39 @@ mod tests {
             panic!("a peer delivers text");
         };
         assert_eq!(origin.principal.as_deref(), Some("builder"));
+    }
+
+    /// The block lane (ADR-0013 §2): the same delivery a person reads, asserted
+    /// as the value it is.
+    #[tokio::test]
+    async fn the_card_says_where_it_went_and_when_it_will_be_read() {
+        let (sent, _) = send("reviewer").await;
+        assert_eq!(
+            sent.display,
+            Some(View::KeyValue {
+                rows: vec![
+                    ("to".into(), "reviewer".into()),
+                    ("from".into(), "parent".into()),
+                    (
+                        "read".into(),
+                        "as its next turn, or mid-run if it is working".into()
+                    ),
+                ]
+            })
+        );
+
+        let (posted, _) = send("#design").await;
+        assert_eq!(
+            posted.display,
+            Some(View::KeyValue {
+                rows: vec![
+                    ("to".into(), "#design".into()),
+                    ("from".into(), "parent".into()),
+                    ("read".into(), "by every member, as it lands".into()),
+                ]
+            }),
+            "a room is read by everyone in it, not taken up as a turn"
+        );
     }
 
     #[tokio::test]
