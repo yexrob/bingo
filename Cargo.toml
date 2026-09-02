@@ -3,39 +3,39 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/yexrob/bingo"
 
 [workspace.dependencies]
-bingo-sdk = { path = "crates/bingo-sdk", version = "0.1.0" }
-bingo-core = { path = "crates/bingo-core", version = "0.1.0" }
-bingo-provider-fake = { path = "crates/bingo-provider-fake", version = "0.1.0" }
-bingo-tool-fs = { path = "crates/bingo-tool-fs", version = "0.1.0" }
-bingo-surface-print = { path = "crates/bingo-surface-print", version = "0.1.0" }
-bingo-provider-anthropic = { path = "crates/bingo-provider-anthropic", version = "0.1.0" }
-bingo-provider-openai = { path = "crates/bingo-provider-openai", version = "0.1.0" }
-bingo-tool-bash = { path = "crates/bingo-tool-bash", version = "0.1.0" }
-bingo-permissions = { path = "crates/bingo-permissions", version = "0.1.0" }
-bingo-tool-web = { path = "crates/bingo-tool-web", version = "0.1.0" }
-bingo-store-jsonl = { path = "crates/bingo-store-jsonl", version = "0.1.0" }
-bingo-context = { path = "crates/bingo-context", version = "0.1.0" }
-bingo-surface-rpc = { path = "crates/bingo-surface-rpc", version = "0.1.0" }
-bingo-surface-tui = { path = "crates/bingo-surface-tui", version = "0.1.0" }
-bingo-skills = { path = "crates/bingo-skills", version = "0.1.0" }
-bingo-mcp = { path = "crates/bingo-mcp", version = "0.1.0" }
-bingo-hooks-shell = { path = "crates/bingo-hooks-shell", version = "0.1.0" }
-bingo-agents = { path = "crates/bingo-agents", version = "0.1.0" }
-bingo-rooms = { path = "crates/bingo-rooms", version = "0.1.0" }
-bingo-tasks = { path = "crates/bingo-tasks", version = "0.1.0" }
-bingo-demo-ui = { path = "crates/bingo-demo-ui", version = "0.1.0" }
-bingo-auth-oauth = { path = "crates/bingo-auth-oauth", version = "0.1.0" }
-bingo-plugin-rpc = { path = "crates/bingo-plugin-rpc", version = "0.1.0" }
-bingo-experience = { path = "crates/bingo-experience", version = "0.1.0" }
-bingo-channels = { path = "crates/bingo-channels", version = "0.1.0" }
-bingo-schedule = { path = "crates/bingo-schedule", version = "0.1.0" }
+bingo-sdk = { path = "crates/bingo-sdk" }
+bingo-core = { path = "crates/bingo-core" }
+bingo-provider-fake = { path = "crates/bingo-provider-fake" }
+bingo-tool-fs = { path = "crates/bingo-tool-fs" }
+bingo-surface-print = { path = "crates/bingo-surface-print" }
+bingo-provider-anthropic = { path = "crates/bingo-provider-anthropic" }
+bingo-provider-openai = { path = "crates/bingo-provider-openai" }
+bingo-tool-bash = { path = "crates/bingo-tool-bash" }
+bingo-permissions = { path = "crates/bingo-permissions" }
+bingo-tool-web = { path = "crates/bingo-tool-web" }
+bingo-store-jsonl = { path = "crates/bingo-store-jsonl" }
+bingo-context = { path = "crates/bingo-context" }
+bingo-surface-rpc = { path = "crates/bingo-surface-rpc" }
+bingo-surface-tui = { path = "crates/bingo-surface-tui" }
+bingo-skills = { path = "crates/bingo-skills" }
+bingo-mcp = { path = "crates/bingo-mcp" }
+bingo-hooks-shell = { path = "crates/bingo-hooks-shell" }
+bingo-agents = { path = "crates/bingo-agents" }
+bingo-rooms = { path = "crates/bingo-rooms" }
+bingo-tasks = { path = "crates/bingo-tasks" }
+bingo-demo-ui = { path = "crates/bingo-demo-ui" }
+bingo-auth-oauth = { path = "crates/bingo-auth-oauth" }
+bingo-plugin-rpc = { path = "crates/bingo-plugin-rpc" }
+bingo-experience = { path = "crates/bingo-experience" }
+bingo-channels = { path = "crates/bingo-channels" }
+bingo-schedule = { path = "crates/bingo-schedule" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
