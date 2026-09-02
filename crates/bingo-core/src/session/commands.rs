@@ -33,11 +33,42 @@ impl Services {
     }
 }
 
+/// The surface a command's own prompt carries (ADR-0008 §3). A `Prompt` is
+/// the command speaking, not the keyboard: what re-enters the session is a
+/// skill's body, and the surface is how every client tells the two apart.
+pub(super) const SURFACE: &str = "command";
+
+/// The one name that is its own prefix.
+const BANG: &str = "!";
+
 /// A name and its argument text, as the actor parses them (ADR-0008 §1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Parsed {
     pub name: String,
     pub args: String,
+}
+
+impl Parsed {
+    /// The line as it would have been typed: what a person recognises the run
+    /// by, and — for an `Input::Action`, which was never typed at all — what
+    /// they would have typed for it.
+    pub(super) fn typed(&self) -> String {
+        let name = spelled(&self.name);
+        match (self.args.is_empty(), self.name.as_str()) {
+            (true, _) => name,
+            (false, BANG) => format!("{name}{}", self.args),
+            (false, _) => format!("{name} {}", self.args),
+        }
+    }
+}
+
+/// How a command's name is written: `!` is its own prefix, everything else
+/// follows a slash.
+pub(super) fn spelled(name: &str) -> String {
+    match name {
+        BANG => BANG.to_string(),
+        name => format!("/{name}"),
+    }
 }
 
 /// `/name rest` → `name`, `!rest` → `!`, an action → its name; prose → `None`.
@@ -57,9 +88,9 @@ pub(super) fn parse(input: &Input) -> Option<Parsed> {
 
 fn parse_line(text: &str) -> Option<Parsed> {
     let line = text.trim_start();
-    if let Some(rest) = line.strip_prefix('!') {
+    if let Some(rest) = line.strip_prefix(BANG) {
         return Some(Parsed {
-            name: "!".into(),
+            name: BANG.into(),
             args: rest.trim().to_string(),
         });
     }
@@ -81,19 +112,46 @@ pub(super) fn is_command(input: &Input) -> bool {
     parse(input).is_some()
 }
 
-/// The origin a command's prompt is submitted with: the line's own, or none
-/// for a typed action, which carries none on the wire.
-pub(super) fn origin_of(input: &Input) -> Origin {
-    match input {
-        Input::Text { origin, .. } => origin.clone(),
-        Input::Action { .. } => Origin::default(),
+/// How a command was invoked, kept for as long as it runs: the line that
+/// asked for it, and the origin whatever it produces re-enters the session
+/// with.
+#[derive(Clone, Debug)]
+pub(super) struct Invocation {
+    pub line: String,
+    pub origin: Origin,
+}
+
+impl Invocation {
+    /// What the submitter's origin becomes once a command stands between them
+    /// and the session: the same person, in the same conversation, through the
+    /// command surface (ADR-0008 §3). A typed action carries no origin on the
+    /// wire, so it starts from none.
+    pub(super) fn of(input: &Input, parsed: &Parsed) -> Self {
+        let submitted = match input {
+            Input::Text { origin, .. } => origin.clone(),
+            Input::Action { .. } => Origin::default(),
+        };
+        Self {
+            line: parsed.typed(),
+            origin: Origin {
+                surface: SURFACE.into(),
+                ..submitted
+            },
+        }
+    }
+
+    /// A command's prompt as the journal keeps it: the line that asked for it,
+    /// then what it produced. The line is written down once, here — a client
+    /// reads the run back off the item rather than off a field beside it.
+    pub(super) fn prompt(&self, text: &str) -> String {
+        format!("{}\n\n{text}", self.line)
     }
 }
 
 /// One run the actor asks for.
 pub(super) struct Run {
     pub intent: IntentId,
-    pub origin: Origin,
+    pub invocation: Invocation,
     pub command: Arc<dyn Command>,
     pub args: String,
     /// A non-instant run, which the queue waits behind.
@@ -108,7 +166,7 @@ pub(super) struct Commands {
     mailbox: Mailbox,
     session: SessionId,
     cwd: PathBuf,
-    inflight: HashMap<IntentId, Origin>,
+    inflight: HashMap<IntentId, Invocation>,
     /// The non-instant command whose run holds the queue behind it.
     holding: Option<IntentId>,
 }
@@ -158,12 +216,12 @@ impl Commands {
         };
         let Run {
             intent,
-            origin,
+            invocation,
             command,
             args,
             holds,
         } = run;
-        self.inflight.insert(intent.clone(), origin);
+        self.inflight.insert(intent.clone(), invocation);
         if holds {
             self.holding = Some(intent.clone());
         }
@@ -183,14 +241,16 @@ impl Commands {
         Ok(())
     }
 
-    /// The run is over; its origin comes back for a `Prompt` outcome, with
-    /// whether it was the run holding the queue.
-    pub(super) fn finish(&mut self, intent: &IntentId) -> Option<(Origin, bool)> {
+    /// The run is over; how it was invoked comes back for a `Prompt` outcome,
+    /// with whether it was the run holding the queue.
+    pub(super) fn finish(&mut self, intent: &IntentId) -> Option<(Invocation, bool)> {
         let held = self.holding.as_ref() == Some(intent);
         if held {
             self.holding = None;
         }
-        self.inflight.remove(intent).map(|origin| (origin, held))
+        self.inflight
+            .remove(intent)
+            .map(|invocation| (invocation, held))
     }
 }
 
@@ -304,6 +364,60 @@ mod tests {
                 name: "!".into(),
                 args: "ls -la | head".into()
             })
+        );
+    }
+
+    /// What a run is recognised by, whatever door it came through.
+    #[test]
+    fn a_run_is_labelled_by_the_line_that_would_have_typed_it() {
+        let typed = |line: &str| parse(&text(line)).map(|p| p.typed());
+        assert_eq!(
+            typed("/model  anthropic/x "),
+            Some("/model anthropic/x".into())
+        );
+        assert_eq!(typed("  /help"), Some("/help".into()));
+        assert_eq!(typed("!ls -la | head"), Some("!ls -la | head".into()));
+        assert_eq!(typed("!"), Some("!".into()));
+        let action = Input::Action {
+            action: Action {
+                name: "permission".into(),
+                args: json!("plan"),
+            },
+        };
+        assert_eq!(
+            parse(&action).map(|p| p.typed()),
+            Some("/permission plan".into()),
+            "a button nobody typed still reads as the line it stands for"
+        );
+    }
+
+    /// The submitter stays who they are; only the surface says a command now
+    /// stands between them and the session.
+    #[test]
+    fn an_invocation_keeps_the_submitter_and_takes_the_command_surface() {
+        let input = Input::text(
+            "/guide do the thing",
+            Origin {
+                surface: "channels".into(),
+                principal: Some("ou_person".into()),
+                conversation: Some("loopback/oc_1".into()),
+            },
+        );
+        let parsed = parse(&input).expect("a command line");
+        let invocation = Invocation::of(&input, &parsed);
+        assert_eq!(invocation.line, "/guide do the thing");
+        assert_eq!(
+            invocation.origin,
+            Origin {
+                surface: SURFACE.into(),
+                principal: Some("ou_person".into()),
+                conversation: Some("loopback/oc_1".into()),
+            }
+        );
+        assert_eq!(
+            invocation.prompt("Read the guide."),
+            "/guide do the thing\n\nRead the guide.",
+            "the typed line is the item's first line and its only record"
         );
     }
 

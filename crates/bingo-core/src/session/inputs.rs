@@ -28,16 +28,11 @@ impl Actor {
     /// A command line: run now if instant, else behind whatever is running.
     async fn submit_command(&mut self, intent: IntentId, input: Input, parsed: commands::Parsed) {
         let Some(command) = self.commands.find(&parsed.name).await else {
-            let shown = if parsed.name == "!" {
-                "!".to_string()
-            } else {
-                format!("/{}", parsed.name)
-            };
             return self
                 .reject(
                     intent,
                     ErrorCode::InvalidInput,
-                    format!("unknown command: {shown}"),
+                    format!("unknown command: {}", commands::spelled(&parsed.name)),
                 )
                 .await;
         };
@@ -45,22 +40,22 @@ impl Actor {
         if !instant && self.busy() {
             return self.enqueue(intent, input).await;
         }
-        let origin = commands::origin_of(&input);
-        self.run_command(intent, origin, command, parsed.args, !instant)
+        let invocation = commands::Invocation::of(&input, &parsed);
+        self.run_command(intent, invocation, command, parsed.args, !instant)
             .await;
     }
 
     async fn run_command(
         &mut self,
         intent: IntentId,
-        origin: Origin,
+        invocation: commands::Invocation,
         command: Arc<dyn Command>,
         args: String,
         holds: bool,
     ) {
         let spawned = self.commands.spawn(commands::Run {
             intent: intent.clone(),
-            origin,
+            invocation,
             command,
             args,
             holds,
@@ -77,7 +72,7 @@ impl Actor {
         intent: IntentId,
         outcome: Result<CommandOutcome, KernelError>,
     ) {
-        let Some((origin, held)) = self.commands.finish(&intent) else {
+        let Some((invocation, held)) = self.commands.finish(&intent) else {
             tracing::warn!(session = %self.id, %intent, "completion from a command that is not running");
             return;
         };
@@ -100,7 +95,9 @@ impl Actor {
                 self.applied(intent, json!({ "item": item })).await;
             }
             Ok(CommandOutcome::Prompt { text }) => {
-                self.submit_prose(intent, Input::text(text, origin)).await;
+                let text = invocation.prompt(&text);
+                self.submit_prose(intent, Input::text(text, invocation.origin))
+                    .await;
             }
             Err(e) => self.reject(intent, e.code, e.message).await,
         }
@@ -273,8 +270,8 @@ impl Actor {
         };
         match (parsed, command) {
             (Some(parsed), Some(command)) => {
-                let origin = commands::origin_of(&input);
-                self.run_command(intent, origin, command, parsed.args, true)
+                let invocation = commands::Invocation::of(&input, &parsed);
+                self.run_command(intent, invocation, command, parsed.args, true)
                     .await
             }
             _ => {
