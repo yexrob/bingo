@@ -31,27 +31,33 @@ tokio, `Send`).
    The full SDK is refused: a second runtime and a `!Send` thread-hop
    would buy ~300 lines of codec this workspace has twice already.
    Budget: `max_dependencies` 302 → 307.
-3. **The session is the agent's** (stateful): one ACP session per bingo
-   session; `session/prompt` carries only the new turn. Everything that
-   crosses the wire is journaled as `ModelEvent`s — the journal stays
-   the one record every surface and `bingo-experience` read. The
-   agent's `sessionId` is journaled once as an extension (`bingo.acp`,
-   `session:<instance>`): a pointer to the agent's own state, never a
-   copy of it. Restore prefers `session/resume` (no replay — the
-   journal already holds the history); falls back to `session/load`,
-   whose replay is swallowed, not journaled twice. Where neither door
-   exists, a fresh session whose first prompt names a file for the
-   agent to read with its own tools — the transcript so far, rendered
-   from the journal at that moment, never maintained alongside it.
+3. **Every turn is a fresh session** (stateless, at the user's call):
+   the provider is a pure function of the request, like every other
+   provider. Each `stream()` spawns the adapter, opens one session,
+   sends one `session/prompt` and is done. The request's own folded
+   `messages` are rendered to a transcript file for that turn; the
+   prompt names the file beside the newest user turn, and the agent
+   reads what it needs with its own tools. The file is derived from
+   the request and deleted with the turn, never kept beside anything.
+   Everything that crosses the wire is journaled as `ModelEvent`s —
+   the journal stays the one record every surface and
+   `bingo-experience` read. Nothing else is remembered: no session
+   id, no extension, no resume ladder — `--continue` restores by
+   construction, and compaction and the ruler keep shaping what the
+   agent is handed.
 4. **The agent's tool calls are first-class**: `ToolInputStart/…/
    ToolCall` and a synthetic `ToolResult`, marked `acp.external: true`
    in `provider_options`; the loop never executes what wears the mark;
    a surface draws it like any tool row, diffs and terminals included.
-5. **The permission door is handed at registration**: the plugin gives
-   its providers one `Arc<dyn Prompter>`; `session/request_permission`
-   and `elicitation/create` become Interactions through it. The
-   `Provider` trait is untouched until a second provider needs the
-   same door.
+5. **Permissions are the agent's own.** The adapter is a whole agent,
+   permission machinery included; the row that spawns it says what it
+   may do in the adapter's own words (args or env — Claude Code's
+   permission modes, Codex's approval policy). A
+   `session/request_permission` that arrives anyway is answered with
+   its reject option — fail closed — and a notice names the row to
+   configure; `elicitation/create` is declined the same way. No
+   prompter reaches a provider and no kernel door opens for one: the
+   need is recorded here, not built.
 6. **Not mapped, on purpose**: our tools do not cross (no MCP handover
    — the agent brings its own); `system`, `Effort`, caching and token
    counting do not cross either. ACP's plans, modes and slash commands
@@ -64,9 +70,11 @@ tokio, `Send`).
 
 ## Consequences
 
-- For an ACP instance the context lives with the agent: compaction and
-  the ruler are advisory there; a lost agent-side session degrades to
-  the transcript-file path, and the degradation is said in a notice.
+- The context stays bingo's: an ACP instance reads the fold like any
+  model. The price is the spawn — node starts in whole seconds, and
+  the agent re-reads what it needs each turn; a warm pool of children
+  (processes reused, sessions never) is future work if the price
+  shows.
 - The first-tier adapters need `node` on PATH; auth is the adapter's
   own (subscription or key), `AuthStatus::NotApplicable`.
 - Protocol churn arrives as a schema-crate bump the compiler walks us

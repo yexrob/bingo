@@ -6,6 +6,12 @@ use std::collections::BTreeMap;
 
 use bingo_sdk::{ArgSpec, Catalog, CommandSpec};
 
+/// The surface a command's own prompt carries (ADR-0008 §3): what re-enters
+/// the session when a `/name` answers with a prompt, rather than the surface
+/// the person typed at. Written down once, because two readers ask about it —
+/// the quiet set in [`crate::transcript`] and [`crate::skill`].
+pub const SURFACE: &str = "command";
+
 /// A command the surface owns. Nothing here reaches the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Local {
@@ -67,8 +73,9 @@ pub fn local(line: &str) -> Option<Local> {
     }
 }
 
-/// `/name args` split into its two halves.
-fn split(line: &str) -> Option<(&str, &str)> {
+/// `/name args` split into its two halves — the actor's own parse (ADR-0008
+/// §1), read back by whoever recognises a line rather than dispatching it.
+pub fn split(line: &str) -> Option<(&str, &str)> {
     let rest = line.strip_prefix('/')?;
     Some(match rest.split_once(char::is_whitespace) {
         Some((name, args)) => (name, args.trim()),
