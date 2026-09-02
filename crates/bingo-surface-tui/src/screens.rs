@@ -431,6 +431,38 @@ fn a_room_post_in_a_member_s_own_transcript() {
     both("room_post", &tree, &ui, now);
 }
 
+/// What a room is owed, on the session it hangs under (ADR-0022 §4): a live
+/// card in the rail past 120 columns, and the same card under the running
+/// rows below it.
+#[test]
+fn what_a_room_is_owed() {
+    let owed = View::Table {
+        headers: ["room", "owed", "asked"].map(str::to_string).to_vec(),
+        rows: vec![
+            vec!["#design".into(), "reviewer".into(), "14:02".into()],
+            vec!["#design".into(), "@all".into(), "14:09".into()],
+        ],
+    };
+    let state = folded(vec![
+        item(1, user("itm_1", "ask the room whether the plan is thin")),
+        item(
+            2,
+            assistant("itm_2", "Asked in #design.", ItemStatus::Completed),
+        ),
+        frame(3, signalled("bingo.rooms", "owed", as_payload(owed))),
+    ]);
+    let tree = solo(&state);
+    let (ui, now) = scene();
+    let wide = draw_tree(120, 40, &tree, &ui, now);
+    assert!(wide.contains("owed"), "the card is titled by its kind: {wide}");
+    assert!(
+        wide.contains("#design  reviewer  14…"),
+        "three columns of `owed` are one column wider than the rail, and the \
+         clock time is what folds: {wide}"
+    );
+    both("owed", &tree, &ui, now);
+}
+
 #[test]
 fn a_child_row_while_it_runs() {
     let tree = spawned_tree(busy_child("reviewer"));
