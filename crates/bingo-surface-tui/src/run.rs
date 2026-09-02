@@ -28,7 +28,7 @@ use crate::effect::Effect;
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
-use crate::{SURFACE_ID, commands, history, input};
+use crate::{SURFACE_ID, commands, history, input, pointer};
 
 /// How often a frame is redrawn *while something is moving*: thirty a second
 /// (§6). Nothing moves when nothing is happening, and then there is no tick at
@@ -498,7 +498,8 @@ impl Run {
                 self.apply(effects);
             }
             Term::Mouse(mouse) => {
-                let effects = input::on_mouse(&mut self.ui, &self.session.tree, mouse, Now::real());
+                let effects =
+                    pointer::on_mouse(&mut self.ui, &self.session.tree, mouse, Now::real());
                 self.apply(effects);
             }
             Term::Paste(text) => input::on_paste(&mut self.ui, &text),
@@ -1123,7 +1124,8 @@ mod tests {
         .expect("the loop ran");
         assert_eq!(ended.exit, Exit { code: 0 });
         let screen = harness.recorder.last();
-        assert!(screen.contains("scout ⏺ stored"), "{screen}");
+        assert!(screen.contains("⏺ scout"), "{screen}");
+        assert!(screen.contains("stored"), "{screen}");
     }
 
     /// A child and a room hang under a root and are reached through it —

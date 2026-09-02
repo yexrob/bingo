@@ -95,6 +95,67 @@ pub fn child_frame(seq: u64, event: Event) -> Frame {
     }
 }
 
+/// Another sub-agent of the root, so a tree can hold more than the one
+/// [`child_id`] names. `n` is both its id and the seq its frames start at.
+pub fn agent_id(n: u64) -> SessionId {
+    SessionId::from_raw(format!("ses_{n}"))
+}
+
+pub fn agent_summary(n: u64, title: &str) -> SessionSummary {
+    SessionSummary {
+        id: agent_id(n),
+        title: Some(title.into()),
+        ..child_summary(title)
+    }
+}
+
+/// The frame at the head of that agent's stream.
+pub fn agent_announced(n: u64, title: &str) -> Event {
+    Event::SessionUpdated {
+        summary: agent_summary(n, title),
+    }
+}
+
+pub fn agent_frame(n: u64, seq: u64, event: Event) -> Frame {
+    Frame {
+        session: agent_id(n),
+        ..frame(seq, event)
+    }
+}
+
+/// A room's whole membership, spelled the way `bingo-rooms` publishes it: the
+/// names a reader parses, the listeners' patience beside them, and the tree a
+/// surface draws, in one payload (ADR-0011 §2, ADR-0013 §2).
+pub fn roster_payload(members: &[&str], listeners: &[(&str, u64)]) -> Value {
+    let mut payload = json!({
+        "members": members,
+        "kind": "tree",
+        "nodes": members.iter().map(|name| json!({"label": name, "tone": "neutral"}))
+            .collect::<Vec<_>>(),
+    });
+    if !listeners.is_empty() {
+        payload["listeners"] = json!(
+            listeners
+                .iter()
+                .map(|(name, patience)| json!({"name": name, "patience_s": patience}))
+                .collect::<Vec<_>>()
+        );
+    }
+    payload
+}
+
+/// What a room's parent is signalled while any answer is owed (ADR-0022 §4):
+/// one row per open debt, oldest first.
+pub fn owed_payload(rows: &[(&str, &str, &str)]) -> Value {
+    as_payload(View::Table {
+        headers: ["room", "owed", "asked"].map(str::to_string).to_vec(),
+        rows: rows
+            .iter()
+            .map(|(room, who, asked)| vec![room.to_string(), who.to_string(), asked.to_string()])
+            .collect(),
+    })
+}
+
 /// A session under the root that this process has not opened: what a
 /// `sessions` read hands the switcher for its stored rows.
 pub fn stored_summary(id: &str, title: &str) -> SessionSummary {

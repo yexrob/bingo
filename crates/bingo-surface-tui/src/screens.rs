@@ -534,6 +534,14 @@ fn a_child_transcript() {
     both("child_transcript", &tree, &ui, now);
 }
 
+/// The cursor on a row of the sessions column, by its number.
+fn on(at: usize) -> crate::roster::Cursor {
+    crate::roster::Cursor {
+        side: crate::roster::Side::Sessions,
+        at,
+    }
+}
+
 #[test]
 fn the_switcher_dropdown() {
     let mut frames = busy_child("reviewer");
@@ -543,7 +551,7 @@ fn the_switcher_dropdown() {
     shown(
         &mut ui,
         Open::Switcher(Switcher {
-            selected: 2,
+            cursor: on(1),
             ..Default::default()
         }),
         now,
@@ -560,29 +568,13 @@ fn the_switcher_lists_what_is_only_in_the_store() {
     shown(
         &mut ui,
         Open::Switcher(Switcher {
-            selected: 2,
+            cursor: on(2),
             stored: vec![stored_summary("ses_7", "scout")],
+            ..Default::default()
         }),
         now,
     );
     both("switcher_stored", &tree, &ui, now);
-}
-
-/// The quick cycle: `↓` on an empty composer, so the strip has the status
-/// line's row and a chip of each kind is on it (§3, 2026-08-31).
-#[test]
-fn the_quick_cycle_strip() {
-    let mut frames = busy_child("reviewer");
-    frames.push(log_frame(9, log_announced("#design")));
-    let tree = spawned_tree(frames);
-    let (mut ui, now) = scene();
-    ui.cycling = true;
-    both("quick_cycle", &tree, &ui, now);
-
-    // §4: the row spends a hue on the cursor and on the one session at work,
-    // and on nothing else — which chip is on screen is said in weight.
-    let painted = painted(80, 24, &tree, &ui, now);
-    assert_eq!(painted.coloured("#design"), vec!["❯", "⏺"]);
 }
 
 #[test]

@@ -35,13 +35,24 @@ fn cuts(screen: &str) -> usize {
 
 /// Twenty sessions the root spawned in an earlier process, which is more rows
 /// than the dropdown has.
-fn crowded_switcher(selected: usize) -> (Tree, Ui, Now) {
+fn crowded_switcher(at: usize) -> (Tree, Ui, Now) {
     let tree = spawned_tree(busy_child("reviewer"));
     let (mut ui, now) = scene();
     let stored = (20..40)
         .map(|i| stored_summary(&format!("ses_{i}"), &format!("scout {i}")))
         .collect();
-    shown(&mut ui, Open::Switcher(Switcher { selected, stored }), now);
+    shown(
+        &mut ui,
+        Open::Switcher(Switcher {
+            cursor: crate::roster::Cursor {
+                side: crate::roster::Side::Sessions,
+                at,
+            },
+            stored,
+            ..Default::default()
+        }),
+        now,
+    );
     (tree, ui, now)
 }
 
