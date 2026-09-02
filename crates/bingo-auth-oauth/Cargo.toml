@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "OAuth flows and the credential store shared by bingo providers"
 
 # A library (ADR-0012 §1): registers nothing, any plugin may depend on it.

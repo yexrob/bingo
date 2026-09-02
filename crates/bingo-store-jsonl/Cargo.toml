@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "On-disk session store for bingo: a JSONL journal, a sidecar lock, a derived summary"
 
 [lints]

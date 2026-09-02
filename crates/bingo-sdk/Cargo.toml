@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Stable plugin and client API for bingo: ids, model types, events, session state reducer, traits"
 
 [lints]

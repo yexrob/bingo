@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Experience plugin for bingo: procedural playbooks as files, recalled by rank"
 
 [lints]

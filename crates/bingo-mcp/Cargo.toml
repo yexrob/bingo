@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "MCP client plugin for bingo: servers dialled in the background, their tools untrusted"
 
 [lints]

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Sub-agents plugin for bingo: an agent is a child session, four tools, @name and /agents"
 
 [lints]

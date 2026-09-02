@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "The cross-process plugin bridge for bingo: a plugin.json spawns a process that ships bingo-native tools and commands"
 
 [lints]

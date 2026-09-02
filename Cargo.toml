@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/yexrob/bingo"
+publish = false
 
 [workspace.dependencies]
 bingo-sdk = { path = "crates/bingo-sdk" }

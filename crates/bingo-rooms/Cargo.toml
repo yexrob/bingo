@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Rooms plugin for bingo: a room is a session nobody answers, and a post reaches every member"
 
 [lints]

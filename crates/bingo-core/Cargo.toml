@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "bingo kernel: session actor, journal and hub, turn state machine, permission gate, tool executor, plugin host"
 
 [lints]
