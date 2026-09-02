@@ -4,6 +4,9 @@
 //! instance. The message types come from `agent-client-protocol-schema`; the
 //! newline-framed JSON-RPC client loop is written here, in tokio, `Send`.
 
+pub mod child;
+pub mod connection;
+pub mod error;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod method;

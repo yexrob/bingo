@@ -232,6 +232,22 @@ pub fn update_tool_call_failed() -> Value {
     })
 }
 
+/// A variant this build's schema does not know. `codex-acp` ships the subagent
+/// RFD ahead of the specification; a client that never asked for it must still
+/// not fall over when it arrives.
+pub fn update_from_a_newer_adapter() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "update": {
+            "sessionUpdate": "subagent_spawned",
+            "subagentSessionId": "child-1",
+            "name": "weather_research",
+            "task": "look it up",
+            "capabilities": {}
+        }
+    })
+}
+
 /// The stable usage notification: the window as the agent sees it, and what
 /// the turn has cost in the agent's own currency.
 pub fn update_usage() -> Value {
