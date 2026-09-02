@@ -13,7 +13,11 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -101,7 +105,12 @@ fn spawn(request: &Request<'_>) -> Result<Box<dyn ChildWrapper>, RunError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut wrapped = CommandWrap::from(command);
+    // One handle for the whole tree, so a hook that outlives its own shell is
+    // still taken with it: a process group on unix, a job object on Windows.
+    #[cfg(unix)]
     wrapped.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    wrapped.wrap(JobObject);
     wrapped.wrap(KillOnDrop);
     wrapped.spawn().map_err(|source| RunError::Spawn {
         shell: shell(),
