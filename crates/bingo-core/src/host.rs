@@ -934,12 +934,6 @@ impl HostApi for Host {
         Ok(())
     }
 
-    /// The same door `login` is handed (ADR-0012 §5), now reachable by a
-    /// provider that must ask a person while it streams (ADR-0035 §5).
-    fn prompter(&self, session: &SessionId) -> Result<Arc<dyn Prompter>, KernelError> {
-        Host::prompter(self, session)
-    }
-
     fn gateway_events(&self) -> GatewayStream {
         let rx = self.gateway.subscribe();
         Box::pin(futures::stream::unfold(rx, |mut rx| async move {

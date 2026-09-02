@@ -342,21 +342,6 @@ pub trait HostApi: Send + Sync {
         ))
     }
 
-    /// A session's own way of asking a person (ADR-0012 §5): the door
-    /// `Provider::login` is already handed, now reachable while a turn runs
-    /// (ADR-0035 §5). A provider that must ask mid-turn — an ACP adapter
-    /// relaying `session/request_permission` — names the session its request
-    /// was built for and asks through this.
-    ///
-    /// A host with no sessions to ask on behalf of refuses, so a caller can
-    /// decline rather than invent an answer.
-    fn prompter(&self, session: &SessionId) -> Result<Arc<dyn Prompter>, KernelError> {
-        Err(KernelError::new(
-            ErrorCode::Internal,
-            format!("this host keeps no prompter: {session}"),
-        ))
-    }
-
     fn gateway_events(&self) -> GatewayStream;
 
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>>;

@@ -196,6 +196,21 @@ async fn a_text_only_turn_streams_one_assistant_item_and_completes() {
     assert_eq!(req[0].system[0].text, "You are bingo.");
 }
 
+/// ADR-0035 §3: a provider that keeps a conversation of its own per session —
+/// an ACP adapter holds one agent session per bingo session — has no other way
+/// to learn whose turn it is answering. The kernel already knows, so it says.
+#[tokio::test]
+async fn the_request_names_the_session_the_turn_runs_for() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("Hi there"))]);
+    let cfg = config(provider.clone(), vec![]);
+    let host = RecordingHost::new();
+    run(&cfg, &host, CancellationToken::new()).await;
+    assert_eq!(
+        provider.requests()[0].session.as_ref(),
+        Some(&cfg.session.id)
+    );
+}
+
 #[tokio::test]
 async fn a_tool_round_gates_executes_and_feeds_the_result_back() {
     let provider = ScriptedProvider::new(vec![
