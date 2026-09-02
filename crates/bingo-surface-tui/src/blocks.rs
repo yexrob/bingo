@@ -19,17 +19,13 @@ use std::time::{Duration, Instant};
 use bingo_sdk::{Item, ItemBody, ItemId, ItemStatus, Seq, SessionState};
 use ratatui::text::Line;
 
-use crate::clock::{self, Anim, FRAME, Now};
+use crate::clock::{FRAME, Now};
 use crate::transcript::{self, Cue, Rows};
 use crate::tree::Agents;
 use crate::welcome;
 
 /// A completion flashes for exactly one frame before it settles (§6).
 const FLIP: Duration = FRAME;
-/// A new block enters this far above its place…
-const RISE_ROWS: u16 = 2;
-/// …and eases down into it over three frames (§6).
-const RISE: Duration = Duration::from_millis(3 * FRAME.as_millis() as u64);
 
 /// What can change about an item's block while it is on the screen. A
 /// terminal item's revision never moves again, so its block is rendered once.
@@ -182,15 +178,6 @@ pub struct Blocks {
     /// How many blocks have been drawn since this cache was made. A test
     /// watches it: scrolling must not move it.
     renders: usize,
-    /// Whether this cache has drawn a transcript before. What was already
-    /// there when a person arrived did not just arrive, so it does not rise.
-    warm: bool,
-    /// When the newest block was inserted, which is what it rises from.
-    arrived: Option<Instant>,
-    /// The rows the newest block has still to settle through, as blank rows
-    /// under it: the transcript hangs from the composer, so a block that has
-    /// not landed is a block with room left beneath it.
-    rise: Vec<Line<'static>>,
     /// Whether any block would draw differently on the next frame, as the
     /// last sync left it.
     moving: bool,
@@ -211,11 +198,6 @@ impl Blocks {
         if self.width != width {
             self.blocks.clear();
             self.width = width;
-            // Every block is drawn again at the new width, and not one of
-            // them has just arrived: a resize re-lays the frame in one draw
-            // (§3), it does not replay the transcript.
-            self.warm = false;
-            self.arrived = None;
         }
         let rows = Rows {
             cwd: &state.summary.cwd,
@@ -234,38 +216,21 @@ impl Blocks {
         self.blocks.truncate(kept);
         self.tail = transcript::failure(state, &rows);
         self.live = live;
-        self.settle(now);
-        self.warm = true;
+        self.moving = self.still_moving(now);
         self.height = self.measure();
         self.height
     }
 
-    /// Where the transcript's own motion is, as of this frame: how far the
-    /// newest block still has to fall, and whether anything at all would draw
-    /// differently on the next frame.
-    fn settle(&mut self, now: Now) {
-        let rows = self.rising(now);
-        self.rise = std::iter::repeat_n(Line::default(), usize::from(rows)).collect();
-        self.moving = rows > 0
-            || self
-                .blocks
-                .iter()
-                .any(|entry| entry.motion.redraw(now.instant));
-    }
-
-    /// How far above its place the newest block still is: two rows as it
-    /// arrives, none three frames later, eased out (§6).
-    fn rising(&self, now: Now) -> u16 {
-        let Some(arrived) = self.arrived.filter(|_| now.motion) else {
-            return 0;
-        };
-        let left = 1.0 - clock::ease_out(Anim::new(arrived, RISE).progress(now.instant));
-        (left * f32::from(RISE_ROWS)).round() as u16
+    /// Whether any block would draw differently on the next frame, as of this
+    /// one.
+    fn still_moving(&self, now: Now) -> bool {
+        self.blocks
+            .iter()
+            .any(|entry| entry.motion.redraw(now.instant))
     }
 
     /// Whether any block would draw differently on the next frame, as the last
-    /// [`sync`] left it: a tail cooling, a completion flashing, a block still
-    /// on its way down.
+    /// [`sync`] left it: a tail cooling, or a completion flashing.
     ///
     /// [`sync`]: Blocks::sync
     pub fn moving(&self) -> bool {
@@ -313,14 +278,7 @@ impl Blocks {
         };
         match self.blocks.get_mut(at) {
             Some(slot) if slot.id == item.id => *slot = entry,
-            _ => {
-                // A block a person watched arrive is the one that rises; a
-                // transcript that was already there simply is there.
-                if self.warm && at >= self.blocks.len() {
-                    self.arrived = Some(now);
-                }
-                self.blocks.insert(at, entry)
-            }
+            _ => self.blocks.insert(at, entry),
         }
         1
     }
@@ -414,13 +372,11 @@ impl Blocks {
     }
 
     /// The last `rows` lines as plain text: what is printed back into the
-    /// shell's own screen when the surface leaves (design §3). A block still
-    /// falling into place is printed where it lands — motion is for the
-    /// screen a person is watching, not for the shell's scrollback.
+    /// shell's own screen when the surface leaves (design §3).
     pub fn tail(&self, rows: usize) -> Vec<String> {
-        let settled = self.height().saturating_sub(self.rise.len());
-        let from = settled.saturating_sub(rows);
-        self.window(from, settled - from)
+        let height = self.height();
+        let from = height.saturating_sub(rows);
+        self.window(from, height - from)
             .iter()
             .map(|line| line.to_string().trim_end().to_string())
             .collect()
@@ -461,18 +417,7 @@ impl Blocks {
             id: None,
             lines: self.live.as_slice(),
         });
-        // The rows the newest block has yet to fall through: blank, and only
-        // there while it is falling.
-        let rise = (!self.rise.is_empty()).then_some(Segment {
-            gap: false,
-            id: None,
-            lines: self.rise.as_slice(),
-        });
-        head.into_iter()
-            .chain(blocks)
-            .chain(tail)
-            .chain(live)
-            .chain(rise)
+        head.into_iter().chain(blocks).chain(tail).chain(live)
     }
 }
 
