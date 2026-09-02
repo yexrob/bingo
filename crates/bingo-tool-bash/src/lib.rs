@@ -12,13 +12,17 @@
 //! from whichever of the two asked.
 //!
 //! The traits fail closed except for `trusted`: a shell command is not read-only
-//! and not concurrency-safe — whether it may run at all is the permission
-//! policy's decision, made from the `Command` subject. Its interrupt is `Block`,
-//! because a command that has already written to the working tree cannot be
-//! taken back by dropping the future; the executor lets it finish and keeps what
-//! it produced, so an interrupt kills the process group and reports the partial
-//! output rather than a cancellation. Interrupting a turn never touches a
-//! background job: `KillShell` is what ends one.
+//! and whether it may run at all is the permission policy's decision, made from
+//! the `Command` subject.
+//!
+//! A person stopping the turn ends a running command, full stop: the kernel
+//! drops the call's future and `run::Group` takes the process tree with it,
+//! with nothing waited for and the output forfeit. What a half-run command
+//! left in the working tree is the price of being able to stop it, and the
+//! model is told the call was interrupted rather than what it wrote.
+//! Interrupting a turn never touches a background job — a promoted command's
+//! process left the call for a task of its own, and `KillShell` is what ends
+//! one.
 //!
 //! See docs/plans/M1-provider-tools-gate.md, docs/plans/M16-background-work.md
 //! and docs/adr/0018-background-commands.md.
@@ -44,8 +48,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, Contribution, Interrupt, Plugin, PluginError, PluginManifest, Registrar, ResultLimit,
-    Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
+    Command, Contribution, Plugin, PluginError, PluginManifest, Registrar, ResultLimit, Subject,
+    Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -301,7 +305,6 @@ impl Tool for BashTool {
     fn traits(&self, _input: &Value) -> ToolTraits {
         ToolTraits {
             trusted: true,
-            interrupt: Interrupt::Block,
             // Whether two commands may run at once is the model's judgment,
             // exactly as it is for two edits: it emitted them in one step. The
             // gate still serializes anything it does not allow outright, and a
@@ -668,7 +671,6 @@ pub(crate) mod tests {
         let (_jobs, _promotions, tool) = tool();
         let traits = tool.traits(&Value::Null);
         assert!(traits.trusted);
-        assert_eq!(traits.interrupt, Interrupt::Block);
         assert!(!traits.read_only);
         assert!(
             traits.concurrency_safe,
@@ -804,23 +806,23 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_interrupt_keeps_the_output_the_command_had_produced() {
+    /// What an interrupt does to a call, from the tool's side: the future is
+    /// dropped, so there is no answer at all — the kernel writes the
+    /// interruption marker instead. That the process tree goes with the drop
+    /// is `run`'s own test; this one holds the tool to answering nothing.
+    async fn a_dropped_call_answers_nothing() {
         let (_jobs, _promotions, tool) = tool();
         let (_host, cx) = context();
-        let cancel = cx.cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            cancel.cancel();
-        });
-        let out = tool
-            .call(
-                serde_json::json!({"command": "echo started; sleep 30"}),
-                &cx,
-            )
-            .await
-            .expect("a Block tool answers with what it had");
-        assert!(out.is_error);
-        assert!(text(&out).contains("started"), "{}", text(&out));
+        let mut running = Box::pin(tool.call(
+            serde_json::json!({ "command": "echo started; sleep 30" }),
+            &cx,
+        ));
+        let held = tokio::time::timeout(Duration::from_millis(200), &mut running).await;
+        assert!(
+            held.is_err(),
+            "a command that is still running answers nothing"
+        );
+        drop(running);
     }
 
     #[tokio::test]

@@ -13,6 +13,11 @@
 //! into an answer. A promotion keeps the [`Running`] instead of concluding it:
 //! the same process and the same pipes go to the job table (ADR-0018 §6).
 //!
+//! There is a fourth way a run ends, and it writes no answer at all: a person
+//! stops the turn, the kernel drops the call's future, and [`Group`] takes the
+//! process tree down on its way out. Nothing is waited for and the output is
+//! forfeit — a background job is not a call and is never ended this way.
+//!
 //! The Windows port of this module was two things. The process group in
 //! [`spawn`] is done: it is `process-wrap`'s job object there, and the crate
 //! compiles and links for `x86_64-pc-windows-msvc`. [`shell`] is not — it
@@ -79,30 +84,71 @@ pub struct Run {
 /// where its output is going. All three move together, which is what lets a
 /// running command change hands without restarting.
 pub struct Running {
-    pub child: Box<dyn ChildWrapper>,
+    pub child: Group,
     pub readers: Vec<Reader>,
     pub sink: Arc<Mutex<Sink>>,
 }
 
+/// The whole tree the shell leads, held so that letting go of it ends it.
+///
+/// A turn's interrupt is a dropped future (`bingo_core::executor`), so what
+/// drop does is the whole of what an interrupt does here. `KillOnDrop` is not
+/// enough on its own: tokio's kill-on-drop signals the one pid it spawned,
+/// which leaves anything the shell started behind — on Windows the job object
+/// closes with the handle and takes the tree, on unix a `sleep` the command
+/// backgrounded would outlive the person who stopped it. `start_kill` is the
+/// wrapper's own spelling of "end the group": a `killpg` on unix, ending the
+/// job object on Windows, on both platforms in the same line.
+pub struct Group(Box<dyn ChildWrapper>);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        // A reaped child's group id is no longer ours to signal: the number
+        // may already name somebody else's work.
+        if self.0.id().is_none() {
+            return;
+        }
+        // Nothing waits: a drop cannot, and an interrupted command's output
+        // is forfeit anyway.
+        let _ = self.0.start_kill();
+    }
+}
+
+impl std::ops::Deref for Group {
+    type Target = Box<dyn ChildWrapper>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Group {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// What running a command takes from whoever asked for it: the directory it
-/// starts in, the token that stops it early, the one that hands it to the
-/// background, and where its tail goes while it works. A tool call lends all
-/// four; a line a person typed lends only the first.
+/// starts in, the flag that hands it to the background, and where its tail
+/// goes while it works. A tool call lends all three; a line a person typed
+/// lends only the first.
+///
+/// The turn's interrupt is not among them and needs no token here: it is the
+/// call's future being dropped, which takes [`Group`] and the process tree
+/// with it. A second reading of the same interrupt would be a second answer
+/// to one keypress.
 pub struct Context<'a> {
     cwd: &'a Path,
-    cancel: CancellationToken,
     promote: CancellationToken,
     progress: Box<dyn Progress + 'a>,
 }
 
 impl<'a> Context<'a> {
-    /// A tool call: the turn's interrupt stops the command, the call's own
-    /// progress line is where its tail goes, and `promote` is the flag a
-    /// surface flips to take it into the background.
+    /// A tool call: the call's own progress line is where its tail goes, and
+    /// `promote` is the flag a surface flips to take it into the background.
     pub fn of_call(cx: &'a ToolContext, promote: CancellationToken) -> Self {
         Self {
             cwd: &cx.cwd,
-            cancel: cx.cancel.clone(),
             promote,
             progress: Box::new(ToCall(cx)),
         }
@@ -113,7 +159,6 @@ impl<'a> Context<'a> {
     pub fn unwatched(cwd: &'a Path) -> Self {
         Self {
             cwd,
-            cancel: CancellationToken::new(),
             promote: CancellationToken::new(),
             progress: Box::new(Unwatched),
         }
@@ -134,7 +179,7 @@ pub async fn run(command: &str, timeout: Duration, cx: &Context<'_>) -> Result<R
 
 /// Spawn a command and start draining its pipes into `sink`.
 pub fn start(command: &str, cwd: &Path, sink: Sink) -> Result<Running, ToolError> {
-    let mut child = spawn(command, cwd)?;
+    let mut child = Group(spawn(command, cwd)?);
     let sink = Arc::new(Mutex::new(sink));
     let readers = read_pipes(child.as_mut(), &sink);
     Ok(Running {
@@ -183,7 +228,9 @@ pub enum Over {
 }
 
 /// Wait for the command, sampling the tail on the way, and stop for whichever
-/// comes first: the exit, the deadline, the turn's interrupt, or the promotion.
+/// comes first: the exit, the deadline, or the promotion. There is no fourth
+/// branch for the turn's interrupt: an interrupt drops this future, and this
+/// function never gets to return at all.
 pub async fn watch(
     running: &mut Running,
     timeout: Duration,
@@ -201,7 +248,6 @@ pub async fn watch(
                 status.map_err(|e| ToolError::Failed(format!("waiting for the command: {e}")))?,
             ),
             () = tokio::time::sleep_until(deadline) => Over::Timeout,
-            () = cx.cancel.cancelled() => Over::Interrupted,
             () = cx.promote.cancelled() => return Ok(Stop::Promoted),
             () = tokio::time::sleep(tail::INTERVAL) => {
                 tail.sample(sink, cx.progress.as_ref()).await;
@@ -453,23 +499,55 @@ mod tests {
         assert!(out.output.ends_with("y\n"), "the tail is missing");
     }
 
+    /// A person stopping the turn drops the call's future. Nothing here is
+    /// asked and nothing is waited for: the whole tree goes with the drop,
+    /// the grandchild the shell backgrounded included.
     #[tokio::test]
-    async fn an_interrupt_returns_what_the_command_had_produced() {
-        let (_host, cx) = context();
-        let cancel = cx.cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            cancel.cancel();
-        });
+    async fn letting_go_of_a_run_takes_the_whole_process_group_with_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ticks = dir.path().join("ticks");
+        let (_host, cx) = context_in(dir.path().to_path_buf());
+        let command = format!(
+            "(while true; do echo tick >> '{0}'; sleep 0.05; done) & sleep 30",
+            ticks.display()
+        );
+        let context = watched(&cx);
+        let mut running = Box::pin(run(&command, NO_TIMEOUT, &context));
+        // One poll spawns it; then wait for the grandchild to be at work
+        // rather than for a clock, because a loaded box makes a guess of any
+        // fixed wait and this test's subject is a command that is definitely
+        // running.
+        let polled = tokio::time::timeout(Duration::from_millis(50), &mut running).await;
+        assert!(polled.is_err(), "the command outlives its first poll");
+        let wrote = wait_for_output(&ticks).await;
+        assert!(wrote > 0, "the grandchild never ran");
 
-        let started = Instant::now();
-        let out = run("echo started; sleep 30", NO_TIMEOUT, &watched(&cx))
-            .await
-            .expect("the command ran");
+        drop(running);
+        tokio::time::sleep(SETTLE).await;
+        let after = size(&ticks);
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(size(&ticks), after, "the process group outlived the drop");
+    }
 
-        assert_eq!(out.ended, Ended::Interrupted);
-        assert_eq!(out.output, "started\n");
-        assert!(started.elapsed() < Duration::from_secs(5));
+    /// Long enough that a killed group has certainly stopped writing, short
+    /// enough to run twice in a test. It bounds nothing that must be waited
+    /// for — only how long the proof watches for a writer that should be gone.
+    const SETTLE: Duration = Duration::from_millis(300);
+
+    fn size(path: &Path) -> u64 {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Poll until the file has something in it, bounded generously.
+    async fn wait_for_output(path: &Path) -> u64 {
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let written = size(path);
+            if written > 0 {
+                return written;
+            }
+        }
+        0
     }
 
     /// The seam promotion stands on: the wait ends, and the process, its pipes
