@@ -5,11 +5,12 @@
 The user chose sketch C of `tui.md` §3 "Teams", turned upright: the
 quick cycle becomes a **vertical list** of every session in the tree,
 each row saying what Claude Code's task list says — status, what it is
-doing, tools · tokens · time, whether it needs you. It is **flat**: a room's members are sessions,
-so they sit in the list beside every other session, never nested under
-the room (user-directed 2026-09-02); a room's own row says how many
-seats it has and how many answers are owed, and a member's row says
-what it owes and whether it is listening. There is already a vertical list of
+doing, tools · tokens · time, whether it needs you. It is **two columns side by side** (user-directed
+2026-09-02, after two flat sketches were refused): sessions on the left
+— agents, a room's members among them, never nested under the room —
+and rooms on the right; `↑`/`↓` walk a column, `←`/`→` cross between
+them. A member's row says which room it is in, what it owes and whether
+it is listening; a room's row says how many seats and how many owed. There is already a vertical list of
 sessions (`ctrl+g`, `tree::switcher_lines`) and a horizontal one (`↓`,
 `cycle::strip`); after this milestone there is **one list, two doors**
 — `↓` on an empty composer and `ctrl+g` anywhere — and the strip is
@@ -28,27 +29,31 @@ the screen: the list draws through `window::around`.
    (`View::Tree` payload, M34-E) and the parent's `owed` signal —
    surface-side composition, ADR-0013 §4's own decision. For a room,
    `seats · owed` counts. Unit tests on fixtures.
-2. **`roster.rs` — the list, pure.** Rows in the cycle's order (the
-   sessions that answer a model, then the rooms), flat, one `Line` each:
+2. **`roster.rs` — the list, pure.** Two columns under dim headings,
+   the sessions that answer a model on the left, the rooms on the right:
    ```
-   ❯ ⏺ project     what is in this workspace?
-     ⏺ reviewer    running · 3 tools · 1.2k tokens · 40s · needs you
-     ⏺ scout       done · 4 tools · 8.1k tokens · in #design
-     ⏺ helper      busy · in #design · owes an answer · 22m
-     ~ watcher     listening · 300s · in #design
-     # design      3 seats · 1 owed
+     Sessions                                  Rooms
+   ❯ ⏺ project   what is in this workspace?    # design   3 seats · 1 owed
+     ⏺ reviewer  running · 3 tools · 40s        # ops      2 seats
+     ⏺ scout     done · 8.1k tokens · in #design
+     ~ watcher   listening · 300s · in #design
    ```
-   Name column padded to the longest, the rest dim, `needs you` and
-   `owes an answer` in `attention`. Drawn through `window::around` with the room the
-   frame has above the composer; snapshot at 80×24 and 120×40 with more
-   rows than room and the cursor last.
+   Each column is its own list through `window::around` (the cursor's
+   column scrolls under it; the other shows its head); the left column
+   takes what the right does not need, and each row is clipped to its
+   column with `…`. Below 80 columns the right column is still drawn —
+   a room row is short. Name column padded to the longest in its
+   column, the rest dim, `needs you` and `owes an answer` in
+   `attention`. Snapshot at 80×24 and 120×40 with more rows than room
+   and the cursor last in each column.
 3. **One door replaces two.** `Open::Switcher` is the list; `↓` on an
    empty composer opens it with the cursor on the viewed session,
    `ctrl+g` the same. `cycle.rs` (the strip) and `Ui.cycling` are
    deleted; `status.rs` loses the strip branch; the `↓`-strip snapshot
    and its byte-identical-status-line proof go with it, replaced by the
    list's. `tree::switcher_lines` becomes `roster::lines` (one renderer).
-4. **Live walk, settled by `⏎`.** Moving the cursor calls `tree.show`
+4. **Live walk, settled by `⏎`.** `↑`/`↓` move within a column, `←`/`→`
+   cross to the other at the nearest row. Moving the cursor calls `tree.show`
    as the strip did; `esc` shows the session the list was opened from
    (remembered on `Switcher` — a fact about the gesture, like
    `esc_armed`); `⏎` closes the list where it is. A click on a row does
@@ -66,8 +71,9 @@ view,status,keys,screens}.rs`, snapshots, `docs/design/tui.md`.
 
 ## Exit criteria
 
-- [ ] `roster_80x24` / `_120x40`: agents then rooms, flat, a member's
-  row with its room, ear and debt; cursor visible with `…` at a cut end.
+- [ ] `roster_80x24` / `_120x40`: two columns, a member's row with its
+  room, ear and debt; the cursor visible in either column with `…` at
+  a cut end; `←`/`→` cross columns in a TestBackend test.
 - [ ] `↓` on an empty composer and `ctrl+g` open byte-identical lists.
 - [ ] Walking switches the view; `esc` restores the opening session;
   `⏎` keeps the walked-to one. TestBackend tests.
