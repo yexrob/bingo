@@ -205,13 +205,35 @@ fn start_status_stop_round_trips_on_a_real_detached_process() {
         "a graceful stop gives the pidfile back"
     );
 
-    let after_out = gateway.verb(&["status"]);
-    let after = stdout(&after_out);
+    let after = stdout(&gateway.verb(&["status"]));
+    assert!(after.contains("not running: no pidfile"), "{after}");
+}
+
+/// TERM in the window between the pidfile appearing and the host finishing its
+/// build (ADR-0020 §4).
+///
+/// `start` returns the moment it can read the pidfile, and the host is still
+/// loading its plugins for a while after that. A TERM arriving in there has to
+/// be held until the surface can be ended properly — if the signal is only
+/// registered once the host is up, the kernel's default action kills this
+/// process instead, and the pidfile it never gave back makes the next `start`
+/// refuse. Nothing is asked between the two verbs, so this is that window.
+#[test]
+fn a_gateway_stopped_the_instant_it_is_up_still_gives_its_pidfile_back() {
+    let gateway = Gateway::new();
+    gateway.start();
+
+    let out = gateway.verb(&["stop"]);
+    let stopped = stdout(&out);
     assert!(
-        after.contains("not running: no pidfile"),
-        "stdout: {after}\nstderr: {}\nexit: {:?}",
-        stderr(&after_out),
-        after_out.status.code()
+        stopped.contains("has stopped"),
+        "a stop that raced the boot: stdout: {stopped}\nstderr: {}\nexit: {:?}",
+        stderr(&out),
+        out.status.code()
+    );
+    assert!(
+        !gateway.pidfile().exists(),
+        "a killed gateway leaves the record that wedges the next start"
     );
 }
 

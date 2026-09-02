@@ -323,7 +323,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     }
     // Held for the whole run and dropped after `Host::shutdown`, so the
     // pidfile goes only once every plugin has given its own claims back.
-    let _resident = resident(work, &cwd)?;
+    let mut resident = resident(work, &cwd)?;
     let config = host_config(&cli, &cwd)?;
     let demo = demo_ui(&cli, &config.layers);
     let listening = channels_wanted(&cli, &config.layers);
@@ -354,12 +354,17 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let surface = host
         .surface(id)
         .ok_or_else(|| KernelError::new(ErrorCode::Internal, format!("no {id} surface")))?;
-    let exit = match work {
-        // The resident gateway ends on a signal, not on its surface: the
-        // channels surface is concurrent and never returns of its own accord,
-        // and something has to come back here for `shutdown` to run at all.
-        Work::Gateway => gateway::run::until_signalled(surface, host.handle(), options).await,
-        _ => surface.run(host.handle(), options).await,
+    let exit = match resident.as_mut() {
+        // Only a resident gateway holds one, and it ends on a signal rather
+        // than on its surface: the channels surface is concurrent and never
+        // returns of its own accord, and something has to come back here for
+        // `shutdown` to run at all.
+        Some(resident) => {
+            resident
+                .until_signalled(surface, host.handle(), options)
+                .await
+        }
+        None => surface.run(host.handle(), options).await,
     };
     if let Some(channels) = beside {
         channels.abort();

@@ -6,6 +6,11 @@
 //! three things wrapped around it: the log sink is installed, the pidfile is
 //! held, and TERM ends the surface instead of the process, so every `Drop` and
 //! every `Plugin::stop` runs before the claims are given back.
+//!
+//! Their order is the contract, not an accident. The pidfile is what tells
+//! `gateway start` that this process is up and may be stopped, and the host
+//! takes a while to build after it appears — so the signals are registered
+//! first, and the file is written to a process that can already answer them.
 
 use std::sync::Arc;
 
@@ -16,11 +21,14 @@ use super::paths::Paths;
 use super::pidfile::{self, Record};
 use super::probe::{self, Probe};
 
-/// What a resident process holds for as long as it runs. Dropping it gives the
-/// pidfile back, so it must outlive `Host::shutdown`.
+/// What a resident process holds for as long as it runs: the pidfile, and the
+/// two signals that end it. Dropping it gives the pidfile back, so it must
+/// outlive `Host::shutdown`.
 #[derive(Debug)]
 pub struct Resident {
     _claim: pidfile::Claim,
+    term: tokio::signal::unix::Signal,
+    interrupt: tokio::signal::unix::Signal,
 }
 
 /// Everything that must be true before a host is built: the directory exists,
@@ -32,6 +40,14 @@ pub fn enter(paths: &Paths, probe: &dyn Probe) -> Result<Resident, KernelError> 
     paths.ensure().map_err(internal)?;
     let file = super::log::open(&paths.log()).map_err(internal)?;
     super::log::install(file).map_err(internal)?;
+    // Before the pidfile, never after. `gateway start` returns the moment it
+    // can read that file, so from that instant a TERM may arrive — and until
+    // these are registered the kernel answers one with its default action,
+    // which is to kill this process where it stands: no `Drop`, no
+    // `Plugin::stop`, and a pidfile nobody gives back. The host is still being
+    // built at that point, so the handlers cannot wait for it.
+    let term = signal(SignalKind::Terminate)?;
+    let interrupt = signal(SignalKind::Interrupt)?;
     let path = paths.pidfile();
     if let Some(old) = pidfile::read(&path).map_err(internal)? {
         replace(&path, &old, probe)?;
@@ -43,7 +59,11 @@ pub fn enter(paths: &Paths, probe: &dyn Probe) -> Result<Resident, KernelError> 
         pidfile = %path.display(),
         "the gateway is up"
     );
-    Ok(Resident { _claim: claim })
+    Ok(Resident {
+        _claim: claim,
+        term,
+        interrupt,
+    })
 }
 
 /// A record already there: refuse if its process is still running, and take
@@ -87,27 +107,31 @@ fn taken(path: &std::path::Path, old: &Record, probe: &dyn Probe) -> String {
     )
 }
 
-/// The surface, until it ends on its own or the operating system asks this
-/// process to leave.
-///
-/// The channels surface is `SurfaceKind::Concurrent` and never returns of its
-/// own accord, so in practice this is the signal arm. Returning from here is
-/// what lets the caller run `Host::shutdown` — the difference between a
-/// gateway that gave its locks back and one that has to be cleaned up by hand.
-pub async fn until_signalled(
-    surface: Arc<dyn Surface>,
-    host: HostHandle,
-    options: SurfaceOptions,
-) -> Result<Exit, KernelError> {
-    let mut term = signal(SignalKind::Terminate)?;
-    let mut interrupt = signal(SignalKind::Interrupt)?;
-    tokio::select! {
-        exit = surface.run(host, options) => {
-            tracing::warn!("the channels surface ended on its own");
-            exit
+impl Resident {
+    /// The surface, until it ends on its own or the operating system asks this
+    /// process to leave.
+    ///
+    /// The channels surface is `SurfaceKind::Concurrent` and never returns of
+    /// its own accord, so in practice this is the signal arm. Returning from
+    /// here is what lets the caller run `Host::shutdown` — the difference
+    /// between a gateway that gave its locks back and one that has to be
+    /// cleaned up by hand. A signal that arrived while the host was still
+    /// being built is already waiting: `enter` registered for it before it
+    /// wrote the pidfile, and a registered signal is held, not lost.
+    pub async fn until_signalled(
+        &mut self,
+        surface: Arc<dyn Surface>,
+        host: HostHandle,
+        options: SurfaceOptions,
+    ) -> Result<Exit, KernelError> {
+        tokio::select! {
+            exit = surface.run(host, options) => {
+                tracing::warn!("the channels surface ended on its own");
+                exit
+            }
+            _ = self.term.recv() => Ok(leaving("SIGTERM")),
+            _ = self.interrupt.recv() => Ok(leaving("SIGINT")),
         }
-        _ = term.recv() => Ok(leaving("SIGTERM")),
-        _ = interrupt.recv() => Ok(leaving("SIGINT")),
     }
 }
 
