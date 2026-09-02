@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use agent_client_protocol_schema::rpc::RequestId;
 use agent_client_protocol_schema::v1::{
-    Error as RpcError, RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
+    CreateElicitationRequest, CreateElicitationResponse, Error as RpcError,
+    RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -31,11 +32,17 @@ pub trait Client: Send + Sync + 'static {
     /// A turn's stream. Notifications get no reply, so this cannot fail.
     async fn update(&self, notification: SessionNotification);
 
-    /// The one request this client answers: a person decides.
+    /// The agent asking whether it may do something.
     async fn permission(
         &self,
         request: RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, RpcError>;
+
+    /// The agent asking this client to collect something from a person.
+    async fn elicitation(
+        &self,
+        request: CreateElicitationRequest,
+    ) -> Result<CreateElicitationResponse, RpcError>;
 }
 
 type Pending = Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, RpcError>>>>>;
@@ -203,15 +210,17 @@ async fn observe(method: &str, params: Value, client: &Arc<dyn Client>) {
 
 async fn answer(method: &str, params: Value, client: Arc<dyn Client>) -> Result<Value, RpcError> {
     match method::incoming(method, params) {
-        Ok(Incoming::Permission(request)) => client
-            .permission(*request)
-            .await
-            .and_then(|answer| serde_json::to_value(answer).map_err(RpcError::into_internal_error)),
+        Ok(Incoming::Permission(request)) => encoded(client.permission(*request).await),
+        Ok(Incoming::Elicitation(request)) => encoded(client.elicitation(*request).await),
         // ADR-0035 §6: `fs/*` and `terminal/*` are declared unsupported, so
         // the agent is told rather than left waiting.
         Ok(_) => Err(RpcError::method_not_found()),
         Err(bad) => Err(RpcError::invalid_params().data(bad.to_string())),
     }
+}
+
+fn encoded<T: serde::Serialize>(answered: Result<T, RpcError>) -> Result<Value, RpcError> {
+    answered.and_then(|answer| serde_json::to_value(answer).map_err(RpcError::into_internal_error))
 }
 
 #[cfg(test)]
@@ -280,6 +289,14 @@ mod tests {
             Ok(RequestPermissionResponse::new(
                 RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(picked)),
             ))
+        }
+
+        async fn elicitation(
+            &self,
+            _request: CreateElicitationRequest,
+        ) -> Result<CreateElicitationResponse, RpcError> {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            Ok(crate::refusal::declined())
         }
     }
 
@@ -405,8 +422,11 @@ mod tests {
         drop(connection);
     }
 
+    /// Both doors an agent may knock on reach the client, and its answer goes
+    /// back under the agent's own id. What the answer *is* is
+    /// [`crate::refusal`]'s to decide; this is the routing.
     #[tokio::test]
-    async fn a_permission_request_is_answered_with_the_option_the_person_picked() {
+    async fn a_question_the_agent_asks_reaches_the_client_and_is_answered_by_id() {
         let (connection, mut agent, watcher) = pair();
         agent
             .write(json!({
@@ -419,7 +439,19 @@ mod tests {
         let reply = agent.read().await;
         assert_eq!(reply["id"], "perm-1", "the agent's own id comes back");
         assert_eq!(reply["result"], fixtures::request_permission_selected());
-        assert_eq!(watcher.asked.load(Ordering::Relaxed), 1);
+
+        agent
+            .write(json!({
+                "jsonrpc": "2.0",
+                "id": "elicit-1",
+                "method": method::ELICITATION_CREATE,
+                "params": fixtures::elicitation_create()
+            }))
+            .await;
+        let reply = agent.read().await;
+        assert_eq!(reply["id"], "elicit-1");
+        assert_eq!(reply["result"], fixtures::elicitation_declined());
+        assert_eq!(watcher.asked.load(Ordering::Relaxed), 2);
         drop(connection);
     }
 

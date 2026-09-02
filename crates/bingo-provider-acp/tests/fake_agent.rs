@@ -69,7 +69,7 @@ async fn a_scripted_agent_answers_a_turn_over_real_pipes() {
             "usage": { "totalTokens": 9, "inputTokens": 6, "outputTokens": 3 }
         }]
     }));
-    let collector = Collector::new(None);
+    let collector = Collector::new();
     let live = connect(&fake, collector.clone());
 
     let hello = live.connection.call(initialize()).await.unwrap();
@@ -141,7 +141,7 @@ async fn a_scripted_agent_answers_a_turn_over_real_pipes() {
 #[tokio::test]
 async fn an_agent_that_advertises_neither_door_refuses_both() {
     let fake = Fake::new(json!({ "sessionId": "s-2", "capabilities": {} }));
-    let live = connect(&fake, Collector::new(None));
+    let live = connect(&fake, Collector::new());
     live.connection.call(initialize()).await.unwrap();
 
     let resumed: Result<_, _> = live
@@ -176,7 +176,7 @@ async fn a_load_replays_and_the_replay_is_ours_to_swallow() {
             chunk("an answer from before")
         ]
     }));
-    let collector = Collector::new(None);
+    let collector = Collector::new();
     let live = connect(&fake, collector.clone());
     live.connection.call(initialize()).await.unwrap();
     live.connection
@@ -201,9 +201,10 @@ async fn a_load_replays_and_the_replay_is_ours_to_swallow() {
     );
 }
 
-/// The person's choice, by the agent's own option id, reaching the agent.
+/// Both questions an agent may put to a client, refused in the agent's own
+/// words, over real pipes — and the turn goes on to finish (ADR-0035 §5).
 #[tokio::test]
-async fn a_permission_answer_reaches_the_agent_by_the_agents_own_id() {
+async fn a_question_the_agent_asks_is_refused_and_the_turn_goes_on() {
     let fake = Fake::new(json!({
         "sessionId": "s-4",
         "turns": [{
@@ -214,11 +215,20 @@ async fn a_permission_answer_reaches_the_agent_by_the_agents_own_id() {
                     { "optionId": "reject", "name": "No", "kind": "reject_once" }
                 ]
             },
-            "updates": [chunk("edited")],
+            "elicitation": {
+                "mode": "form",
+                "sessionId": "s-4",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": { "branch": { "type": "string" } }
+                },
+                "message": "Which branch?"
+            },
+            "updates": [chunk("left it alone")],
             "stopReason": "end_turn"
         }]
     }));
-    let live = connect(&fake, Collector::new(Some("allow-once")));
+    let live = connect(&fake, Collector::new());
     live.connection.call(initialize()).await.unwrap();
     live.connection.call(new_session(fake.cwd())).await.unwrap();
     let ended = live
@@ -228,11 +238,17 @@ async fn a_permission_answer_reaches_the_agent_by_the_agents_own_id() {
         .unwrap();
     assert_eq!(
         serde_json::to_value(ended.stop_reason).unwrap(),
-        json!("end_turn")
+        json!("end_turn"),
+        "a refusal is an answer, not a failed turn"
     );
     let answered = fake.wait_for("permission/answered").await;
     assert_eq!(answered["outcome"]["outcome"], "selected");
-    assert_eq!(answered["outcome"]["optionId"], "allow-once");
+    assert_eq!(
+        answered["outcome"]["optionId"], "reject",
+        "the agent's own reject id, not a kind and not a position"
+    );
+    let declined = fake.wait_for("elicitation/answered").await;
+    assert_eq!(declined["action"], "decline");
 }
 
 /// A cancel ends the turn the way ACP says, and the child goes with the
@@ -243,7 +259,7 @@ async fn a_cancel_ends_the_turn_and_the_child_goes_with_the_handle() {
         "sessionId": "s-5",
         "turns": [{ "updates": [chunk("working")], "awaitCancel": true }]
     }));
-    let live = connect(&fake, Collector::new(None));
+    let live = connect(&fake, Collector::new());
     live.connection.call(initialize()).await.unwrap();
     live.connection.call(new_session(fake.cwd())).await.unwrap();
 
@@ -271,7 +287,7 @@ async fn a_cancel_ends_the_turn_and_the_child_goes_with_the_handle() {
 #[tokio::test]
 async fn an_agent_with_no_login_refuses_the_session_in_its_own_words() {
     let fake = Fake::new(json!({ "sessionId": "s-6", "authRequired": true }));
-    let live = connect(&fake, Collector::new(None));
+    let live = connect(&fake, Collector::new());
     live.connection.call(initialize()).await.unwrap();
     let refused = live.connection.call(new_session(fake.cwd())).await;
     let Err(error) = refused else {

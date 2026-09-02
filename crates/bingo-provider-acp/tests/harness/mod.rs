@@ -11,12 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol_schema::v1::{
-    Error as RpcError, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification,
+    CreateElicitationRequest, CreateElicitationResponse, Error as RpcError,
+    RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
 };
 use async_trait::async_trait;
 use bingo_provider_acp::child::{self, Spawned};
 use bingo_provider_acp::connection::{Client, Connection};
+use bingo_provider_acp::refusal;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -112,18 +113,18 @@ impl Fake {
     }
 }
 
-/// A client that collects the stream and answers every permission with the
-/// option the test names.
+/// A client that collects the stream and answers a question the way the plugin
+/// does: with the refusal, because permissions are the adapter's own
+/// (ADR-0035 §5). The notice that goes with it belongs to the session, not to
+/// the wire, so it is not here.
 pub struct Collector {
     pub updates: Arc<Mutex<Vec<SessionNotification>>>,
-    pub pick: Option<String>,
 }
 
 impl Collector {
-    pub fn new(pick: Option<&str>) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             updates: Arc::new(Mutex::new(Vec::new())),
-            pick: pick.map(str::to_string),
         })
     }
 }
@@ -138,22 +139,14 @@ impl Client for Collector {
         &self,
         request: RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, RpcError> {
-        let Some(pick) = &self.pick else {
-            return Ok(RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
-        };
-        assert!(
-            request
-                .options
-                .iter()
-                .any(|o| o.option_id.0.as_ref() == pick),
-            "the test picks an option the agent offered: {:?}",
-            request.options
-        );
-        Ok(RequestPermissionResponse::new(
-            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(pick.clone())),
-        ))
+        Ok(refusal::refused(&request))
+    }
+
+    async fn elicitation(
+        &self,
+        _request: CreateElicitationRequest,
+    ) -> Result<CreateElicitationResponse, RpcError> {
+        Ok(refusal::declined())
     }
 }
 

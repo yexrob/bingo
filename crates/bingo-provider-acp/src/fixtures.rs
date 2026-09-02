@@ -408,3 +408,28 @@ pub fn request_permission_selected() -> Value {
 pub fn request_permission_cancelled() -> Value {
     json!({ "outcome": { "outcome": "cancelled" } })
 }
+
+/// What this client sends back to either adapter: the id of the option the
+/// agent itself marked a rejection (ADR-0035 §5).
+pub fn request_permission_refused() -> Value {
+    json!({ "outcome": { "outcome": "selected", "optionId": "reject" } })
+}
+
+/// The other door an agent may knock on to reach a person. This client
+/// declares no elicitation capability, so a conformant agent never sends it;
+/// the one that does is answered rather than left waiting.
+pub fn elicitation_create() -> Value {
+    json!({
+        "mode": "form",
+        "sessionId": "sess_abc123",
+        "requestedSchema": {
+            "type": "object",
+            "properties": { "branch": { "type": "string", "title": "Branch" } }
+        },
+        "message": "Which branch should I push to?"
+    })
+}
+
+pub fn elicitation_declined() -> Value {
+    json!({ "action": "decline" })
+}

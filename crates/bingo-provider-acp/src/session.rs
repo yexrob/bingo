@@ -17,13 +17,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol_schema::v1::{
-    AgentCapabilities, Error as RpcError, InitializeRequest, LoadSessionRequest, NewSessionRequest,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest, SessionNotification,
+    AgentCapabilities, CreateElicitationRequest, CreateElicitationResponse, Error as RpcError,
+    InitializeRequest, LoadSessionRequest, NewSessionRequest, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, SessionNotification,
 };
 use async_trait::async_trait;
-use bingo_sdk::{
-    Answer, Env, HostHandle, KernelError, Level, Message, Prompter, ProviderError, SessionId,
-};
+use bingo_sdk::{Env, HostHandle, KernelError, Message, ProviderError, SessionId};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 
@@ -32,7 +31,7 @@ use crate::config::Adapter;
 use crate::connection::{Client, Connection};
 use crate::error::AcpError;
 use crate::ladder::{self, Opening};
-use crate::{prompter, transcript};
+use crate::{refusal, transcript};
 
 /// The plugin id the extension is journaled under (ADR-0011 §2).
 pub const PLUGIN: &str = "bingo.acp";
@@ -45,16 +44,17 @@ pub const KIND_PREFIX: &str = "session:";
 type Sink = mpsc::UnboundedSender<SessionNotification>;
 
 /// The client half of one link: where updates go, whether they are being
-/// swallowed, and who to ask when the agent wants permission.
+/// swallowed, and what the agent is told when it asks a question whose answer
+/// is already written on its own row.
 struct Inbox {
     adapter: String,
-    /// Whose turn this adapter is answering: the session whose dialog a
-    /// permission question opens on.
-    session: SessionId,
     sink: Mutex<Option<Sink>>,
     /// True while `session/load` replays. The journal already holds those
     /// turns; writing them again would be the conversation twice.
     loading: AtomicBool,
+    /// Whether this adapter has already been told, once, where its permissions
+    /// are configured.
+    told: AtomicBool,
     host: Option<HostHandle>,
 }
 
@@ -69,53 +69,39 @@ impl Client for Inbox {
         }
     }
 
-    /// ADR-0035 §5: the session's own dialog, reached through the door
-    /// `login` already used. A question that cannot be put, or is not
-    /// answered, is never a yes — the agent is told it was cancelled.
+    /// ADR-0035 §5: an ACP agent brings its own permission machinery, and the
+    /// row that spawned it says what it may do. A question that arrives anyway
+    /// is refused in the agent's own words, and the turn goes on.
     async fn permission(
         &self,
         request: RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, RpcError> {
-        let Some(asking) = self.asking().await else {
-            return Ok(prompter::outcome(&Answer::Cancel, &request));
-        };
-        let (kind, answers) = prompter::question(&request, &self.adapter);
-        match asking.ask(kind, answers).await {
-            Ok(answer) => Ok(prompter::outcome(&answer, &request)),
-            Err(_) => Ok(prompter::outcome(&Answer::Cancel, &request)),
-        }
+        self.say_where_the_answer_lives().await;
+        Ok(refusal::refused(&request))
+    }
+
+    async fn elicitation(
+        &self,
+        _request: CreateElicitationRequest,
+    ) -> Result<CreateElicitationResponse, RpcError> {
+        self.say_where_the_answer_lives().await;
+        Ok(refusal::declined())
     }
 }
 
 impl Inbox {
-    /// The session's dialog, if there is still a session to open one on. A
-    /// turn whose session has gone is not one a person can answer for.
-    async fn asking(&self) -> Option<Arc<dyn Prompter>> {
-        let host = self.host.as_ref()?;
-        match host.prompter(&self.session) {
-            Ok(asking) => Some(asking),
-            Err(refused) => {
-                self.say_nobody_could_be_asked(host, &refused.to_string())
-                    .await;
-                None
-            }
+    /// The one thing this plugin must not do silently: an agent asked, and was
+    /// refused by a rule the person never sees unless it is said. Said once —
+    /// an agent may ask on every call it makes.
+    async fn say_where_the_answer_lives(&self) {
+        if self.told.swap(true, Ordering::AcqRel) {
+            return;
         }
-    }
-
-    /// The one thing this plugin must not do silently: the agent asked a
-    /// person something and nobody could be asked.
-    async fn say_nobody_could_be_asked(&self, host: &HostHandle, why: &str) {
-        let _ = host
-            .notice(
-                Level::Warn,
-                "ACP_NO_PROMPTER",
-                &format!(
-                    "{} asked permission and there was nobody to ask ({why}), \
-                     so it was declined.",
-                    self.adapter
-                ),
-            )
-            .await;
+        let Some(host) = self.host.as_ref() else {
+            return;
+        };
+        let (level, code, text) = refusal::told(&self.adapter);
+        let _ = host.notice(level, &code, &text).await;
     }
 }
 
@@ -260,7 +246,7 @@ impl Sessions {
         cwd: &Path,
         history: &[Message],
     ) -> Result<Arc<Link>, ProviderError> {
-        let inbox = self.inbox(name, session).await;
+        let inbox = self.inbox(name).await;
         let (connection, handle) = self.spawn(adapter, cwd, inbox.clone())?;
         let hello = connection.call(handshake()).await.map_err(from_acp)?;
         let known = self.known_id(session, name).await;
@@ -283,12 +269,12 @@ impl Sessions {
         }))
     }
 
-    async fn inbox(&self, name: &str, session: &SessionId) -> Arc<Inbox> {
+    async fn inbox(&self, name: &str) -> Arc<Inbox> {
         Arc::new(Inbox {
             adapter: name.to_string(),
-            session: session.clone(),
             sink: Mutex::new(None),
             loading: AtomicBool::new(false),
+            told: AtomicBool::new(false),
             host: self.host.lock().await.clone(),
         })
     }

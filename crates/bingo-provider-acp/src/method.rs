@@ -7,9 +7,9 @@
 //! agent starts.
 
 use agent_client_protocol_schema::v1::{
-    AuthenticateRequest, AuthenticateResponse, CancelNotification, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PromptRequest, PromptResponse, RequestPermissionRequest,
+    AuthenticateRequest, AuthenticateResponse, CancelNotification, CreateElicitationRequest,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, RequestPermissionRequest,
     ResumeSessionRequest, ResumeSessionResponse, SessionNotification,
 };
 use serde::Serialize;
@@ -72,8 +72,12 @@ impl Notify for CancelNotification {
 pub enum Incoming {
     /// The stream of a turn: chunks, tool calls, usage.
     Update(Box<SessionNotification>),
-    /// The one client request this plugin answers: a person decides.
+    /// The agent asking whether it may do something. Refused: it brings its
+    /// own permission machinery (ADR-0035 §5).
     Permission(Box<RequestPermissionRequest>),
+    /// The agent asking this client to collect something from a person.
+    /// Declined at the same door, for the same reason.
+    Elicitation(Box<CreateElicitationRequest>),
     /// A method this client declared it does not have.
     Unsupported,
 }
@@ -84,6 +88,9 @@ pub fn incoming(method: &str, params: serde_json::Value) -> Result<Incoming, ser
     match method {
         SESSION_UPDATE => Ok(Incoming::Update(Box::new(serde_json::from_value(params)?))),
         SESSION_REQUEST_PERMISSION => Ok(Incoming::Permission(Box::new(serde_json::from_value(
+            params,
+        )?))),
+        ELICITATION_CREATE => Ok(Incoming::Elicitation(Box::new(serde_json::from_value(
             params,
         )?))),
         _ => Ok(Incoming::Unsupported),
@@ -194,10 +201,6 @@ mod tests {
             incoming(TERMINAL_CREATE, Value::Null).expect("nor is a null body"),
             Incoming::Unsupported
         ));
-        assert!(matches!(
-            incoming(ELICITATION_CREATE, Value::Null).expect("nor is elicitation"),
-            Incoming::Unsupported
-        ));
     }
 
     #[test]
@@ -206,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn the_two_lines_the_agent_starts_are_read_by_their_method() {
+    fn the_lines_the_agent_starts_are_read_by_their_method() {
         assert!(matches!(
             incoming(SESSION_UPDATE, fixtures::update_agent_message_chunk()).expect("an update"),
             Incoming::Update(_)
@@ -216,5 +219,20 @@ mod tests {
                 .expect("a permission request"),
             Incoming::Permission(_)
         ));
+        assert!(matches!(
+            incoming(ELICITATION_CREATE, fixtures::elicitation_create())
+                .expect("an elicitation request"),
+            Incoming::Elicitation(_)
+        ));
+    }
+
+    /// The other door a person could be reached through, and the word this
+    /// client answers it with (ADR-0035 §5).
+    #[test]
+    fn the_elicitation_door_round_trips() {
+        reads::<CreateElicitationRequest>(fixtures::elicitation_create());
+        writes::<agent_client_protocol_schema::v1::CreateElicitationResponse>(
+            fixtures::elicitation_declined(),
+        );
     }
 }

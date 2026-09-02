@@ -129,9 +129,15 @@ terminal-colorsaurus = "1.0"
 # M38 (docs/plans/M38-an-agent-answers-as-a-model.md, ADR-0035 §2): the ACP
 # message types, pinned exactly as the official SDK pins them. Types only —
 # the newline-framed JSON-RPC client loop is written in `bingo-provider-acp`,
-# in tokio, `Send`. `unstable_end_turn_token_usage` is the only way a turn
-# reports its tokens; every other unstable feature stays off.
-agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_end_turn_token_usage"] }
+# in tokio, `Send`. Two unstable features are on and both are types, not
+# behaviour: `unstable_end_turn_token_usage` is the only way a turn reports its
+# tokens, and `unstable_elicitation` is how `elicitation/create` is declined in
+# the protocol's own word rather than a shape invented here (ADR-0035 §5).
+# Neither adds a dependency. Every other unstable feature stays off.
+agent-client-protocol-schema = { version = "=1.5.0", features = [
+    "unstable_end_turn_token_usage",
+    "unstable_elicitation",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

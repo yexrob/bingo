@@ -17,9 +17,11 @@
 //!   "replay": [ { "sessionUpdate": "user_message_chunk", "content": {…} } ],
 //!   "turns": [
 //!     {
-//!       "permission": { "toolCallId": "c1", "title": "Edit", "kind": "edit",
-//!                       "options": [ { "optionId": "yes", "name": "Yes",
-//!                                      "kind": "allow_once" } ] },
+//!       "permission": { "toolCall": { "toolCallId": "c1", "title": "Edit" },
+//!                       "options": [ { "optionId": "no", "name": "No",
+//!                                      "kind": "reject_once" } ] },
+//!       "elicitation": { "mode": "form", "sessionId": "…",
+//!                        "requestedSchema": {…}, "message": "…" },
 //!       "updates": [ { "sessionUpdate": "agent_message_chunk", "content": {…} } ],
 //!       "stopReason": "end_turn",
 //!       "usage": { "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 },
@@ -79,6 +81,10 @@ struct Capabilities {
 struct Turn {
     #[serde(default)]
     permission: Option<Value>,
+    /// The other door: an agent that asks the client to collect something from
+    /// a person. Declined, like the permission (ADR-0035 §5).
+    #[serde(default)]
+    elicitation: Option<Value>,
     #[serde(default)]
     updates: Vec<Value>,
     #[serde(default = "end_turn")]
@@ -222,8 +228,19 @@ impl Agent {
         };
         self.turn += 1;
         let _ = params;
-        if let Some(request) = turn.permission {
-            self.ask_permission(request, lines).await?;
+        if let Some(mut request) = turn.permission {
+            request["sessionId"] = json!(self.script.session_id);
+            self.ask(
+                method::SESSION_REQUEST_PERMISSION,
+                "permission",
+                request,
+                lines,
+            )
+            .await?;
+        }
+        if let Some(request) = turn.elicitation {
+            self.ask(method::ELICITATION_CREATE, "elicitation", request, lines)
+                .await?;
         }
         for update in turn.updates {
             self.update(update).await?;
@@ -240,33 +257,29 @@ impl Agent {
         self.send(wire::result(id, answer)).await
     }
 
-    /// The one request an agent makes of this client. What comes back is
-    /// logged, so a test can prove the person's choice reached the agent.
-    async fn ask_permission(
+    /// A question the agent puts to the client, and the wait for its answer.
+    /// What comes back is logged under `<what>/answered`, so a test can prove
+    /// what reached the agent rather than what the client believes it sent.
+    async fn ask(
         &mut self,
-        request: Value,
+        method: &str,
+        what: &str,
+        params: Value,
         lines: &mut Lines<BufReader<Stdin>>,
     ) -> Result<(), Failed> {
-        let mut params = request;
-        params["sessionId"] = json!(self.script.session_id);
-        let id = agent_client_protocol_schema::rpc::RequestId::Str("perm-1".into());
-        self.send(wire::request(
-            id,
-            method::SESSION_REQUEST_PERMISSION,
-            params,
-        ))
-        .await?;
+        let id = agent_client_protocol_schema::rpc::RequestId::Str(format!("{what}-1"));
+        self.send(wire::request(id, method, params)).await?;
         while let Some(line) = lines.next_line().await? {
             let Ok(envelope) = serde_json::from_str::<Envelope>(&line) else {
                 continue;
             };
             match envelope.into_inner() {
                 Body::Reply(Reply::Result { result, .. }) => {
-                    return self.record("permission/answered", &result).await;
+                    return self.record(&format!("{what}/answered"), &result).await;
                 }
                 Body::Reply(Reply::Error { error, .. }) => {
                     let said = serde_json::to_value(error)?;
-                    return self.record("permission/refused", &said).await;
+                    return self.record(&format!("{what}/refused"), &said).await;
                 }
                 Body::Notification(note) => {
                     self.record(&note.method, &note.params.unwrap_or(Value::Null))
@@ -332,6 +345,7 @@ impl Agent {
 fn script_turn(turn: &Turn) -> Turn {
     Turn {
         permission: turn.permission.clone(),
+        elicitation: turn.elicitation.clone(),
         updates: turn.updates.clone(),
         stop_reason: turn.stop_reason.clone(),
         usage: turn.usage.clone(),
