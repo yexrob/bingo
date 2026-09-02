@@ -4,16 +4,21 @@
 //! Nothing here is published and nothing is stored. A seat is composed at
 //! render time from what the rooms plugin already writes — the room's own
 //! `members` extension (a membership and the tree it draws as, in one payload,
-//! §10 2026-09-02), the seat's own `ear:<name>` register, and the `owed`
-//! signal on the room's parent (ADR-0022 §4). Joining them is the surface's
-//! own business (ADR-0013 §4): a plugin describes what it knows, and which
-//! rows sit beside which is a decision no plugin gets to make.
+//! §10 2026-09-02), the seat's own `ear:<name>` register, its `cursor:<name>`
+//! reading mark, and the `owed` signal on the room's parent (ADR-0022 §4).
+//! Joining them is the surface's own business (ADR-0013 §4): a plugin
+//! describes what it knows, and which rows sit beside which is a decision no
+//! plugin gets to make.
+//!
+//! Three of those four live in the *room's* journal, the mark included
+//! (ADR-0034 §2): a room is a `Log` session that answers nobody, so it is the
+//! one place a seat can be read from without touching the seat.
 //!
 //! A surface may not import a plugin (ADR-0001), so the names below are the
 //! whole of the contract between them, and every payload is read as data:
 //! a shape this does not recognise leaves the fact out rather than guessing.
 
-use bingo_sdk::SessionState;
+use bingo_sdk::{ItemBody, SessionState};
 use jiff::Timestamp;
 use serde_json::Value;
 
@@ -28,11 +33,12 @@ const LISTENERS: &str = "listeners";
 /// The kind one seat's own retuning is published under, before its name
 /// (ADR-0029 §4).
 const EAR: &str = "ear:";
-/// The kind a seat's reading mark is published under, before its room
-/// (ADR-0034 §2). It sits on the member's own session, not the room's.
+/// The kind a seat's reading mark is published under, before its name
+/// (ADR-0034 §2). It sits in the room's own journal, beside the posts it
+/// measures against, and never on the member's session.
 const CURSOR: &str = "cursor:";
-/// The `seq` of the room that mark has read up to.
-const SEQ: &str = "seq";
+/// The one thing that mark holds: the last post the seat has read.
+const POST: &str = "post";
 /// The signal the room's parent carries while any answer is owed.
 const OWED: &str = "owed";
 /// The open debts that signal carries beside the table it draws as, and the
@@ -49,15 +55,26 @@ const ROOM_COLUMN: &str = "room";
 const OWED_COLUMN: &str = "owed";
 const ASKED_COLUMN: &str = "asked";
 
-/// How a seat hears its room (ADR-0029 §1).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// How a seat hears its room (ADR-0029 §1, reversed by ADR-0034 §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ear {
-    /// Every post wakes it as it lands: today's seat, and the default.
-    #[default]
+    /// Every post wakes it as it lands. The exception now, asked for by the
+    /// number that says so — `name:0` on a roster.
     Live,
     /// Posts land held and are read whole at the seat's next turn. The
-    /// patience is absent where the roster named the seat without one.
+    /// patience is absent where the roster named the seat without one, which
+    /// is what a bare name asks for and what nearly every seat wears.
     Listening { patience_s: Option<u64> },
+}
+
+/// A bare name on a roster is a patient ear (ADR-0034 §6). How long it waits
+/// is the plugin's own constant and is published only where a seat asked for
+/// another, so a seat the roster says nothing about listens for a while this
+/// surface has no number for.
+impl Default for Ear {
+    fn default() -> Ear {
+        Ear::Listening { patience_s: None }
+    }
 }
 
 /// An answer a seat still owes, as the card it is read from says it.
@@ -81,8 +98,9 @@ pub struct Seat {
     pub ear: Ear,
     /// How many posts stand after this seat's reading mark (ADR-0034 §2),
     /// where there is a mark to read and it is behind the room's head. A seat
-    /// at the head has nothing to say, and so has one whose journal carries no
-    /// mark this surface recognises — a guess would be worse than a silence.
+    /// at the head has nothing to say, and so has one the room's journal
+    /// carries no mark for that this surface recognises — a guess would be
+    /// worse than a silence.
     pub unread: Option<u64>,
     /// The oldest answer it still owes there, where one stands.
     pub owes: Option<Owes>,
@@ -105,37 +123,39 @@ pub fn seat(tree: &Tree, state: &SessionState) -> Option<Seat> {
     Some(Seat {
         room: tree::name(room),
         ear: ear(room, &name),
-        unread: unread(state, room),
+        unread: unread(room, &name),
         owes: owes(tree, room, &name),
     })
 }
 
-/// What stands unread in the room for this seat: the room's head, which is the
-/// last frame of its journal this attachment carries, less the `seq` the
-/// seat's own mark stopped at.
-fn unread(state: &SessionState, room: &SessionState) -> Option<u64> {
-    let read = read_to(state, &tree::name(room))?;
-    room.seq.0.checked_sub(read).filter(|behind| *behind > 0)
+/// What stands unread in the room for this seat: the posts of the room's own
+/// journal that landed after the one its mark points at. A seat with no mark,
+/// a mark of a shape this surface does not know, or one naming a post the
+/// journal no longer holds is measured against nothing, and says nothing.
+fn unread(room: &SessionState, name: &str) -> Option<u64> {
+    let read = read_to(room, name)?;
+    let posts = posts(room);
+    let at = posts.iter().position(|post| *post == read)?;
+    let behind = (posts.len() - at - 1) as u64;
+    (behind > 0).then_some(behind)
 }
 
-/// The `seq` this session's mark for one room stopped at. A mark is filed
-/// under `cursor:<room>` and names its room in the payload as well; the
-/// payload is what is read, so nothing turns on how the kind was spelled.
-fn read_to(state: &SessionState, room: &str) -> Option<u64> {
-    state
-        .extensions
-        .get(PLUGIN)?
+/// The post this seat's mark stopped at, as the room's own journal has it.
+fn read_to<'a>(room: &'a SessionState, name: &str) -> Option<&'a str> {
+    published(room, &format!("{CURSOR}{}", name.to_lowercase()))?
+        .get(POST)?
+        .as_str()
+}
+
+/// The posts a room holds, in the order its journal gave them. A post is what
+/// somebody said into the room, which is a user item — the same thing the
+/// rooms plugin folds its own ledgers out of.
+fn posts(room: &SessionState) -> Vec<&str> {
+    room.items
         .iter()
-        .filter(|(kind, _)| kind.starts_with(CURSOR))
-        .find(|(_, mark)| marks(mark, room))
-        .and_then(|(_, mark)| mark.get(SEQ)?.as_u64())
-}
-
-/// Whether a mark is this room's, as the mark itself says.
-fn marks(mark: &Value, room: &str) -> bool {
-    mark.get(ROOM)
-        .and_then(Value::as_str)
-        .is_some_and(|named| same(named, room))
+        .filter(|item| matches!(item.body, ItemBody::User { .. }))
+        .map(|item| item.id.as_str())
+        .collect()
 }
 
 /// What a room's row says about itself.
@@ -192,8 +212,9 @@ fn retuned(room: &SessionState, name: &str) -> Option<Ear> {
     Some(listening(Some(seconds)))
 }
 
-/// The ear the roster was seated with. A membership with no listeners at all
-/// — every room opened before there were ears — is all live.
+/// The ear the roster was seated with. A roster names only the seats whose ear
+/// is not the default, so a seat it passes over — a bare name, and every name
+/// on a room opened before there were ears — wears that default.
 fn declared(room: &SessionState, name: &str) -> Ear {
     published(room, MEMBERS)
         .and_then(|payload| payload.get(LISTENERS).cloned())
@@ -323,8 +344,9 @@ mod tests {
     use super::*;
     use crate::test_support::*;
 
-    /// A root with a room under it, two sub-agents seated in it, one of them
-    /// listening, and a debt the room's parent is signalling.
+    /// A root with a room under it, two sub-agents seated in it — one that
+    /// asked for a live ear, one wearing a patience of its own — four posts in
+    /// the room, and a debt the room's parent is signalling.
     fn seated() -> Tree {
         let mut frames = vec![
             child_frame(1, announced("reviewer")),
@@ -335,10 +357,18 @@ mod tests {
                 extended(
                     "bingo.rooms",
                     "members",
-                    roster_payload(&["reviewer", "watcher"], &[("watcher", 300)]),
+                    roster_payload(
+                        &["reviewer", "watcher"],
+                        &[("reviewer", 0), ("watcher", 600)],
+                    ),
                 ),
             ),
         ];
+        // The posts a reading mark has to stand behind.
+        frames.extend(
+            (1..=4u64)
+                .map(|n| posted(4 + n, &format!("itm_p{n}"), "watcher", &format!("post {n}"))),
+        );
         frames.push(frame(
             5,
             signalled(
@@ -384,7 +414,7 @@ mod tests {
         assert_eq!(
             of(&seated(), "watcher").map(|seat| seat.ear),
             Some(Ear::Listening {
-                patience_s: Some(300)
+                patience_s: Some(600)
             })
         );
     }
@@ -395,7 +425,7 @@ mod tests {
     fn a_seat_that_retuned_its_own_ear_is_heard_over_the_roster() {
         let mut tree = seated();
         tree.apply(&log_frame(
-            6,
+            9,
             extended(
                 "bingo.rooms",
                 "ear:watcher",
@@ -410,7 +440,7 @@ mod tests {
         );
 
         tree.apply(&log_frame(
-            7,
+            10,
             extended(
                 "bingo.rooms",
                 "ear:watcher",
@@ -424,9 +454,12 @@ mod tests {
         );
     }
 
-    /// The shape a room opened before there were ears left in its journal.
+    /// The shape a room opened before there were ears left in its journal, and
+    /// the shape a bare name still writes: a roster names only the seats whose
+    /// ear is not the default, and the default is the patient one now
+    /// (ADR-0034 §6).
     #[test]
-    fn a_roster_written_before_there_were_ears_seats_everyone_live() {
+    fn a_roster_that_declares_no_ear_seats_everyone_patient() {
         let tree = folded_tree(vec![
             child_frame(1, announced("reviewer")),
             log_frame(2, log_announced("#design")),
@@ -443,44 +476,61 @@ mod tests {
             of(&tree, "reviewer"),
             Some(Seat {
                 room: "#design".into(),
-                ear: Ear::Live,
+                ear: Ear::Listening { patience_s: None },
                 unread: None,
                 owes: None,
             })
         );
     }
 
-    /// The one fact "seen" derives from (ADR-0034 §2): the room's head less
-    /// the `seq` the seat's own mark stopped at, and nothing at all once the
-    /// mark has caught up.
+    /// The one fact "seen" derives from (ADR-0034 §2): the posts of the room's
+    /// own journal that landed after the one this seat's mark points at, and
+    /// nothing at all once the mark has caught up.
     #[test]
     fn a_seat_behind_the_rooms_head_counts_what_it_has_not_read() {
         let mut tree = seated();
-        tree.apply(&child_frame(6, room_cursor("#design", 1)));
+        tree.apply(&log_frame(9, room_cursor("reviewer", "itm_p1")));
         assert_eq!(
             of(&tree, "reviewer").and_then(|seat| seat.unread),
             Some(3),
-            "the room's journal reaches seq 4 and the mark stopped at 1"
+            "the room holds four posts and the mark stopped at the first"
         );
 
-        tree.apply(&child_frame(7, room_cursor("#design", 4)));
+        tree.apply(&log_frame(10, room_cursor("reviewer", "itm_p4")));
         assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.unread), None);
     }
 
-    /// A mark says which room it belongs to, and only that room's head is
-    /// counted against it. A payload of another shape leaves the fact out.
+    /// A mark is one seat's, under that seat's own name. Another seat's says
+    /// nothing here, and neither does a payload of a shape this surface does
+    /// not know or one naming a post the journal no longer holds — each leaves
+    /// the fact out rather than guessing a number.
     #[test]
-    fn a_mark_of_another_room_or_another_shape_counts_nothing() {
+    fn a_mark_of_another_seat_or_another_shape_counts_nothing() {
         let mut tree = seated();
-        tree.apply(&child_frame(6, room_cursor("#ops", 1)));
+        tree.apply(&log_frame(9, room_cursor("watcher", "itm_p1")));
         assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.unread), None);
+        assert_eq!(
+            of(&tree, "watcher").and_then(|seat| seat.unread),
+            Some(3),
+            "it counts for the seat it was filed under"
+        );
 
-        tree.apply(&child_frame(
-            7,
+        tree.apply(&log_frame(
+            10,
             extended(
                 "bingo.rooms",
-                "cursor:#design",
-                serde_json::json!({"room": "#design", "seq": "the first"}),
+                "cursor:reviewer",
+                serde_json::json!({"seq": 1}),
+            ),
+        ));
+        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.unread), None);
+
+        tree.apply(&log_frame(
+            11,
+            extended(
+                "bingo.rooms",
+                "cursor:reviewer",
+                serde_json::json!({"post": "itm_gone"}),
             ),
         ));
         assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.unread), None);
@@ -569,7 +619,7 @@ mod tests {
         assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.owes), None);
 
         tree.apply(&log_frame(
-            7,
+            9,
             extended("bingo.rooms", "members", serde_json::json!(7)),
         ));
         assert_eq!(of(&tree, "reviewer"), None, "nobody is seated by a number");

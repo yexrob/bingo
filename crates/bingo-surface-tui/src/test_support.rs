@@ -124,8 +124,10 @@ pub fn agent_frame(n: u64, seq: u64, event: Event) -> Frame {
 }
 
 /// A room's whole membership, spelled the way `bingo-rooms` publishes it: the
-/// names a reader parses, the listeners' patience beside them, and the tree a
-/// surface draws, in one payload (ADR-0011 §2, ADR-0013 §2).
+/// names a reader parses, the tree a surface draws, and beside them the seats
+/// whose ear is not the default — a bare name asks for the default and is
+/// never listed (ADR-0011 §2, ADR-0013 §2, ADR-0034 §6). A patience of `0` is
+/// the live ear `name:0` asks for.
 pub fn roster_payload(members: &[&str], listeners: &[(&str, u64)]) -> Value {
     let mut payload = json!({
         "members": members,
@@ -144,14 +146,15 @@ pub fn roster_payload(members: &[&str], listeners: &[(&str, u64)]) -> Value {
     payload
 }
 
-/// A seat's reading mark, spelled the way `bingo-rooms` journals one on the
-/// *member's* own session (ADR-0034 §2): the `seq` of the room it has read up
-/// to, filed under the room it belongs to and naming it again in the payload.
-pub fn room_cursor(room: &str, seq: u64) -> Event {
+/// A seat's reading mark, spelled the way `bingo-rooms` journals one in the
+/// *room's* own journal (ADR-0034 §2): the id of the last post it has read,
+/// under a kind of the seat's own name, lowercased the way a room compares
+/// them. It belongs on a [`log_frame`], never on the member's session.
+pub fn room_cursor(member: &str, post: &str) -> Event {
     extended(
         "bingo.rooms",
-        &format!("cursor:{room}"),
-        json!({"room": room, "seq": seq}),
+        &format!("cursor:{}", member.to_lowercase()),
+        json!({"post": post}),
     )
 }
 
