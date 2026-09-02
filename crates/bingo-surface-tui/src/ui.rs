@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeSet;
 
 use bingo_sdk::{
-    Action, CommandSpec, ItemId, Level, Seq, SessionId, SessionState, SessionSummary, TurnId, View,
+    Action, CommandSpec, Level, Seq, SessionId, SessionState, SessionSummary, TurnId, View,
 };
 
 use crate::blocks::Blocks;
@@ -20,6 +20,7 @@ use crate::commands::{self, Suggestion};
 use crate::complete;
 use crate::composer::Composer;
 use crate::dialog::Dialog;
+use crate::fold::Folds;
 use crate::frame::Regions;
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
@@ -333,8 +334,10 @@ pub struct Ui {
     pub panel: usize,
     /// An action fired and not yet answered.
     pub pending: Option<Pending>,
-    /// The results `ctrl+o` opened whole; everything else folds (§4).
-    pub expanded: BTreeSet<ItemId>,
+    /// How much of each block a person opened or shut, with `ctrl+o` or a
+    /// click (§7). A block that is not in it wears its kind's own start
+    /// ([`crate::fold`]), so the default is never written down twice.
+    pub folds: Folds,
     /// When ctrl+c was pressed on an empty composer.
     pub armed: Option<Instant>,
     /// The turn this surface has asked to stop, so the activity row answers
@@ -386,7 +389,7 @@ impl Ui {
             focus: None,
             panel: 0,
             pending: None,
-            expanded: BTreeSet::new(),
+            folds: Folds::new(),
             armed: None,
             stop_asked: None,
             esc_armed: false,

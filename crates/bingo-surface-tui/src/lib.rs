@@ -47,6 +47,7 @@ mod complete;
 mod composer;
 mod dialog;
 mod effect;
+mod fold;
 mod frame;
 mod highlight;
 mod history;

@@ -3,12 +3,11 @@
 //! raised bar for what you said. The reducer is the only history: nothing here
 //! remembers a thing, and [`crate::blocks`] stacks and memoises what it draws.
 
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{
-    ContentPart, DecisionKind, Item, ItemBody, ItemId, ItemStatus, Origin, SessionState,
-    ToolOutput, TurnStatus, View,
+    ContentPart, DecisionKind, Item, ItemBody, ItemStatus, Origin, SessionState, ToolOutput,
+    TurnStatus, View,
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -16,6 +15,7 @@ use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::clock::{self, Anim, Now};
+use crate::fold::{self, Fold, Folds};
 use crate::tree::{self, Agents};
 use crate::{markdown, paths, theme, views, wrap};
 
@@ -30,6 +30,13 @@ const PULSE: Duration = Duration::from_millis(1200);
 const OUTPUT_ROWS: usize = 5;
 /// A running tool's tail: enough to see it move, few enough to look past.
 const TAIL_ROWS: usize = 3;
+/// A thought's rows, streaming or peeked at. Fewer than a tool's tail, and the
+/// reason is the difference between the two: a tool's output is *read* — a
+/// person is looking for the line that says what happened — and a thought is
+/// read *past*. Two rows are enough to see one moving and to recognise where
+/// it went; a third would spend a row of the transcript on working nobody
+/// asked for.
+const THOUGHT_ROWS: usize = 2;
 /// Diff rows kept under a tool row.
 const DIFF_ROWS: usize = 12;
 /// What opens a folded result. The key is the frame's; the words are here
@@ -40,8 +47,9 @@ const EXPAND: &str = "ctrl+o to expand";
 pub struct Rows<'a> {
     pub cwd: &'a str,
     pub width: usize,
-    /// The results a person opened whole with `ctrl+o`.
-    pub expanded: &'a BTreeSet<ItemId>,
+    /// How much of each block a person opened or shut; everything else wears
+    /// its kind's own start ([`crate::fold`]).
+    pub folds: &'a Folds,
     /// The frame being drawn: what every cue below is a function of.
     pub now: Now,
     /// What the session in view is called. A post says which room it came
@@ -90,19 +98,19 @@ pub fn item_lines(
     rows: &Rows<'_>,
     cue: Cue,
 ) -> Vec<Line<'static>> {
-    // Whether this block was opened whole — by `ctrl+o`, or by a click on it.
-    // One set answers for every fold, and it is asked once, here.
-    let opened = rows.expanded.contains(&item.id);
+    // How much of this block is on the screen — what `ctrl+o` and a click both
+    // write, over the start its kind has. One question, asked once, here.
+    let fold = fold::fold_of(rows.folds, item);
     match &item.body {
         ItemBody::User { parts, origin } => match quiet(origin) {
-            true => notice(parts, origin, item.status, opened, rows),
+            true => notice(parts, origin, item.status, fold, rows),
             false => user(parts, origin.principal.as_deref(), rows),
         },
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
-        ItemBody::Reasoning { .. } => thinking(item, opened, rows),
-        ItemBody::ToolCall { .. } => called(item, agents, opened, rows, cue),
+        ItemBody::Reasoning { .. } => thinking(item, fold, rows),
+        ItemBody::ToolCall { .. } => called(item, agents, fold, rows, cue),
         ItemBody::Action { name, args, result } => {
-            action(item.status, name, args, result.as_ref(), opened, rows)
+            action(item.status, name, args, result.as_ref(), fold, rows)
         }
         ItemBody::Compaction { before, after, .. } => vec![rule(
             &format!("context compacted ({before} → {after} tokens)"),
@@ -141,7 +149,7 @@ pub fn item_lines(
 fn called(
     item: &Item,
     agents: &Agents<'_>,
-    expanded: bool,
+    fold: Fold,
     rows: &Rows<'_>,
     cue: Cue,
 ) -> Vec<Line<'static>> {
@@ -164,7 +172,7 @@ fn called(
                 input,
                 output: output.as_ref(),
                 progress: progress.as_deref(),
-                expanded,
+                fold,
             },
             rows,
             cue,
@@ -270,7 +278,7 @@ fn notice(
     parts: &[ContentPart],
     origin: &Origin,
     status: ItemStatus,
-    expanded: bool,
+    fold: Fold,
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
     let text = said(parts);
@@ -293,10 +301,7 @@ fn notice(
         rows,
     );
     if !rest.trim().is_empty() {
-        out.extend(returns(
-            kept(plain(rest), expanded, OUTPUT_ROWS, None),
-            rows,
-        ));
+        out.extend(returns(kept(plain(rest), fold, OUTPUT_ROWS, None), rows));
     }
     out
 }
@@ -436,44 +441,64 @@ fn cooling(back: usize, age: f32) -> Style {
 }
 
 /// A thought is readable where it happened, and while it is being had: the
-/// row says `✻ Thinking…` over the tail of what has arrived, then decays to
-/// `✻ Thought for 2s` over the whole of it.
+/// row says `✻ Thinking…` over the newest two rows of what has arrived, then
+/// closes to `✻ Thought for 2s` alone.
 ///
 /// One match on one fact — whether the thinking is over — because that is the
 /// only thing the two halves differ by.
-fn thinking(item: &Item, expanded: bool, rows: &Rows<'_>) -> Vec<Line<'static>> {
+fn thinking(item: &Item, fold: Fold, rows: &Rows<'_>) -> Vec<Line<'static>> {
     match item.completed_at {
-        None => still_thinking(item, rows),
-        Some(end) => thought_for(item, end, expanded, rows),
+        None => still_thinking(item, fold, rows),
+        Some(end) => thought_for(item, end, fold, rows),
     }
 }
 
-/// A thought as it is being had: the row, and under it the last rows of what
-/// has been thought so far — the same three dim `⎿` rows a running tool's tail
-/// shows (§6), scrolling up as the deltas arrive.
+/// A thought as it is being had: the row, and under it the newest
+/// [`THOUGHT_ROWS`] of what has been thought so far — dim under the same `⎿`
+/// a running tool's tail hangs from (§6), scrolling up as the deltas arrive.
 ///
 /// They wear no comet tail. The comet is `presence`'s glow on words being said
 /// (§6 "streaming"), and thinking is where `dim` lives (§4): a second warm
 /// light beside the sparkle would put motion on the one thing a person is
 /// meant to read past.
-fn still_thinking(item: &Item, rows: &Rows<'_>) -> Vec<Line<'static>> {
+fn still_thinking(item: &Item, fold: Fold, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let mut out = vec![sparkled(
         format!("Thinking{}", theme::ellipsis()),
         theme::dim().patch(theme::italic()),
     )];
     if let Some(text) = thought(item) {
-        out.extend(returns(tail(text), rows));
+        out.extend(returns(streaming(text, fold), rows));
     }
     out
 }
 
-/// A thought that is over: how long it took, and what was thought under it —
-/// dim, folded at [`OUTPUT_ROWS`] like any other result, and opened by the
-/// same `ctrl+o`.
+/// What is under a thought still being had: the newest rows of it, which is
+/// the only cut that can follow something that grows from the bottom; the
+/// whole of it where a person opened it; nothing where they shut it.
+///
+/// It carries no `… +N lines`: the count would change under the reader on
+/// every delta, and a tail is not a promise that the rest is reachable — that
+/// is what the row a thought decays to is for.
+fn streaming(text: &str, fold: Fold) -> Vec<Line<'static>> {
+    match fold {
+        Fold::Shut => Vec::new(),
+        Fold::Peek => tail(text, THOUGHT_ROWS),
+        Fold::Open => plain(text),
+    }
+}
+
+/// A thought that is over: how long it took, and — where a person has asked
+/// for it — what was thought, dim under the `⎿`.
+///
+/// The row is alone by default. A finished thought is working, not an answer:
+/// it is read past, and the rows it would spend belong to what came of it. The
+/// text is one click or one `ctrl+o` away, and the peek starts at the *top*,
+/// because somebody opening a finished thought is reading it from the
+/// beginning rather than watching it move.
 fn thought_for(
     item: &Item,
     end: jiff::Timestamp,
-    expanded: bool,
+    fold: Fold,
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
     let mut out = vec![sparkled(
@@ -482,7 +507,7 @@ fn thought_for(
     )];
     if let Some(text) = thought(item) {
         out.extend(returns(
-            kept(plain(text), expanded, OUTPUT_ROWS, Some(EXPAND)),
+            kept(plain(text), fold, THOUGHT_ROWS, Some(EXPAND)),
             rows,
         ));
     }
@@ -524,8 +549,8 @@ struct Call<'a> {
     input: &'a Value,
     output: Option<&'a ToolOutput>,
     progress: Option<&'a str>,
-    /// Opened whole with `ctrl+o`: nothing under it folds.
-    expanded: bool,
+    /// How much of what came back is shown.
+    fold: Fold,
 }
 
 fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
@@ -586,39 +611,40 @@ fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
         let Some(progress) = call.progress else {
             return Vec::new();
         };
-        return returns(tail(progress), rows);
+        return returns(tail(progress, TAIL_ROWS), rows);
     }
     let Some(output) = call.output else {
         return Vec::new();
     };
-    returns(folded(output, call.expanded, rows.result_width()), rows)
+    returns(folded(output, call.fold, rows.result_width()), rows)
 }
 
-/// The last rows of something still arriving: what a running tool has printed
-/// so far, or what a thought has been thinking. One tail, so the two read the
-/// same and move the same (§6).
-fn tail(arriving: &str) -> Vec<Line<'static>> {
+/// The last `keep` rows of something still arriving: what a running tool has
+/// printed so far, or what a thought has been thinking. One tail, so the two
+/// move the same way (§6); how many rows each spends is the one thing they
+/// differ by, and each names its own.
+fn tail(arriving: &str, keep: usize) -> Vec<Line<'static>> {
     let all: Vec<&str> = arriving.trim_end().lines().collect();
-    plain(&all[all.len().saturating_sub(TAIL_ROWS)..].join("\n"))
+    plain(&all[all.len().saturating_sub(keep)..].join("\n"))
 }
 
 /// What a person reads under a finished tool row: the display the tool drew
 /// for them when there is one (ADR-0013 §2, the block lane), else the text the
 /// model read, folded to what a row can spare either way.
-fn folded(output: &ToolOutput, expanded: bool, width: usize) -> Vec<Line<'static>> {
+fn folded(output: &ToolOutput, fold: Fold, width: usize) -> Vec<Line<'static>> {
     let (rows, limit) = match &output.display {
         // A diff is the one display a person reads by the dozen rows.
         Some(view @ View::Diff { .. }) => (views::render(view, width), DIFF_ROWS),
         Some(view) => (views::render(view, width), OUTPUT_ROWS),
         None => (plain(&text_of(output)), OUTPUT_ROWS),
     };
-    kept(rows, expanded, limit, Some(EXPAND))
+    kept(rows, fold, limit, Some(EXPAND))
 }
 
 /// Everything a result says, with nothing folded away: what the pager opens
 /// (design §5 — a long output opens in a sheet).
 pub fn whole(output: &ToolOutput, width: usize) -> Vec<Line<'static>> {
-    folded(output, true, width)
+    folded(output, Fold::Open, width)
 }
 
 fn plain(text: &str) -> Vec<Line<'static>> {
@@ -655,18 +681,19 @@ fn text_of(output: &ToolOutput) -> String {
         .join("\n")
 }
 
-/// What a block shows under its row: everything when it was opened — by
-/// `ctrl+o` or by a click on it — else the first rows and how many were left
-/// out. One set answers for every fold, so a block is open in one way only.
+/// What a block shows under its row, from the one fold it is in: nothing, the
+/// first `limit` rows with how many were left out, or the whole of it. One map
+/// answers for every fold, so a block is open in one way only.
 fn kept(
     rows: Vec<Line<'static>>,
-    expanded: bool,
+    fold: Fold,
     limit: usize,
     opens: Option<&str>,
 ) -> Vec<Line<'static>> {
-    match expanded {
-        true => rows,
-        false => cut(rows, limit, opens),
+    match fold {
+        Fold::Shut => Vec::new(),
+        Fold::Peek => cut(rows, limit, opens),
+        Fold::Open => rows,
     }
 }
 
@@ -734,7 +761,7 @@ fn action(
     name: &str,
     args: &Value,
     result: Option<&Value>,
-    expanded: bool,
+    fold: Fold,
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
     let mut out = speaks(
@@ -744,7 +771,7 @@ fn action(
     );
     if let Some(result) = result {
         out.extend(returns(
-            kept(plain(&as_text(result)), expanded, OUTPUT_ROWS, Some(EXPAND)),
+            kept(plain(&as_text(result)), fold, OUTPUT_ROWS, Some(EXPAND)),
             rows,
         ));
     }
@@ -841,7 +868,7 @@ mod tests {
         assistant, completed, delivered, folded, frame, item, post, receipt_item, running_tool,
         scene, started, started_tool, tool, ts, user as person,
     };
-    use bingo_sdk::Event;
+    use bingo_sdk::{Event, ItemId};
 
     fn drawn(items: Vec<Item>) -> Vec<String> {
         drawn_in(None, items)
@@ -863,13 +890,13 @@ mod tests {
     /// The transcript without the welcome box, which `welcome.rs` pins on its
     /// own: these tests are about the grammar under it.
     fn rendered(state: &SessionState) -> Vec<String> {
-        rendered_with(state, &BTreeSet::new())
+        rendered_with(state, &Folds::new())
     }
 
-    fn rendered_with(state: &SessionState, expanded: &BTreeSet<ItemId>) -> Vec<String> {
+    fn rendered_with(state: &SessionState, folds: &Folds) -> Vec<String> {
         let welcomed = crate::welcome::lines(state, 60).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(state, &Agents::new(), 60, expanded, Vec::new(), scene().1);
+        let height = blocks.sync(state, &Agents::new(), 60, folds, Vec::new(), scene().1);
         let mut rows: Vec<String> = blocks
             .window(0, height)
             .iter()
@@ -1109,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_decays_into_what_it_took_and_what_was_thought() {
+    fn thinking_streams_and_then_closes_to_the_row_alone() {
         assert_eq!(
             drawn(vec![thinking_item("the manifest")]),
             vec!["✻ Thinking…".to_string(), "  ⎿  the manifest".to_string()],
@@ -1117,27 +1144,55 @@ mod tests {
         );
         assert_eq!(
             drawn(vec![thought_item("The manifest first.", 2)]),
-            vec![
-                "✻ Thought for 2s".to_string(),
-                "  ⎿  The manifest first.".to_string(),
-            ],
-            "and once it is over it is readable where it happened"
+            vec!["✻ Thought for 2s".to_string()],
+            "and once it is over it closes: the text is a click away, not a row"
         );
     }
 
-    /// The same three rows a running tool's tail shows (§6), the last of what
-    /// has arrived — one helper, so the two move alike.
+    /// Two rows, the newest of what has arrived — the same tail a running tool
+    /// wears (§6) and two rows of it rather than three, because a thought is
+    /// read past.
     #[test]
-    fn a_thought_being_had_streams_the_tail_of_what_it_has_so_far() {
+    fn a_thought_being_had_streams_two_rows_of_its_newest_text() {
         assert_eq!(
             drawn(vec![thinking_item("first\nsecond\nthird\nfourth")]),
             vec![
                 "✻ Thinking…".to_string(),
-                "  ⎿  second".to_string(),
-                "     third".to_string(),
+                "  ⎿  third".to_string(),
                 "     fourth".to_string(),
             ],
         );
+    }
+
+    /// The three states a thought that is over has, which is the whole of what
+    /// a click on one walks (§7). It is the one block with a shut.
+    #[test]
+    fn a_finished_thought_is_shut_then_peeks_from_the_top_then_opens_whole() {
+        let text: String = (1..=9).map(|i| format!("step {i}\n")).collect();
+        let state = folded(vec![frame(
+            1,
+            Event::ItemCompleted {
+                item: thought_item(&text, 3),
+            },
+        )]);
+        let at = |fold| {
+            let folds: Folds = [(ItemId::from_raw("itm_1"), fold)].into_iter().collect();
+            rendered_with(&state, &folds)
+        };
+        assert_eq!(at(Fold::Shut), vec!["✻ Thought for 3s".to_string()]);
+        assert_eq!(
+            at(Fold::Peek),
+            vec![
+                "✻ Thought for 3s".to_string(),
+                "  ⎿  step 1".to_string(),
+                "     step 2".to_string(),
+                "     … +7 lines (ctrl+o to expand)".to_string(),
+            ],
+            "the peek reads from the top: nothing is moving to follow"
+        );
+        let open = at(Fold::Open);
+        assert_eq!(open.len(), 10, "the row and every step: {open:?}");
+        assert_eq!(open.last().map(String::as_str), Some("     step 9"));
     }
 
     /// Nothing thought yet, and nothing to fold: the row alone, as an empty
@@ -1158,16 +1213,14 @@ mod tests {
         assert_eq!(took(jiff::SignedDuration::from_secs(-1)), "<1s");
     }
 
-    /// The same fold a result wears, and the same key.
+    /// However long a thought was, the row a person meets is the same one row
+    /// — a five-row cut of somebody else's working is what it stopped being.
     #[test]
-    fn a_long_thought_folds_and_opens_with_the_key_a_result_does() {
-        let text: String = (1..=9).map(|i| format!("step {i}\n")).collect();
-        let drawn = drawn(vec![thought_item(&text, 3)]);
-        assert_eq!(drawn[0], "✻ Thought for 3s");
-        assert_eq!(drawn.len(), OUTPUT_ROWS + 2);
+    fn a_long_thought_costs_the_transcript_one_row() {
+        let text: String = (1..=99).map(|i| format!("step {i}\n")).collect();
         assert_eq!(
-            drawn.last().map(String::as_str),
-            Some("     … +4 lines (ctrl+o to expand)")
+            drawn(vec![thought_item(&text, 3)]),
+            vec!["✻ Thought for 3s".to_string()],
         );
     }
 
@@ -1254,7 +1307,7 @@ mod tests {
             &state,
             &Agents::new(),
             160,
-            &BTreeSet::new(),
+            &Folds::new(),
             Vec::new(),
             scene().1,
         );
@@ -1285,7 +1338,9 @@ mod tests {
             .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
             .collect();
         let state = folded(frames);
-        let opened: BTreeSet<ItemId> = [ItemId::from_raw("itm_1")].into_iter().collect();
+        let opened: Folds = [(ItemId::from_raw("itm_1"), Fold::Open)]
+            .into_iter()
+            .collect();
         let rows = rendered_with(&state, &opened).join("\n");
         assert!(rows.contains("line 9"), "{rows}");
         assert!(!rows.contains("+4 lines"), "{rows}");

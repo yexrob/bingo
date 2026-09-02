@@ -7,13 +7,14 @@
 //! of answers the keys give (§7: a key means one direction, a click means
 //! both).
 
-use bingo_sdk::SessionId;
+use bingo_sdk::{SessionId, SessionState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
 use crate::clock::Now;
 use crate::effect::Effect;
-use crate::input::{scroll, walk_to};
+use crate::fold;
+use crate::input::{item_of, scroll, walk_to};
 use crate::rail::CardId;
 use crate::roster;
 use crate::select::Cell;
@@ -63,23 +64,29 @@ fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect>
         return vec![Effect::View(session.clone())];
     }
     if let Some(item) = &block {
-        toggle_fold(ui, item);
+        cycle_fold(ui, tree.viewed(), item);
     }
     ui.select.block = block;
     ui.select.start(cell);
     Vec::new()
 }
 
-/// A click on a block opens what is folded under it, and a second click folds
-/// it again — a result, a thought, a notice alike. A *key* never means two
-/// directions (§7, M11e); a click on the same row is one gesture, and the
-/// direction it takes is the one the row is not already in.
+/// A click on a block walks its fold one step and comes back to where its kind
+/// starts (§7). A *key* never means two directions (§7, M11e); a click on the
+/// same row is one gesture, and one gesture may go round.
 ///
-/// It fills the set `ctrl+o` fills, so a block is open in one way only.
-fn toggle_fold(ui: &mut Ui, item: &bingo_sdk::ItemId) {
-    if !ui.expanded.remove(item) {
-        ui.expanded.insert(item.clone());
-    }
+/// A result, a notice and an action have the two states they always had — open
+/// and their five-row cut — because that cut is where they start. A thought
+/// that is over starts shut, so the same walk gives it three: shut, its first
+/// two rows, the whole of it. Only a thought has a state worth skipping past.
+///
+/// It writes the map `ctrl+o` writes, so a block is open in one way only.
+fn cycle_fold(ui: &mut Ui, state: &SessionState, id: &bingo_sdk::ItemId) {
+    let Some(item) = item_of(state, id) else {
+        return;
+    };
+    let next = fold::cycled(item, fold::fold_of(&ui.folds, item));
+    ui.folds.insert(id.clone(), next);
 }
 
 /// A drag takes the far end of the run with it.

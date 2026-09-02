@@ -15,6 +15,7 @@ use bingo_sdk::{Event, ItemStatus, TurnStatus};
 use ratatui::style::Style;
 
 use crate::clock::{FRAME, Now};
+use crate::fold::Folds;
 use crate::test_support::*;
 use crate::tree::Tree;
 use crate::{keys, theme};
@@ -62,7 +63,7 @@ fn transcript_style(tree: &Tree, now: Now, needle: &str) -> Style {
         tree.viewed(),
         &tree.agents(),
         80,
-        &std::collections::BTreeSet::new(),
+        &Folds::new(),
         Vec::new(),
         now,
     );

@@ -447,7 +447,7 @@ fn render_transcript(
         tree.viewed(),
         &tree.agents(),
         area.width as usize,
-        &ui.expanded,
+        &ui.folds,
         live,
         now,
     );
