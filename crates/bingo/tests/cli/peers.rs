@@ -213,14 +213,14 @@ fn posts(home: &Path, root: &SessionId, room: &str) -> Vec<String> {
         .collect()
 }
 
-/// What a member was handed of a room, post by post: a nudge is unsigned and
-/// is nobody's post, so this is exactly the fan-out it received.
-fn fanned_out(home: &Path, root: &SessionId, member: &str, room: &str) -> Vec<String> {
+/// What a member read of a room (ADR-0034 §4): a contributor's piece is
+/// journaled under `contributor:<id>`, so this is exactly the readings the
+/// rooms contributor folded into that member's turns, and nothing else it was
+/// told.
+fn readings(home: &Path, root: &SessionId, member: &str) -> Vec<String> {
     said(&journal(home, &format!("agent/{root}/{member}")))
         .into_iter()
-        .filter(|(_, origin)| {
-            origin.conversation.as_deref() == Some(room) && origin.principal.is_some()
-        })
+        .filter(|(_, origin)| origin.surface == "contributor:rooms")
         .map(|(text, _)| text)
         .collect()
 }
@@ -352,10 +352,12 @@ fn a_bounced_post_neither_opens_nor_answers_a_mention_debt() {
     );
 }
 
-/// ADR-0025 §5, which the count of §2 leans on: one delivery per post per
-/// member. Both members are spawned in the foreground before the post, so the
-/// order up to it is the script's; every response after it waits, which leaves
-/// the woken members time to journal what they were handed.
+/// ADR-0025 §5 under ADR-0034 §1, which the count of §2 leans on: one reading
+/// per post per member, and the post itself copied into neither. Both members
+/// are spawned in the foreground before the post, so the order up to it is the
+/// script's; every response after it waits, which leaves the woken members time
+/// to journal what they read. Both seats ask for a live ear, or a bare kickoff
+/// would wake nobody (ADR-0034 §6).
 const ONE_POST: &str = r##"{"responses":[
     {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"alpha","prompt":"stand by","background":false}}}]},
     {"steps":[{"text":"standing by"}]},
@@ -373,7 +375,8 @@ fn a_post_reaches_each_member_exactly_once() {
     let home = tempfile::tempdir().unwrap();
     with_team(
         home.path(),
-        r#"{"rooms":[{"name":"design","members":["alpha","beta"]}]}"#,
+        r#"{"rooms":[{"name":"design","members":["alpha","beta"],
+            "listeners":[{"name":"alpha","patience_s":0},{"name":"beta","patience_s":0}]}]}"#,
     );
     let out = run_json(home.path(), &script(ONE_POST), "call the stand-up");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -381,9 +384,15 @@ fn a_post_reaches_each_member_exactly_once() {
 
     for member in ["alpha", "beta"] {
         assert_eq!(
-            fanned_out(home.path(), &root, member, "#design"),
-            ["stand-up in five"],
-            "{member} was handed the post once and once only"
+            readings(home.path(), &root, member),
+            ["[#design, since you last read]\nparent: stand-up in five"],
+            "{member} read the post once and once only"
+        );
+        assert!(
+            said(&journal(home.path(), &format!("agent/{root}/{member}")))
+                .iter()
+                .all(|(text, _)| text != "stand-up in five"),
+            "and it was copied into nobody"
         );
     }
 }
@@ -426,15 +435,17 @@ fn turns(frames: &[Frame]) -> usize {
 ///
 /// Within the members the race decides nothing, because the response that
 /// posts the next number is addressed to a session that has *read* the last
-/// one. That is what `when` is for. A post the fan-out has delivered but whose
-/// target was mid-turn sits in that session's queue, not in its journal, and a
-/// room is serial (ADR-0025): a post written from behind the head is handed
-/// back rather than landed. Deal `count 2` to a session in that state and the
-/// number is refused and gone, the relay has nothing left awake, and the count
-/// stops — which is a true thing about a room, wrongly blamed on the room by a
-/// script that let any of three sessions carry the post. Matching each round on
-/// the previous number is the same precondition the serial rule enforces, so
-/// the deck can no longer deal a post to a session that would be refused.
+/// one. That is what `when` is for. A room is serial (ADR-0025): a post written
+/// from behind the head is handed back rather than landed, and what "behind"
+/// means is the seat's cursor (ADR-0034 §5). Deal `count 2` to a session that
+/// has not read `count 1` and the number is refused and gone, the relay has
+/// nothing left awake, and the count stops — which is a true thing about a
+/// room, wrongly blamed on the room by a script that let any of three sessions
+/// carry the post. Matching each round on the previous number is the same
+/// precondition the serial rule enforces, and a member carries that number only
+/// in the reading its own turn opened with, so the deck can no longer deal a
+/// post to a session that would be refused. The filler responses are addressed
+/// the same way: only a member has ever read a room.
 ///
 /// The parent's tail is a delay long enough to hold the run open while the
 /// relay runs; it is a liveness bound, not a bet on who asks first.
@@ -447,21 +458,21 @@ const RELAY: &str = r##"{"responses":[
     {"when":{"contains":"start the count"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count 1"}}}]},
     {"when":{"contains":"count 1"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count 2"}}}]},
     {"when":{"contains":"count 2"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count 3"}}}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"since you last read"},"steps":[{"text":"done"}]},
     {"when":{"contains":"seat the relay"},"steps":[{"text":"done"}]},
     {"when":{"contains":"seat the relay"},"steps":[{"text":"done"}]}
 ]}"##;
@@ -474,7 +485,9 @@ fn one_kickoff_post_runs_a_relay_the_parent_never_dispatches() {
     let home = tempfile::tempdir().unwrap();
     with_team(
         home.path(),
-        r#"{"rooms":[{"name":"relay","members":["alpha","beta","gamma"]}]}"#,
+        r#"{"rooms":[{"name":"relay","members":["alpha","beta","gamma"],
+            "listeners":[{"name":"alpha","patience_s":0},{"name":"beta","patience_s":0},
+                         {"name":"gamma","patience_s":0}]}]}"#,
     );
     let out = run_json(home.path(), &script(RELAY), "seat the relay and start it");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -496,9 +509,11 @@ fn one_kickoff_post_runs_a_relay_the_parent_never_dispatches() {
         let (brief, origin) = heard.first().expect("{member} read something");
         assert!(brief.starts_with("You count in #relay"), "{heard:?}");
         assert_eq!(origin.conversation, None, "the brief came from the spawn");
-        assert_eq!(
-            heard[1].0, "start the count",
-            "the kickoff followed the brief it was read with: {heard:?}"
+        let read = readings(home.path(), &root, member);
+        assert!(
+            read.first()
+                .is_some_and(|said| said.contains("parent: start the count")),
+            "the kickoff was read in the turn the brief opened: {read:?}"
         );
     }
 }

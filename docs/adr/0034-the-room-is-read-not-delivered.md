@@ -1,6 +1,6 @@
 # ADR-0034 — The room is read, not delivered
 
-Status: accepted · 2026-09-02 · Plan: M37
+Status: accepted · 2026-09-02 · Plan: M37 · amended 2026-09-03 (M37)
 
 ## Context
 
@@ -22,10 +22,20 @@ parent's included, shows none of it; a wake just opens a turn.
 1. **A post is written once.** The fan-out appends to the room's journal
    and copies nothing. For each seat it decides one thing: whether to
    wake it.
-2. **Every seat keeps a cursor** — the room's `seq` it has read up to —
-   as an extension on the *member's* session (`bingo.rooms`,
-   `cursor:<room>`), journaled, so `--continue` finds it. The cursor is
-   the one fact "seen" derives from.
+2. **Every seat keeps a cursor** — the last post it has read — as an
+   extension in the *room's* own journal (`bingo.rooms`,
+   `cursor:<member>`), journaled, so `--continue` finds it. A kind per
+   seat, so two seats reading at once write two facts rather than race
+   over one (the `ear:` precedent, ADR-0029 §4). It is the `ItemId` the
+   room's journal gave the post, not a `Seq`: a seq addresses a frame,
+   and the only door onto frames by seq is `events_since`, a stream
+   nothing a turn can drain. It lives on the room because a room is a
+   `Log` session that answers nobody — reading one costs nothing and
+   takes nothing away, where a reader that opens a *member's* session
+   and lets go is its last client and closes an idle seat under the very
+   wake this plugin just sent. A name nobody holds yet is seated with a
+   cursor exactly like a name somebody does. The cursor is the one fact
+   "seen" derives from.
 3. **A wake is a nudge**: `Delivery::Wake`, `principal: None`, no body —
    not a post, no debt, no serial count (ADR-0029 §3's nudge). A seat is
    woken when it is `@`-named (ADR-0029 §5), when its ear is live, or
@@ -60,10 +70,13 @@ parent's included, shows none of it; a wake just opens a turn.
 - `bingo-experience`'s recall reads the member's journal; a room post
   reaches its memory only through the turn that read it. Recorded as a
   behaviour change, accepted.
-- Old journals holding copied posts replay as they were written; the
-  contributor starts a seat with no cursor at the room's head at the
-  time it was seated — a journal line (`cursor` on seating) — so a
-  resumed member does not re-read a room's whole history.
+- Old journals holding copied posts replay as they were written. A seat
+  joining a room is seated at the room's head, so it owes nothing said
+  before it; a reseat moves no cursor, so the backlog a process left
+  outlives it — which is what keeps a restart, reseating every declared
+  room, from marking unread posts read. The first run after this change
+  therefore finds rooms whose seats have no cursor and hands each the
+  room's history once. Accepted: one reading, once.
 - The kernel changes not at all: a contributor, an extension and a
   nudge are doors it already has.
 

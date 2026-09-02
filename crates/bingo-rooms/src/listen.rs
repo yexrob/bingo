@@ -214,7 +214,10 @@ mod tests {
         assert!(!out.is_error);
         assert_eq!(
             out.parts[0].as_text(),
-            Some("#design: posts wait for your next turn, and wake you once they have waited 120s")
+            Some(
+                "#design: you read the room at your next turn, and are woken once it has \
+                 stood unread for 120s"
+            )
         );
         assert_eq!(
             fleet.ears(&room).of("scout"),

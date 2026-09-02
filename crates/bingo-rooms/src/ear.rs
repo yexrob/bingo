@@ -1,8 +1,12 @@
-//! The ear a seat wears (ADR-0029 §1). One number says it: 0 is a live ear —
-//! every post wakes the seat, today's seat and the default — and thirty
-//! seconds or more is a patient one, whose posts land held and are read whole
-//! at the seat's next turn. The band between is refused in words rather than
-//! rounded: it names a live seat.
+//! The ear a seat wears (ADR-0029 §1, ADR-0034 §6). One number says it: 0 is a
+//! live ear — every post wakes the seat — and thirty seconds or more is a
+//! patient one, whose posts wait to be read at the seat's next turn and wake it
+//! once they have waited that long. The band between is refused in words rather
+//! than rounded: it names a live seat.
+//!
+//! The default is the patient ear. A bare name on a roster asks for one, and a
+//! live seat is asked for by the number that says so — a room wakes the seats
+//! a post names, and the ones that said they wanted every post.
 //!
 //! A room's ears are two layers, and only two: what the roster declared when it
 //! was seated, and what a seat has retuned for itself since (`Listen`). The
@@ -30,14 +34,21 @@ pub const FLOOR: Duration = Duration::from_secs(30);
 pub const PATIENCE_S: &str = "patience_s";
 
 /// How a seat hears its room.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ear {
     /// Every post wakes it, as it lands.
-    #[default]
     Live,
-    /// Posts land held; the seat reads them whole at its next turn, and the
-    /// deadline wakes it once when they have waited this long.
+    /// Posts wait to be read at the seat's next turn, and the deadline wakes it
+    /// once they have waited this long.
     Patient(Duration),
+}
+
+impl Default for Ear {
+    /// The ear a bare name asks for (ADR-0034 §6): patient, at the chaser's own
+    /// patience and not a second constant.
+    fn default() -> Ear {
+        Ear::Patient(PATIENCE)
+    }
 }
 
 impl Ear {
@@ -51,11 +62,10 @@ impl Ear {
         }
     }
 
-    /// The ear a listener on a roster asks for: a name alone takes the
-    /// default, which is the chaser's own patience and not a second constant.
+    /// The ear a seat on a roster asks for: a name alone takes the default.
     pub fn declared(seconds: Option<u64>) -> Result<Ear, KernelError> {
         match seconds {
-            None => Ok(Ear::Patient(PATIENCE)),
+            None => Ok(Ear::default()),
             Some(seconds) => Ear::asked(seconds),
         }
     }
@@ -88,7 +98,8 @@ impl Ear {
         match self {
             Ear::Live => "every post wakes you as it lands".to_string(),
             Ear::Patient(patience) => format!(
-                "posts wait for your next turn, and wake you once they have waited {}s",
+                "you read the room at your next turn, and are woken once it has \
+                 stood unread for {}s",
                 patience.as_secs()
             ),
         }
@@ -115,15 +126,13 @@ pub struct Seat {
 }
 
 impl Seat {
-    /// One word of a roster line: `scout` is a live seat, `~parent` a patient
-    /// one at the default, `~parent:120` at the patience it asks for.
+    /// One word of a roster line: `scout` is a patient seat at the default,
+    /// `scout:120` at the patience it asks for, and `scout:0` a live one every
+    /// post wakes (ADR-0034 §6).
     pub fn read(word: &str) -> Result<Seat, KernelError> {
-        let Some(listening) = word.strip_prefix('~') else {
-            return Ok(Seat::live(word));
-        };
-        let (name, asked) = match listening.split_once(':') {
+        let (name, asked) = match word.split_once(':') {
             Some((name, seconds)) => (name, Some(patience(seconds)?)),
-            None => (listening, None),
+            None => (word, None),
         };
         Ok(Seat {
             name: name.to_string(),
@@ -131,6 +140,7 @@ impl Seat {
         })
     }
 
+    /// A seat every post wakes, which a roster asks for by name.
     pub fn live(name: &str) -> Seat {
         Seat {
             name: name.to_string(),
@@ -138,22 +148,30 @@ impl Seat {
         }
     }
 
-    /// How the seat reads back, in a receipt and in `/room`: a patient ear
-    /// wears the sigil that asked for it.
+    /// A seat wearing the ear a bare name asks for.
+    pub fn named(name: &str) -> Seat {
+        Seat {
+            name: name.to_string(),
+            ..Seat::default()
+        }
+    }
+
+    /// How the seat reads back, in a receipt and in `/room`: the word that would
+    /// ask for it, which for the default ear is the bare name.
     pub fn said(&self) -> String {
-        match self.ear {
-            Ear::Live => self.name.clone(),
-            Ear::Patient(patience) => format!("~{}({}s)", self.name, patience.as_secs()),
+        match self.ear == Ear::default() {
+            true => self.name.clone(),
+            false => format!("{}:{}", self.name, self.ear.seconds()),
         }
     }
 }
 
-/// The seconds after a `~name:` — a word, not a number, is nobody's patience.
+/// The seconds after a `name:` — a word, not a number, is nobody's patience.
 fn patience(seconds: &str) -> Result<u64, KernelError> {
     seconds.trim().parse().map_err(|_| {
         KernelError::new(
             ErrorCode::InvalidInput,
-            format!("{seconds:?} is not a patience: `~name` takes the default, `~name:120` waits that many seconds"),
+            format!("{seconds:?} is not a patience: `name` takes the default, `name:120` waits that many seconds, `name:0` wakes for every post"),
         )
     })
 }
@@ -161,33 +179,21 @@ fn patience(seconds: &str) -> Result<u64, KernelError> {
 /// What a room nobody is in reads as, wherever a roster is read back.
 pub const NOBODY: &str = "nobody yet";
 
-/// What the seats that listen rather than answer are gathered under.
-const LISTENING: &str = "listening";
+/// What a seat every post wakes is badged with.
+const LIVE: &str = "live";
 
-/// The roster as a person reads it (ADR-0013): a node per live seat, and the
-/// ones that listen under a node of their own, each badged with the patience
-/// it asked for. The ear is the whole of the difference between the two, so
-/// the tree is drawn here — and drawn once, for the block a door answers with
-/// and for the roster the room publishes alike.
+/// The roster as a person reads it (ADR-0013): a node per seat, in the order
+/// the roster seated them, badged with the ear it wears where that is not the
+/// room's own default. The tree is drawn here and once, for the block a door
+/// answers with and for the roster the room publishes alike.
 pub fn nodes(seats: &[Seat]) -> Vec<TreeNode> {
     if seats.is_empty() {
         return vec![leaf(NOBODY, None)];
     }
-    let (listening, live): (Vec<&Seat>, Vec<&Seat>) =
-        seats.iter().partition(|seat| !seat.ear.is_live());
-    let mut nodes: Vec<TreeNode> = live.iter().map(|seat| leaf(&seat.name, None)).collect();
-    if !listening.is_empty() {
-        nodes.push(TreeNode {
-            label: LISTENING.into(),
-            badge: None,
-            tone: Tone::Neutral,
-            children: listening
-                .iter()
-                .map(|seat| leaf(&seat.name, waits(seat.ear)))
-                .collect(),
-        });
-    }
-    nodes
+    seats
+        .iter()
+        .map(|seat| leaf(&seat.name, badge(seat.ear)))
+        .collect()
 }
 
 /// One seat as a node. A roster wants nobody, so no seat wears a tone that
@@ -201,20 +207,25 @@ fn leaf(label: &str, badge: Option<String>) -> TreeNode {
     }
 }
 
-/// What a listening seat's badge says: how long a post waits for it.
-fn waits(ear: Ear) -> Option<String> {
+/// What a seat's badge says, and nothing at all for the ear a bare name asks
+/// for: a roster is read for what is unusual about it.
+fn badge(ear: Ear) -> Option<String> {
+    if ear == Ear::default() {
+        return None;
+    }
     match ear {
-        Ear::Live => None,
+        Ear::Live => Some(LIVE.to_string()),
         Ear::Patient(patience) => Some(format!("{}s", patience.as_secs())),
     }
 }
 
 /// A listener as the structured doors declare one: a name, or a name and the
-/// patience it asks for. `OpenRoom` and `.bingo/team.json` say it the same way.
+/// patience it asks for — zero for a seat every post wakes. `OpenRoom` and
+/// `.bingo/team.json` say it the same way.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Listener {
-    /// A name alone: a patient ear at the default.
+    /// A name alone: the default ear, which is a patient one.
     Name(String),
     Asked {
         name: String,
@@ -236,10 +247,11 @@ impl Listener {
     }
 }
 
-/// The roster a door declares: its members, live unless its listeners say
-/// otherwise. A name in both is one seat, and the ear is the listener's.
+/// The roster a door declares: its members at the default ear unless its
+/// listeners say otherwise. A name in both is one seat, and the ear is the
+/// listener's.
 pub fn seats(members: &[String], listeners: &[Listener]) -> Result<Vec<Seat>, KernelError> {
-    let mut seats: Vec<Seat> = members.iter().map(|m| Seat::live(m)).collect();
+    let mut seats: Vec<Seat> = members.iter().map(|m| Seat::named(m)).collect();
     for listener in listeners {
         let seat = listener.seat()?;
         match seats
@@ -294,17 +306,6 @@ impl Ears {
     pub fn retuned(&self) -> Vec<String> {
         self.retuned.keys().cloned().collect()
     }
-
-    /// Whether anyone here listens. A room of live seats holds no deadline, so
-    /// a reader can stop at this rather than walk the tree to ask who a
-    /// session is on the roster — which is every room opened before there were
-    /// ears, and every one that never asked for one.
-    pub fn patient(&self) -> bool {
-        self.declared
-            .values()
-            .chain(self.retuned.values())
-            .any(|ear| !ear.is_live())
-    }
 }
 
 /// A name as the ears are keyed: a room compares names in any case, so the
@@ -325,7 +326,8 @@ pub fn register(ear: Ear) -> Value {
 }
 
 /// The listeners a membership payload names. A payload without them — every
-/// room opened before there were ears — declares an all-live roster.
+/// room opened before there were ears, and every roster whose seats all take
+/// the default — declares nothing, so every seat in it wears the default ear.
 fn declared(payload: &Value) -> BTreeMap<String, Ear> {
     payload[LISTENERS]
         .as_array()
@@ -338,7 +340,7 @@ fn listed(entry: &Value) -> Option<(String, Ear)> {
     let name = entry["name"].as_str()?;
     let ear = match entry[PATIENCE_S].as_u64() {
         Some(seconds) => Ear::stored(seconds),
-        None => Ear::Patient(PATIENCE),
+        None => Ear::default(),
     };
     Some((key(name), ear))
 }
@@ -348,13 +350,13 @@ fn stored(payload: &Value) -> Option<Ear> {
     payload[PATIENCE_S].as_u64().map(Ear::stored)
 }
 
-/// The listeners a roster is published with: the seats that are not live, and
-/// nothing at all when none of them are — a room of live seats is written
-/// exactly as it was before there were ears.
+/// The listeners a roster is published with: the seats whose ear is not the
+/// default, and nothing at all when none of them differ — a roster of bare
+/// names is written exactly as one was before there were ears.
 pub fn listeners_of(seats: &[Seat]) -> Option<Value> {
     let listed: Vec<Value> = seats
         .iter()
-        .filter(|seat| !seat.ear.is_live())
+        .filter(|seat| seat.ear != Ear::default())
         .map(|seat| json!({ "name": seat.name, PATIENCE_S: seat.ear.seconds() }))
         .collect();
     (!listed.is_empty()).then(|| Value::Array(listed))
@@ -392,6 +394,15 @@ mod tests {
         }
     }
 
+    /// ADR-0034 §6: the ear a name alone asks for, which every door falls back
+    /// to and every roster is read against.
+    #[test]
+    fn the_default_ear_is_a_patient_one_at_the_chaser_s_own_patience() {
+        assert_eq!(Ear::default(), Ear::Patient(PATIENCE));
+        assert_eq!(Ear::default(), Ear::Patient(Duration::from_secs(300)));
+        assert_eq!(Seat::named("scout").ear, Ear::default());
+    }
+
     #[test]
     fn a_number_is_the_whole_of_the_dial_and_the_dead_band_is_refused() {
         assert_eq!(Ear::asked(0), Ok(Ear::Live));
@@ -399,8 +410,8 @@ mod tests {
         assert_eq!(Ear::asked(300), Ok(Ear::Patient(PATIENCE)));
         assert_eq!(
             Ear::declared(None),
-            Ok(Ear::Patient(PATIENCE)),
-            "the default is the chaser's own patience"
+            Ok(Ear::default()),
+            "a name alone takes the default"
         );
 
         let refused = Ear::asked(15).expect_err("under the floor");
@@ -422,26 +433,30 @@ mod tests {
 
     #[test]
     fn a_roster_word_says_the_ear_beside_the_name() {
-        assert_eq!(Seat::read("scout"), Ok(Seat::live("scout")));
-        assert_eq!(Seat::read("~parent"), Ok(seat(PARENT, 300)));
-        assert_eq!(Seat::read("~parent:120"), Ok(seat(PARENT, 120)));
-        assert_eq!(Seat::read("~parent:0"), Ok(Seat::live(PARENT)));
+        assert_eq!(Seat::read("scout"), Ok(Seat::named("scout")));
+        assert_eq!(Seat::read("parent"), Ok(seat(PARENT, 300)));
+        assert_eq!(Seat::read("parent:120"), Ok(seat(PARENT, 120)));
+        assert_eq!(Seat::read("parent:0"), Ok(Seat::live(PARENT)));
 
-        let clamped = Seat::read("~parent:15").expect_err("the dead band, not a clamp");
+        let clamped = Seat::read("parent:15").expect_err("the dead band, not a clamp");
         assert!(
             clamped.message.contains("under thirty seconds of patience"),
             "{clamped}"
         );
-        assert!(
-            Seat::read("~parent:soon").is_err(),
-            "a patience is a number"
-        );
+        assert!(Seat::read("parent:soon").is_err(), "a patience is a number");
     }
 
+    /// A seat reads back as the word that would ask for it, so a roster copied
+    /// out of `/room` opens the same room again.
     #[test]
-    fn a_seat_reads_back_wearing_the_sigil_that_asked_for_it() {
-        assert_eq!(Seat::live("scout").said(), "scout");
-        assert_eq!(seat(PARENT, 300).said(), "~parent(300s)");
+    fn a_seat_reads_back_as_the_word_that_asked_for_it() {
+        assert_eq!(Seat::named("scout").said(), "scout");
+        assert_eq!(seat(PARENT, 300).said(), "parent");
+        assert_eq!(seat(PARENT, 120).said(), "parent:120");
+        assert_eq!(Seat::live(PARENT).said(), "parent:0");
+        for word in ["scout", "parent:120", "parent:0"] {
+            assert_eq!(Seat::read(word).expect("a roster word").said(), word);
+        }
     }
 
     /// The two structured doors declare a listener the same way.
@@ -453,6 +468,14 @@ mod tests {
         let asked: Listener =
             serde_json::from_value(json!({"name": "parent", "patience_s": 120})).expect("a seat");
         assert_eq!(asked.seat(), Ok(seat(PARENT, 120)));
+
+        let live: Listener =
+            serde_json::from_value(json!({"name": "parent", "patience_s": 0})).expect("a seat");
+        assert_eq!(
+            live.seat(),
+            Ok(Seat::live(PARENT)),
+            "the live seat is asked for"
+        );
 
         let bare: Listener =
             serde_json::from_value(json!({"name": "parent"})).expect("a seat with no number");
@@ -466,15 +489,18 @@ mod tests {
     #[test]
     fn a_door_s_roster_is_its_members_with_the_listeners_ears() {
         let members = ["scout", "parent"].map(str::to_string).to_vec();
-        let listeners = [Listener::Name(PARENT.into())];
+        let listeners = [Listener::Asked {
+            name: PARENT.into(),
+            patience_s: Some(0),
+        }];
         assert_eq!(
             seats(&members, &listeners).expect("a roster"),
-            [Seat::live("scout"), seat(PARENT, 300)],
+            [Seat::named("scout"), Seat::live(PARENT)],
             "a name in both is one seat, wearing the listener's ear"
         );
         assert_eq!(
             seats(&["scout".into()], &listeners).expect("a roster"),
-            [Seat::live("scout"), seat(PARENT, 300)],
+            [Seat::named("scout"), Seat::live(PARENT)],
             "a listener nobody listed is seated by listening"
         );
     }
@@ -488,7 +514,7 @@ mod tests {
         assert_eq!(ears.of("scout"), Ear::Live);
         assert_eq!(ears.of(PARENT), Ear::Patient(Duration::from_secs(120)));
         assert_eq!(ears.of("PARENT"), Ear::Patient(Duration::from_secs(120)));
-        assert_eq!(ears.of("nobody"), Ear::Live, "a name off the roster");
+        assert_eq!(ears.of("nobody"), Ear::default(), "a name off the roster");
 
         ears.retune("scout", &register(Ear::Patient(FLOOR)));
         assert_eq!(ears.of("scout"), Ear::Patient(FLOOR));
@@ -498,26 +524,12 @@ mod tests {
         assert_eq!(ears.of("scout"), Ear::Live, "a cleared retuning");
         assert!(ears.retuned().is_empty());
 
-        ears.declare(&room::payload(&[Seat::live(PARENT)]));
-        assert_eq!(ears.of(PARENT), Ear::Live, "a roster is declared whole");
-    }
-
-    /// A room of live seats is a room the deadline never has to place: the
-    /// reader says so without asking the tree anything.
-    #[test]
-    fn a_room_says_whether_anyone_in_it_listens_at_all() {
-        let mut ears = Ears::default();
-        ears.declare(&room::payload(&[Seat::live("scout")]));
-        assert!(!ears.patient(), "every seat hears every post");
-
-        ears.retune("scout", &register(Ear::Patient(FLOOR)));
-        assert!(ears.patient());
-
-        ears.retune("scout", &Value::Null);
-        assert!(!ears.patient());
-
-        ears.declare(&room::payload(&[seat(PARENT, 120)]));
-        assert!(ears.patient(), "the roster declared one");
+        ears.declare(&room::payload(&[Seat::named(PARENT)]));
+        assert_eq!(
+            ears.of(PARENT),
+            Ear::default(),
+            "a roster is declared whole"
+        );
     }
 
     /// A retuning is written where the roster cannot reach it, so the order the

@@ -6,13 +6,13 @@
 use std::path::Path;
 
 use bingo_sdk::{
-    Driver, HostHandle, KernelError, OpenOptions, ParentLink, SessionFilter, SessionId,
-    SessionSelector, SessionSpec,
+    Driver, HostHandle, ItemId, KernelError, OpenOptions, ParentLink, SessionFilter, SessionId,
+    SessionSelector, SessionSpec, SessionState,
 };
 use serde_json::Value;
 
 use crate::ear::{self, Seat};
-use crate::{PLUGIN, identity, name, room};
+use crate::{PLUGIN, cursor, identity, name, room};
 
 /// The room of that name under `parent`, opened if there is none; either way
 /// its roster afterwards is exactly `seats`, which are names and not sessions
@@ -27,30 +27,102 @@ pub async fn seat(
 ) -> Result<SessionId, KernelError> {
     let name = name::check(name)?;
     let title = name::title(name);
-    let room = match standing(host, parent, &title).await? {
-        Some(room) => {
-            // A roster is declared whole, and the ears with it: what a seat
-            // retuned for itself under the roster before this one is written
-            // over here, so the reseat is the reset lever it is meant to be
-            // (ADR-0029 §4). A room this call is opening has none to clear.
-            clear_retuned(host, &room).await?;
-            room
-        }
-        None => open(host, parent, cwd, name, &title).await?,
+    let Some(room) = standing(host, parent, &title).await? else {
+        // A room this call opens has said nothing yet, so every seat on it is
+        // level with it and no cursor has to say so — and it carries no
+        // retuning to clear either.
+        let room = open(host, parent, cwd, name, &title).await?;
+        declare(host, &room, seats).await?;
+        return Ok(room);
     };
-    host.extend(&room, PLUGIN, room::MEMBERS, room::payload(seats))
-        .await?;
+    reseat(host, &room, &title, seats).await?;
     Ok(room)
+}
+
+/// A room that already stands, seated again. Its journal answers three
+/// questions here — what a seat retuned for itself, who it was already
+/// seating, and where its head is — and one snapshot answers all three, so it
+/// is read once and no read of it can disagree with another.
+async fn reseat(
+    host: &HostHandle,
+    room: &SessionId,
+    title: &str,
+    seats: &[Seat],
+) -> Result<(), KernelError> {
+    let standing = room::read(host, room).await;
+    // A roster is declared whole, and the ears with it: what a seat retuned
+    // for itself under the roster before this one is written over here, so the
+    // reseat is the reset lever it is meant to be (ADR-0029 §4).
+    clear_retuned(host, room, standing.as_ref()).await?;
+    let joining = joining(standing.as_ref(), seats);
+    let head = standing.as_ref().and_then(head_of);
+    declare(host, room, seats).await?;
+    start_reading(host, room, title, head.as_ref(), &joining).await;
+    Ok(())
+}
+
+/// The membership, published whole: the names and the ears in one payload.
+async fn declare(host: &HostHandle, room: &SessionId, seats: &[Seat]) -> Result<(), KernelError> {
+    host.extend(room, PLUGIN, room::MEMBERS, room::payload(seats))
+        .await
+}
+
+/// The names this call adds to the roster: the ones the room was not already
+/// seating. A reseat is a roster and not a join, so a seat that was already
+/// there keeps reading where it left off — including a seat that has read
+/// nothing yet, whose backlog a restart must not sweep away.
+fn joining(standing: Option<&SessionState>, seats: &[Seat]) -> Vec<String> {
+    let held = standing.map(room::members_of).unwrap_or_default();
+    seats
+        .iter()
+        .map(|seat| seat.name.clone())
+        .filter(|seat| !held.iter().any(|member| name::same(member, seat)))
+        .collect()
+}
+
+/// Where a seat joining a room starts reading (ADR-0034 §2): at the room's
+/// head, so what was said before it was seated is not a backlog it owes. The
+/// cursor is a register in the room's own journal, so a name nobody holds yet
+/// is seated with one exactly like a name somebody does.
+async fn start_reading(
+    host: &HostHandle,
+    room: &SessionId,
+    title: &str,
+    head: Option<&ItemId>,
+    joining: &[String],
+) {
+    let Some(head) = head else {
+        return;
+    };
+    for member in joining {
+        if let Err(error) = cursor::advance(host, room, member, head).await {
+            tracing::debug!(room = %title, member, %error, "a seat was not told where to start reading");
+        }
+    }
+}
+
+/// The last thing said in a room, which is where a seat joining it starts.
+fn head_of(standing: &SessionState) -> Option<ItemId> {
+    standing
+        .items
+        .iter()
+        .filter_map(crate::mentions::Post::of)
+        .next_back()
+        .map(|post| post.id)
 }
 
 /// Every retuning a standing room carries, cleared. Each is cleared where it
 /// was written — one register per seat — so a `Listen` that lands beside this
 /// call is settled by journal order rather than by clobbering a shared value.
-async fn clear_retuned(host: &HostHandle, room: &SessionId) -> Result<(), KernelError> {
-    let Some(state) = room::read(host, room).await else {
+async fn clear_retuned(
+    host: &HostHandle,
+    room: &SessionId,
+    standing: Option<&SessionState>,
+) -> Result<(), KernelError> {
+    let Some(standing) = standing else {
         return Ok(());
     };
-    for member in ear::ears_of(&state).retuned() {
+    for member in ear::ears_of(standing).retuned() {
         host.extend(room, PLUGIN, &ear::kind(&member), Value::Null)
             .await?;
     }

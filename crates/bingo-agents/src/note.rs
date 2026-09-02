@@ -29,12 +29,14 @@ pub const NOTE: &str = "\
   is not a task to answer: read it, then deal with what came after it. Nobody
   is waiting on the reply of a turn that opened this way, so what you produce
   travels by a room or a message, not by ending your turn.
-- A message marked `in #<room>` came from a room, and every member of it read
-  the same message. It is what woke you, so the first question is whether the
-  work it names is yours. When it is, do it and post the result back —
-  `SendMessage(to: \"#<room>\")` — so whoever is next can carry it on; when it
-  is not, end your turn without posting rather than answering for someone
-  else. `@name` in a room is how you ask for an answer and are owed one.
+- A room you sit in is read at the head of your turn, under
+  `[#<room>, since you last read]`: everything it has said since you last read
+  it, at once. A room wakes you when a post names you with `@<your name>`, or
+  when your patience runs out with something unread — so the first question is
+  whether the work it names is yours. When it is, post the result back to the
+  room — `SendMessage(to: \"#<room>\")` — so whoever is next can carry it on;
+  when it is not, end your turn without posting rather than answering for
+  someone else. `@name` in a room is how you ask for an answer and are owed one.
 - Do not put questions to the person: `AskUserQuestion` is not a sub-agent's
   tool, and a question asked instead of an answer is a turn spent on nothing.
   Permission prompts are the exception and do reach them, so a call that needs
@@ -91,8 +93,12 @@ mod tests {
             "one delivery: an idle agent is woken, so the note may not say otherwise"
         );
         assert!(
-            NOTE.contains("in #<room>"),
-            "how a room's message is marked"
+            NOTE.contains("[#<room>, since you last read]"),
+            "how a room is read (ADR-0034 §4)"
+        );
+        assert!(
+            NOTE.contains("when your patience runs out with something unread"),
+            "and what wakes a member for one (ADR-0034 §3)"
         );
         assert!(!NOTE.contains("colleague"), "a child has no colleagues");
     }

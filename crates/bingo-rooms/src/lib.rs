@@ -32,6 +32,7 @@
 
 mod chase;
 mod command;
+mod cursor;
 mod deadline;
 mod ear;
 mod hook;
@@ -41,6 +42,7 @@ mod name;
 mod owed;
 mod placement;
 mod post;
+mod reader;
 mod room;
 mod roster;
 mod seat;
@@ -51,14 +53,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ClientIdentity, Command, Contribution, Hook, Plugin, PluginError, PluginManifest, Registrar,
-    Tool,
+    ClientIdentity, Command, ContextContributor, Contribution, Hook, Plugin, PluginError,
+    PluginManifest, Registrar, Tool,
 };
 
 pub use command::RoomCommand;
 pub use ear::{Ear, Listener, Seat};
 pub use hook::RoomsHook;
 pub use listen::ListenTool;
+pub use reader::Reader;
 pub use room::Room;
 pub use seat::seat;
 pub use team::{Entry, TeamError};
@@ -75,7 +78,13 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN,
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["command:room", "hook:rooms", "tool:OpenRoom", "tool:Listen"],
+    provides: &[
+        "command:room",
+        "hook:rooms",
+        "tool:OpenRoom",
+        "tool:Listen",
+        "context:rooms",
+    ],
     requires: &[],
     // Who sits in which room is a project's file, not a person's settings.
     config: None,
@@ -110,6 +119,9 @@ impl Plugin for RoomsPlugin {
         ));
         registrar.add(Contribution::Tool(Arc::new(OpenRoomTool) as Arc<dyn Tool>));
         registrar.add(Contribution::Tool(Arc::new(ListenTool) as Arc<dyn Tool>));
+        registrar.add(Contribution::Context(
+            Arc::new(Reader) as Arc<dyn ContextContributor>
+        ));
         Ok(())
     }
 }
@@ -127,7 +139,13 @@ mod plugin_tests {
         assert_eq!(MANIFEST.id, "bingo.rooms");
         assert_eq!(
             MANIFEST.provides,
-            ["command:room", "hook:rooms", "tool:OpenRoom", "tool:Listen"]
+            [
+                "command:room",
+                "hook:rooms",
+                "tool:OpenRoom",
+                "tool:Listen",
+                "context:rooms",
+            ]
         );
         assert!(MANIFEST.requires.is_empty());
         assert!(MANIFEST.config.is_none());
@@ -146,5 +164,6 @@ mod plugin_tests {
         assert!(matches!(&contributions[1], Contribution::Hook(h) if h.id() == "rooms"));
         assert!(matches!(&contributions[2], Contribution::Tool(t) if t.spec().name == "OpenRoom"));
         assert!(matches!(&contributions[3], Contribution::Tool(t) if t.spec().name == "Listen"));
+        assert!(matches!(&contributions[4], Contribution::Context(c) if c.id() == "rooms"));
     }
 }
