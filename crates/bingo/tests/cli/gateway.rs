@@ -205,8 +205,14 @@ fn start_status_stop_round_trips_on_a_real_detached_process() {
         "a graceful stop gives the pidfile back"
     );
 
-    let after = stdout(&gateway.verb(&["status"]));
-    assert!(after.contains("not running: no pidfile"), "{after}");
+    let after_out = gateway.verb(&["status"]);
+    let after = stdout(&after_out);
+    assert!(
+        after.contains("not running: no pidfile"),
+        "stdout: {after}\nstderr: {}\nexit: {:?}",
+        stderr(&after_out),
+        after_out.status.code()
+    );
 }
 
 #[test]
