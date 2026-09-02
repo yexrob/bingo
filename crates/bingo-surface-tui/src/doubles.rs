@@ -4,15 +4,16 @@
 //! the title, a selection and a notification never paint a cell.
 
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bingo_sdk::{
     Activation, ArgSpec, Attachment, Catalog, CatalogEntry, CatalogKind, ClientIdentity,
-    CloseReason, CommandSpec, Delivery, Event, FrameStream, GatewayStream, HistoryChunk,
-    HistoryPage, HostApi, HostHandle, Input, IntentId, InterruptScope, KernelError, OpenOptions,
-    Seq, SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionState,
-    SessionSummary,
+    CloseReason, CommandSpec, Delivery, Event, FrameStream, GatewayEvent, GatewayStream,
+    HistoryChunk, HistoryPage, HostApi, HostHandle, Input, IntentId, InterruptScope, KernelError,
+    OpenOptions, Seq, SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector,
+    SessionState, SessionSummary,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -125,6 +126,11 @@ pub struct TestHost {
     /// What `sessions` answers with beyond the root: what the store holds.
     stored: Vec<SessionSummary>,
     closed: Mutex<Vec<SessionId>>,
+    /// What it announces on its gateway, taken by the first subscriber.
+    announcements: Mutex<Vec<GatewayEvent>>,
+    /// Set as each announcement is handed over: a host that has said a
+    /// catalogue changed answers the next read with the model it gained.
+    announced: Arc<AtomicBool>,
 }
 
 impl TestHost {
@@ -138,16 +144,8 @@ impl TestHost {
         frames: Vec<bingo_sdk::Frame>,
         stored: Vec<SessionSummary>,
     ) -> (HostHandle, Arc<TestSession>) {
-        let session = Arc::new(TestSession {
-            frames,
-            ..Default::default()
-        });
-        let host = TestHost {
-            session: Arc::clone(&session),
-            child: Arc::new(TestSession::default()),
-            stored,
-            closed: Mutex::new(Vec::new()),
-        };
+        let session = scripted(frames, std::time::Duration::ZERO);
+        let host = Self::over(Arc::clone(&session), stored, Vec::new());
         (HostHandle(Arc::new(host)), session)
     }
 
@@ -157,35 +155,49 @@ impl TestHost {
         frames: Vec<bingo_sdk::Frame>,
         pace: std::time::Duration,
     ) -> (HostHandle, Arc<TestSession>) {
-        let session = Arc::new(TestSession {
-            frames,
-            pace,
-            ..Default::default()
-        });
-        let host = TestHost {
-            session: Arc::clone(&session),
-            child: Arc::new(TestSession::default()),
-            stored: Vec::new(),
-            closed: Mutex::new(Vec::new()),
-        };
+        let session = scripted(frames, pace);
+        let host = Self::over(Arc::clone(&session), Vec::new(), Vec::new());
+        (HostHandle(Arc::new(host)), session)
+    }
+
+    /// A host that says something happened to the whole process while the
+    /// loop is running — a catalogue rebuilt, a session created elsewhere.
+    pub fn announcing(announcements: Vec<GatewayEvent>) -> (HostHandle, Arc<TestSession>) {
+        let session = scripted(Vec::new(), std::time::Duration::ZERO);
+        let host = Self::over(Arc::clone(&session), Vec::new(), announcements);
         (HostHandle(Arc::new(host)), session)
     }
 
     /// The root's mailbox and the child's, which `open(ById)` answers with.
     pub fn tree(frames: Vec<bingo_sdk::Frame>) -> (HostHandle, Arc<TestSession>, Arc<TestSession>) {
-        let session = Arc::new(TestSession {
-            frames,
-            ..Default::default()
-        });
-        let child = Arc::new(TestSession::default());
-        let host = TestHost {
-            session: Arc::clone(&session),
-            child: Arc::clone(&child),
-            stored: Vec::new(),
-            closed: Mutex::new(Vec::new()),
-        };
+        let session = scripted(frames, std::time::Duration::ZERO);
+        let host = Self::over(Arc::clone(&session), Vec::new(), Vec::new());
+        let child = Arc::clone(&host.child);
         (HostHandle(Arc::new(host)), session, child)
     }
+
+    fn over(
+        session: Arc<TestSession>,
+        stored: Vec<SessionSummary>,
+        announcements: Vec<GatewayEvent>,
+    ) -> TestHost {
+        TestHost {
+            session,
+            child: Arc::new(TestSession::default()),
+            stored,
+            closed: Mutex::new(Vec::new()),
+            announcements: Mutex::new(announcements),
+            announced: Arc::default(),
+        }
+    }
+}
+
+fn scripted(frames: Vec<bingo_sdk::Frame>, pace: std::time::Duration) -> Arc<TestSession> {
+    Arc::new(TestSession {
+        frames,
+        pace,
+        ..Default::default()
+    })
 }
 
 #[async_trait]
@@ -279,17 +291,32 @@ impl HostApi for TestHost {
                 })
                 .expect("a serialisable spec"),
             }],
-            _ => vec![CatalogEntry {
-                id: "fake/fake-1".into(),
-                label: "fake-1".into(),
-                meta: Value::Null,
-            }],
+            // A second model appears once this host has announced that the
+            // catalogue changed: a refresh, as a client sees one.
+            _ => ["fake/fake-1"]
+                .into_iter()
+                .chain(
+                    self.announced
+                        .load(Ordering::SeqCst)
+                        .then_some("fake/fake-2"),
+                )
+                .map(|id| CatalogEntry {
+                    id: id.into(),
+                    label: id.split('/').next_back().unwrap_or(id).into(),
+                    meta: Value::Null,
+                })
+                .collect(),
         };
         Ok(Catalog { kind, entries })
     }
 
     fn gateway_events(&self) -> GatewayStream {
-        Box::pin(futures::stream::empty())
+        let announcements = std::mem::take(&mut *self.announcements.lock().expect("no poisoned lock"));
+        let announced = Arc::clone(&self.announced);
+        Box::pin(futures::stream::iter(announcements).map(move |event| {
+            announced.store(true, Ordering::SeqCst);
+            event
+        }))
     }
 
     fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
