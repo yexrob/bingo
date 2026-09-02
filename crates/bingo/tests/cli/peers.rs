@@ -428,15 +428,20 @@ fn turns(frames: &[Frame]) -> usize {
 /// can do: each round of three responses — the last poster's wrap-up and the
 /// two members its post woke — carries exactly one post, and every one of the
 /// three has read the room's head, so whichever takes it lands it. The
-/// parent's tail is a delay long enough to hold the run open while a relay
-/// that takes milliseconds runs; it is a liveness bound, not a bet on who
-/// asks first.
+/// parent's tail is a delay long enough to hold the run open while the relay
+/// runs; it is a liveness bound, not a bet on who asks first.
+///
+/// The bound is sized for the slowest machine that runs it, not the fastest:
+/// three rounds take milliseconds on an idle laptop and seconds apiece on a
+/// loaded shared runner, where five of them once held only two of the three.
+/// A relay that finishes early does not shorten the run, so this is paid in
+/// full every time — which is the price of a bound that does not flake.
 const RELAY: &str = r##"{"responses":[
     {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"alpha","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
     {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"beta","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
     {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"gamma","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
     {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count to 3, starting at 1"}}}]},
-    {"when":{"contains":"seat the relay"},"steps":[{"delay":{"ms":5000}},{"text":"they have it"}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"delay":{"ms":20000}},{"text":"they have it"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"1"}}}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
