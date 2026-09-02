@@ -24,10 +24,10 @@ use crate::theme;
 /// ends it cut short. The run and a line for each cut end come to exactly the
 /// room asked for — or to the whole list, when it fits.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Window {
-    run: Range<usize>,
-    above: bool,
-    below: bool,
+pub struct Window {
+    pub run: Range<usize>,
+    pub above: bool,
+    pub below: bool,
 }
 
 /// The rows that fit around the one the cursor is on, the list flowing under
@@ -35,6 +35,12 @@ struct Window {
 pub fn around(lines: Vec<Line<'static>>, selected: usize, rows: usize) -> Vec<Line<'static>> {
     let at = window(lines.len(), selected, rows);
     framed(lines, at)
+}
+
+/// The same window over a list whose rows are more than lines — a card's row
+/// knows the answer it belongs to, and a click is answered against that.
+pub fn of(len: usize, selected: usize, rows: usize) -> Window {
+    window(len, selected, rows)
 }
 
 /// The rows that fit from the one the cursor is on, for a list whose rows
@@ -105,7 +111,7 @@ fn framed(lines: Vec<Line<'static>>, at: Window) -> Vec<Line<'static>> {
 
 /// What says the list goes on past this end: the strip's own mark (§3), in the
 /// column a row's text sits in.
-fn cut() -> Line<'static> {
+pub fn cut() -> Line<'static> {
     Line::from(vec![
         theme::cursor_span(false),
         Span::styled(theme::ellipsis().to_string(), theme::dim()),

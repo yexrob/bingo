@@ -289,8 +289,12 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
             .map(move |wrapped| (wrapped, option))
     })
     .collect();
-    let lines: Vec<Line<'static>> = rows.iter().map(|(line, _)| line.clone()).collect();
     let above = regions.above();
+    // Two border rows and the title the box keeps: what is left is what the
+    // answers have to be walked in.
+    let room = usize::from(above.height).saturating_sub(3);
+    let rows = fitted_answers(rows, ui.dialog.focus, room);
+    let lines: Vec<Line<'static>> = rows.iter().map(|(line, _)| line.clone()).collect();
     // Only a row of the transcript on screen can anchor it: a child's item
     // ids are its own, and would name the wrong row here.
     let anchor = (!asked_elsewhere)
@@ -309,6 +313,50 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         opening(interaction, now),
         guarded(interaction, now),
     );
+}
+
+/// The card's answers in the room the box has to walk them in: a question with
+/// more options than that keeps the one the cursor is on, and says at which end
+/// it cut the rest. What sits above them is [`layers::card`]'s to give away —
+/// it keeps the title and the newest rows, which is what a permission wants:
+/// the preview gives way, never the answers.
+fn fitted_answers(
+    rows: Vec<(Line<'static>, Option<usize>)>,
+    focus: usize,
+    room: usize,
+) -> Vec<(Line<'static>, Option<usize>)> {
+    let Some(first) = rows.iter().position(|(_, option)| option.is_some()) else {
+        return rows;
+    };
+    let end = rows
+        .iter()
+        .rposition(|(_, option)| option.is_some())
+        .map_or(first, |at| at + 1);
+    // Whatever follows the answers — the mark of one already sent — is drawn
+    // with them, so it is theirs to make room for.
+    let room = room.saturating_sub(rows.len() - end);
+    if end - first <= room {
+        return rows;
+    }
+    let cursor = rows[first..end]
+        .iter()
+        .position(|(_, option)| *option == Some(focus))
+        .unwrap_or(0);
+    let at = window::of(end - first, cursor, room);
+    let mut out: Vec<(Line<'static>, Option<usize>)> = rows[..first].to_vec();
+    if at.above {
+        out.push((window::cut(), None));
+    }
+    out.extend(
+        rows[first + at.run.start..first + at.run.end]
+            .iter()
+            .cloned(),
+    );
+    if at.below {
+        out.push((window::cut(), None));
+    }
+    out.extend(rows[end..].iter().cloned());
+    out
 }
 
 /// Whether the kernel's guard is still down. A card that cannot be answered

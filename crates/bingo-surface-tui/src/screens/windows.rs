@@ -24,11 +24,12 @@ fn marked(screen: &str) -> String {
 }
 
 /// How many ends of the list said they were cut short. A drawn row comes
-/// quoted, as the backend prints it.
+/// quoted, as the backend prints it, and a card's rows come between its own
+/// two uprights.
 fn cuts(screen: &str) -> usize {
     screen
         .lines()
-        .filter(|row| row.replace('"', "").trim() == "…")
+        .filter(|row| row.replace(['"', '│'], "").trim() == "…")
         .count()
 }
 
@@ -171,6 +172,40 @@ fn crowded_panel(cursor: usize) -> (bingo_sdk::SessionState, Ui, Now) {
     ui.panel = cursor;
     shown(&mut ui, Open::Panel, now);
     (folded(frames), ui, now)
+}
+
+/// A question with a dozen options, each with a description: a card with more
+/// answers in it than the box has rows to walk them in.
+fn crowded_question(focus: usize) -> (Tree, Ui, Now) {
+    let mut open = question(false, false);
+    if let bingo_sdk::InteractionKind::Question { options, .. } = &mut open.kind {
+        *options = (1..=12)
+            .map(|i| bingo_sdk::QuestionOption {
+                id: format!("o{i}"),
+                label: format!("option {i:02}"),
+                description: Some(format!("what option {i:02} means")),
+            })
+            .collect();
+    }
+    let (tree, mut ui, now) = super::asked(open);
+    ui.dialog.focus = focus;
+    (tree, ui, now)
+}
+
+/// The answers are what the card was opened for, so they are what keeps the
+/// room: the preview above them still gives way first (§10, 2026-08-31).
+#[test]
+fn a_card_walks_its_answers_without_losing_the_one_it_is_on() {
+    let (tree, ui, now) = crowded_question(0);
+    let screen = shot("question_head", &tree, &ui, now);
+    assert!(marked(&screen).contains("option 01"), "{screen}");
+    assert_eq!(cuts(&screen), 1);
+    assert!(screen.contains("Auth"), "the title stays: {screen}");
+
+    let (tree, ui, now) = crowded_question(11);
+    let screen = shot("question_end", &tree, &ui, now);
+    assert!(marked(&screen).contains("option 12"), "{screen}");
+    assert_eq!(cuts(&screen), 1);
 }
 
 /// The panel's cursor walks headings, and each heading carries its view under
