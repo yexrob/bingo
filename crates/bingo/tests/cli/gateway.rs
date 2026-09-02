@@ -22,7 +22,13 @@ use jiff::{SignedDuration, Timestamp};
 use super::*;
 
 /// Long enough for a process to boot, take its claims and write a pidfile.
-const PATIENCE: Duration = Duration::from_secs(30);
+///
+/// `gateway start` gives up waiting for its own pidfile after 30s
+/// (`gateway::start::PATIENCE`, not reachable from here — this crate ships no
+/// lib target, by design). This budget wraps that whole subprocess, so it
+/// must clear 30s with room for the give-up path itself to run and exit, or
+/// a start that is genuinely about to time out races this wrapper's own kill.
+const PATIENCE: Duration = Duration::from_secs(45);
 
 /// A temporary home with a gateway that can be started in it.
 struct Gateway {
