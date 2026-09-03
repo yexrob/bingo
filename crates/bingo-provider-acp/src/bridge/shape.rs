@@ -86,16 +86,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// An invented tool: the translation is by shape, never by name, and a
+    /// fixture built from a real bingo tool would not show that.
     fn spec() -> ToolSpec {
         ToolSpec {
-            name: "SendMessage".into(),
-            description: "Post into a room.".into(),
+            name: "Shout".into(),
+            description: "Say something out loud.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": { "text": { "type": "string" } },
                 "required": ["text"]
             }),
-            meta: serde_json::Map::from_iter([("source".to_string(), json!("rooms"))]),
+            meta: serde_json::Map::from_iter([(
+                "source".to_string(),
+                json!("a-catalogue-only-fact"),
+            )]),
         }
     }
 
@@ -111,8 +116,8 @@ mod tests {
         assert_eq!(
             wire(&offered(&spec())),
             json!({
-                "name": "SendMessage",
-                "description": "Post into a room.",
+                "name": "Shout",
+                "description": "Say something out loud.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "text": { "type": "string" } },
@@ -127,7 +132,7 @@ mod tests {
     #[test]
     fn what_a_catalogue_shows_beside_a_tool_does_not_cross() {
         let written = wire(&offered(&spec())).to_string();
-        assert!(!written.contains("rooms"), "{written}");
+        assert!(!written.contains("a-catalogue-only-fact"), "{written}");
         assert!(!written.contains("_meta"), "{written}");
     }
 
@@ -144,13 +149,13 @@ mod tests {
     #[test]
     fn a_call_carries_its_arguments_under_the_id_the_bridge_minted() {
         let request: CallToolRequestParams =
-            serde_json::from_value(json!({ "name": "SendMessage", "arguments": { "text": "hi" } }))
+            serde_json::from_value(json!({ "name": "Shout", "arguments": { "text": "hi" } }))
                 .expect("a recorded call");
         assert_eq!(
             asked(request, "acp_1_1"),
             ToolCall {
                 call_id: "acp_1_1".into(),
-                name: "SendMessage".into(),
+                name: "Shout".into(),
                 input: json!({ "text": "hi" }),
             }
         );
@@ -161,7 +166,7 @@ mod tests {
     #[test]
     fn a_call_with_no_arguments_is_an_empty_object_not_null() {
         let request: CallToolRequestParams =
-            serde_json::from_value(json!({ "name": "ListAgents" })).expect("a recorded call");
+            serde_json::from_value(json!({ "name": "Whisper" })).expect("a recorded call");
         assert_eq!(asked(request, "acp_1_2").input, json!({}));
     }
 

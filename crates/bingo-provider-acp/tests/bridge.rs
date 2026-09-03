@@ -70,6 +70,9 @@ impl Doors for Fake {
     }
 }
 
+/// The names are invented on purpose. The bridge knows no tool by name — the
+/// offer is whatever the doors hold — and a fixture built from a real bingo
+/// tool would not show that.
 fn spec(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.to_string(),
@@ -172,7 +175,7 @@ fn text_of(result: &CallToolResult) -> String {
 async fn what_the_doors_offer_is_what_tools_list_shows() {
     let rendezvous = Rendezvous::open();
     let doors = Fake::with(
-        vec![spec("SendMessage"), spec("Listen")],
+        vec![spec("Shout"), spec("Wave")],
         Answer::Output(ToolOutput::text("unused")),
     );
     let token = rendezvous.bridge.admit(doors).expect("a token");
@@ -186,13 +189,10 @@ async fn what_the_doors_offer_is_what_tools_list_shows() {
             .iter()
             .map(|t| t.name.to_string())
             .collect::<Vec<_>>(),
-        ["SendMessage", "Listen"],
+        ["Shout", "Wave"],
         "in the order the doors held them"
     );
-    assert_eq!(
-        offered[0].description.as_deref(),
-        Some("What SendMessage does.")
-    );
+    assert_eq!(offered[0].description.as_deref(), Some("What Shout does."));
     assert_eq!(offered[0].input_schema["type"], json!("object"));
     let _ = client.cancel().await;
 }
@@ -201,7 +201,7 @@ async fn what_the_doors_offer_is_what_tools_list_shows() {
 async fn a_call_reaches_the_doors_and_its_answer_comes_back() {
     let rendezvous = Rendezvous::open();
     let doors = Fake::with(
-        vec![spec("SendMessage")],
+        vec![spec("Shout")],
         Answer::Output(ToolOutput::text("posted into #review")),
     );
     let token = rendezvous.bridge.admit(doors.clone()).expect("a token");
@@ -211,8 +211,7 @@ async fn a_call_reaches_the_doors_and_its_answer_comes_back() {
         .expect("the bridge answers");
     let answered = client
         .call_tool(
-            CallToolRequestParams::new("SendMessage")
-                .with_arguments(arguments(json!({ "text": "hi" }))),
+            CallToolRequestParams::new("Shout").with_arguments(arguments(json!({ "text": "hi" }))),
         )
         .await
         .expect("a call is answered");
@@ -221,7 +220,7 @@ async fn a_call_reaches_the_doors_and_its_answer_comes_back() {
 
     let seen = doors.seen.lock().await;
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].name, "SendMessage");
+    assert_eq!(seen[0].name, "Shout");
     assert_eq!(seen[0].input, json!({ "text": "hi" }));
     assert!(
         !seen[0].call_id.is_empty(),
@@ -238,7 +237,7 @@ async fn a_call_reaches_the_doors_and_its_answer_comes_back() {
 async fn a_call_the_doors_refused_is_an_error_result_not_a_protocol_error() {
     let rendezvous = Rendezvous::open();
     let doors = Fake::with(
-        vec![spec("SendMessage")],
+        vec![spec("Shout")],
         Answer::Refuse("no turn is in flight".into()),
     );
     let token = rendezvous.bridge.admit(doors).expect("a token");
@@ -247,7 +246,7 @@ async fn a_call_the_doors_refused_is_an_error_result_not_a_protocol_error() {
         .await
         .expect("the bridge answers");
     let answered = client
-        .call_tool(CallToolRequestParams::new("SendMessage"))
+        .call_tool(CallToolRequestParams::new("Shout"))
         .await
         .expect("a refusal is an answer, not a transport failure");
     assert_eq!(answered.is_error, Some(true));
@@ -264,7 +263,7 @@ async fn a_call_the_doors_refused_is_an_error_result_not_a_protocol_error() {
 async fn a_changed_offer_reaches_a_live_client() {
     let rendezvous = Rendezvous::open();
     let doors = Fake::with(
-        vec![spec("SendMessage")],
+        vec![spec("Shout")],
         Answer::Output(ToolOutput::text("unused")),
     );
     let token = rendezvous.bridge.admit(doors.clone()).expect("a token");
@@ -276,7 +275,7 @@ async fn a_changed_offer_reaches_a_live_client() {
         .expect("the bridge answers");
     assert_eq!(client.list_all_tools().await.expect("a list").len(), 1);
 
-    doors.offer.lock().await.push(spec("Listen"));
+    doors.offer.lock().await.push(spec("Wave"));
     rendezvous.bridge.offer_changed();
 
     tokio::time::timeout(LIMIT, heard.notified())
@@ -290,7 +289,7 @@ async fn a_changed_offer_reaches_a_live_client() {
             .iter()
             .map(|t| t.name.to_string())
             .collect::<Vec<_>>(),
-        ["SendMessage", "Listen"],
+        ["Shout", "Wave"],
         "asking again after the word is what list_changed is for"
     );
     let _ = client.cancel().await;
@@ -303,10 +302,7 @@ async fn a_token_nobody_minted_never_gets_a_conversation() {
     let rendezvous = Rendezvous::open();
     rendezvous
         .bridge
-        .admit(Fake::with(
-            vec![spec("SendMessage")],
-            Answer::Refuse("x".into()),
-        ))
+        .admit(Fake::with(vec![spec("Shout")], Answer::Refuse("x".into())))
         .expect("a token");
 
     let refused = connect(
@@ -325,7 +321,7 @@ async fn a_token_nobody_minted_never_gets_a_conversation() {
 async fn a_second_concurrent_stream_on_one_token_is_refused() {
     let rendezvous = Rendezvous::open();
     let doors = Fake::with(
-        vec![spec("SendMessage")],
+        vec![spec("Shout")],
         Answer::Output(ToolOutput::text("unused")),
     );
     let token = rendezvous.bridge.admit(doors).expect("a token");
@@ -351,7 +347,7 @@ async fn a_second_concurrent_stream_on_one_token_is_refused() {
 async fn a_token_may_be_dialled_again_once_its_stream_has_closed() {
     let rendezvous = Rendezvous::open();
     let doors = Fake::with(
-        vec![spec("SendMessage")],
+        vec![spec("Shout")],
         Answer::Output(ToolOutput::text("still here")),
     );
     let token = rendezvous.bridge.admit(doors).expect("a token");
@@ -363,7 +359,7 @@ async fn a_token_may_be_dialled_again_once_its_stream_has_closed() {
 
     let again = reconnect(&rendezvous.address, token.as_str(), ()).await;
     let answered = again
-        .call_tool(CallToolRequestParams::new("SendMessage"))
+        .call_tool(CallToolRequestParams::new("Shout"))
         .await
         .expect("the same doors are still behind it");
     assert_eq!(text_of(&answered), "still here");
@@ -376,7 +372,7 @@ async fn a_token_may_be_dialled_again_once_its_stream_has_closed() {
 async fn a_dismissed_conversation_is_no_longer_an_address() {
     let rendezvous = Rendezvous::open();
     let doors = Fake::with(
-        vec![spec("SendMessage")],
+        vec![spec("Shout")],
         Answer::Output(ToolOutput::text("unused")),
     );
     let token = rendezvous.bridge.admit(doors).expect("a token");
@@ -395,10 +391,7 @@ async fn a_dropped_bridge_stops_listening() {
     let address = Address::of_run(&Env::rooted(home.path()), std::process::id());
     let bridge = Bridge::at(address.clone()).expect("it listens");
     let token = bridge
-        .admit(Fake::with(
-            vec![spec("SendMessage")],
-            Answer::Refuse("x".into()),
-        ))
+        .admit(Fake::with(vec![spec("Shout")], Answer::Refuse("x".into())))
         .expect("a token");
     connect(&address, token.as_str(), ())
         .await

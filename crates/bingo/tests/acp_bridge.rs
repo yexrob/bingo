@@ -31,8 +31,8 @@ struct Echo {
 impl Doors for Echo {
     async fn offer(&self) -> Vec<ToolSpec> {
         vec![ToolSpec {
-            name: "SendMessage".into(),
-            description: "Post into a room.".into(),
+            name: "Shout".into(),
+            description: "Say something out loud.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": { "text": { "type": "string" } },
@@ -46,7 +46,7 @@ impl Doors for Echo {
         let said = call.input["text"].as_str().unwrap_or_default().to_string();
         self.seen.lock().await.push(call);
         match said.is_empty() {
-            true => Err(Refused::new("SendMessage needs something to say")),
+            true => Err(Refused::new("Shout needs something to say")),
             false => Ok(ToolOutput::text(format!("posted: {said}"))),
         }
     }
@@ -82,12 +82,12 @@ async fn an_agent_reaches_the_shared_tools_through_the_spawned_proxy() {
             .iter()
             .map(|t| t.name.to_string())
             .collect::<Vec<_>>(),
-        ["SendMessage"]
+        ["Shout"]
     );
 
     let answered = client
         .call_tool(
-            CallToolRequestParams::new("SendMessage").with_arguments(
+            CallToolRequestParams::new("Shout").with_arguments(
                 json!({ "text": "hello from the other side" })
                     .as_object()
                     .expect("an object")
@@ -109,7 +109,7 @@ async fn an_agent_reaches_the_shared_tools_through_the_spawned_proxy() {
 
     // A refusal crosses two processes as an answer, not as a broken pipe.
     let refused = client
-        .call_tool(CallToolRequestParams::new("SendMessage"))
+        .call_tool(CallToolRequestParams::new("Shout"))
         .await
         .expect("a refusal is an answer");
     assert_eq!(refused.is_error, Some(true));
@@ -119,7 +119,7 @@ async fn an_agent_reaches_the_shared_tools_through_the_spawned_proxy() {
             .iter()
             .filter_map(|block| block.as_text().map(|text| text.text.clone()))
             .collect::<String>(),
-        "SendMessage needs something to say"
+        "Shout needs something to say"
     );
 
     let _ = client.cancel().await;
