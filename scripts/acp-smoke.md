@@ -21,8 +21,8 @@ permission words on it:
     "adapters": {
       "claude": {
         "command": "npx",
-        "args": ["-y", "@agentclientprotocol/claude-agent-acp",
-                 "--permission-mode", "acceptEdits"]
+        "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+        "options": { "mode": "dontAsk" }
       },
       "codex-acp": {
         "command": "npx",
@@ -68,7 +68,11 @@ finding.
       bingo, the call is refused, one `ACP_ASKED` notice names
       `acp.adapters.<name>`, and the turn goes on. Then put the adapter's own
       permission mode on the row and watch the same request succeed without
-      bingo being asked at all. That is the whole of ADR-0035 §5.
+      bingo being asked at all. That is the whole of ADR-0035 §5. Which door
+      that mode goes through is the adapter's: `codex-acp` takes one from
+      `env`, and `claude-agent-acp` has neither a flag nor a variable for it —
+      its mode is the session config option `options` sets, so that is the
+      half of the row to change for it.
 - [ ] **Login refused.** Log the adapter out and run a turn. The error is the
       adapter's own words on `session/new`, and `bingo login claude` does not
       offer to fix it — auth is `NotApplicable` and the fix is
