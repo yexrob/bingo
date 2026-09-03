@@ -33,6 +33,9 @@
 //!   a room says about the members in it.
 //! - [`window`] is what every list a cursor walks draws when it outgrows its
 //!   room: the rows around the cursor, and a `…` at each end it cut.
+//! - [`complete`] is the `@` dropdown's ranking and [`mentions`] is who it can
+//!   reach from the session on the screen — the agents under it, or, in a
+//!   room, the seats on its roster.
 //! - [`skill`] answers whether an item is a skill run and which one, so the
 //!   model's `Skill(guide)` and a person's `/guide` come to the one row, and
 //!   [`acp`] answers the same for a call an ACP agent ran on its own side
@@ -60,6 +63,7 @@ mod input;
 mod keys;
 mod layers;
 mod markdown;
+mod mentions;
 mod pager;
 mod panel;
 mod paths;

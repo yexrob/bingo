@@ -14,12 +14,13 @@ use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::{self, Now};
+use crate::commands::{Group, Suggestion};
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Listed, Open, Picker, Switcher, Ui};
 use crate::{
-    composer as prompt, dialog, keys, layers, pager, panel, rail, rewind, roster, search, select,
-    status, theme, transcript, views, window, wrap,
+    composer as prompt, dialog, keys, layers, mentions, pager, panel, rail, rewind, roster, search,
+    select, status, theme, transcript, views, window, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -161,6 +162,7 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
             menu(
                 ui,
                 &tree.viewed().summary.cwd,
+                &mentions::targets(tree),
                 MENU_ROWS.min(usize::from(above.height)),
             ),
         ]
@@ -750,31 +752,63 @@ fn placeholder(state: &SessionState) -> String {
 
 /// The `/` and `@` dropdown: what the line being typed ranks, in `rows` of
 /// room around the one the cursor is on.
-fn menu(ui: &Ui, cwd: &str, rows: usize) -> Vec<Line<'static>> {
-    let suggestions = ui.suggestions(cwd);
+fn menu(ui: &Ui, cwd: &str, mentions: &[String], rows: usize) -> Vec<Line<'static>> {
+    let suggestions = ui.suggestions(cwd, mentions);
     let selected = ui.menu.selected.min(suggestions.len().saturating_sub(1));
+    let listed = listed(&suggestions, selected);
+    // Asked of the lines themselves rather than counted from the labels: a
+    // second sum of where a label falls is a second place to get it wrong
+    // ([`crate::roster`]).
+    let at = listed
+        .iter()
+        .position(|(_, of)| *of == Some(selected))
+        .unwrap_or(0);
+    let lines = listed.into_iter().map(|(line, _)| line).collect();
+    window::around(lines, at, rows)
+}
+
+/// Every line the dropdown has before the window takes it: its rows, each under
+/// the label of the run it is in where there is another run beside it, and the
+/// row of the list each line answers to. A label answers none — it is furniture,
+/// like the roster's, and nowhere the cursor lands.
+fn listed(suggestions: &[Suggestion], selected: usize) -> Vec<(Line<'static>, Option<usize>)> {
+    let labelled = suggestions
+        .windows(2)
+        .any(|two| two[0].group != two[1].group);
     let column = suggestions
         .iter()
-        .map(|r| r.label.width())
+        .map(|row| row.label.width())
         .max()
         .unwrap_or(0);
-    let lines = suggestions
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let focused = index == selected;
-            let style = if focused { theme::text() } else { theme::dim() };
-            let label = format!("{:<column$}", row.label, column = column);
-            Line::from(vec![
-                theme::cursor_span(focused),
-                Span::styled(
-                    format!("{label}  {}", row.hint).trim_end().to_string(),
-                    style,
-                ),
-            ])
-        })
-        .collect();
-    window::around(lines, selected, rows)
+    let mut out: Vec<(Line<'static>, Option<usize>)> = Vec::new();
+    let mut run: Option<Group> = None;
+    for (index, row) in suggestions.iter().enumerate() {
+        if labelled && run != Some(row.group) {
+            out.push((run_label(row.group), None));
+        }
+        run = Some(row.group);
+        out.push((suggestion_line(row, column, index == selected), Some(index)));
+    }
+    out
+}
+
+/// What a run is called: dim, at the margin its rows are indented from.
+fn run_label(group: Group) -> Line<'static> {
+    Line::from(Span::styled(group.label().to_string(), theme::dim()))
+}
+
+/// One row: the mark where the cursor is, the label padded to the widest of
+/// them, and whatever the row has to say after it.
+fn suggestion_line(row: &Suggestion, column: usize, focused: bool) -> Line<'static> {
+    let style = if focused { theme::text() } else { theme::dim() };
+    let label = format!("{:<column$}", row.label, column = column);
+    Line::from(vec![
+        theme::cursor_span(focused),
+        Span::styled(
+            format!("{label}  {}", row.hint).trim_end().to_string(),
+            style,
+        ),
+    ])
 }
 
 #[cfg(test)]

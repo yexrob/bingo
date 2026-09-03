@@ -87,7 +87,7 @@ fn crowded_menu(from_the_end: usize) -> (bingo_sdk::SessionState, Ui, Now) {
     let (mut ui, now) = scene();
     ui.catalogs.commands = (1..=12).map(|i| spec(&format!("plugin-{i:02}"))).collect();
     write(&mut ui, &state, "/", now);
-    let rows = ui.suggestions(&state.summary.cwd).len();
+    let rows = ui.suggestions(&state.summary.cwd, &[]).len();
     ui.menu.selected = rows - 1 - from_the_end;
     (state, ui, now)
 }

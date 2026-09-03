@@ -17,6 +17,7 @@ use crate::complete;
 use crate::effect::Effect;
 use crate::fold;
 use crate::keys;
+use crate::mentions;
 use crate::pager;
 use crate::rail::{self, CardId, Pin};
 use crate::rewind::{self, Rewind};
@@ -61,7 +62,7 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if key.code == KeyCode::Esc {
         return escape(ui, tree, now);
     }
-    if key.code == KeyCode::Tab && ui.suggestions(cwd(tree)).is_empty() && cycle_focus(ui, tree) {
+    if key.code == KeyCode::Tab && suggestions(ui, tree).is_empty() && cycle_focus(ui, tree) {
         return Vec::new();
     }
     // A prompt raised anywhere in the tree is answered from wherever the
@@ -286,6 +287,12 @@ fn cwd(tree: &Tree) -> &str {
     &tree.viewed().summary.cwd
 }
 
+/// What the dropdown is offering for the line being typed: the one question
+/// every key that the dropdown owns asks, over the session on the screen.
+fn suggestions(ui: &Ui, tree: &Tree) -> Vec<commands::Suggestion> {
+    ui.suggestions(cwd(tree), &mentions::targets(tree))
+}
+
 /// A bracketed paste lands verbatim wherever the caret is.
 pub fn on_paste(ui: &mut Ui, text: &str) {
     ui.composer.insert(text);
@@ -335,7 +342,7 @@ fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         // One layer is open at a time, whichever form it takes.
         sheet: ui.layer.showing(),
         card: tree.open_interaction().is_some(),
-        dropdown: !ui.suggestions(cwd(tree)).is_empty(),
+        dropdown: !suggestions(ui, tree).is_empty(),
         busy: tree.viewed().busy(),
     };
     // An `esc` that closed something is not half of a gesture.
@@ -649,7 +656,7 @@ fn settle(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
 
 /// The dropdown owns the arrows and the completion keys while it is open.
 fn menu(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
-    let rows = ui.suggestions(cwd(tree));
+    let rows = suggestions(ui, tree);
     if rows.is_empty() {
         return (key.code == KeyCode::Tab).then(Vec::new);
     }
@@ -670,12 +677,16 @@ fn menu(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
 }
 
 fn adds_something(ui: &Ui, tree: &Tree) -> bool {
-    ui.selected_suggestion(cwd(tree))
-        .is_some_and(|chosen| chosen.value.trim_end() != ui.composer.text().trim_end())
+    chosen(ui, tree).is_some_and(|row| row.value.trim_end() != ui.composer.text().trim_end())
+}
+
+/// The row the dropdown's cursor is on.
+fn chosen(ui: &Ui, tree: &Tree) -> Option<commands::Suggestion> {
+    ui.selected_suggestion(cwd(tree), &mentions::targets(tree))
 }
 
 fn accept(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
-    if let Some(chosen) = ui.selected_suggestion(cwd(tree)) {
+    if let Some(chosen) = chosen(ui, tree) {
         ui.composer.set(&chosen.value);
     }
     ui.edited();
@@ -887,7 +898,7 @@ mod tests {
         let (mut ui, now) = scene();
         write(&mut ui, &state, "@Car", now);
         assert_eq!(
-            ui.suggestions(&state.summary.cwd)
+            ui.suggestions(&state.summary.cwd, &[])
                 .iter()
                 .map(|row| row.label.clone())
                 .collect::<Vec<_>>(),
@@ -896,7 +907,7 @@ mod tests {
         on_key(&mut ui, &tree, key(KeyCode::Enter), now);
         assert_eq!(ui.composer.text(), "@Cargo.toml ");
         assert!(
-            ui.suggestions(&state.summary.cwd).is_empty(),
+            ui.suggestions(&state.summary.cwd, &[]).is_empty(),
             "a finished mention offers nothing more"
         );
     }

@@ -83,13 +83,40 @@ pub fn split(line: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// One row of the dropdown: what it shows and the line it completes to.
+/// Which run of the dropdown a row belongs to. The runs are told apart by a
+/// label above each of them only while there is another beside it — the list's
+/// own grammar ([`crate::roster`]) — so a dropdown offering one kind of thing
+/// wears no label at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// A `/` command, or a value for one: the only run its dropdown has.
+    Commands,
+    /// A session an `@` can reach ([`crate::mentions`]).
+    Agents,
+    /// A path under the session's own directory ([`crate::complete`]).
+    Files,
+}
+
+impl Group {
+    /// What a run is called, where there is another beside it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Commands => "Commands",
+            Group::Agents => "Agents",
+            Group::Files => "Files",
+        }
+    }
+}
+
+/// One row of the dropdown: what it shows, the line it completes to, and which
+/// run of the list it is in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Suggestion {
     /// The whole composer line this row completes to.
     pub value: String,
     pub label: String,
     pub hint: String,
+    pub group: Group,
 }
 
 /// The dropdown for the line being typed: command names while the caret is
@@ -126,6 +153,7 @@ fn rank(partial: &str, specs: &[CommandSpec]) -> Vec<Suggestion> {
             value: format!("/{name} "),
             label: format!("/{name}"),
             hint: spec.hint.clone(),
+            group: Group::Commands,
         };
         if name.to_lowercase().starts_with(&partial) {
             prefix.push(row);
@@ -159,6 +187,7 @@ fn arguments(
             value: format!("/{name} {id}"),
             label: id.clone(),
             hint: String::new(),
+            group: Group::Commands,
         })
         .collect()
 }
@@ -228,6 +257,7 @@ mod tests {
                 value: "/model fake/fake-1".into(),
                 label: "fake/fake-1".into(),
                 hint: String::new(),
+                group: Group::Commands,
             }]
         );
     }
