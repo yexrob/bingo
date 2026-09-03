@@ -194,10 +194,16 @@ impl Provider for AcpProvider {
     /// there is no door in the protocol that answers "what do you serve"
     /// before a session is open, which is why they are harvested at all three
     /// that do — `session/new`, `session/load` and `session/resume` — and
-    /// refreshed from every set the client makes. Before any session, and
-    /// after the last one ends, `agent` alone is the honest answer.
+    /// refreshed from every set the client makes.
+    ///
+    /// With no conversation to read them from, one is opened for the asking
+    /// and dropped (`crate::probe`): a session is the only door, so the cold
+    /// answer is to knock on it. A knock nobody answers is `agent` alone and a
+    /// notice — a catalogue must not fail.
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        Ok(catalogue(self.sessions.models(&self.name).await))
+        Ok(catalogue(
+            self.sessions.models(&self.name, &self.adapter).await,
+        ))
     }
 
     /// The adapter owns its own login — a Claude subscription, a ChatGPT

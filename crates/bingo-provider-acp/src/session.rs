@@ -36,7 +36,7 @@ use crate::crossing::{self, Crossing};
 use crate::error::AcpError;
 use crate::knobs::{Declared, Knobs, Wanted, Wire};
 use crate::ladder::{self, Opening};
-use crate::{refusal, transcript};
+use crate::{probe, refusal, transcript};
 
 /// The plugin id the extension is journaled under (ADR-0011 §2).
 pub const PLUGIN: &str = "bingo.acp";
@@ -51,7 +51,7 @@ type Sink = mpsc::UnboundedSender<SessionNotification>;
 /// The client half of one link: where updates go, whether they are being
 /// swallowed, and what the agent is told when it asks a question whose answer
 /// is already written on its own row.
-struct Inbox {
+pub(crate) struct Inbox {
     adapter: String,
     sink: Mutex<Option<Sink>>,
     /// True while `session/load` replays. The journal already holds those
@@ -168,6 +168,9 @@ pub struct Sessions {
     /// dropped when the plugin stops. One per run: the address carries the
     /// pid, and every conversation on it is a token (ADR-0036 §3).
     bridge: Mutex<Option<Arc<Bridge>>>,
+    /// What each adapter said it serves when it was asked cold — an opening
+    /// nobody is having a conversation in (`crate::probe`).
+    cold: probe::Cold,
 }
 
 impl Sessions {
@@ -178,7 +181,14 @@ impl Sessions {
             links: Mutex::new(BTreeMap::new()),
             known: Mutex::new(BTreeMap::new()),
             bridge: Mutex::new(None),
+            cold: probe::Cold::default(),
         })
+    }
+
+    /// Where this run keeps what is its own. The probe opens its throwaway
+    /// session here, having no person's session to take a directory from.
+    pub(crate) fn env(&self) -> &Env {
+        &self.env
     }
 
     pub async fn set_host(&self, host: HostHandle) {
@@ -373,22 +383,26 @@ impl Sessions {
         link.knobs.apply(&wire(name, link, &host), wanted).await;
     }
 
-    /// The models any live conversation with this adapter says it has. Derived
-    /// from what the agent declared and never kept beside it: an instance's
-    /// catalogue is as fresh as its last session opening, and before one there
-    /// is nothing of the agent's to serve (ADR-0037 §2).
-    pub async fn models(&self, adapter: &str) -> Vec<ModelInfo> {
-        let live = self
-            .links
+    /// The models this adapter says it has. A live conversation's declaration
+    /// is the freshest there is — it is the one a `set` answer keeps moving —
+    /// so it is read first and a cold ask's harvest only stands in for it
+    /// (ADR-0037 §2, `crate::probe`).
+    pub async fn models(&self, name: &str, adapter: &Adapter) -> Vec<ModelInfo> {
+        match self.live(name).await {
+            Some(link) => link.knobs.models().await,
+            None => self.cold.models(self, name, adapter).await,
+        }
+    }
+
+    /// Any conversation with this adapter. Which one does not matter: they all
+    /// speak to the same agent, and it declares the same list to each.
+    async fn live(&self, adapter: &str) -> Option<Arc<Link>> {
+        self.links
             .lock()
             .await
             .iter()
             .find(|((name, _), _)| name == adapter)
-            .map(|(_, link)| link.clone());
-        match live {
-            Some(link) => link.knobs.models().await,
-            None => Vec::new(),
-        }
+            .map(|(_, link)| link.clone())
     }
 
     /// This session's way back into bingo, if there is a bridge to open it on.
@@ -438,13 +452,25 @@ impl Sessions {
     }
 
     async fn warn(&self, code: &str, text: &str) {
-        let Some(host) = self.host.lock().await.clone() else {
-            return;
-        };
-        let _ = host.notice(Level::Warn, code, text).await;
+        self.heard(code, text).await;
     }
 
-    async fn inbox(&self, name: &str) -> Arc<Inbox> {
+    /// Say it, and answer whether anybody was there. A notice said while no
+    /// session is open reaches nobody — the kernel says as much — so a caller
+    /// whose word is owed to a person keeps it and says it again later
+    /// (`crate::probe`).
+    pub(crate) async fn heard(&self, code: &str, text: &str) -> bool {
+        let Some(host) = self.host.lock().await.clone() else {
+            return false;
+        };
+        host.notice(Level::Warn, code, text).await.is_ok()
+    }
+
+    /// The client half every conversation with this adapter is read through,
+    /// a cold ask's included: it answers the two questions an agent may put
+    /// before it is prompted, and a probe that left them unanswered would
+    /// leave an agent waiting on the way in.
+    pub(crate) async fn inbox(&self, name: &str) -> Arc<Inbox> {
         Arc::new(Inbox {
             adapter: name.to_string(),
             sink: Mutex::new(None),
@@ -454,7 +480,10 @@ impl Sessions {
         })
     }
 
-    fn spawn(
+    /// One adapter process and the wire to it. The one place a child is
+    /// started: a cold ask spawns through here too, so there is a single
+    /// answer to "how is an adapter run".
+    pub(crate) fn spawn(
         &self,
         adapter: &Adapter,
         cwd: &Path,
@@ -537,7 +566,13 @@ impl Sessions {
 
     /// A session the agent has never seen before. Every rung answers with the
     /// knobs it is offering, and this is the one that also names the session.
-    async fn fresh(&self, connection: &Connection, place: &Where<'_>) -> Result<Entered, AcpError> {
+    /// It is also the whole of a cold ask (`crate::probe`): the one door in
+    /// the protocol that says what an agent serves is a session opening.
+    pub(crate) async fn fresh(
+        &self,
+        connection: &Connection,
+        place: &Where<'_>,
+    ) -> Result<Entered, AcpError> {
         let (opened, body) = connection.call_seen(new_session(place)).await?;
         Ok(Entered::at(
             opened.session_id.0.as_ref(),
@@ -630,10 +665,11 @@ pub fn session_id_from(payload: &serde_json::Value) -> Option<&str> {
 }
 
 /// Where a rung landed, and what the agent said on the way in.
-struct Entered {
+pub(crate) struct Entered {
     acp: String,
     preamble: Option<PathBuf>,
-    declared: Declared,
+    /// The knobs the agent offered, which is also the catalogue it serves.
+    pub(crate) declared: Declared,
 }
 
 impl Entered {
@@ -653,7 +689,10 @@ fn from_acp(error: AcpError) -> ProviderError {
 /// ADR-0035 §6: no filesystem, no terminal. The agent works on its own
 /// machine with its own tools, and is told so in the handshake rather than
 /// discovering it at the first `fs/read_text_file`.
-fn handshake() -> InitializeRequest {
+///
+/// The same words whoever is asking: a cold ask (`crate::probe`) introduces
+/// itself as this client too, because it is this client.
+pub(crate) fn handshake() -> InitializeRequest {
     InitializeRequest::new(agent_client_protocol_schema::ProtocolVersion::V1)
         .client_info(implementation())
 }
@@ -667,9 +706,18 @@ fn implementation() -> agent_client_protocol_schema::v1::Implementation {
 /// The rows travel with every rung, not only the new one: a resumed or loaded
 /// session is handed its `mcpServers` afresh, and one that was not would come
 /// back with the tools of a run that has ended.
-struct Where<'a> {
+pub(crate) struct Where<'a> {
     cwd: &'a Path,
     servers: &'a [McpServer],
+}
+
+impl<'a> Where<'a> {
+    /// A place with nothing to offer: where a cold ask opens its session
+    /// (`crate::probe`). An agent that will never be prompted has nothing to
+    /// call, so it is handed no servers — and no bridge is opened to hold.
+    pub(crate) fn bare(cwd: &'a Path) -> Self {
+        Self { cwd, servers: &[] }
+    }
 }
 
 /// `mcpServers` carries the bridge and whatever a person's own rows forward

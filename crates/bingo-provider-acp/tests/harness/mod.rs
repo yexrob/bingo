@@ -50,6 +50,13 @@ impl Fake {
         }
     }
 
+    /// What the agent obeys from the next spawn on. A scenario that must prove
+    /// nothing spawned again says so by putting a different script where the
+    /// next child would read one.
+    pub fn rewrite(&self, script: Value) {
+        std::fs::write(&self.script, script.to_string()).unwrap();
+    }
+
     pub fn env(&self) -> std::collections::BTreeMap<String, String> {
         [
             (

@@ -162,52 +162,6 @@ fn a_thinking_change_reaches_the_agent_before_the_next_prompt() {
     );
 }
 
-/// An external agent picks its own models per session, and nothing in the
-/// protocol answers "what do you serve" before one is open — so asking before
-/// one is neither a hang nor an error: bingo's own label, alone, and no child
-/// spawned to find out.
-#[test]
-fn before_any_session_the_instance_serves_the_label_alone() {
-    let Some(agent) = fake_agent() else { return };
-    let adapter = Scripted::new(
-        agent,
-        json!({
-            "sessionId": "acp-knob-0",
-            "configOptions": [model_option()],
-            "turns": []
-        }),
-    );
-    let named = ["--provider", "scripted", "--model", "agent"];
-    let mut refresh = adapter.base();
-    let refreshed = run(refresh.args(named).arg("/models refresh"));
-    assert_eq!(
-        refreshed.status.code(),
-        Some(0),
-        "stderr: {}",
-        stderr(&refreshed)
-    );
-    assert!(
-        stdout(&refreshed).contains("scripted 1 models"),
-        "{}",
-        stdout(&refreshed)
-    );
-
-    let mut list = adapter.base();
-    let listed = run(list.args(named).arg("/models"));
-    assert_eq!(listed.status.code(), Some(0), "stderr: {}", stderr(&listed));
-    let listing = stdout(&listed);
-    assert!(listing.contains("\n  agent\n"), "{listing}");
-    assert!(
-        !listing.contains("fast-model"),
-        "nothing was asked of an agent nobody opened a session with: {listing}"
-    );
-    assert!(
-        adapter.methods().is_empty(),
-        "and no child was spawned to find out: {:?}",
-        adapter.methods()
-    );
-}
-
 /// ADR-0037 §2: the models the agent declared are this instance's catalogue,
 /// served through the door every endpoint-answered list rides (ADR-0026) —
 /// with bingo's own `agent` label always in front of them.
