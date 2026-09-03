@@ -73,6 +73,17 @@ impl TestSession {
             .collect()
     }
 
+    /// The pictures beside each prompt, in the order they were submitted.
+    pub fn pictures(&self) -> Vec<Vec<bingo_sdk::Image>> {
+        locked(&self.submitted)
+            .iter()
+            .filter_map(|input| match input {
+                Input::Text { images, .. } => Some(images.clone()),
+                Input::Action { .. } => None,
+            })
+            .collect()
+    }
+
     pub fn answers(&self) -> Vec<(InteractionId, Answer, Activation)> {
         locked(&self.answers).clone()
     }
@@ -344,6 +355,7 @@ fn said(conversation: Conversation, text: &str, addressed: bool) -> Incoming {
         conversation,
         principal: "ou_person".into(),
         text: text.into(),
+        images: Vec::new(),
         addressed,
         parent: None,
     }
@@ -390,6 +402,37 @@ async fn a_message_opens_a_session_keyed_by_its_chat_and_carries_who_spoke() {
         "an existing session is continued before a new one is minted: {:?}",
         chat.host.opened()
     );
+}
+
+/// A picture reaches the kernel beside the words that came with it, and a
+/// picture alone is an ask with no words (ADR-0040).
+#[tokio::test]
+async fn a_picture_is_submitted_beside_its_words() {
+    let chat = Chat::open();
+    let image = bingo_sdk::Image::from_bytes("image/png", b"png").expect("a picture");
+    let Incoming::Message {
+        conversation,
+        principal,
+        addressed,
+        parent,
+        ..
+    } = hello("oc_1")
+    else {
+        panic!("a message");
+    };
+    chat.say(Incoming::Message {
+        conversation,
+        principal,
+        text: String::new(),
+        images: vec![image.clone()],
+        addressed,
+        parent,
+    })
+    .await;
+    let session = chat.session("loopback/oc_1").await;
+    chat.until(|| session.pictures().first().cloned()).await;
+    assert_eq!(session.prompts(), [""]);
+    assert_eq!(session.pictures(), [vec![image]]);
 }
 
 #[tokio::test]

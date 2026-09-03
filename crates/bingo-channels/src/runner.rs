@@ -11,8 +11,8 @@ use std::time::Instant;
 
 use bingo_sdk::{
     Activation, Answer, Applied, Attachment, ClientIdentity, ErrorCode, Event, Frame, FrameStream,
-    HostHandle, Input, IntentId, InteractionId, KernelError, OpenOptions, Origin, SessionHandle,
-    SessionId, SessionSelector, SessionSpec, SessionState,
+    HostHandle, Image, Input, IntentId, InteractionId, KernelError, OpenOptions, Origin,
+    SessionHandle, SessionId, SessionSelector, SessionSpec, SessionState,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -347,11 +347,12 @@ impl Runner {
             Incoming::Message {
                 principal,
                 text,
+                images,
                 parent,
                 ..
             } => {
                 self.parent = parent;
-                self.said(&principal, text);
+                self.said(&principal, text, images);
             }
             Incoming::Click {
                 question, choice, ..
@@ -361,19 +362,20 @@ impl Runner {
 
     /// A reply that answers the open question is that answer; anything else
     /// is the next thing to work on.
-    fn said(&mut self, principal: &str, text: String) {
+    fn said(&mut self, principal: &str, text: String, images: Vec<Image>) {
         match self.answering(&text) {
             Some((id, answer)) => self.answer(id, answer),
             None => self.handle.submit(
                 IntentId::mint(),
-                Input::text(
+                Input::Text {
                     text,
-                    Origin {
+                    images,
+                    origin: Origin {
                         surface: SURFACE_ID.into(),
                         principal: Some(principal.to_string()),
                         conversation: Some(self.key.clone()),
                     },
-                ),
+                },
             ),
         }
     }
