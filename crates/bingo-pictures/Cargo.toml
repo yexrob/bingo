@@ -28,3 +28,16 @@ image.workspace = true
 # `Image.data` is base64 (ADR-0040); the pixels are behind it.
 base64.workspace = true
 thiserror.workspace = true
+# A picture from the web is fetched by this machine, never handed to a
+# provider as a URL (M47, ADR-0041 §3). Already in the tree for the providers
+# and the web tool, so it costs no crate.
+reqwest.workspace = true
+# The body arrives in chunks so it can be cut at the cap as it comes, rather
+# than read whole and measured after.
+futures.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+# The remote reads, scripted: a served picture, a 404, a body over the cap.
+wiremock.workspace = true

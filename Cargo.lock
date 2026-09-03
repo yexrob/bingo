@@ -314,6 +314,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bingo-auth-oauth",
+ "bingo-pictures",
  "bingo-sdk",
  "futures",
  "insta",
@@ -464,8 +465,13 @@ version = "0.4.2"
 dependencies = [
  "base64 0.23.1",
  "bingo-sdk",
+ "futures",
  "image",
+ "reqwest",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]
@@ -648,11 +654,14 @@ name = "bingo-surface-print"
 version = "0.4.2"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
+ "bingo-pictures",
  "bingo-sdk",
  "futures",
  "insta",
  "jiff",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -699,6 +708,7 @@ dependencies = [
  "two-face",
  "unicode-segmentation",
  "unicode-width",
+ "wiremock",
 ]
 
 [[package]]

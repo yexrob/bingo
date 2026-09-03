@@ -111,20 +111,17 @@ fn rows(line: &str, matched: Vec<String>, group: Group) -> Vec<Suggestion> {
         .collect()
 }
 
-/// The images a line mentions, which is what reaches the model beside it. The
-/// line is the only record: nothing is remembered when a mention is deleted.
+/// The pictures a line mentions, which is what reaches the model beside it,
+/// as they were typed. The line is the only record: nothing is remembered
+/// when a mention is deleted. What counts as one is `bingo-pictures`'
+/// (ADR-0041) — every extension a decoder knows, and any URL, whose bytes are
+/// read at submit and whose type is decided there.
 pub fn attachments(line: &str) -> Vec<String> {
     line.split_whitespace()
         .filter_map(|word| word.strip_prefix('@'))
-        .filter(|path| is_image(path))
+        .filter(|word| bingo_pictures::names_a_picture(word))
         .map(str::to_owned)
         .collect()
-}
-
-/// Whether a path names a picture, which is what makes it an attachment
-/// rather than a word. The table is `Image`'s (ADR-0040): one list.
-fn is_image(path: &str) -> bool {
-    bingo_sdk::Image::media_type_of(Path::new(path)).is_some()
 }
 
 /// The word being typed: everything after the last space.
@@ -280,5 +277,42 @@ mod tests {
         );
         assert_eq!(attachments("@SHOT.JPEG"), vec!["SHOT.JPEG".to_string()]);
         assert!(attachments("no mention here").is_empty());
+    }
+
+    /// Every format the decoder reads, not the four a provider takes: what a
+    /// person has on disk is wider than what goes on the wire (ADR-0041).
+    #[test]
+    fn a_format_only_the_decoder_reads_is_an_attachment_too() {
+        assert_eq!(
+            attachments("@shot.bmp @scan.tiff @icon.ico"),
+            vec![
+                "shot.bmp".to_string(),
+                "scan.tiff".to_string(),
+                "icon.ico".to_string()
+            ],
+        );
+    }
+
+    /// A URL is mentioned, never completed: nothing on this machine could
+    /// have offered it, and its type is the bytes' to say, not its name's.
+    #[test]
+    fn a_url_is_an_attachment_whatever_it_ends_in() {
+        assert_eq!(
+            attachments("look at @https://x/y.jpg and @http://x/picture"),
+            vec![
+                "https://x/y.jpg".to_string(),
+                "http://x/picture".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn the_dropdown_offers_files_and_never_a_url() {
+        let dir = tree();
+        let rows = offered("look at @s", "s", &[], &walk(dir.path()));
+        assert!(
+            rows.iter().all(|row| !row.value.contains("://")),
+            "{rows:?}"
+        );
     }
 }

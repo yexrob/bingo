@@ -17,6 +17,9 @@ tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+# `--image` takes a path or a URL, and a stream-json block may carry a type no
+# provider takes: both are read and widened here (M47, ADR-0041).
+bingo-pictures.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
@@ -24,3 +27,8 @@ bingo-sdk = { workspace = true, features = ["testing"] }
 jiff.workspace = true
 # The stream-json lines are a wire format: snapshots are the fixture.
 insta.workspace = true
+# The pictures the tests hand over, drawn by the crate that reads them back.
+bingo-pictures = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+# The wider picture in a stream-json block is base64 on the wire.
+base64.workspace = true

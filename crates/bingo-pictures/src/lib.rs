@@ -1,10 +1,16 @@
 //! A picture as pixels.
 //!
-//! A terminal that draws pictures takes one format (PNG), and a person hands
-//! over whatever their camera, their screenshot key or a tool gave them
-//! (ADR-0040's table: png, jpeg, gif, webp). This crate is the one place the
-//! second becomes the first: [`to_png`] answers with the bytes a surface may
-//! send and the size they draw at, and nothing above it knows a decoder.
+//! A terminal that draws pictures takes one format (PNG), a provider takes
+//! four (ADR-0040's table: png, jpeg, gif, webp), and a person hands over
+//! whatever their camera, their screenshot key, a chat server or a tool gave
+//! them. This crate is the one place the wider becomes the narrower, and
+//! nothing above it knows a decoder.
+//!
+//! [`to_png`] answers with the bytes a terminal may draw and the size they
+//! draw at. [`sniffed`] and [`accepted`] answer with the one [`Image`] the
+//! journal keeps. [`load`] reads a [`Source`] — a path on this machine or a
+//! URL this machine fetches (ADR-0041 §3) — and hands the bytes to the first
+//! two.
 //!
 //! A PNG passes through untouched — its size is in its header, so nothing is
 //! decoded and nothing is re-encoded. Everything else is decoded once and
@@ -13,6 +19,14 @@
 use base64::Engine;
 use bingo_sdk::Image;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+
+mod accepted;
+mod load;
+mod source;
+
+pub use accepted::{accepted, sniffed};
+pub use load::load;
+pub use source::{Source, names_a_picture};
 
 /// A picture in the one format a terminal takes, and the size it draws at.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +78,7 @@ pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
 /// Decode whatever this is and write it back out as PNG. The compression is
 /// the fast one: these bytes are on their way to a terminal on the same
 /// machine, so a second spent squeezing them is a second a person waits.
-fn encode(bytes: &[u8]) -> Result<Png, PictureError> {
+pub(crate) fn encode(bytes: &[u8]) -> Result<Png, PictureError> {
     let decoded = image::load_from_memory(bytes)?;
     let mut out = Vec::new();
     let encoder =
@@ -77,12 +91,27 @@ fn encode(bytes: &[u8]) -> Result<Png, PictureError> {
     })
 }
 
+/// What went wrong with one picture. Its `Display` is what a person is shown
+/// — the TUI's notice, `--print`'s stderr, the channel's log line — so each
+/// reads as the second half of a sentence whose first half is the source the
+/// caller was reading.
 #[derive(Debug, thiserror::Error)]
 pub enum PictureError {
     #[error("the picture is not base64: {0}")]
     NotBase64(#[from] base64::DecodeError),
     #[error("no decoder read this picture: {0}")]
     Undecodable(#[from] image::ImageError),
+    /// The bytes are not a picture at all: a web page behind a URL, a text
+    /// file with a picture's name, a download that stopped early.
+    #[error("not a picture: no decoder recognises these bytes")]
+    NotAPicture,
+    #[error("could not be read: {0}")]
+    Unreadable(#[from] std::io::Error),
+    #[error("could not be fetched: {0}")]
+    Unfetchable(reqwest::Error),
+    /// The journal's own table and cap (ADR-0040), refusing it in its words.
+    #[error(transparent)]
+    Refused(#[from] bingo_sdk::ImageError),
 }
 
 #[cfg(any(test, feature = "testing"))]

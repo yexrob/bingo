@@ -34,6 +34,9 @@ tokio = { workspace = true, features = ["net"] }
 reqwest.workspace = true
 # The ACK payload's `data` is base64 of the JSON bytes (ADR-0016 §6).
 base64.workspace = true
+# A picture off a chat is whatever the phone that took it produced: it is
+# sniffed and widened to a type a provider accepts here (M47, ADR-0041 §2).
+bingo-pictures.workspace = true
 # M13 (docs/plans/M13-channels.md), the one new dependency: Feishu's long
 # connection is a plain wss stream with an application-level ping. rustls
 # only — `openssl-sys` is banned in deny.toml — and the roots reqwest already
@@ -52,4 +55,6 @@ insta.workspace = true
 tempfile.workspace = true
 # Feishu's HTTP endpoints, scripted.
 wiremock.workspace = true
+# The pictures those endpoints serve, drawn by the crate that reads them back.
+bingo-pictures = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["net", "test-util"] }

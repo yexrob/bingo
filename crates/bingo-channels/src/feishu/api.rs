@@ -107,10 +107,12 @@ impl Api {
         self.send(reqwest::Method::PATCH, path, Some(body)).await
     }
 
-    /// A binary resource — a picture a message carried — with the media type
-    /// its `Content-Type` names. Feishu answers these with the bytes, not
-    /// the JSON envelope, so a refusal is read off the status.
-    pub async fn get_bytes(&self, path: &str) -> Result<(String, Vec<u8>), ApiError> {
+    /// A binary resource — a picture a message carried. Feishu answers these
+    /// with the bytes, not the JSON envelope, so a refusal is read off the
+    /// status. The type is not read off the `Content-Type`: what a picture is
+    /// is the bytes' to say (ADR-0041), and they are sniffed where they are
+    /// turned into an `Image`.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>, ApiError> {
         let bearer = self
             .tokens
             .bearer(&self.http, &self.base, std::time::Instant::now())
@@ -129,19 +131,11 @@ impl Api {
                 message: response.text().await.unwrap_or_default(),
             });
         }
-        let media_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
         let bytes = response
             .bytes()
             .await
             .map_err(|e| ApiError::Transport(format!("feishu: {e}")))?;
-        Ok((media_type, bytes.to_vec()))
+        Ok(bytes.to_vec())
     }
 
     async fn send(

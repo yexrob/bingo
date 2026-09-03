@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use bingo_sdk::{
     Attachment, CatalogKind, ClientIdentity, CloseReason, CommandSpec, Event, Exit, FrameStream,
-    GatewayEvent, GatewayStream, HostHandle, Input, IntentId, IntentOutcome, InterruptScope,
-    KernelError, Level, OpenOptions, SessionFilter, SessionHandle, SessionId, SessionSelector,
-    SessionState, SessionSummary, SurfaceOptions, View,
+    GatewayEvent, GatewayStream, HostHandle, Image, Input, IntentId, IntentOutcome, InterruptScope,
+    KernelError, Level, OpenOptions, Origin, SessionFilter, SessionHandle, SessionId,
+    SessionSelector, SessionState, SessionSummary, SurfaceOptions, View,
 };
 use crossterm::event::Event as Term;
 use futures::{Stream, StreamExt};
@@ -69,7 +69,22 @@ enum Reply {
     Commands(Vec<CommandSpec>),
     /// One catalogue's ids, by the source name a command's argument gives.
     Catalogue(String, Vec<String>),
+    /// A line whose pictures have been read in (ADR-0041): the loop asked for
+    /// them off its own thread, so a slow web server costs it no frame.
+    Mentioned(Box<Mentioned>),
     Failed(KernelError),
+}
+
+/// A submitted line waiting on the pictures it named. It carries the mailbox
+/// it was typed at, so a person who switches session while a picture is in
+/// flight still sends it where they wrote it.
+struct Mentioned {
+    handle: SessionHandle,
+    text: String,
+    origin: Origin,
+    /// The composer's own pictures with the mentions read in after them, or
+    /// the first mention that did not read, in the words a person is shown.
+    images: Result<Vec<Image>, String>,
 }
 
 /// What this surface is attached to: the reducer's state for every session
@@ -612,51 +627,84 @@ impl Run {
         let Some(handle) = self.session.writer() else {
             return self.not_yet();
         };
-        let mut said = None;
-        let input = match input {
+        match input {
             Input::Text {
                 text,
                 images,
                 origin,
-            } => {
-                let Some(images) = self.with_mentioned(&text, images) else {
-                    return self.ui.composer.set(&text);
-                };
-                history::append(&self.data_dir, &text);
-                said = Some(text.clone());
-                self.ui.pictures.clear();
-                Input::Text {
-                    text,
-                    images,
-                    origin,
-                }
-            }
-            action => action,
-        };
-        let intent = self.mint(said);
-        handle.submit(intent, input);
-    }
-
-    /// `images` with the pictures `text` mentions by path read in after them,
-    /// relative to the session's directory; `None`, and a notice saying
-    /// which, when one does not read — nothing is sent then.
-    fn with_mentioned(
-        &mut self,
-        text: &str,
-        mut images: Vec<bingo_sdk::Image>,
-    ) -> Option<Vec<bingo_sdk::Image>> {
-        let cwd = std::path::PathBuf::from(&self.session.tree.root().summary.cwd);
-        for path in complete::attachments(text) {
-            match bingo_sdk::Image::read(&cwd.join(&path)) {
-                Ok(image) => images.push(image),
-                Err(error) => {
-                    self.ui
-                        .notify(Level::Warn, format!("{path}: {error}"), Instant::now());
-                    return None;
-                }
+            } => self.submit_text(handle, text, images, origin),
+            action => {
+                let intent = self.mint(None);
+                handle.submit(intent, action);
             }
         }
-        Some(images)
+    }
+
+    /// A line goes as soon as the pictures it names are in hand. A line that
+    /// names none goes now; the rest are read on their own task — a path off
+    /// this machine's disk, a URL this machine fetches (ADR-0041 §3) — and
+    /// come back as a reply, so no key press waits on a web server.
+    fn submit_text(
+        &mut self,
+        handle: SessionHandle,
+        text: String,
+        images: Vec<Image>,
+        origin: Origin,
+    ) {
+        let mentions = complete::attachments(&text);
+        if mentions.is_empty() {
+            return self.send_text(handle, text, images, origin);
+        }
+        let cwd = std::path::PathBuf::from(&self.session.tree.root().summary.cwd);
+        self.spawn(async move {
+            let images = read_mentions(mentions, &cwd, images).await;
+            Ok(Reply::Mentioned(Box::new(Mentioned {
+                handle,
+                text,
+                origin,
+                images,
+            })))
+        });
+    }
+
+    /// The pictures are in hand: the words go with them, or the line comes
+    /// back with the reason it did not — nothing is sent then, and what was
+    /// typed is not lost.
+    fn mentioned(&mut self, waiting: Mentioned) {
+        let Mentioned {
+            handle,
+            text,
+            origin,
+            images,
+        } = waiting;
+        match images {
+            Ok(images) => self.send_text(handle, text, images, origin),
+            Err(why) => {
+                self.ui.notify(Level::Warn, why, Instant::now());
+                self.ui.composer.set(&text);
+            }
+        }
+    }
+
+    /// The words, their pictures, and the line they leave in the history.
+    fn send_text(
+        &mut self,
+        handle: SessionHandle,
+        text: String,
+        images: Vec<Image>,
+        origin: Origin,
+    ) {
+        history::append(&self.data_dir, &text);
+        self.ui.pictures.clear();
+        let intent = self.mint(Some(text.clone()));
+        handle.submit(
+            intent,
+            Input::Text {
+                text,
+                images,
+                origin,
+            },
+        );
     }
 
     fn interrupt(&mut self) {
@@ -842,6 +890,7 @@ impl Run {
             Reply::Catalogue(source, ids) => {
                 self.ui.catalogs.values.insert(source, ids);
             }
+            Reply::Mentioned(waiting) => self.mentioned(*waiting),
             Reply::Failed(error) => {
                 self.ui.opening = false;
                 self.ui.notify(Level::Error, error.message, Instant::now());
@@ -870,6 +919,24 @@ impl Run {
         self.ui.layer.close(Instant::now());
         self.refocus();
     }
+}
+
+/// `images` with the pictures `mentions` name read in after them, in the
+/// order they were written; the first that does not read is what comes back
+/// instead, in the words the notice will carry. Off the loop's thread: a
+/// path is read from disk and a URL is fetched by this machine (ADR-0041 §3).
+async fn read_mentions(
+    mentions: Vec<String>,
+    cwd: &std::path::Path,
+    mut images: Vec<Image>,
+) -> Result<Vec<Image>, String> {
+    for word in mentions {
+        match bingo_pictures::load(&bingo_pictures::Source::parse(&word, cwd)).await {
+            Ok(image) => images.push(image),
+            Err(error) => return Err(format!("{word}: {error}")),
+        }
+    }
+    Ok(images)
 }
 
 /// `bingo — <directory>`, and the session in view when it is not the root.
@@ -1655,50 +1722,144 @@ mod tests {
         }
     }
 
-    /// A line and the directory a mention is read from.
-    fn mentioning() -> (tempfile::TempDir, Run, std::sync::Arc<TestSession>) {
+    /// A line, the directory a mention is read from, and the lane the read
+    /// comes back on — the loop's own, kept open here so a test waits for a
+    /// picture exactly as the loop does.
+    fn mentioning() -> (
+        tempfile::TempDir,
+        Run,
+        std::sync::Arc<TestSession>,
+        mpsc::Receiver<Reply>,
+    ) {
         let dir = tempfile::tempdir().expect("a directory");
         let mut state = state();
         state.summary.cwd = dir.path().to_string_lossy().into_owned();
         let session = std::sync::Arc::new(TestSession::default());
         let mut run = idle_in(state, std::sync::Arc::clone(&session), Instant::now());
+        let (replies, waiting) = mpsc::channel(4);
+        run.replies = replies;
         // A submit appends to the prompt history; that belongs in the
         // scratch directory, not beside the crate's sources.
         run.data_dir = dir.path().to_path_buf();
-        (dir, run, session)
+        (dir, run, session, waiting)
+    }
+
+    /// The hop the loop makes: the pictures are read on a task and folded
+    /// back in when they land.
+    async fn settle(run: &mut Run, waiting: &mut mpsc::Receiver<Reply>) {
+        let reply = waiting.recv().await.expect("the mentions came back");
+        run.reply(reply, &mut None);
     }
 
     fn prose(text: &str) -> Input {
         Input::text(text, bingo_sdk::Origin::surface(SURFACE_ID))
     }
 
-    #[test]
-    fn a_mentioned_picture_is_read_from_the_sessions_directory() {
-        let (dir, mut run, session) = mentioning();
-        std::fs::write(dir.path().join("shot.png"), b"png").expect("a picture");
-        run.submit(prose("look at @shot.png"));
+    /// The one picture a submitted line carried, whatever brought it.
+    fn one_picture(session: &TestSession, line: &str) -> Image {
         let submitted = session.submitted();
         let [Input::Text { text, images, .. }] = submitted.as_slice() else {
             panic!("one submission: {submitted:?}");
         };
-        assert_eq!(text, "look at @shot.png", "the words go as typed");
-        assert_eq!(images.len(), 1);
-        assert_eq!(images[0].media_type, "image/png");
+        assert_eq!(text, line, "the words go as typed");
+        let [image] = images.as_slice() else {
+            panic!("one picture: {images:?}");
+        };
+        image.clone()
+    }
+
+    #[tokio::test]
+    async fn a_mentioned_picture_is_read_from_the_sessions_directory() {
+        let (dir, mut run, session, mut waiting) = mentioning();
+        std::fs::write(
+            dir.path().join("shot.png"),
+            bingo_pictures::testing::png_bytes(3, 4),
+        )
+        .expect("a picture");
+        run.submit(prose("look at @shot.png"));
+        settle(&mut run, &mut waiting).await;
+        let image = one_picture(&session, "look at @shot.png");
+        assert_eq!(image.media_type, "image/png");
         assert!(run.ui.notices.is_empty());
     }
 
-    #[test]
-    fn a_mention_that_does_not_read_keeps_the_line_and_says_so() {
-        let (_dir, mut run, session) = mentioning();
+    /// A format no provider takes is one a person still has: it is decoded
+    /// here and journaled as PNG (ADR-0041 §2).
+    #[tokio::test]
+    async fn a_mentioned_bmp_reaches_the_session_as_a_png() {
+        let (dir, mut run, session, mut waiting) = mentioning();
+        std::fs::write(
+            dir.path().join("shot.bmp"),
+            bingo_pictures::testing::drawn(5, 6, bingo_pictures::testing::ImageFormat::Bmp),
+        )
+        .expect("a picture");
+        run.submit(prose("@shot.bmp"));
+        settle(&mut run, &mut waiting).await;
+        assert_eq!(one_picture(&session, "@shot.bmp").media_type, "image/png");
+    }
+
+    /// A picture on the web is read by this machine and journaled as bytes;
+    /// no provider is ever handed the URL (ADR-0041 §3).
+    #[tokio::test]
+    async fn a_mentioned_url_is_fetched_by_this_machine() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/y.jpg"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(
+                bingo_pictures::testing::drawn(4, 4, bingo_pictures::testing::ImageFormat::Jpeg),
+            ))
+            .mount(&server)
+            .await;
+        let (_dir, mut run, session, mut waiting) = mentioning();
+        let line = format!("look at @{}/y.jpg", server.uri());
+        run.submit(prose(&line));
+        settle(&mut run, &mut waiting).await;
+        assert_eq!(one_picture(&session, &line).media_type, "image/jpeg");
+        assert!(run.ui.notices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_mention_that_does_not_read_keeps_the_line_and_says_so() {
+        let (_dir, mut run, session, mut waiting) = mentioning();
         run.submit(prose("look at @missing.png"));
+        settle(&mut run, &mut waiting).await;
         assert!(session.submitted().is_empty(), "nothing was sent");
         assert_eq!(run.ui.composer.text(), "look at @missing.png");
         assert!(
             run.ui
                 .notices
                 .iter()
-                .any(|n| n.text.starts_with("missing.png: ")),
-            "the notice names the path: {:?}",
+                .any(|n| n.text.starts_with("missing.png: ") && n.text.contains("could not")),
+            "the notice names the mention and says why: {:?}",
+            run.ui.notices
+        );
+    }
+
+    /// A URL that answers with a web page is the one a person pastes by
+    /// mistake; it must say so rather than hang on the body.
+    #[tokio::test]
+    async fn a_url_that_is_not_a_picture_keeps_the_line_and_says_so() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<!doctype html><html>a page</html>"),
+            )
+            .mount(&server)
+            .await;
+        let (_dir, mut run, session, mut waiting) = mentioning();
+        let line = format!("@{}/page", server.uri());
+        run.submit(prose(&line));
+        settle(&mut run, &mut waiting).await;
+        assert!(session.submitted().is_empty(), "nothing was sent");
+        assert_eq!(run.ui.composer.text(), line);
+        assert!(
+            run.ui
+                .notices
+                .iter()
+                .any(|n| n.text.contains("not a picture")),
+            "{:?}",
             run.ui.notices
         );
     }
