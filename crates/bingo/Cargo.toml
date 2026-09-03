@@ -75,3 +75,7 @@ futures.workspace = true
 # after `exit` is a terminal question, not a unit-test one.
 portable-pty.workspace = true
 vt100.workspace = true
+# M39 (ADR-0036 §3): the tool bridge end to end — a real MCP client speaking
+# through a spawned `bingo acp-mcp-proxy` to a live listener.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+async-trait.workspace = true

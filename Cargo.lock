@@ -260,6 +260,7 @@ dependencies = [
  "jiff",
  "portable-pty",
  "process-wrap 10.0.0",
+ "rmcp",
  "serde",
  "serde_json",
  "tempfile",

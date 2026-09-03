@@ -1,6 +1,7 @@
 //! The binary: parse the command line, compose the plugins, build the host,
 //! run one surface, exit with its code. Nothing here knows how a turn works.
 
+mod acp_proxy;
 mod channels;
 mod gateway;
 mod login;
@@ -176,6 +177,12 @@ enum Command {
         #[command(subcommand)]
         verb: gateway::Verb,
     },
+    /// The stdio↔socket pump an ACP agent spawns to reach this run's shared
+    /// tools (ADR-0036 §3). Hidden: it is a row in a `session/new` this
+    /// binary writes for itself, not a thing a person types, and it reads
+    /// where to dial from the environment rather than from here.
+    #[command(hide = true)]
+    AcpMcpProxy,
 }
 
 #[derive(Subcommand, Debug)]
@@ -221,7 +228,8 @@ impl Command {
             Command::Serve { .. }
             | Command::Channels { .. }
             | Command::Gateway { .. }
-            | Command::Provider { .. } => None,
+            | Command::Provider { .. }
+            | Command::AcpMcpProxy => None,
         }
     }
 }
@@ -424,6 +432,9 @@ async fn credentials(host: &Host, cli: &Cli) -> Option<Result<i32, KernelError>>
 async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32, KernelError>> {
     let env = environment(cwd);
     match &cli.command {
+        // Not a bingo run at all: no host, no session, and nothing on stdout
+        // but the bytes it is carrying (ADR-0036 §3).
+        Some(Command::AcpMcpProxy) => Some(acp_proxy::run().await),
         Some(Command::Provider { .. }) => Some(added_provider(&env).await),
         Some(Command::Channels {
             action: Some(ChannelsAction::Add { adapter }),
