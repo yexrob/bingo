@@ -48,7 +48,11 @@ carrying the kickoff and naming with `@name` whoever it is for. A member reads \
 its room at the head of its own turn, and being named is what opens that turn \
 now, so one post starts everyone it names and each reads its own brief first; \
 writing to them one at a time instead makes you the switchboard every step has \
-to pass back through.";
+to pass back through. A brief that tells an agent to stand by has to say what \
+to stand by for: everything reaching it from elsewhere is labelled — \
+`[from <name>]`, `[in #<room>]` — and an unlabelled line in its own \
+conversation is the person it works for, or you, writing to it directly, which \
+it answers whatever else it was told.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SpawnArgs {
@@ -659,6 +663,26 @@ mod tests {
             "{DESCRIPTION}"
         );
         assert!(DESCRIPTION.contains("switchboard"), "{DESCRIPTION}");
+    }
+
+    /// ADR-0010 §5: an unlabelled line is the person, and a brief that seats an
+    /// agent must not leave it deaf to one. The rule is taught where the brief
+    /// is written, because that is where the mistake is made.
+    #[test]
+    fn the_description_says_what_an_unlabelled_line_is() {
+        assert!(
+            DESCRIPTION.contains("stand by has to say what to stand by for"),
+            "{DESCRIPTION}"
+        );
+        assert!(
+            DESCRIPTION.contains("`[from <name>]`, `[in #<room>]`"),
+            "the labelled kinds are named, so the unlabelled one is legible"
+        );
+        assert!(
+            DESCRIPTION
+                .contains("an unlabelled line in its own conversation is the person it works for"),
+            "{DESCRIPTION}"
+        );
     }
 
     #[test]
