@@ -7,7 +7,7 @@
 //! adapter set that declares its capabilities as flags.
 
 use async_trait::async_trait;
-use bingo_sdk::{CancellationToken, InteractionId};
+use bingo_sdk::{CancellationToken, Image, InteractionId};
 use tokio::sync::mpsc;
 
 use crate::conversation::{Conversation, Posted};
@@ -24,6 +24,9 @@ pub enum Incoming {
         /// and is stamped by the adapter, never read out of the text.
         principal: String,
         text: String,
+        /// The pictures the message carried, already fetched (ADR-0040): a
+        /// caption-less picture is a message with empty text.
+        images: Vec<Image>,
         /// The bot was spoken to: always in a direct chat, and in a group
         /// only on a mention (ADR-0016 §4).
         addressed: bool,

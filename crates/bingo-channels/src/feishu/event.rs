@@ -31,6 +31,16 @@ const OURS: &str = "bingo";
 pub struct Heard {
     pub id: String,
     pub incoming: Option<Incoming>,
+    /// The pictures the message carried, still to be fetched: parsing does
+    /// no I/O, so what leaves here is the key, not the bytes.
+    pub pictures: Vec<Picture>,
+}
+
+/// One picture in a message, by the address Feishu serves it under.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picture {
+    pub message: String,
+    pub key: String,
 }
 
 /// `me` is this bot's own open id, read once at startup: there is no
@@ -38,15 +48,19 @@ pub struct Heard {
 pub fn heard(payload: &[u8], me: &str) -> Option<Heard> {
     let event: Value = serde_json::from_slice(payload).ok()?;
     let id = event["header"]["event_id"].as_str()?.to_string();
-    let incoming = match event["header"]["event_type"].as_str()? {
-        MESSAGE => message(&event["event"], me),
-        CARD_ACTION => click(&event["event"]),
-        _ => None,
+    let (incoming, pictures) = match event["header"]["event_type"].as_str()? {
+        MESSAGE => message(&event["event"], me).unzip(),
+        CARD_ACTION => (click(&event["event"]), None),
+        _ => (None, None),
     };
-    Some(Heard { id, incoming })
+    Some(Heard {
+        id,
+        incoming,
+        pictures: pictures.unwrap_or_default(),
+    })
 }
 
-fn message(event: &Value, me: &str) -> Option<Incoming> {
+fn message(event: &Value, me: &str) -> Option<(Incoming, Vec<Picture>)> {
     let message = &event["message"];
     let chat = message["chat_id"].as_str()?;
     // Only `p2p` and `group` exist; a topic thread is a group with a thread id.
@@ -57,9 +71,19 @@ fn message(event: &Value, me: &str) -> Option<Incoming> {
         None => Conversation::direct(chat),
     };
     let mentions = &message["mentions"];
-    Some(Incoming::Message {
+    let (text, keys) = spoken(message, mentions, me)?;
+    let id = message["message_id"].as_str().unwrap_or_default();
+    let pictures = keys
+        .into_iter()
+        .map(|key| Picture {
+            message: id.to_string(),
+            key,
+        })
+        .collect();
+    let incoming = Incoming::Message {
         addressed: !group || mentions_me(mentions, me),
-        text: spoken(message, mentions, me)?,
+        text,
+        images: Vec::new(),
         principal: event["sender"]["sender_id"]["open_id"]
             .as_str()
             .unwrap_or_default()
@@ -68,7 +92,8 @@ fn message(event: &Value, me: &str) -> Option<Incoming> {
             .as_str()
             .map(|id| Handle::Message(id.to_string()).posted()),
         conversation,
-    })
+    };
+    Some((incoming, pictures))
 }
 
 fn mentions_me(mentions: &Value, me: &str) -> bool {
@@ -77,37 +102,45 @@ fn mentions_me(mentions: &Value, me: &str) -> bool {
         .is_some_and(|mentions| mentions.iter().any(|m| m["id"]["open_id"] == me))
 }
 
-/// The words, with the `@_user_N` placeholders resolved: ours removed, the
-/// rest replaced by the name a person would have read on the screen.
-fn spoken(message: &Value, mentions: &Value, me: &str) -> Option<String> {
+/// The words, with the `@_user_N` placeholders resolved — ours removed, the
+/// rest replaced by the name a person would have read on the screen — and
+/// the keys of the pictures beside them, in the order they were placed.
+fn spoken(message: &Value, mentions: &Value, me: &str) -> Option<(String, Vec<String>)> {
     let content: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-    let text = match message["message_type"].as_str()? {
-        "text" => content["text"].as_str()?.to_string(),
+    let (text, keys) = match message["message_type"].as_str()? {
+        "text" => (content["text"].as_str()?.to_string(), Vec::new()),
         "post" => post(&content),
-        // Files, images and audio are not this surface's (M13 non-goals).
+        "image" => (
+            String::new(),
+            vec![content["image_key"].as_str()?.to_string()],
+        ),
+        // Files, audio and stickers are not this surface's (M13 non-goals).
         _ => return None,
     };
-    Some(resolve(&text, mentions, me).trim().to_string())
+    Some((resolve(&text, mentions, me).trim().to_string(), keys))
 }
 
-/// A rich-text message flattened: its text runs, one line per paragraph.
-fn post(content: &Value) -> String {
-    let paragraphs = content["content"]
+/// A rich-text message flattened: its text runs, one line per paragraph,
+/// and its `img` runs as the keys they name.
+fn post(content: &Value) -> (String, Vec<String>) {
+    let runs: Vec<&Value> = content["content"]
         .as_array()
         .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    paragraphs
+        .unwrap_or(&[])
         .iter()
-        .map(|runs| {
-            runs.as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-                .iter()
-                .filter_map(|run| run["text"].as_str())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(|paragraph| paragraph.as_array().map(Vec::as_slice).unwrap_or(&[]))
+        .flat_map(|paragraph| paragraph.iter().chain(std::iter::once(&Value::Null)))
+        .collect();
+    let mut text = String::new();
+    let mut keys = Vec::new();
+    for run in runs {
+        match run["tag"].as_str() {
+            Some("img") => keys.extend(run["image_key"].as_str().map(str::to_owned)),
+            _ if run.is_null() => text.push('\n'),
+            _ => text.push_str(run["text"].as_str().unwrap_or_default()),
+        }
+    }
+    (text, keys)
 }
 
 fn resolve(text: &str, mentions: &Value, me: &str) -> String {
@@ -251,6 +284,7 @@ mod tests {
                 conversation: Conversation::direct("oc_1"),
                 principal: "ou_person".into(),
                 text: "run the tests".into(),
+                images: Vec::new(),
                 addressed: true,
                 parent: Some(Handle::Message("om_1".into()).posted()),
             })
@@ -339,10 +373,56 @@ mod tests {
     fn a_file_is_seen_and_left_alone() {
         let mut event: Value =
             serde_json::from_slice(&text_message("p2p", json!({}), json!([]))).expect("json");
-        event["event"]["message"]["message_type"] = json!("image");
+        event["event"]["message"]["message_type"] = json!("audio");
         let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
         assert_eq!(heard.id, "evt_1", "it is still acked and still deduped");
         assert_eq!(heard.incoming, None);
+        assert!(heard.pictures.is_empty());
+    }
+
+    #[test]
+    fn a_picture_is_a_message_with_no_words_and_one_key_to_fetch() {
+        let mut event: Value = serde_json::from_slice(&text_message(
+            "p2p",
+            json!({"image_key": "img_1"}),
+            json!([]),
+        ))
+        .expect("json");
+        event["event"]["message"]["message_type"] = json!("image");
+        let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
+        let Some(Incoming::Message { text, images, .. }) = heard.incoming else {
+            panic!("a message");
+        };
+        assert_eq!(text, "");
+        assert!(images.is_empty(), "nothing is fetched while parsing");
+        assert_eq!(
+            heard.pictures,
+            vec![Picture {
+                message: "om_1".into(),
+                key: "img_1".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_post_keeps_its_words_and_its_pictures_in_order() {
+        let mut event: Value = serde_json::from_slice(&text_message(
+            "p2p",
+            json!({"title": "", "content": [
+                [{"tag": "text", "text": "before"}, {"tag": "img", "image_key": "img_a"}],
+                [{"tag": "img", "image_key": "img_b"}, {"tag": "text", "text": "after"}]
+            ]}),
+            json!([]),
+        ))
+        .expect("json");
+        event["event"]["message"]["message_type"] = json!("post");
+        let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
+        let Some(Incoming::Message { text, .. }) = heard.incoming else {
+            panic!("a message");
+        };
+        assert_eq!(text, "before\nafter");
+        let keys: Vec<&str> = heard.pictures.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["img_a", "img_b"]);
     }
 
     #[test]

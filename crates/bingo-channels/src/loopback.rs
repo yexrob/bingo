@@ -204,6 +204,7 @@ impl Loopback {
                     conversation,
                     principal,
                     text,
+                    images: Vec::new(),
                 })
             }
             "click" => Some(Incoming::Click {

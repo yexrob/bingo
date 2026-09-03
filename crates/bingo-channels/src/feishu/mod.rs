@@ -17,6 +17,7 @@ pub mod card;
 pub mod chunks;
 pub mod event;
 pub mod frame;
+pub mod pictures;
 pub mod posted;
 pub mod send;
 pub mod token;

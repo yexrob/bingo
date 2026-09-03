@@ -22,8 +22,9 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use super::api::Api;
 use super::bootstrap::{ClientConfig, Refusal, handshake};
 use super::chunks::Chunks;
-use super::event::{Seen, heard};
+use super::event::{Picture, Seen, heard};
 use super::frame::{self, Frame, Method, header, kind};
+use super::pictures;
 use crate::adapter::{Inbox, Incoming};
 use crate::error::ChannelError;
 
@@ -98,7 +99,15 @@ async fn once(
         Ok((socket, _)) => socket,
         Err(error) => return refused(error),
     };
-    pump(socket, config, me, inbox, cancel, seen).await
+    let delivery = Delivery { api, inbox };
+    pump(socket, config, me, &delivery, cancel, seen).await
+}
+
+/// Where an event goes once it is whole: the inbox, and the api that fetches
+/// what the event only names (ADR-0040).
+struct Delivery<'a> {
+    api: &'a Api,
+    inbox: &'a Inbox,
 }
 
 /// A refused upgrade says why in three response headers and no body.
@@ -128,12 +137,12 @@ async fn pump(
     socket: Socket,
     config: &mut ClientConfig,
     me: &str,
-    inbox: &Inbox,
+    delivery: &Delivery<'_>,
     cancel: &CancellationToken,
     seen: &mut Seen,
 ) -> Ended {
     let (mut writer, mut reader) = socket.split();
-    let ended = listening(&mut writer, &mut reader, config, me, inbox, cancel, seen).await;
+    let ended = listening(&mut writer, &mut reader, config, me, delivery, cancel, seen).await;
     farewell(&mut writer).await;
     ended
 }
@@ -143,7 +152,7 @@ async fn listening(
     reader: &mut Reader,
     config: &mut ClientConfig,
     me: &str,
-    inbox: &Inbox,
+    delivery: &Delivery<'_>,
     cancel: &CancellationToken,
     seen: &mut Seen,
 ) -> Ended {
@@ -175,7 +184,7 @@ async fn listening(
         // just been hot-updated by a pong.
         quiet_at = Instant::now() + config.read_deadline();
         ping_at = ping_at.min(Instant::now() + config.ping_interval);
-        if let Some(ended) = act(writer, step, inbox, cancel, quiet_at).await {
+        if let Some(ended) = act(writer, step, delivery, cancel, quiet_at).await {
             return ended;
         }
     }
@@ -186,7 +195,7 @@ async fn listening(
 async fn act(
     writer: &mut Writer,
     step: Step,
-    inbox: &Inbox,
+    delivery: &Delivery<'_>,
     cancel: &CancellationToken,
     quiet_at: Instant,
 ) -> Option<Ended> {
@@ -197,7 +206,7 @@ async fn act(
             "the ack could not be written: {error}"
         )));
     }
-    let event = step.deliver?;
+    let event = with_pictures(delivery.api, step.deliver?, &step.pictures).await;
     // Handing an event on must never blind the socket. While this task is
     // parked on a full downstream channel, nothing polls the read deadline,
     // the ping timer or the cancellation — so a stalled session is
@@ -206,11 +215,35 @@ async fn act(
     // never returns. That is the wedge no reconnect can recover from, which is
     // why this wait is armed like every other one here.
     tokio::select! {
-        posted = inbox.post(event) => posted.is_err().then_some(Ended::Cancelled),
+        posted = delivery.inbox.post(event) => posted.is_err().then_some(Ended::Cancelled),
         _ = cancel.cancelled() => Some(Ended::Cancelled),
         _ = tokio::time::sleep_until(quiet_at) => Some(Ended::Dropped(
             "the session could not take an event within the read deadline".into(),
         )),
+    }
+}
+
+/// The message with its pictures fetched; anything else is handed on as is.
+/// The ack has gone out already, so a slow fetch costs delivery time, never
+/// a redelivery.
+async fn with_pictures(api: &Api, event: Incoming, pictures: &[Picture]) -> Incoming {
+    match event {
+        Incoming::Message {
+            conversation,
+            principal,
+            text,
+            addressed,
+            parent,
+            ..
+        } if !pictures.is_empty() => Incoming::Message {
+            conversation,
+            principal,
+            text,
+            images: pictures::fetch(api, pictures).await,
+            addressed,
+            parent,
+        },
+        other => other,
     }
 }
 
@@ -247,6 +280,8 @@ fn read(message: Option<Result<Message, WsError>>) -> Option<Frame> {
 struct Step {
     reply: Option<Frame>,
     deliver: Option<Incoming>,
+    /// What `deliver` still has to fetch before it is handed on.
+    pictures: Vec<Picture>,
 }
 
 /// The reassembly state of one connection, and the dedupe ring of the whole
@@ -300,12 +335,14 @@ impl<'a> Inbound<'a> {
     /// Acked within three seconds, whatever else happens to it. The ack's
     /// payload doubles as the `{}` a card callback must be answered with.
     fn event(&mut self, whole: Frame, arrived: std::time::Instant) -> Step {
-        let deliver = heard(&whole.payload, self.me)
+        let (deliver, pictures) = heard(&whole.payload, self.me)
             .filter(|heard| self.seen.first(&heard.id))
-            .and_then(|heard| heard.incoming);
+            .map(|heard| (heard.incoming, heard.pictures))
+            .unwrap_or_default();
         Step {
             reply: Some(frame::ack(&whole, arrived.elapsed())),
             deliver,
+            pictures,
         }
     }
 }
