@@ -164,7 +164,9 @@ mod tests {
     #[test]
     fn every_session_door_round_trips() {
         let new: NewSessionRequest = writes(fixtures::new_session_request());
-        assert!(new.mcp_servers.is_empty(), "our tools do not cross");
+        // The recorded body carries no rows; since M39 a live one does, and
+        // what goes in them is `servers.rs`'s question, not this fixture's.
+        assert!(new.mcp_servers.is_empty(), "none in the recorded body");
         let opened: NewSessionResponse = reads(fixtures::new_session_response());
         assert_eq!(opened.session_id.0.as_ref(), "sess_abc123");
         writes::<LoadSessionRequest>(fixtures::load_session_request());
