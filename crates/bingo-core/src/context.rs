@@ -4,6 +4,8 @@
 pub mod budget;
 pub mod elide;
 
+use std::collections::HashSet;
+
 use bingo_sdk::*;
 use serde_json::Value;
 
@@ -50,7 +52,10 @@ impl ContextView {
     }
 
     pub fn fold_items(items: &[Item]) -> Vec<Message> {
-        let mut out = Folder::default();
+        let mut out = Folder {
+            mixed: mixed_turns(items),
+            ..Default::default()
+        };
         for item in items {
             out.item(item);
         }
@@ -95,6 +100,9 @@ struct Folder {
     /// one response joins it, and their results join the one user message
     /// after it, as the model produced them.
     round: Option<(Option<TurnId>, u32)>,
+    /// The turns in which the person's own lines are marked, because
+    /// something that is not theirs speaks unlabelled in the same turn.
+    mixed: HashSet<Option<TurnId>>,
 }
 
 impl Folder {
@@ -102,7 +110,9 @@ impl Folder {
     fn item(&mut self, item: &Item) {
         let round = (item.turn.clone(), item.round);
         match &item.body {
-            ItemBody::User { parts, origin } => self.user(spoken(parts, origin)),
+            ItemBody::User { parts, origin } => {
+                self.user(spoken(parts, origin, self.mixed.contains(&item.turn)))
+            }
             ItemBody::Assistant { text } => self.text(text),
             ItemBody::Reasoning {
                 text,
@@ -255,14 +265,20 @@ fn plain(value: &Value) -> String {
 /// (ADR-0010 §5, ADR-0011): an agent's message, or a post in a group, must
 /// not read as the one the session works for, and a reply goes back where
 /// the post came from.
-fn spoken(parts: &[ContentPart], origin: &Origin) -> Vec<ContentPart> {
-    let Some(label) = speaker(origin) else {
+fn spoken(parts: &[ContentPart], origin: &Origin, mixed: bool) -> Vec<ContentPart> {
+    let Some(label) = marker(origin, mixed) else {
         return parts.to_vec();
     };
     let mut out = Vec::with_capacity(parts.len() + 1);
     out.push(ContentPart::text(format!("[{label}]")));
     out.extend(parts.iter().cloned());
     out
+}
+
+/// What stands above a user item: who spoke, where they spoke — or, in a turn
+/// that mixes, that this line is the person's own.
+fn marker(origin: &Origin, mixed: bool) -> Option<String> {
+    speaker(origin).or_else(|| (mixed && the_persons_own(origin)).then(|| THE_PERSON.to_string()))
 }
 
 /// `from <principal>`, `from <principal> in <conversation>`, or
@@ -276,6 +292,54 @@ fn speaker(origin: &Origin) -> Option<String> {
         (None, Some(place)) => Some(format!("in {place}")),
         (None, None) => None,
     }
+}
+
+/// What the person's own line is called when it has to be called something.
+const THE_PERSON: &str = "from the person you work for";
+
+/// The surfaces the kernel itself speaks through in a user's turn: a
+/// contributor's piece, a hook's, its own. Each signs nothing, exactly as the
+/// person's own line signs nothing, so the surface is the only thing that
+/// tells them apart — which is why they are named here, beside the rule that
+/// reads them, and used from wherever a piece is minted.
+pub(crate) const KERNEL_SURFACE: &str = "kernel";
+pub(crate) const CONTRIBUTOR_PREFIX: &str = "contributor:";
+pub(crate) const HOOK_PREFIX: &str = "hook:";
+
+fn kernel_speaks_through(surface: &str) -> bool {
+    surface == KERNEL_SURFACE
+        || surface.starts_with(CONTRIBUTOR_PREFIX)
+        || surface.starts_with(HOOK_PREFIX)
+}
+
+/// The person's own line: signed by nobody, from nowhere, through a door the
+/// kernel does not speak through. A door that is not the person has to sign
+/// what it sends — a principal, a conversation, or both — because the fold has
+/// nothing else to tell it apart by.
+fn the_persons_own(origin: &Origin) -> bool {
+    speaker(origin).is_none() && !kernel_speaks_through(&origin.surface)
+}
+
+/// The turns whose user entries mix the person's own lines with speech that is
+/// not theirs. Bareness marks the person by absence, and an absence is legible
+/// only while nothing else in the same turn is unlabelled too: a nudge and a
+/// direct line coalesce into one turn, and there the person takes a mark of
+/// their own. A turn that is all theirs keeps every line bare.
+fn mixed_turns(items: &[Item]) -> HashSet<Option<TurnId>> {
+    let mut theirs: HashSet<Option<TurnId>> = HashSet::new();
+    let mut others: HashSet<Option<TurnId>> = HashSet::new();
+    for item in items {
+        let ItemBody::User { origin, .. } = &item.body else {
+            continue;
+        };
+        let side = if the_persons_own(origin) {
+            &mut theirs
+        } else {
+            &mut others
+        };
+        side.insert(item.turn.clone());
+    }
+    theirs.intersection(&others).cloned().collect()
 }
 
 #[cfg(test)]
@@ -305,6 +369,49 @@ mod tests {
                 origin: Origin::surface("t"),
             },
         )
+    }
+
+    /// A user item in a named turn, said through `origin`.
+    fn said(id: &str, turn: &str, origin: Origin, text: &str) -> Item {
+        let mut said = item(
+            id,
+            ItemBody::User {
+                parts: vec![ContentPart::text(text)],
+                origin,
+            },
+        );
+        said.turn = Some(TurnId::from_raw(turn));
+        said
+    }
+
+    /// The person, through a client: nobody signs it and it comes from nowhere.
+    fn person() -> Origin {
+        Origin::surface("tui")
+    }
+
+    fn peer(who: &str) -> Origin {
+        Origin {
+            surface: "peer".into(),
+            principal: Some(who.into()),
+            conversation: None,
+        }
+    }
+
+    /// A delivery from a conversation and nobody in it — a nudge.
+    fn posted(place: &str) -> Origin {
+        Origin {
+            surface: "peer".into(),
+            principal: None,
+            conversation: Some(place.into()),
+        }
+    }
+
+    fn texts(messages: &[Message]) -> Vec<Option<&str>> {
+        messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .map(|part| part.as_text())
+            .collect()
     }
 
     fn tool(id: &str, call: &str, output: Option<&str>) -> Item {
@@ -353,19 +460,144 @@ mod tests {
         assert_eq!(msgs[3].role, Role::Assistant);
     }
 
+    /// Two turns, folded into one message: the mark belongs to the turn that
+    /// mixes, and a turn of the person's own keeps its line bare.
     #[test]
     fn a_user_item_from_a_named_principal_says_who_spoke() {
-        let mut said = user("i1", "ship it");
-        if let ItemBody::User { origin, .. } = &mut said.body {
-            origin.principal = Some("reviewer".into());
-        }
-        let msgs = ContextView::fold_items(&[said, user("i2", "ok")]);
+        let msgs = ContextView::fold_items(&[
+            said("i1", "trn_1", peer("reviewer"), "ship it"),
+            said("i2", "trn_2", person(), "ok"),
+        ]);
         assert_eq!(msgs.len(), 1);
-        let texts: Vec<Option<&str>> = msgs[0].parts.iter().map(|p| p.as_text()).collect();
         assert_eq!(
-            texts,
+            texts(&msgs),
             [Some("[from reviewer]"), Some("ship it"), Some("ok")],
             "a person's own line carries no prefix"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_is_all_the_persons_own_lines_stays_bare() {
+        let msgs = ContextView::fold_items(&[
+            said("i1", "trn_1", person(), "read x"),
+            said("i2", "trn_1", person(), "and this"),
+        ]);
+        assert_eq!(texts(&msgs), [Some("read x"), Some("and this")]);
+    }
+
+    #[test]
+    fn a_peer_sharing_the_turn_makes_the_persons_line_say_it_is_theirs() {
+        let msgs = ContextView::fold_items(&[
+            said("i1", "trn_1", peer("reviewer"), "ship it"),
+            said("i2", "trn_1", person(), "ok"),
+        ]);
+        assert_eq!(
+            texts(&msgs),
+            [
+                Some("[from reviewer]"),
+                Some("ship it"),
+                Some("[from the person you work for]"),
+                Some("ok"),
+            ]
+        );
+    }
+
+    /// The failure this rule is for: a nudge and a line typed straight at the
+    /// session coalesce into one turn, and the bare line stops reading as the
+    /// person's — a model told to stand by takes it for more of the chatter.
+    #[test]
+    fn a_nudge_sharing_the_turn_makes_the_persons_line_say_it_is_theirs() {
+        let msgs = ContextView::fold_items(&[
+            said(
+                "i1",
+                "trn_1",
+                posted("#collab"),
+                "there is something unread",
+            ),
+            said("i2", "trn_1", person(), "Hi"),
+        ]);
+        assert_eq!(
+            texts(&msgs),
+            [
+                Some("[in #collab]"),
+                Some("there is something unread"),
+                Some("[from the person you work for]"),
+                Some("Hi"),
+            ]
+        );
+    }
+
+    /// A contributor's piece signs nothing and comes from nowhere, exactly as
+    /// the person's line does; only the surface tells them apart.
+    #[test]
+    fn a_contributors_piece_sharing_the_turn_does_the_same() {
+        let msgs = ContextView::fold_items(&[
+            said(
+                "i1",
+                "trn_1",
+                Origin::surface(format!("{CONTRIBUTOR_PREFIX}notes")),
+                "[notes, since you last read]",
+            ),
+            said("i2", "trn_1", person(), "Hi"),
+        ]);
+        assert_eq!(
+            texts(&msgs),
+            [
+                Some("[notes, since you last read]"),
+                Some("[from the person you work for]"),
+                Some("Hi"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_kernel_and_its_hooks_speak_unsigned_and_are_not_the_person() {
+        let msgs = ContextView::fold_items(&[
+            said("i1", "trn_1", Origin::surface(KERNEL_SURFACE), "carry on"),
+            said(
+                "i2",
+                "trn_1",
+                Origin::surface(format!("{HOOK_PREFIX}guard")),
+                "not yet",
+            ),
+            said("i3", "trn_1", person(), "ok"),
+        ]);
+        assert_eq!(
+            texts(&msgs),
+            [
+                Some("carry on"),
+                Some("not yet"),
+                Some("[from the person you work for]"),
+                Some("ok"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_the_person_never_spoke_in_is_marked_nowhere() {
+        let msgs = ContextView::fold_items(&[
+            said(
+                "i1",
+                "trn_1",
+                posted("#collab"),
+                "there is something unread",
+            ),
+            said(
+                "i2",
+                "trn_1",
+                Origin::surface(format!("{CONTRIBUTOR_PREFIX}notes")),
+                "[notes, since you last read]",
+            ),
+            said("i3", "trn_1", Origin::surface(KERNEL_SURFACE), "carry on"),
+        ]);
+        assert_eq!(
+            texts(&msgs),
+            [
+                Some("[in #collab]"),
+                Some("there is something unread"),
+                Some("[notes, since you last read]"),
+                Some("carry on"),
+            ]
         );
     }
 
