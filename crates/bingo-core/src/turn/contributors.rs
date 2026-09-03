@@ -8,6 +8,8 @@ use bingo_sdk::{
     SystemBlock,
 };
 
+use crate::context::CONTRIBUTOR_PREFIX;
+
 #[derive(Default)]
 pub struct Gathered {
     pub system: Vec<SystemBlock>,
@@ -49,7 +51,9 @@ fn absorb(out: &mut Gathered, id: &str, pieces: Vec<ContextPiece>) {
     for piece in pieces {
         match piece {
             ContextPiece::System(block) => out.system.push(block),
-            ContextPiece::User { parts, .. } => out.user.push((format!("contributor:{id}"), parts)),
+            ContextPiece::User { parts, .. } => {
+                out.user.push((format!("{CONTRIBUTOR_PREFIX}{id}"), parts))
+            }
         }
     }
 }

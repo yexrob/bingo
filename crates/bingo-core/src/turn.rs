@@ -28,7 +28,9 @@ use stream::Streamed;
 pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
 
 use crate::accumulator::Finished;
-use crate::context::{ContextView, budget, elide, estimate_tokens, splice_compaction};
+use crate::context::{
+    ContextView, HOOK_PREFIX, KERNEL_SURFACE, budget, elide, estimate_tokens, splice_compaction,
+};
 use crate::executor::{self, Gate, PendingCall};
 use crate::gate::{GateInput, gate_call, hook_applies};
 use crate::models::vision;
@@ -480,7 +482,10 @@ impl Turn<'_> {
             && self.recoveries < MAX_LENGTH_RECOVERIES
         {
             self.recoveries += 1;
-            self.user_piece(vec![ContentPart::text(CONTINUE_PROMPT)], "kernel".into());
+            self.user_piece(
+                vec![ContentPart::text(CONTINUE_PROMPT)],
+                KERNEL_SURFACE.into(),
+            );
             self.round += 1;
             return Some(Step::Assembling);
         }
@@ -493,7 +498,7 @@ impl Turn<'_> {
             if let HookOutcome::Block { reason } = hook.on_stop(&self.hook_cx).await {
                 self.user_piece(
                     vec![ContentPart::text(reason)],
-                    format!("hook:{}", hook.id()),
+                    format!("{HOOK_PREFIX}{}", hook.id()),
                 );
                 self.round += 1;
                 return Step::Assembling;
