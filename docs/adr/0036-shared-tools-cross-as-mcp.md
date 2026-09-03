@@ -87,6 +87,10 @@ of its sentence — no MCP handover — is repealed for shared tools.
 - The turn must serve a bridged call while its stream is open; a door
   that waits for the stream's end deadlocks the agent against itself.
 - Budget: rmcp grows the `server` and `transport-io` features on a
-  crate already pinned; `scripts/budget.sh` is the referee.
+  crate already pinned — measured 308 → 310 (`uuid`, `pastey`, both
+  the server feature's own). Token bytes come from `getrandom`
+  (already in the tree, +0) rather than `aws-lc-rs`, whose C build
+  breaks the Windows cross-check of the very crate that spells the
+  named pipe.
 
 Refs: ADR-0035 §§5–6, ADR-0001; Plan: M39

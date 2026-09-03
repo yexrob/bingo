@@ -42,6 +42,6 @@
 # without the member. The full `agent-client-protocol` SDK was measured at +27,
 # fourteen of them a second async runtime, and refused: the newline-framed
 # JSON-RPC client loop is written in the plugin, in tokio, `Send`.
-max_dependencies = 308
+max_dependencies = 310
 max_core_check_seconds = 20
 max_target_gb = 5
