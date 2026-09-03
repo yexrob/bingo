@@ -19,7 +19,8 @@ the sixel quantiser; `image` alone with ten decoders measures +20.
 ## Decision
 
 1. **One library crate for pixels.** `bingo-pictures` (library tier,
-   depends on `bingo-sdk` and `image` only) owns the decoder:
+   depends on `bingo-sdk`, `image` and — for §3 — `reqwest`) owns the
+   decoder:
    `to_png(&Image) -> Png { bytes, width, height }` (a PNG passes
    through; anything else is decoded, GIF at its first frame, and
    encoded as PNG), and in M47 `load(Source) -> Image` — a path or a
@@ -52,5 +53,11 @@ the sixel quantiser; `image` alone with ten decoders measures +20.
 - The sdk does not depend on `image`: the sdk's `Image::read` stays
   the table-only path reader, and the loader is where formats widen.
 - The budget comment line in `scripts/budget.toml` cites this record.
+- *2026-09-04, M47:* `reqwest` in the library pulls `aws-lc-sys` into
+  every crate above it, and that build script wants `windows.h`, so the
+  local Windows cross-check no longer runs for `bingo-surface-tui` or
+  `bingo-pictures` (M45 met the same for `bingo-channels`). CI's
+  `windows` job is the backstop; a `ring`-backed rustls would give the
+  local check back and is recorded, not decided.
 
 Refs: ADR-0040, ADR-0001 (library tier), M11e; Plans: M46, M47
