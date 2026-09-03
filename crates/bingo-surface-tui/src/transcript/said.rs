@@ -18,9 +18,14 @@ use crate::{commands, seats, theme};
 
 /// The surfaces whose input is the machinery reporting in rather than
 /// somebody speaking: a background job that ended, a message from another
-/// session, a room's post, a scheduled turn, a command's own prompt. What they
+/// session, a room's nudge, a scheduled turn, a command's own prompt. What they
 /// deliver reads as a tool row does, because that is what it is — something
 /// that happened, not something anyone said to you.
+///
+/// The room's own is in the set and drawn by nobody: a member does not see it
+/// ([`lines`]), and in the room it is the conversation ([`post`]). It stays
+/// here because the composer's pending area reads the same set, and a nudge in
+/// flight is machinery there too.
 ///
 /// `command` is the one a person did set in motion, and it is here anyway: a
 /// `/guide` puts a page of skill body in the journal under a line nobody
@@ -188,8 +193,8 @@ fn notice(
 }
 
 /// The conversation a delivery says it came from, where saying it tells a
-/// person something: in a member's own transcript a room post is one of
-/// several conversations arriving, and in the room's own it is the only one.
+/// person something: a session is in several at once, and a delivery that names
+/// the one already on the screen names nothing.
 fn elsewhere<'a>(origin: &'a Origin, rows: &Rows<'_>) -> Option<&'a str> {
     origin
         .conversation
