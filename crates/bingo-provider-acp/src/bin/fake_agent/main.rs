@@ -26,11 +26,21 @@
 //!       "stopReason": "end_turn",
 //!       "usage": { "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 },
 //!       "awaitCancel": false,
-//!       "thenExit": false
+//!       "thenExit": false,
+//!       "mcpList": false,
+//!       "mcp": [ { "tool": "SendMessage", "arguments": {…} } ]
 //!     }
 //!   ]
 //! }
 //! ```
+//!
+//! With `"mcp": true` at the top, the agent dials the server row bingo injects
+//! into `session/new` and speaks MCP to it over its stdio, the way a real
+//! adapter dials the servers it is handed (ADR-0036 §3). What it lists and
+//! what it calls both reach the log, so a black-box asserts what the agent was
+//! actually offered and actually got back.
+
+mod mcp;
 
 use std::path::PathBuf;
 
@@ -45,6 +55,9 @@ type Failed = Box<dyn std::error::Error>;
 const SCRIPT: &str = "BINGO_FAKE_ACP_SCRIPT";
 const LOG: &str = "BINGO_FAKE_ACP_LOG";
 
+/// The row bingo writes for itself, which is the one this agent dials.
+const BRIDGE: &str = "bingo";
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Script {
@@ -58,6 +71,10 @@ struct Script {
     /// What `session/load` replays before it answers.
     #[serde(default)]
     replay: Vec<Value>,
+    /// Whether this agent dials the server row it is handed and speaks MCP to
+    /// it. Off by default: most scenarios have nothing to do with the bridge.
+    #[serde(default)]
+    mcp: bool,
     #[serde(default)]
     turns: Vec<Turn>,
 }
@@ -100,6 +117,25 @@ struct Turn {
     /// does. The next turn must find a new child.
     #[serde(default)]
     then_exit: bool,
+    /// Ask the bridge what it offers, mid-turn. What comes back is logged, so
+    /// an offer that moved between turns can be seen to have moved.
+    #[serde(default)]
+    mcp_list: bool,
+    /// Ask again until this tool is among what is offered, or give up. A tool
+    /// that reaches the offer late — an MCP server bingo was still dialling
+    /// when the turn began — is waited for rather than slept on.
+    #[serde(default)]
+    mcp_until: Option<String>,
+    /// Calls to make over the bridge before anything is streamed: the agent is
+    /// blocked on each answer, the way a real one is.
+    #[serde(default)]
+    mcp: Vec<Value>,
+    /// Calls to make once the turn has been answered — which is nobody's turn,
+    /// and must be refused (ADR-0036 §2). Tried again until they are, because
+    /// a turn is not over the instant its answer is written and a scenario
+    /// must wait on the fact rather than on a clock.
+    #[serde(default)]
+    mcp_after: Vec<Value>,
 }
 
 fn end_turn() -> String {
@@ -116,6 +152,7 @@ async fn main() -> Result<(), Failed> {
         log,
         turn: 0,
         out: tokio::io::stdout(),
+        bridge: None,
     }
     .serve(BufReader::new(tokio::io::stdin()).lines())
     .await
@@ -126,6 +163,9 @@ struct Agent {
     log: Option<PathBuf>,
     turn: usize,
     out: Stdout,
+    /// The bridge, once this agent has dialled it. One per child, the way a
+    /// real adapter keeps one connection per configured server.
+    bridge: Option<mcp::Server>,
 }
 
 impl Agent {
@@ -164,9 +204,9 @@ impl Agent {
         let id = asked.id.clone();
         let outcome = match asked.method.as_ref() {
             method::INITIALIZE => Ok(self.handshake()),
-            method::SESSION_NEW => self.open(),
-            method::SESSION_LOAD => self.load().await?,
-            method::SESSION_RESUME => self.resume(),
+            method::SESSION_NEW => self.opened(&params).await?,
+            method::SESSION_LOAD => self.loaded(&params).await?,
+            method::SESSION_RESUME => self.resumed(&params).await?,
             method::SESSION_PROMPT => return self.prompt(id, &params, lines).await,
             _ => Err(refusal(-32601, "method not found")),
         };
@@ -195,30 +235,49 @@ impl Agent {
     }
 
     /// An adapter with no credential refuses here, in the protocol's own code.
-    fn open(&self) -> Result<Value, Value> {
+    async fn opened(&mut self, params: &Value) -> Result<Result<Value, Value>, Failed> {
         if self.script.auth_required {
-            return Err(refusal(-32000, "Authentication required"));
+            return Ok(Err(refusal(-32000, "Authentication required")));
         }
-        Ok(json!({ "sessionId": self.script.session_id }))
+        self.dial(params).await?;
+        Ok(Ok(json!({ "sessionId": self.script.session_id })))
     }
 
     /// A load replays what it holds before it answers. The client is expected
     /// to swallow that replay: the journal already has those turns.
-    async fn load(&mut self) -> Result<Result<Value, Value>, Failed> {
+    async fn loaded(&mut self, params: &Value) -> Result<Result<Value, Value>, Failed> {
         if !self.script.capabilities.load_session {
             return Ok(Err(refusal(-32601, "session/load is not here")));
         }
+        self.dial(params).await?;
         for update in self.script.replay.clone() {
             self.update(update).await?;
         }
         Ok(Ok(json!({})))
     }
 
-    fn resume(&self) -> Result<Value, Value> {
+    async fn resumed(&mut self, params: &Value) -> Result<Result<Value, Value>, Failed> {
         if !self.script.capabilities.resume {
-            return Err(refusal(-32601, "session/resume is not here"));
+            return Ok(Err(refusal(-32601, "session/resume is not here")));
         }
-        Ok(json!({}))
+        self.dial(params).await?;
+        Ok(Ok(json!({})))
+    }
+
+    /// Dial the row bingo wrote for itself and ask what is on it. Every rung
+    /// of the restore ladder carries the row, so whichever one opened this
+    /// conversation, this is where the bridge is met.
+    async fn dial(&mut self, params: &Value) -> Result<(), Failed> {
+        if !self.script.mcp || self.bridge.is_some() {
+            return Ok(());
+        }
+        let Some(row) = ours(params) else {
+            return self.record("mcp/absent", &params["mcpServers"]).await;
+        };
+        let mut server = mcp::Server::dial(&row).await?;
+        let offered = server.list().await?;
+        self.bridge = Some(server);
+        self.record("mcp/tools", &offered).await
     }
 
     async fn prompt(
@@ -247,6 +306,10 @@ impl Agent {
             self.ask(method::ELICITATION_CREATE, "elicitation", request, lines)
                 .await?;
         }
+        if let Some(wanted) = &turn.mcp_until {
+            self.wait_for_tool(wanted).await?;
+        }
+        self.bridged(turn.mcp_list, &turn.mcp).await?;
         for update in turn.updates {
             self.update(update).await?;
         }
@@ -260,10 +323,83 @@ impl Agent {
             answer["usage"] = usage;
         }
         self.send(wire::result(id, answer)).await?;
+        self.after(&turn.mcp_after).await?;
         if turn.then_exit {
             std::process::exit(0);
         }
         Ok(())
+    }
+
+    /// What this turn does over the bridge, before it says anything: the agent
+    /// is blocked on each answer, which is the whole point of serving a call
+    /// while the turn's stream is open (ADR-0036 §2).
+    async fn bridged(&mut self, list: bool, calls: &[Value]) -> Result<(), Failed> {
+        let (Some(server), log) = (self.bridge.as_mut(), &self.log) else {
+            return Ok(());
+        };
+        if list {
+            let offered = server.list().await?;
+            record(log, "mcp/tools", &offered).await?;
+        }
+        for call in calls {
+            let name = call["tool"].as_str().unwrap_or_default().to_string();
+            // Said before the call, not after: a scenario that means to
+            // interrupt one has to know it is in flight.
+            record(log, "mcp/calling", &json!({ "tool": name })).await?;
+            let answered = server.call(&name, &call["arguments"]).await?;
+            record(
+                log,
+                "mcp/called",
+                &json!({ "tool": name, "answer": answered }),
+            )
+            .await?;
+        }
+        for method in std::mem::take(&mut server.heard) {
+            record(log, &format!("mcp/{method}"), &Value::Null).await?;
+        }
+        Ok(())
+    }
+
+    /// Calls made when this agent is answering nobody. Each is tried until it
+    /// is refused: writing a turn's answer and the turn being over are not the
+    /// same instant, and what is being waited for is the second.
+    async fn after(&mut self, calls: &[Value]) -> Result<(), Failed> {
+        let (Some(server), log) = (self.bridge.as_mut(), &self.log) else {
+            return Ok(());
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        for call in calls {
+            let name = call["tool"].as_str().unwrap_or_default().to_string();
+            loop {
+                let answered = server.call(&name, &call["arguments"]).await?;
+                let refused = answered["isError"] == json!(true);
+                if refused || std::time::Instant::now() > deadline {
+                    let said = json!({ "tool": name, "answer": answered });
+                    record(log, "mcp/called", &said).await?;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// List until a tool is offered, or until the wait is longer than any
+    /// scenario should need. Bingo dials the MCP servers a person configured
+    /// on its own schedule, so a tool sourced from one arrives when it
+    /// arrives; waiting on the fact beats sleeping on a guess.
+    async fn wait_for_tool(&mut self, wanted: &str) -> Result<(), Failed> {
+        let (Some(server), log) = (self.bridge.as_mut(), &self.log) else {
+            return Ok(());
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let offered = server.list().await?;
+            if named(&offered, wanted) || std::time::Instant::now() > deadline {
+                return record(log, "mcp/tools", &offered).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// A question the agent puts to the client, and the wait for its answer.
@@ -336,18 +472,25 @@ impl Agent {
     }
 
     async fn record(&self, method: &str, params: &Value) -> Result<(), Failed> {
-        let Some(path) = &self.log else {
-            return Ok(());
-        };
-        let line = format!("{}\n", json!({ "method": method, "params": params }));
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
-        Ok(())
+        record(&self.log, method, params).await
     }
+}
+
+/// One line of what this agent was told or did. A free function, not a
+/// method: the bridge and the log are two fields, and a call being logged
+/// while the bridge is being spoken to must borrow only the one it needs.
+async fn record(log: &Option<PathBuf>, method: &str, params: &Value) -> Result<(), Failed> {
+    let Some(path) = log else {
+        return Ok(());
+    };
+    let line = format!("{}\n", json!({ "method": method, "params": params }));
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(line.as_bytes()).await?;
+    Ok(())
 }
 
 /// The script's turn, taken by value so the borrow of `self` ends here.
@@ -360,7 +503,29 @@ fn script_turn(turn: &Turn) -> Turn {
         usage: turn.usage.clone(),
         await_cancel: turn.await_cancel,
         then_exit: turn.then_exit,
+        mcp_list: turn.mcp_list,
+        mcp_until: turn.mcp_until.clone(),
+        mcp: turn.mcp.clone(),
+        mcp_after: turn.mcp_after.clone(),
     }
+}
+
+/// Whether a `tools/list` result holds a tool of this name.
+fn named(offered: &Value, wanted: &str) -> bool {
+    offered["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == json!(wanted)))
+}
+
+/// The row bingo wrote for itself among the servers it handed over. A row for
+/// somebody else's server is not this agent's to dial from here — a real one
+/// would dial them all, and this one is only ever asked about the bridge.
+fn ours(params: &Value) -> Option<Value> {
+    params["mcpServers"]
+        .as_array()?
+        .iter()
+        .find(|row| row["name"] == json!(BRIDGE))
+        .cloned()
 }
 
 fn refusal(code: i64, message: &str) -> Value {

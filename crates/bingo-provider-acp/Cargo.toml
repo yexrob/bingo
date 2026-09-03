@@ -51,4 +51,4 @@ rmcp = { workspace = true, features = ["client"] }
 # The scripted ACP agent the contract tests drive: Rust, so CI needs no node.
 [[bin]]
 name = "bingo-fake-acp-agent"
-path = "src/bin/fake_agent.rs"
+path = "src/bin/fake_agent/main.rs"

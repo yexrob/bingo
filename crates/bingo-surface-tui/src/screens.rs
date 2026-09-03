@@ -76,6 +76,51 @@ fn idle() {
     both("idle", &solo(&folded(answered())), &ui, now);
 }
 
+/// A tool call handed into a turn from outside the model (ADR-0036 §2) lands
+/// while the assistant item is still being written. Both belong to the same
+/// turn and neither swallows the other: the half-written sentence keeps its
+/// place and the call reads as a call, the way any other one does.
+#[test]
+fn a_call_that_lands_while_the_assistant_is_still_writing() {
+    let state = folded(vec![
+        frame(1, started("trn_1")),
+        item(2, user("itm_1", "tell the room and say so")),
+        frame(
+            3,
+            Event::ItemStarted {
+                item: assistant("itm_2", "", ItemStatus::Running),
+            },
+        ),
+        frame(
+            4,
+            Event::ItemDelta {
+                item: bingo_sdk::ItemId::from_raw("itm_2"),
+                n: 0,
+                kind: bingo_sdk::DeltaKind::Text,
+                data: "Posting it now, and then I will read what came back and".into(),
+            },
+        ),
+        frame(
+            5,
+            Event::ItemStarted {
+                item: running_tool("itm_3", "SendMessage", ""),
+            },
+        ),
+        item(
+            6,
+            tool(
+                "itm_3",
+                "SendMessage",
+                json!({ "to": "#design", "text": "posted" }),
+                Some(ToolOutput::text("delivered to #design")),
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let (ui, now) = mid_turn();
+    both("bridged_call_while_streaming", &solo(&state), &ui, now);
+}
+
 #[test]
 fn welcome_on_a_fresh_session() {
     let (ui, now) = scene();

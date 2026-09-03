@@ -70,7 +70,10 @@ pub struct Acp {
     pub adapters: BTreeMap<String, Adapter>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+/// `Default` is written out below rather than derived: two of these fields are
+/// on unless a row says otherwise, and it is what serde fills a missing field
+/// from — so what a blank row means is said once, in one place.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Adapter {
     /// The program to run: `npx`, `gemini`, `cursor-agent`, a path.
@@ -81,12 +84,35 @@ pub struct Adapter {
     /// depends on.
     pub env: BTreeMap<String, String>,
     /// A row a person keeps but does not want registered today.
-    #[serde(default = "yes")]
     pub enabled: bool,
+    /// What this agent is offered over the tool bridge, when the derived set
+    /// is not what a person wants (ADR-0036 §6). An explicit list *replaces*
+    /// the derivation — including the exclusion, because on their own machine
+    /// their word is the last one — and is checked for nothing but existence.
+    /// Absent, the offer is the turn's own tool list and syncs itself.
+    pub tools: Option<Vec<String>>,
+    /// Whether the MCP servers this person configured for bingo ride
+    /// `session/new` so the agent dials them itself (ADR-0036 §4). On by
+    /// default: one hop instead of two, and their tools leave the bridge so
+    /// nothing is served twice. Off keeps the rows — and the credentials in
+    /// them — home, and the sourced tools cross the bridge instead, gated and
+    /// untrusted as ever.
+    pub forward_mcp: bool,
 }
 
-fn yes() -> bool {
-    true
+/// What a row with nothing but a command means: on, forwarding, and offered
+/// whatever the turn is offered.
+impl Default for Adapter {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            enabled: true,
+            tools: None,
+            forward_mcp: true,
+        }
+    }
 }
 
 /// The rows worth registering, each checked for a name a person could type
@@ -176,6 +202,49 @@ mod tests {
         assert_eq!(adapter.args[1], "@agentclientprotocol/claude-agent-acp");
         assert_eq!(adapter.env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8080");
         assert!(adapter.enabled, "a row is on unless it says otherwise");
+    }
+
+    /// The two words a row may say about the tool bridge, and what it means
+    /// when it says neither (ADR-0036 §§4, 6).
+    #[test]
+    fn a_row_that_says_nothing_about_the_bridge_forwards_and_derives_its_offer() {
+        let rows = rows(json!({
+            "acp": { "adapters": { "claude": { "command": "npx" } } }
+        }))
+        .expect("one row");
+        assert!(rows[0].1.forward_mcp, "forwarding is on unless it is off");
+        assert_eq!(
+            rows[0].1.tools, None,
+            "and the offer is the turn's own, not a list"
+        );
+    }
+
+    #[test]
+    fn a_row_may_name_its_own_offer_and_keep_its_servers_home() {
+        let rows = rows(json!({
+            "acp": { "adapters": { "claude": {
+                "command": "npx",
+                "tools": ["SendMessage", "TaskCreate"],
+                "forwardMcp": false
+            } } }
+        }))
+        .expect("one row");
+        assert_eq!(
+            rows[0].1.tools.as_deref(),
+            Some(["SendMessage".to_string(), "TaskCreate".to_string()].as_slice())
+        );
+        assert!(!rows[0].1.forward_mcp);
+    }
+
+    /// An empty list is a person saying "none", which is not the same as
+    /// saying nothing.
+    #[test]
+    fn an_empty_offer_list_is_a_choice_and_not_an_absent_one() {
+        let rows = rows(json!({
+            "acp": { "adapters": { "claude": { "command": "npx", "tools": [] } } }
+        }))
+        .expect("one row");
+        assert_eq!(rows[0].1.tools.as_deref(), Some([].as_slice()));
     }
 
     #[test]

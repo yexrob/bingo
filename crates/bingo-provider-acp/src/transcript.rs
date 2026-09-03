@@ -130,12 +130,13 @@ pub fn write(dir: &Path, session: &SessionId, messages: &[Message]) -> std::io::
     Ok(path)
 }
 
-/// The line the first prompt of a restored session carries.
-pub fn first_prompt(path: &Path, asked: &str) -> String {
+/// The line the first prompt of a restored session carries, in front of what
+/// the person asked.
+pub fn first_prompt(path: &Path) -> String {
     format!(
         "This conversation started before you did. Read {} first — it is the \
          transcript so far, and the assistant turns in it are yours. Then \
-         answer what follows.\n\n{asked}",
+         answer what follows.",
         path.display()
     )
 }
@@ -234,10 +235,10 @@ mod tests {
     }
 
     #[test]
-    fn the_first_prompt_names_the_file_and_then_the_question() {
-        let line = first_prompt(Path::new("/tmp/acp/s1.md"), "and the tests?");
+    fn the_first_prompt_names_the_file() {
+        let line = first_prompt(Path::new("/tmp/acp/s1.md"));
         assert!(line.contains("/tmp/acp/s1.md"), "{line}");
-        assert!(line.trim_end().ends_with("and the tests?"), "{line}");
+        assert!(line.contains("Read"), "{line}");
     }
 
     #[test]

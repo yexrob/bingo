@@ -16,6 +16,7 @@ pub mod command;
 pub mod config;
 pub mod dial;
 pub mod manager;
+pub mod rows;
 pub mod source;
 pub mod tool;
 
@@ -24,13 +25,14 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use bingo_sdk::{
     Command, ConfigClaim, Contribution, HostHandle, Merge, Plugin, PluginError, PluginManifest,
-    Registrar, ToolSource,
+    Registrar, ServiceHandle, ToolSource, WireService,
 };
 
 pub use command::McpCommand;
 pub use config::{Server, Settings};
 pub use dial::CONNECT_TIMEOUT;
 pub use manager::{Manager, Status};
+pub use rows::{Rows, SERVERS};
 pub use source::McpSource;
 pub use tool::{McpTool, tool_name};
 
@@ -38,7 +40,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.mcp",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tools:mcp", "command:mcp"],
+    provides: &["tools:mcp", "command:mcp", "service:mcp.servers"],
     requires: &[],
     config: Some(ConfigClaim {
         keys: &[
@@ -80,6 +82,7 @@ impl Plugin for McpPlugin {
         registrar.add(Contribution::Command(
             Arc::new(McpCommand::new(Arc::clone(&manager))) as Arc<dyn Command>,
         ));
+        registrar.add(service(Arc::clone(&manager)));
         self.manager
             .set(manager)
             .map_err(|_| PluginError::Failed("the mcp plugin registered twice".into()))
@@ -102,6 +105,23 @@ impl Plugin for McpPlugin {
     }
 }
 
+/// The rows, under the key another plugin looks them up by. The typed lookup
+/// is a `ServiceHandle` over the wire face, which is how a service met by
+/// method rather than by type is reached from in process (ADR-0031 §4).
+///
+/// No wire face is opened: a row carries a person's `env` and `headers`, so
+/// the answer stays inside this process. Opening one would put those keys
+/// within reach of every out-of-process plugin, and nothing asks for them
+/// there.
+fn service(manager: Arc<Manager>) -> Contribution {
+    let wire = Arc::new(Rows::new(manager)) as Arc<dyn WireService>;
+    Contribution::Service {
+        key: SERVERS.to_string(),
+        value: Arc::new(ServiceHandle::new(wire)),
+        wire: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,7 +134,10 @@ mod tests {
     #[test]
     fn the_manifest_says_what_it_provides_and_what_it_claims() {
         assert_eq!(MANIFEST.id, "bingo.mcp");
-        assert_eq!(MANIFEST.provides, ["tools:mcp", "command:mcp"]);
+        assert_eq!(
+            MANIFEST.provides,
+            ["tools:mcp", "command:mcp", "service:mcp.servers"]
+        );
         assert!(MANIFEST.requires.is_empty());
         let claim = MANIFEST.config.expect("a config claim");
         assert_eq!(claim.keys[0], ("mcpServers", Merge::ByName));
@@ -122,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn the_plugin_registers_one_tool_source_and_one_command() {
+    fn the_plugin_registers_a_tool_source_a_command_and_the_rows() {
         let mut registrar = registrar(json!({
             "mcpServers": { "files": { "command": "npx", "args": ["-y", "files"] } }
         }));
@@ -130,7 +153,7 @@ mod tests {
             .register(&mut registrar)
             .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 2);
+        assert_eq!(contributions.len(), 3);
         match &contributions[0] {
             Contribution::Tools(source) => assert_eq!(source.id(), "mcp"),
             other => panic!("expected a tool source, got {other:?}"),
@@ -138,6 +161,16 @@ mod tests {
         match &contributions[1] {
             Contribution::Command(command) => assert_eq!(command.spec().name, "mcp"),
             other => panic!("expected a command, got {other:?}"),
+        }
+        match &contributions[2] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, SERVERS);
+                assert!(
+                    wire.is_none(),
+                    "a row carries env and headers: no face across a process line"
+                );
+            }
+            other => panic!("expected the rows service, got {other:?}"),
         }
     }
 

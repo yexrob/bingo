@@ -101,6 +101,22 @@ impl Manager {
             .collect()
     }
 
+    /// The rows of every server a person has left switched on, keyed by name
+    /// and shaped the way they wrote them.
+    ///
+    /// Not the tools: whoever asks for these is going to dial the servers
+    /// itself, so what it needs is the row (ADR-0036 §4). A server that is
+    /// switched off is not a row anyone should be handed — bingo would not
+    /// dial it either.
+    pub async fn rows(&self) -> serde_json::Map<String, serde_json::Value> {
+        let slots = self.slots.read().await;
+        self.servers
+            .iter()
+            .filter(|(name, _)| !matches!(slots.get(*name).map(off), Some(true)))
+            .map(|(name, server)| (name.clone(), crate::config::row(server)))
+            .collect()
+    }
+
     /// One line per configured server, for `/mcp`.
     pub async fn statuses(&self) -> Vec<(String, Status)> {
         let slots = self.slots.read().await;
@@ -255,6 +271,11 @@ fn tools_of(server: &str, state: &State) -> Vec<Arc<dyn Tool>> {
             )) as Arc<dyn Tool>
         })
         .collect()
+}
+
+/// Whether a person has switched this server off.
+fn off(slot: &Slot) -> bool {
+    matches!(slot.state, State::Disabled)
 }
 
 fn status_of(state: &State) -> Status {

@@ -6,13 +6,18 @@
 //! message it was actually sent.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use bingo_sdk::ItemBody;
+use bingo_sdk::{ContentPart, ItemBody};
 use serde_json::{Value, json};
 
 use super::*;
+
+/// The tool bridge is its own scenario file: what ADR-0036 added is a
+/// conversation the other way, and it reads on its own terms.
+mod bridge;
 
 /// The scripted agent is a binary of another crate, built beside this one.
 /// `cargo test --workspace` and CI build it; a bare `cargo test -p bingo` does
@@ -48,6 +53,13 @@ struct Scripted {
 
 impl Scripted {
     fn new(agent: &Path, script: Value) -> Self {
+        Self::configured(agent, script, json!({}), json!({}))
+    }
+
+    /// One adapter, with whatever else the scenario needs written onto its row
+    /// and beside it — a `tools` list, a `forwardMcp`, a person's own MCP
+    /// servers.
+    fn configured(agent: &Path, script: Value, row: Value, beside: Value) -> Self {
         let home = tempfile::tempdir().unwrap();
         let scripted = Scripted {
             script: home.path().join("acp-script.json"),
@@ -56,20 +68,17 @@ impl Scripted {
             home,
         };
         scripted.obeys(script);
-        std::fs::write(
-            &scripted.settings,
-            json!({
-                "acp": { "adapters": { "scripted": {
-                    "command": agent,
-                    "env": {
-                        "BINGO_FAKE_ACP_SCRIPT": scripted.script,
-                        "BINGO_FAKE_ACP_LOG": scripted.log,
-                    }
-                }}}
-            })
-            .to_string(),
-        )
-        .unwrap();
+        let mut adapter = json!({
+            "command": agent,
+            "env": {
+                "BINGO_FAKE_ACP_SCRIPT": scripted.script,
+                "BINGO_FAKE_ACP_LOG": scripted.log,
+            }
+        });
+        merge(&mut adapter, row);
+        let mut settings = json!({ "acp": { "adapters": { "scripted": adapter } } });
+        merge(&mut settings, beside);
+        std::fs::write(&scripted.settings, settings.to_string()).unwrap();
         scripted
     }
 
@@ -150,6 +159,13 @@ impl Scripted {
     /// One run a host drives over stdin, speaking the Claude Code envelope —
     /// the only way to put two turns, or an interrupt, into one process.
     fn hosted(&self) -> Command {
+        self.hosted_with(&[])
+    }
+
+    /// The same, for a scenario whose agent calls a tool the gate would stop
+    /// to ask about. Nobody is there to answer one in this mode, so a run that
+    /// means to watch a call *run* has to say so.
+    fn hosted_with(&self, extra: &[&str]) -> Command {
         let mut cmd = self.base();
         cmd.args([
             "--input-format",
@@ -160,7 +176,8 @@ impl Scripted {
             "scripted",
             "--model",
             "agent",
-        ]);
+        ])
+        .args(extra);
         cmd
     }
 
@@ -174,6 +191,22 @@ impl Scripted {
     /// A turn that carries on the last conversation in this directory.
     fn again(&self, said: &str) -> Output {
         run(self.bingo(&["--continue"]).arg(said))
+    }
+}
+
+/// One object's keys written over another's, so a scenario says only what it
+/// changes.
+fn merge(into: &mut Value, from: Value) {
+    let (Some(into), Some(from)) = (into.as_object_mut(), from.as_object()) else {
+        return;
+    };
+    for (key, value) in from {
+        match into.get_mut(key) {
+            Some(held) if held.is_object() && value.is_object() => merge(held, value.clone()),
+            _ => {
+                into.insert(key.clone(), value.clone());
+            }
+        }
     }
 }
 

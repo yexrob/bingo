@@ -1,4 +1,4 @@
-# ACP live smoke (M38)
+# ACP live smoke (M38, M39)
 
 The one thing the suite cannot do: run a real agent. Everything else about
 `bingo-provider-acp` is proven offline against the scripted agent and recorded
@@ -78,6 +78,36 @@ finding.
 - [ ] **Usage.** After a turn, the session's token counts are the agent's own
       where it reports them (`claude-agent-acp`), and zero where it does not
       (`codex-acp`). Zero is honest, not free.
+- [ ] **The bridge (M39, ADR-0036).** Ask the agent to list the tools it has
+      from the MCP server named `bingo`, then to use one. Codex is the harder
+      of the two and the one to run this on first — it dials `mcpServers`
+      through its own client, not ours.
+      1. `bingo --print --provider codex-acp --model agent "list the tools on
+         the MCP server called bingo, one per line, and nothing else"`. The
+         list holds this house's tools — `SendMessage`, `ListAgents`,
+         `TaskCreate` and whatever else the session offers — and holds none of
+         `Read`, `Write`, `Edit`, `Bash`, `WebFetch`, `SpawnAgent`,
+         `AskUserQuestion`: the agent brought those itself.
+      2. `pgrep -fa acp-mcp-proxy` shows one proxy per live ACP session while
+         a turn is running, and the socket it dials is under
+         `~/.bingo/data/acp/<pid>.sock` with mode `600`.
+      3. Ask it to act: with a second session open, `"send a message to the
+         session called <name> saying hello"`. The post appears in that
+         session; `--output-format json` on this one shows a real `toolCall`
+         item under the turn, wearing `external: true` in its meta, and the
+         permission gate treated it as it treats any call.
+      4. Ask it to call one after its turn is over — it cannot, so instead
+         watch the same call inside a turn you interrupt with `esc`: the
+         agent is told the call was interrupted, the turn ends, and the next
+         turn works on the same child.
+      5. If `mcpServers` is configured, the agent was handed those rows too:
+         its own `/mcp`-equivalent lists them beside `bingo`, and their tools
+         are *not* in the `bingo` server's list. Set `"forwardMcp": false` on
+         the adapter row, run 1 again, and they are — under their
+         `mcp__<server>__<tool>` names, gated and untrusted.
+      6. Read the first prompt the agent was sent (the adapter's own log, or
+         `--output-format json` on a fresh session): it names the bridge and
+         says a call is served only during the turn.
 
 ## 3. What a failure means
 
@@ -89,3 +119,12 @@ finding.
   moved.
 - A second `session/new` where a resume was expected: the agent forgot the
   session. That is the ladder working, and the notice is the proof.
+- The agent says there is no server called `bingo`: read the `session/new` it
+  was sent. If the row is there, the agent's MCP client could not spawn the
+  proxy — run `BINGO_ACP_BRIDGE_ADDRESS=… BINGO_ACP_BRIDGE_TOKEN=… bingo
+  acp-mcp-proxy` by hand against a live run and see what it says. If the row
+  is not there, an `ACP_BRIDGE` notice on the session says why.
+- The agent lists the bridge's tools but every call is refused: the calls are
+  arriving outside a turn. That is the rule, not a fault — an agent that
+  batches its tool calls until after it has answered cannot use this bridge,
+  and that is a finding worth writing down.
