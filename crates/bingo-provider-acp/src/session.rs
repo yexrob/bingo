@@ -18,17 +18,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol_schema::v1::{
     AgentCapabilities, CreateElicitationRequest, CreateElicitationResponse, Error as RpcError,
-    InitializeRequest, LoadSessionRequest, NewSessionRequest, RequestPermissionRequest,
+    InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, SessionNotification,
 };
 use async_trait::async_trait;
-use bingo_sdk::{Env, HostHandle, KernelError, Level, Message, ProviderError, SessionId};
+use bingo_sdk::{Env, HostHandle, KernelError, Level, Message, ProviderError, SessionId, ToolSpec};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 
+use crate::bridge::Bridge;
 use crate::child::{self, Spawned};
 use crate::config::Adapter;
 use crate::connection::{Client, Connection};
+use crate::crossing::{self, Crossing};
 use crate::error::AcpError;
 use crate::ladder::{self, Opening};
 use crate::{refusal, transcript};
@@ -111,9 +113,13 @@ pub struct Link {
     pub connection: Connection,
     pub acp: String,
     pub capabilities: AgentCapabilities,
-    /// Spent by the first prompt: the file a freshly opened agent must read
-    /// before it can answer.
-    preamble: Mutex<Option<PathBuf>>,
+    /// Spent by the first prompt: what a freshly opened agent must be told
+    /// before it can answer — the file it has to read, the tools it now has.
+    preamble: Mutex<Option<String>>,
+    /// This conversation's way back into bingo, if a bridge was opened for it.
+    /// Dropping it dismisses the token, which is why it is held here: the link
+    /// and the conversation end together.
+    crossing: Option<Crossing>,
     inbox: Arc<Inbox>,
     /// Dropping this ends the process group.
     _adapter: child::Adapter,
@@ -128,9 +134,18 @@ impl Link {
         updates
     }
 
-    /// The file a restored agent must read, named once and then forgotten.
-    pub async fn take_preamble(&self) -> Option<PathBuf> {
+    /// What the agent must be told first, said once and then forgotten.
+    pub async fn take_preamble(&self) -> Option<String> {
         self.preamble.lock().await.take()
+    }
+
+    /// Hand the tool list of the request about to be served to the doors, and
+    /// say whether what the agent may call has moved (ADR-0036 §1).
+    pub async fn observe(&self, tools: &[ToolSpec]) -> bool {
+        match &self.crossing {
+            Some(crossing) => crossing.doors.observe(tools).await,
+            None => false,
+        }
     }
 }
 
@@ -143,6 +158,10 @@ pub struct Sessions {
     links: Mutex<BTreeMap<(String, SessionId), Arc<Link>>>,
     /// What the journal says the agent called this session, by adapter.
     known: Mutex<BTreeMap<SessionId, BTreeMap<String, String>>>,
+    /// This run's tool bridge, opened by the first session that needs one and
+    /// dropped when the plugin stops. One per run: the address carries the
+    /// pid, and every conversation on it is a token (ADR-0036 §3).
+    bridge: Mutex<Option<Arc<Bridge>>>,
 }
 
 impl Sessions {
@@ -152,6 +171,7 @@ impl Sessions {
             host: Mutex::new(None),
             links: Mutex::new(BTreeMap::new()),
             known: Mutex::new(BTreeMap::new()),
+            bridge: Mutex::new(None),
         })
     }
 
@@ -171,10 +191,19 @@ impl Sessions {
 
     /// The process is going: every adapter child goes with it. Dropping a
     /// link takes its process group, so letting go of them all is the whole
-    /// of a shutdown.
+    /// of a shutdown — and dropping the bridge takes the socket.
     pub async fn close(&self) {
         self.links.lock().await.clear();
         self.known.lock().await.clear();
+        *self.bridge.lock().await = None;
+    }
+
+    /// The house's tool set moved: every live conversation is told to ask
+    /// again. Nothing to do when no bridge was ever opened.
+    pub async fn offer_changed(&self) {
+        if let Some(bridge) = self.bridge.lock().await.as_ref() {
+            bridge.offer_changed();
+        }
     }
 
     /// The session ended: its children end with it.
@@ -274,24 +303,88 @@ impl Sessions {
         let inbox = self.inbox(name).await;
         let (connection, handle) = self.spawn(adapter, cwd, inbox.clone())?;
         let hello = connection.call(handshake()).await.map_err(from_acp)?;
+        let crossing = self
+            .crossing(session, (name, adapter), &hello.agent_capabilities)
+            .await;
         let known = self.known_id(session, name).await;
         let opening = ladder::opening(
             &hello.agent_capabilities,
             known.as_deref(),
             !history.is_empty(),
         );
+        let place = Where {
+            cwd,
+            servers: crossing
+                .as_ref()
+                .map(|c| c.servers.as_slice())
+                .unwrap_or(&[]),
+        };
         let entered = self
-            .climb(&connection, &inbox, session, cwd, history, opening)
+            .climb(&connection, &inbox, session, &place, history, opening)
             .await?;
         self.journal(session, name, &entered.acp).await;
         Ok(Arc::new(Link {
             connection,
             acp: entered.acp,
             capabilities: hello.agent_capabilities,
-            preamble: Mutex::new(entered.preamble),
+            preamble: Mutex::new(prelude(entered.preamble.as_deref(), crossing.is_some())),
+            crossing,
             inbox,
             _adapter: handle,
         }))
+    }
+
+    /// This session's way back into bingo, if there is a bridge to open it on.
+    ///
+    /// A bridge that will not listen is not worth failing a turn over: the
+    /// agent still answers, it just cannot act, and the person is told which
+    /// of the two it got.
+    async fn crossing(
+        &self,
+        session: &SessionId,
+        named: (&str, &Adapter),
+        capabilities: &AgentCapabilities,
+    ) -> Option<Crossing> {
+        let host = self.host.lock().await.clone()?;
+        let bridge = self.bridge().await?;
+        let exe = std::env::current_exe().ok()?;
+        match crossing::open(&bridge, &host, session, named, capabilities, &exe).await {
+            Ok(crossing) => Some(crossing),
+            Err(why) => {
+                let (name, _) = named;
+                self.warn(
+                    "ACP_BRIDGE",
+                    &format!("{name} was opened without bingo's own tools: {why}"),
+                )
+                .await;
+                None
+            }
+        }
+    }
+
+    /// This run's bridge, opened by the first session that asks for one.
+    async fn bridge(&self) -> Option<Arc<Bridge>> {
+        let mut held = self.bridge.lock().await;
+        if held.is_none() {
+            match Bridge::open(&self.env) {
+                Ok(bridge) => *held = Some(Arc::new(bridge)),
+                Err(why) => {
+                    self.warn(
+                        "ACP_BRIDGE",
+                        &format!("bingo's tools are not reachable from this run's agents: {why}"),
+                    )
+                    .await;
+                }
+            }
+        }
+        held.clone()
+    }
+
+    async fn warn(&self, code: &str, text: &str) {
+        let Some(host) = self.host.lock().await.clone() else {
+            return;
+        };
+        let _ = host.notice(Level::Warn, code, text).await;
     }
 
     async fn inbox(&self, name: &str) -> Arc<Inbox> {
@@ -334,14 +427,14 @@ impl Sessions {
         connection: &Connection,
         inbox: &Arc<Inbox>,
         session: &SessionId,
-        cwd: &Path,
+        place: &Where<'_>,
         history: &[Message],
         opening: Opening,
     ) -> Result<Entered, ProviderError> {
         let mut rung = opening;
         loop {
             match self
-                .enter(connection, inbox, session, cwd, history, &rung)
+                .enter(connection, inbox, session, place, history, &rung)
                 .await
             {
                 Ok(entered) => {
@@ -361,25 +454,25 @@ impl Sessions {
         connection: &Connection,
         inbox: &Arc<Inbox>,
         session: &SessionId,
-        cwd: &Path,
+        place: &Where<'_>,
         history: &[Message],
         rung: &Opening,
     ) -> Result<Entered, AcpError> {
         match rung {
             Opening::Resume(id) => {
-                connection.call(resume(id, cwd)).await?;
+                connection.call(resume(id, place)).await?;
                 Ok(Entered::at(id))
             }
             Opening::Load(id) => {
-                self.load(connection, inbox, id, cwd).await?;
+                self.load(connection, inbox, id, place).await?;
                 Ok(Entered::at(id))
             }
             Opening::New => {
-                let opened = connection.call(new_session(cwd)).await?;
+                let opened = connection.call(new_session(place)).await?;
                 Ok(Entered::at(opened.session_id.0.as_ref()))
             }
             Opening::Fresh { transcript } => {
-                let opened = connection.call(new_session(cwd)).await?;
+                let opened = connection.call(new_session(place)).await?;
                 let mut entered = Entered::at(opened.session_id.0.as_ref());
                 if *transcript {
                     entered.preamble = self.write_transcript(session, history);
@@ -396,10 +489,10 @@ impl Sessions {
         connection: &Connection,
         inbox: &Arc<Inbox>,
         id: &str,
-        cwd: &Path,
+        place: &Where<'_>,
     ) -> Result<(), AcpError> {
         inbox.loading.store(true, Ordering::Release);
-        let outcome = connection.call(load_session(id, cwd)).await;
+        let outcome = connection.call(load_session(id, place)).await;
         inbox.loading.store(false, Ordering::Release);
         outcome.map(|_| ())
     }
@@ -491,21 +584,48 @@ fn implementation() -> agent_client_protocol_schema::v1::Implementation {
     agent_client_protocol_schema::v1::Implementation::new("bingo", env!("CARGO_PKG_VERSION"))
 }
 
-/// `mcpServers` stays empty: our tools do not cross (ADR-0035 §6).
-fn new_session(cwd: &std::path::Path) -> NewSessionRequest {
-    NewSessionRequest::new(cwd.to_path_buf())
+/// Where a conversation is opened, and what it is opened with.
+///
+/// The rows travel with every rung, not only the new one: a resumed or loaded
+/// session is handed its `mcpServers` afresh, and one that was not would come
+/// back with the tools of a run that has ended.
+struct Where<'a> {
+    cwd: &'a Path,
+    servers: &'a [McpServer],
 }
 
-fn resume(id: &str, cwd: &std::path::Path) -> ResumeSessionRequest {
+/// `mcpServers` carries the bridge and whatever a person's own rows forward
+/// (ADR-0036 §§3–4; ADR-0035 §6 said no tools cross, and this amends it).
+fn new_session(place: &Where<'_>) -> NewSessionRequest {
+    NewSessionRequest::new(place.cwd.to_path_buf()).mcp_servers(place.servers.to_vec())
+}
+
+fn resume(id: &str, place: &Where<'_>) -> ResumeSessionRequest {
     ResumeSessionRequest::new(
         agent_client_protocol_schema::v1::SessionId::new(id),
-        cwd.to_path_buf(),
+        place.cwd.to_path_buf(),
     )
+    .mcp_servers(place.servers.to_vec())
 }
 
-fn load_session(id: &str, cwd: &std::path::Path) -> LoadSessionRequest {
+fn load_session(id: &str, place: &Where<'_>) -> LoadSessionRequest {
     LoadSessionRequest::new(
         agent_client_protocol_schema::v1::SessionId::new(id),
-        cwd.to_path_buf(),
+        place.cwd.to_path_buf(),
     )
+    .mcp_servers(place.servers.to_vec())
+}
+
+/// What the first prompt of a conversation carries in front of what the person
+/// said: the transcript a restored agent must read, the tools a bridged one
+/// now has, or nothing at all.
+fn prelude(transcript: Option<&Path>, bridged: bool) -> Option<String> {
+    let mut said = Vec::new();
+    if let Some(path) = transcript {
+        said.push(transcript::first_prompt(path));
+    }
+    if bridged {
+        said.push(crossing::SAYS.to_string());
+    }
+    (!said.is_empty()).then(|| said.join("\n\n"))
 }

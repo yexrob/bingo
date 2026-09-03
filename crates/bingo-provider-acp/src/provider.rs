@@ -4,7 +4,10 @@
 //! crosses: an ACP session is stateful and holds everything before it
 //! (ADR-0035 §3), so replaying the folded context would tell the agent its own
 //! history back. The system prompt does not cross either — the agent has its
-//! own — nor do our tools, nor `Effort`, nor `max_tokens` (ADR-0035 §6).
+//! own — nor `Effort`, nor `max_tokens` (ADR-0035 §6). The tools do, but not
+//! on this wire: they were handed over at `session/new` as an MCP server the
+//! agent dials, and the request's list of them only says what that server now
+//! offers (ADR-0036 §1).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,7 +27,6 @@ use tokio::sync::mpsc;
 use crate::config::{self, Adapter};
 use crate::events::Mapper;
 use crate::session::{Link, Sessions};
-use crate::transcript;
 
 type Yielded = Result<ModelEvent, ProviderError>;
 
@@ -83,6 +85,12 @@ impl Provider for AcpProvider {
             link.capabilities.prompt_capabilities.image,
             Ordering::Relaxed,
         );
+        // The offer is this request's own tool list (ADR-0036 §1). A request
+        // that moves it is what `tools/list_changed` is made of, so the bridge
+        // hears about it before the prompt that will be answered with it.
+        if link.observe(&request.tools).await {
+            self.sessions.offer_changed().await;
+        }
         Ok(hold(link, asked, cancel).await)
     }
 
@@ -131,7 +139,7 @@ fn said(message: &Message) -> String {
 async fn hold(link: Arc<Link>, asked: String, cancel: CancellationToken) -> ModelStream {
     let updates = link.listen().await;
     let text = match link.take_preamble().await {
-        Some(path) => transcript::first_prompt(&path, &asked),
+        Some(said) => format!("{said}\n\n{asked}"),
         None => asked,
     };
     let prompt = PromptRequest::new(

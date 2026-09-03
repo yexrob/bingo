@@ -19,9 +19,11 @@
 use std::sync::{Arc, OnceLock};
 
 use bingo_sdk::{
-    ConfigClaim, Contribution, Env, HostHandle, Merge, Plugin, PluginError, PluginManifest,
-    Registrar,
+    CatalogKind, ConfigClaim, Contribution, Env, GatewayEvent, HostHandle, Merge, Plugin,
+    PluginError, PluginManifest, Registrar,
 };
+use futures::StreamExt;
+use tokio::task::JoinHandle;
 
 pub mod bridge;
 pub mod child;
@@ -66,6 +68,9 @@ fn schema() -> schemars::Schema {
 #[derive(Default)]
 pub struct AcpPlugin {
     sessions: OnceLock<Arc<session::Sessions>>,
+    /// The task that hears the tools catalogue move. Started with the host,
+    /// stopped with the plugin.
+    watching: OnceLock<JoinHandle<()>>,
 }
 
 impl AcpPlugin {
@@ -101,20 +106,45 @@ impl Plugin for AcpPlugin {
     /// permission question is asked through and where the agent's session id
     /// is journaled.
     async fn start(&self, host: HostHandle) -> Result<(), PluginError> {
-        if let Some(sessions) = self.sessions.get() {
-            sessions.set_host(host).await;
-        }
+        let Some(sessions) = self.sessions.get() else {
+            return Ok(());
+        };
+        sessions.set_host(host.clone()).await;
+        let _ = self
+            .watching
+            .set(tokio::spawn(watch(host, sessions.clone())));
         Ok(())
     }
 
     /// Every adapter child ends with the process that spawned it: dropping
     /// the registry drops every link, and dropping a link takes its process
-    /// group.
+    /// group. The bridge goes the same way, and the socket with it.
     async fn stop(&self) -> Result<(), PluginError> {
+        if let Some(watching) = self.watching.get() {
+            watching.abort();
+        }
         if let Some(sessions) = self.sessions.get() {
             sessions.close().await;
         }
         Ok(())
+    }
+}
+
+/// A tool registered after a session started still reaches its agent: the
+/// catalogue moving is `tools/list_changed` on every live conversation
+/// (ADR-0036 §1). What moved is not carried — `list_changed` means "ask
+/// again", and the offer is derived when it is asked for.
+async fn watch(host: HostHandle, sessions: Arc<session::Sessions>) {
+    let mut events = host.gateway_events();
+    while let Some(event) = events.next().await {
+        if matches!(
+            event,
+            GatewayEvent::CatalogChanged {
+                kind: CatalogKind::Tools
+            }
+        ) {
+            sessions.offer_changed().await;
+        }
     }
 }
 
