@@ -23,6 +23,10 @@ mod bridge;
 /// own story (ADR-0037), and it reads on its own terms.
 mod knobs;
 
+/// And so is a child dying: three ways of meeting one rule, which read
+/// together or not at all.
+mod life;
+
 /// The scripted agent is a binary of another crate, built beside this one.
 /// `cargo test --workspace` and CI build it; a bare `cargo test -p bingo` does
 /// not, and these tests say so once rather than failing on a file nobody in
@@ -130,15 +134,15 @@ impl Scripted {
     /// Wait until the agent has recorded `method`, or fail the scenario rather
     /// than hang the suite.
     fn wait_for(&self, method: &str) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !self.methods().iter().any(|m| m == method) {
-            assert!(
-                Instant::now() < deadline,
-                "the agent never heard {method}; it heard {:?}",
-                self.methods()
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_until(
+            || self.methods().iter().any(|m| m == method),
+            || {
+                format!(
+                    "the agent never heard {method}; it heard {:?}",
+                    self.methods()
+                )
+            },
+        );
     }
 
     /// The binary against this adapter's home, in this adapter's directory.
@@ -216,6 +220,19 @@ impl Scripted {
     }
 }
 
+/// Wait for something to become true, or fail the scenario rather than hang
+/// the suite. Two processes and a background dial make most of the facts here
+/// arrive when they arrive; what a scenario must never do is guess how long
+/// that takes. The message is asked for only once the wait has run out, so it
+/// can afford to go and look at what the world was doing instead.
+fn wait_until(ready: impl Fn() -> bool, gave_up: impl Fn() -> String) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{}", gave_up());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// One object's keys written over another's, so a scenario says only what it
 /// changes.
 fn merge(into: &mut Value, from: Value) {
@@ -242,8 +259,22 @@ fn frames_of(out: &Output) -> Vec<Frame> {
         .collect()
 }
 
-fn bodies(out: &Output) -> Vec<ItemBody> {
-    frames_of(out)
+/// The frames a host-driven run wrote. `--output-format json` is the same
+/// stream, arriving a line at a time through the host's own pipe, so what a
+/// run said before the test looked is read the one way.
+fn frames(ended: &stream_json::Ended) -> Vec<Frame> {
+    ended
+        .lines
+        .iter()
+        .filter(|line| line.get("event").is_some())
+        .map(|line| {
+            serde_json::from_str(&line.to_string()).unwrap_or_else(|e| panic!("{e}: {line}"))
+        })
+        .collect()
+}
+
+fn bodies(frames: Vec<Frame>) -> Vec<ItemBody> {
+    frames
         .into_iter()
         .filter_map(|frame| match frame.event {
             Event::ItemCompleted { item } => Some(item.body),
@@ -252,8 +283,8 @@ fn bodies(out: &Output) -> Vec<ItemBody> {
         .collect()
 }
 
-fn said(out: &Output) -> Vec<String> {
-    bodies(out)
+fn said(frames: Vec<Frame>) -> Vec<String> {
+    bodies(frames)
         .into_iter()
         .filter_map(|body| match body {
             ItemBody::Assistant { text } => Some(text),
@@ -262,8 +293,8 @@ fn said(out: &Output) -> Vec<String> {
         .collect()
 }
 
-fn notices(out: &Output) -> Vec<(String, String)> {
-    bodies(out)
+fn notices(frames: Vec<Frame>) -> Vec<(String, String)> {
+    bodies(frames)
         .into_iter()
         .filter_map(|body| match body {
             ItemBody::Notice { code, text, .. } => Some((code, text)),
@@ -272,8 +303,19 @@ fn notices(out: &Output) -> Vec<(String, String)> {
         .collect()
 }
 
-fn extensions(out: &Output) -> Vec<(String, String)> {
-    frames_of(out)
+/// The notices of one code among everything that was said. A scenario about a
+/// notice asks two things of it — that it was said, and that it was said once
+/// — and keeps the whole list beside it, because what else was said is what
+/// makes a failure readable.
+fn coded<'a>(all: &'a [(String, String)], code: &str) -> Vec<&'a String> {
+    all.iter()
+        .filter(|(said, _)| said == code)
+        .map(|(_, text)| text)
+        .collect()
+}
+
+fn extensions(frames: Vec<Frame>) -> Vec<(String, String)> {
+    frames
         .into_iter()
         .filter_map(|frame| match frame.event {
             Event::Extension { plugin, kind, .. } => Some((plugin, kind)),
@@ -333,9 +375,9 @@ fn a_turn_through_an_adapter_streams_text_thought_and_the_agents_own_call() {
     );
     let out = adapter.turn("say hello");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert_eq!(said(&out), ["Hello there."]);
+    assert_eq!(said(frames_of(&out)), ["Hello there."]);
 
-    let reasoning: Vec<(String, bool)> = bodies(&out)
+    let reasoning: Vec<(String, bool)> = bodies(frames_of(&out))
         .into_iter()
         .filter_map(|body| match body {
             ItemBody::Reasoning {
@@ -363,7 +405,7 @@ fn a_turn_through_an_adapter_streams_text_thought_and_the_agents_own_call() {
         "the agent's own call wears `acp.external`: {reasoning:?}"
     );
     assert!(
-        !bodies(&out)
+        !bodies(frames_of(&out))
             .iter()
             .any(|body| matches!(body, ItemBody::ToolCall { .. })),
         "and the loop was asked to run nothing"
@@ -429,7 +471,7 @@ fn the_agents_session_id_is_journaled_once_as_an_extension() {
     let out = adapter.turn("hello");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
-        extensions(&out),
+        extensions(frames_of(&out)),
         [("bingo.acp".to_string(), "session:scripted".to_string())]
     );
     let written = frames_of(&out)
@@ -512,7 +554,10 @@ fn the_restore_ladder_climbs_resume_then_load_then_a_file() {
     );
     let first = adapter.turn("the first question");
     assert_eq!(first.status.code(), Some(0), "stderr: {}", stderr(&first));
-    assert!(notices(&first).is_empty(), "a first session is no fall");
+    assert!(
+        notices(frames_of(&first)).is_empty(),
+        "a first session is no fall"
+    );
 
     // The top rung: the agent kept the session and takes it back without
     // replaying, so nothing is said and nothing is opened.
@@ -529,9 +574,9 @@ fn the_restore_ladder_climbs_resume_then_load_then_a_file() {
         ["initialize", "session/resume", "session/prompt"]
     );
     assert!(
-        notices(&resumed).is_empty(),
+        notices(frames_of(&resumed)).is_empty(),
         "a resume that worked says nothing: {:?}",
-        notices(&resumed)
+        notices(frames_of(&resumed))
     );
 
     // One rung down: no resume, only a load, whose replay of turns the journal
@@ -553,16 +598,18 @@ fn the_restore_ladder_climbs_resume_then_load_then_a_file() {
         ["initialize", "session/load", "session/prompt"]
     );
     assert!(
-        notices(&loaded)
+        notices(frames_of(&loaded))
             .iter()
             .any(|(code, _)| code == "ACP_RESTORE"),
         "a fall is said: {:?}",
-        notices(&loaded)
+        notices(frames_of(&loaded))
     );
     assert!(
-        !said(&loaded).iter().any(|text| text.contains("replayed")),
+        !said(frames_of(&loaded))
+            .iter()
+            .any(|text| text.contains("replayed")),
         "the replay is swallowed, not journaled twice: {:?}",
-        said(&loaded)
+        said(frames_of(&loaded))
     );
 
     // The bottom rung: the agent kept nothing, so it is handed the
@@ -623,7 +670,11 @@ fn a_permission_question_is_refused_and_one_notice_names_the_row() {
     );
     let out = adapter.turn("edit it");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert_eq!(said(&out), ["Left it alone."], "the turn went on");
+    assert_eq!(
+        said(frames_of(&out)),
+        ["Left it alone."],
+        "the turn went on"
+    );
 
     let answered = adapter
         .first("permission/answered")
@@ -631,58 +682,12 @@ fn a_permission_question_is_refused_and_one_notice_names_the_row() {
     assert_eq!(answered["outcome"]["outcome"], "selected");
     assert_eq!(answered["outcome"]["optionId"], "reject");
 
-    let all = notices(&out);
-    let asked: Vec<&String> = all
-        .iter()
-        .filter(|(code, _)| code == "ACP_ASKED")
-        .map(|(_, text)| text)
-        .collect();
+    let all = notices(frames_of(&out));
+    let asked = coded(&all, "ACP_ASKED");
     assert_eq!(asked.len(), 1, "said once: {all:?}");
     assert!(
         asked[0].contains("acp.adapters.scripted"),
         "the notice names the row: {}",
         asked[0]
-    );
-}
-
-/// ADR-0035 §3: an adapter that died between turns is replaced, not asked. The
-/// replacement climbs back into the same agent session from the journal's own
-/// pointer, and the person is told a child went.
-#[test]
-fn an_adapter_that_died_between_turns_is_replaced_and_said() {
-    let Some(agent) = fake_agent() else { return };
-    let adapter = Scripted::new(
-        agent,
-        json!({
-            "sessionId": "acp-7",
-            "capabilities": { "resume": true },
-            "turns": [
-                { "updates": [chunk("First.")], "stopReason": "end_turn", "thenExit": true },
-                one_turn(vec![chunk("Second.")])
-            ]
-        }),
-    );
-    let mut host = stream_json::Host::start(&mut adapter.hosted());
-    host.prompt("one");
-    host.until("result");
-    host.prompt("two");
-    let ended = host.finish();
-    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
-
-    // The dead child's script starts again from its first turn, so the second
-    // bingo turn is answered "First." by a new agent — which is the point:
-    // it was answered at all.
-    assert_eq!(ended.results().len(), 2, "{:?}", ended.types());
-    assert_eq!(
-        adapter.methods(),
-        [
-            "initialize",
-            "session/new",
-            "session/prompt",
-            "initialize",
-            "session/resume",
-            "session/prompt"
-        ],
-        "a second handshake, and back into the same agent session"
     );
 }

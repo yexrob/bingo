@@ -6,6 +6,8 @@
 //! a prompt, the frames that came out, and the log the agent wrote of what
 //! it was offered and what it got back.
 
+use bingo_sdk::IntentOutcome;
+
 use super::*;
 /// What the agent was offered on the bridge, from the `tools/list` it logged.
 fn offered(adapter: &Scripted) -> Vec<String> {
@@ -165,7 +167,7 @@ fn a_bridged_call_posts_to_the_parent_and_is_journaled_under_the_turn() {
         "and the tool's own receipt came back: {answered}"
     );
 
-    let posts: Vec<String> = bodies(&out)
+    let posts: Vec<String> = bodies(frames_of(&out))
         .into_iter()
         .filter_map(|body| match body {
             ItemBody::User { parts, .. } => {
@@ -285,28 +287,37 @@ fn a_row_that_names_its_tools_is_offered_only_those() {
 #[test]
 fn an_interrupt_drops_a_bridged_call_and_the_child_serves_the_next_turn() {
     let Some(agent) = fake_agent() else { return };
-    let adapter = Scripted::configured(
-        agent,
-        json!({
-            "sessionId": "acp-esc",
-            "capabilities": { "resume": true },
-            "mcp": true,
-            "turns": [
-                {
-                    "mcp": [{ "tool": "Bash", "arguments": { "command": "sleep 30" } }],
-                    "updates": [chunk("Back.")],
-                    "stopReason": "end_turn"
-                },
-                { "updates": [chunk("Second.")], "stopReason": "end_turn" }
-            ]
-        }),
-        json!({ "tools": ["Bash"] }),
-        json!({}),
-    );
+    let adapter = Scripted::configured(agent, json!({}), json!({ "tools": ["Bash"] }), json!({}));
+    // The command says when it started before it goes to sleep, because what
+    // this scenario has to interrupt is the call *running in this house* — the
+    // agent logging that it is about to make one is a moment earlier, and in
+    // that gap the turn can already be over, so the call is refused for having
+    // no turn instead of for being interrupted. Both are true; only one is
+    // this test. The script is written second because the path is the home's,
+    // and no child has read it yet.
+    let running = adapter.home.path().join("running");
+    adapter.obeys(json!({
+        "sessionId": "acp-esc",
+        "capabilities": { "resume": true },
+        "mcp": true,
+        "turns": [
+            {
+                "mcp": [{ "tool": "Bash", "arguments": {
+                    "command": format!("touch {} && sleep 30", running.display())
+                }}],
+                "updates": [chunk("Back.")],
+                "stopReason": "end_turn"
+            },
+            { "updates": [chunk("Second.")], "stopReason": "end_turn" }
+        ]
+    }));
     let mut host =
         stream_json::Host::start(&mut adapter.hosted_with(&["--dangerously-skip-permissions"]));
     host.prompt("go");
-    adapter.wait_for("mcp/calling");
+    wait_until(
+        || running.exists(),
+        || "the bridged call never started running".to_string(),
+    );
     host.interrupt();
     adapter.wait_for("mcp/called");
     host.prompt("again");
@@ -412,6 +423,52 @@ fn echo_server() -> Option<PathBuf> {
     Some(path)
 }
 
+/// Wait until bingo has finished dialling one of a person's own MCP servers.
+///
+/// `bingo-mcp` dials in the background and answers from a cache until the
+/// handshake lands (ADR-0009 §1), and a turn's tool set is frozen when the
+/// turn starts (ADR-0036 §2). So a scenario about a sourced tool cannot open
+/// its turn and then wait: whatever that turn was given is what it has, and
+/// listing again inside it re-reads the same frozen offer. The wait belongs
+/// before the turn, and it is a wait on the fact — `/mcp` is what the run
+/// itself will say — never on a guess about which of two dials wins.
+fn dialled(host: &mut stream_json::Host, server: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        host.prompt("/mcp");
+        let table = answered(host.until_event("intentAck"));
+        if connected(&table, server) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{server} never finished dialling: {table}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What a `/command` inside the run answered with.
+fn answered(ack: Value) -> Value {
+    let frame: Frame = serde_json::from_value(ack).expect("an intentAck frame");
+    match frame.event {
+        Event::IntentAck {
+            outcome: IntentOutcome::Applied { result },
+            ..
+        } => result,
+        other => panic!("the command was not applied: {other:?}"),
+    }
+}
+
+/// Whether `/mcp`'s table says this server is up. Its columns are the server,
+/// its state and how many tools it brought.
+fn connected(answered: &Value, server: &str) -> bool {
+    answered["view"]["rows"].as_array().is_some_and(|rows| {
+        rows.iter()
+            .any(|row| row[0] == json!(server) && row[1] == json!("connected"))
+    })
+}
+
 /// The rows a `session/new` carried.
 fn injected(adapter: &Scripted) -> Vec<Value> {
     adapter.first("session/new").expect("a session was opened")["mcpServers"]
@@ -424,7 +481,9 @@ fn injected(adapter: &Scripted) -> Vec<Value> {
 /// verbatim, so the agent dials them itself — one hop, its own env — and the
 /// tools those servers serve leave the bridge, because nothing is served
 /// twice. The absence here is given its meaning by the scenario below, where
-/// the same server under `forwardMcp: false` does reach the offer.
+/// the same server under `forwardMcp: false` does reach the offer — and by
+/// the turn opening only once that server is up, so that what is absent is
+/// absent on purpose rather than not there yet.
 #[test]
 fn a_persons_own_servers_are_forwarded_verbatim_and_leave_the_offer() {
     let Some(agent) = fake_agent() else { return };
@@ -442,8 +501,11 @@ fn a_persons_own_servers_are_forwarded_verbatim_and_leave_the_offer() {
             "command": echo, "args": ["--quiet"], "env": { "ECHO_TOKEN": "s3cret" }
         }}}),
     );
-    let out = adapter.turn("what have you got");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let mut host = stream_json::Host::start(&mut adapter.driven("agent"));
+    dialled(&mut host, "echo");
+    host.prompt("what have you got");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
 
     let rows = injected(&adapter);
     assert_eq!(rows.len(), 2, "ours and theirs: {rows:?}");
@@ -469,6 +531,11 @@ fn a_persons_own_servers_are_forwarded_verbatim_and_leave_the_offer() {
 /// `forwardMcp: false` keeps a person's rows — and the credentials in them —
 /// home. Nothing of theirs crosses, and the tools those servers serve ride the
 /// bridge instead, gated and untrusted as ever (ADR-0009 §2, ADR-0036 §4).
+///
+/// The turn opens once the server is up, because that is the only moment from
+/// which the answer is the plugin's and not the machine's: a turn started
+/// before the dial landed would be offered a tool set the server had not
+/// reached yet, and no amount of listing inside that turn would change it.
 #[test]
 fn a_row_that_keeps_its_servers_home_serves_their_tools_on_the_bridge() {
     let Some(agent) = fake_agent() else { return };
@@ -480,7 +547,7 @@ fn a_row_that_keeps_its_servers_home_serves_their_tools_on_the_bridge() {
             "capabilities": { "resume": true },
             "mcp": true,
             "turns": [{
-                "mcpUntil": "mcp__echo__echo",
+                "mcpList": true,
                 "updates": [chunk("Listed.")],
                 "stopReason": "end_turn"
             }]
@@ -488,8 +555,11 @@ fn a_row_that_keeps_its_servers_home_serves_their_tools_on_the_bridge() {
         json!({ "forwardMcp": false }),
         json!({ "mcpServers": { "echo": { "command": echo } } }),
     );
-    let out = adapter.turn("what have you got");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let mut host = stream_json::Host::start(&mut adapter.driven("agent"));
+    dialled(&mut host, "echo");
+    host.prompt("what have you got");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
 
     let rows = injected(&adapter);
     assert_eq!(rows.len(), 1, "only ours crossed: {rows:?}");
@@ -530,12 +600,8 @@ fn a_row_this_agent_cannot_take_is_skipped_and_named() {
     assert_eq!(rows.len(), 1, "only ours crossed: {rows:?}");
     assert_eq!(rows[0]["name"], "bingo");
 
-    let all = notices(&out);
-    let said: Vec<&String> = all
-        .iter()
-        .filter(|(code, _)| code == "ACP_MCP")
-        .map(|(_, text)| text)
-        .collect();
+    let all = notices(frames_of(&out));
+    let said = coded(&all, "ACP_MCP");
     assert_eq!(said.len(), 1, "said once: {all:?}");
     assert!(
         said[0].contains("remote") && said[0].contains("http"),
