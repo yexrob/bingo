@@ -444,7 +444,11 @@ mod tests {
             .as_array()
             .expect("one shape per node")
             .iter()
-            .map(|node| node["properties"]["kind"]["const"].as_str().expect("a kind"))
+            .map(|node| {
+                node["properties"]["kind"]["const"]
+                    .as_str()
+                    .expect("a kind")
+            })
             .collect();
         assert_eq!(kinds, KNOWN);
     }

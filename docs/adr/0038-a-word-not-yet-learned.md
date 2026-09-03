@@ -21,12 +21,20 @@ say it at all without teaching the sdk a new word first.
    `fold` is the mandatory text — what `--print`, a channel and every
    surface that has not learned the kind shows. A node with no
    honest fold has no business on a screen it does not control.
+   On the wire it is `{"kind": "custom", "customKind": "<the
+   plugin's word>", "data": …, "fold": …}`: the tag stays a word the
+   sdk knows, so a custom node reads back as the node that was
+   written rather than being caught by §2 and wrapped a second time.
 2. **Custom is also the catch-all.** `View` deserializes an unknown
    `kind` into `Custom`: the whole raw object as `data`, its `fold`
    field as the fold when present, else `[<kind>]`. From this change
    on, a newer speaker never breaks an older reader — a new sdk word
    lands as text until the reader learns it. (Binaries older than
    this change still error; the door helps every version after it.)
+   A word the sdk *does* have is read exactly as it always was,
+   mistakes included: a malformed `Table`, or a node with no `kind`
+   at all, is an error and not a degrade. The door is for a
+   vocabulary gap, never for a spelling mistake.
 3. **Learning a kind is a surface's own affair.** A surface that
    recognises a kind renders it richly — a module inside that
    surface, invisible to the sdk and the kernel (only the TUI may
@@ -41,9 +49,18 @@ say it at all without teaching the sdk a new word first.
 ## Consequences
 
 - Every surface adds one arm: `Custom` renders its fold (until it
-  chooses to learn kinds). The compiler walks each match.
-- The committed plugin-rpc schema moves if `View` rides it;
-  regenerated in the same change.
+  chooses to learn kinds). The compiler walked each match and named
+  one crate, `bingo-surface-tui`; `--print`, the channels and the ACP
+  bridge already read every node through `fold()`.
+- Both committed schemas move — `View` rides `schema/plugin.json` and
+  `schema/rpc.json` — and are regenerated in the same change. The
+  catch-all itself has no spelling in JSON Schema; §2 is its record.
+- The panel lane reads a payload's `kind` as the view tag for every
+  word now, not only the fourteen: a plugin whose journalled state
+  object carries a `kind` string is drawn as that node's fold rather
+  than as the generic record dump (ADR-0011 §2). The lane already
+  read `kind` that way — this widens it from a closed list to any
+  word, and `kind` in a panel payload is the view vocabulary's.
 - Old journals replay unchanged; new journals holding custom kinds
   read as text on surfaces that predate the kind but not this ADR.
 - No new dependency, no kernel machinery: one variant, one custom
