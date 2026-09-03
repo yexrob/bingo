@@ -57,7 +57,8 @@ impl Drop for Bridge {
 }
 
 impl Bridge {
-    /// Listen on this run's own address.
+    /// Listen on this run's own address. Called from inside the runtime: the
+    /// accept loop is a task, and a bridge outside one would answer nobody.
     pub fn open(env: &Env) -> Result<Self, AcpError> {
         Self::at(Address::of_run(env, std::process::id()))
     }

@@ -177,7 +177,7 @@ pub use platform::{Listener, Stream};
 
 /// Dial the bridge. The proxy's whole knowledge of the transport.
 #[cfg(unix)]
-pub async fn dial(address: &Address) -> Result<Stream, AcpError> {
+pub async fn dial(address: &Address) -> Result<DialledStream, AcpError> {
     tokio::net::UnixStream::connect(address.as_str())
         .await
         .map_err(|e| AcpError::transport(format!("{address}: {e}")))
