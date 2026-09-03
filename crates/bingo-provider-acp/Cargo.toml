@@ -17,7 +17,9 @@ bingo-sdk.workspace = true
 # schema crate alone is +5 crates where the full SDK is +27, fourteen of them a
 # second async runtime whose futures are `!Send`.
 agent-client-protocol-schema.workspace = true
-tokio.workspace = true
+# M39 (ADR-0036 §3): `net` for the tool bridge's unix socket and named pipe;
+# the workspace default omits it, as `bingo-auth-oauth` also has to say.
+tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 futures.workspace = true
 async-trait.workspace = true
@@ -27,10 +29,24 @@ thiserror.workspace = true
 schemars.workspace = true
 process-wrap.workspace = true
 jiff.workspace = true
+# M39 (ADR-0036 §3): the MCP server half of the crate this workspace already
+# pins for its MCP client. `server` brings the async-read/write transport the
+# accepted stream is served over; `transport-io` is the stdio pair the plan
+# names beside it.
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+# M39: the bridge token is a secret, so its bytes come from the system random
+# source, in the same base64url spelling as `bingo-auth-oauth::pkce`. Not that
+# module's `aws-lc-rs`: it builds C, and this crate's Windows cross-check has
+# a named pipe to check without a Windows C toolchain.
+getrandom.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+# M39: the bridge's tests are a real MCP client on the other end of the
+# rendezvous, so what is asserted is the protocol and not our own idea of it.
+rmcp = { workspace = true, features = ["client"] }
 
 # The scripted ACP agent the contract tests drive: Rust, so CI needs no node.
 [[bin]]
