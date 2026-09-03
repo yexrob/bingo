@@ -287,28 +287,37 @@ fn a_row_that_names_its_tools_is_offered_only_those() {
 #[test]
 fn an_interrupt_drops_a_bridged_call_and_the_child_serves_the_next_turn() {
     let Some(agent) = fake_agent() else { return };
-    let adapter = Scripted::configured(
-        agent,
-        json!({
-            "sessionId": "acp-esc",
-            "capabilities": { "resume": true },
-            "mcp": true,
-            "turns": [
-                {
-                    "mcp": [{ "tool": "Bash", "arguments": { "command": "sleep 30" } }],
-                    "updates": [chunk("Back.")],
-                    "stopReason": "end_turn"
-                },
-                { "updates": [chunk("Second.")], "stopReason": "end_turn" }
-            ]
-        }),
-        json!({ "tools": ["Bash"] }),
-        json!({}),
-    );
+    let adapter = Scripted::configured(agent, json!({}), json!({ "tools": ["Bash"] }), json!({}));
+    // The command says when it started before it goes to sleep, because what
+    // this scenario has to interrupt is the call *running in this house* — the
+    // agent logging that it is about to make one is a moment earlier, and in
+    // that gap the turn can already be over, so the call is refused for having
+    // no turn instead of for being interrupted. Both are true; only one is
+    // this test. The script is written second because the path is the home's,
+    // and no child has read it yet.
+    let running = adapter.home.path().join("running");
+    adapter.obeys(json!({
+        "sessionId": "acp-esc",
+        "capabilities": { "resume": true },
+        "mcp": true,
+        "turns": [
+            {
+                "mcp": [{ "tool": "Bash", "arguments": {
+                    "command": format!("touch {} && sleep 30", running.display())
+                }}],
+                "updates": [chunk("Back.")],
+                "stopReason": "end_turn"
+            },
+            { "updates": [chunk("Second.")], "stopReason": "end_turn" }
+        ]
+    }));
     let mut host =
         stream_json::Host::start(&mut adapter.hosted_with(&["--dangerously-skip-permissions"]));
     host.prompt("go");
-    adapter.wait_for("mcp/calling");
+    wait_until(
+        || running.exists(),
+        || "the bridged call never started running".to_string(),
+    );
     host.interrupt();
     adapter.wait_for("mcp/called");
     host.prompt("again");

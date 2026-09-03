@@ -134,15 +134,15 @@ impl Scripted {
     /// Wait until the agent has recorded `method`, or fail the scenario rather
     /// than hang the suite.
     fn wait_for(&self, method: &str) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !self.methods().iter().any(|m| m == method) {
-            assert!(
-                Instant::now() < deadline,
-                "the agent never heard {method}; it heard {:?}",
-                self.methods()
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_until(
+            || self.methods().iter().any(|m| m == method),
+            || {
+                format!(
+                    "the agent never heard {method}; it heard {:?}",
+                    self.methods()
+                )
+            },
+        );
     }
 
     /// The binary against this adapter's home, in this adapter's directory.
@@ -217,6 +217,19 @@ impl Scripted {
     /// A turn that carries on the last conversation in this directory.
     fn again(&self, said: &str) -> Output {
         run(self.bingo(&["--continue"]).arg(said))
+    }
+}
+
+/// Wait for something to become true, or fail the scenario rather than hang
+/// the suite. Two processes and a background dial make most of the facts here
+/// arrive when they arrive; what a scenario must never do is guess how long
+/// that takes. The message is asked for only once the wait has run out, so it
+/// can afford to go and look at what the world was doing instead.
+fn wait_until(ready: impl Fn() -> bool, gave_up: impl Fn() -> String) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{}", gave_up());
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
