@@ -307,7 +307,7 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     // Only a row of the transcript on screen can anchor it: a child's item
     // ids are its own, and would name the wrong row here.
     let anchor = (!asked_elsewhere)
-        .then(|| asking_row(ui, interaction, regions))
+        .then(|| asking_row(ui, interaction))
         .flatten();
     let at = layers::under(above, anchor, rows_of(&lines, above));
     ui.painted.borrow_mut().card = Some(Card {
@@ -378,16 +378,10 @@ fn guarded(interaction: &bingo_sdk::Interaction, now: Now) -> bool {
 }
 
 /// Where the row that asked ends, in screen rows, when it is on the screen.
-fn asking_row(ui: &Ui, interaction: &bingo_sdk::Interaction, regions: Regions) -> Option<u16> {
+fn asking_row(ui: &Ui, interaction: &bingo_sdk::Interaction) -> Option<u16> {
     let painted = ui.painted.borrow();
-    let region = regions.transcript;
     let line = painted.blocks.span(interaction.item.as_ref()?)?.1;
-    // A short transcript hangs from the foot of its region, so the rows above
-    // it are padding the line numbers know nothing about.
-    let rows = usize::from(region.height);
-    let padding = rows - painted.height.min(rows);
-    let row = u16::try_from(line.checked_sub(painted.top)? + padding).ok()?;
-    (row < region.height).then(|| region.y + row)
+    Some(painted.regions.transcript.y + painted.row_of(line)?)
 }
 
 /// How far into its arrival a card the kernel opened is. A still surface has
@@ -461,18 +455,34 @@ fn render_transcript(
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
     let mut shown = painted.blocks.window(painted.top, rows);
     // A short transcript hangs from the composer, not from the top of the screen.
-    let padding = rows - shown.len();
+    let padding = painted.padding();
     shown.splice(..0, std::iter::repeat_n(Line::default(), padding));
     frame.render_widget(Paragraph::new(shown), area);
-    let top = painted.top.saturating_sub(padding);
+    // A mark is measured from the row line `top` was drawn at, which is where
+    // the lines start rather than where the region does.
+    let lined = lined(area, padding);
     if let Some(search) = ui.search.as_ref() {
-        search::mark(frame, area, top, search);
+        search::mark(frame, lined, painted.top, search);
     }
     if let Some(run) = ui.select.run.as_ref() {
-        select::mark(frame, area, top, run);
+        select::mark(frame, lined, painted.top, run);
     }
     if ui.crossfading(now) {
         layers::hush(frame, area);
+    }
+}
+
+/// The rows of the region that carry a transcript line: a transcript shorter
+/// than its region hangs from the composer, and the padding above it is
+/// nobody's.
+fn lined(area: Rect, padding: usize) -> Rect {
+    let padding = u16::try_from(padding)
+        .unwrap_or(area.height)
+        .min(area.height);
+    Rect {
+        y: area.y + padding,
+        height: area.height - padding,
+        ..area
     }
 }
 
@@ -1966,7 +1976,17 @@ mod tests {
                 ..now
             },
         );
-        let marked: Vec<(u16, u16)> = screen
+        let marked = hit_cells(&screen);
+        assert_eq!(marked.len(), 7, "seven cells of `line 59`: {marked:?}");
+        assert!(
+            marked.iter().all(|(x, _)| (2..9).contains(x)),
+            "after the `❯ `: {marked:?}"
+        );
+    }
+
+    /// The cells carrying the mark a hit is drawn in.
+    fn hit_cells(screen: &ratatui::backend::TestBackend) -> Vec<(u16, u16)> {
+        screen
             .buffer()
             .content()
             .iter()
@@ -1975,12 +1995,98 @@ mod tests {
                 cell.style() == theme::as_drawn(theme::presence().patch(theme::bold()))
             })
             .map(|(i, _)| ((i % 80) as u16, (i / 80) as u16))
-            .collect();
-        assert_eq!(marked.len(), 7, "seven cells of `line 59`: {marked:?}");
-        assert!(
-            marked.iter().all(|(x, _)| (2..9).contains(x)),
-            "after the `❯ `: {marked:?}"
+            .collect()
+    }
+
+    /// A hit is marked the way a run is tinted: on a transcript shorter than
+    /// its region, both hang with the lines and not with the pane.
+    #[test]
+    fn a_hit_on_a_short_transcript_is_marked_where_it_sits() {
+        let state = folded(vec![item_frame(1, user("itm_1", "run the tests"))]);
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        let row = row_carrying(&render(&state, &ui, now), "run the tests");
+        crate::input::on_key(&mut ui, &tree, ctrl('f'), now);
+        for c in "tests".chars() {
+            crate::input::on_key(&mut ui, &tree, typed(c), now);
+        }
+        crate::input::on_key(&mut ui, &tree, key(crossterm::event::KeyCode::Enter), now);
+        assert_eq!(
+            hit_cells(&drawn(80, 24, &tree, &ui, now)),
+            (10..15).map(|x| (x, row)).collect::<Vec<_>>(),
+            "the five cells of `tests` on the row it is drawn on"
         );
+    }
+
+    /// The cells one draw styles differently from another, gathered by row:
+    /// where a mark landed, and nowhere else.
+    fn marked_cells(
+        quiet: &ratatui::backend::TestBackend,
+        marked: &ratatui::backend::TestBackend,
+    ) -> Vec<(u16, String)> {
+        let width = usize::from(marked.buffer().area().width);
+        let mut rows: Vec<(u16, String)> = Vec::new();
+        for (i, (_, after)) in quiet
+            .buffer()
+            .content()
+            .iter()
+            .zip(marked.buffer().content())
+            .enumerate()
+            .filter(|(_, (before, after))| before.style() != after.style())
+        {
+            let row = u16::try_from(i / width).expect("a row of the screen");
+            match rows.last_mut() {
+                Some((at, text)) if *at == row => text.push_str(after.symbol()),
+                _ => rows.push((row, after.symbol().to_string())),
+            }
+        }
+        rows
+    }
+
+    /// A drag across the row a needle is on: the row it went over, and the
+    /// cells the tint landed on — the round trip a person sees.
+    fn dragged_over(
+        state: &SessionState,
+        needle: &str,
+        from: u16,
+        to: u16,
+    ) -> (u16, Vec<(u16, String)>) {
+        let tree = solo(state);
+        let (mut ui, now) = scene();
+        let row = row_carrying(&render(state, &ui, now), needle);
+        crate::pointer::on_mouse(&mut ui, &tree, click(from, row), now);
+        crate::pointer::on_mouse(&mut ui, &tree, dragged(to, row), now);
+        let marked = drawn(80, 24, &tree, &ui, now);
+        ui.select.clear();
+        (row, marked_cells(&drawn(80, 24, &tree, &ui, now), &marked))
+    }
+
+    /// A transcript shorter than its region hangs from the composer, so the
+    /// rows above it carry no line at all. The tint hangs with it: what a drag
+    /// marks is the text under the pointer, not the row that far from the top
+    /// of the pane.
+    #[test]
+    fn a_drag_over_a_short_transcript_tints_the_cells_under_the_pointer() {
+        let state = folded(vec![item_frame(1, user("itm_1", "run the tests"))]);
+        let (row, marked) = dragged_over(&state, "run the tests", 2, 5);
+        assert_eq!(marked, vec![(row, "run".to_string())]);
+    }
+
+    /// The same drag on a transcript taller than its region, where there is no
+    /// padding to get wrong: one mapping answers both.
+    #[test]
+    fn a_drag_over_a_long_transcript_tints_the_cells_under_the_pointer() {
+        let (row, marked) = dragged_over(&long_transcript(60), "line 59", 2, 6);
+        assert_eq!(marked, vec![(row, "line".to_string())]);
+    }
+
+    /// A wide glyph is drawn in two cells, and the tint covers both: a run is
+    /// measured the way the terminal measures, not in characters.
+    #[test]
+    fn a_drag_over_wide_glyphs_tints_the_cells_they_are_drawn_in() {
+        let state = folded(vec![item_frame(1, user("itm_1", "你好 warm"))]);
+        let (row, marked) = dragged_over(&state, "你好", 2, 6);
+        assert_eq!(marked, vec![(row, "你好".to_string())]);
     }
 
     #[test]

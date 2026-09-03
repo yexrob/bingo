@@ -152,6 +152,9 @@ pub fn refused(bytes: usize) -> String {
 }
 
 /// Tint the cells of the run that are on the screen.
+///
+/// `area`'s first row is line `top`: it is the rows carrying lines, which is
+/// not the whole region when a short transcript hangs from the composer.
 pub fn mark(frame: &mut Frame, area: Rect, top: usize, run: &Run) {
     for row in 0..area.height {
         let line = top + row as usize;

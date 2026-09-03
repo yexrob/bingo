@@ -173,12 +173,8 @@ fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
     }) {
         return None;
     }
-    let row = usize::from(mouse.row - region.y);
-    // A short transcript hangs from the foot of its region: the rows above it
-    // are padding and belong to no line.
-    let padding = region.height as usize - painted.height.min(region.height as usize);
     Some(Cell {
-        line: painted.top + row.checked_sub(padding)?,
+        line: painted.line_at(usize::from(mouse.row - region.y))?,
         column: usize::from(mouse.column - region.x),
     })
 }

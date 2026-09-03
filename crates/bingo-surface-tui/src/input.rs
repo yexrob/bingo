@@ -2139,6 +2139,33 @@ mod tests {
         assert_eq!(run.head.line, run.anchor.line + 2);
     }
 
+    /// What a drag copies is the text those cells were showing: the run is
+    /// measured against the rendered transcript, and a wide glyph counts for
+    /// the two cells it is drawn in.
+    #[test]
+    fn a_drag_copies_the_cells_it_went_over() {
+        for (text, from, to, copied) in
+            [("run the tests", 2, 5, "run"), ("你好 warm", 2, 6, "你好")]
+        {
+            let state = folded(vec![frame(
+                1,
+                bingo_sdk::Event::ItemCompleted {
+                    item: user("itm_1", text),
+                },
+            )]);
+            let tree = solo(&state);
+            let (mut ui, now) = scene();
+            let row = row_carrying(&render(&state, &ui, now), text);
+            on_mouse(&mut ui, &tree, click(from, row), now);
+            on_mouse(&mut ui, &tree, dragged(to, row), now);
+            assert_eq!(
+                press(&mut ui, &state, typed('y'), now),
+                vec![Effect::Copy(copied.to_string())],
+                "dragging {from}..{to} over {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_click_on_a_child_row_steps_into_it() {
         let tree = folded_tree(vec![

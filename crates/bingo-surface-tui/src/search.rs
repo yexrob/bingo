@@ -137,6 +137,9 @@ pub fn row(search: &Search) -> Line<'static> {
 
 /// Paint the hits that are on the screen. It is a pass over the cells the
 /// transcript already drew, so no block has to know it was searched.
+///
+/// `area`'s first row is line `top`: it is the rows carrying lines, which is
+/// not the whole region when a short transcript hangs from the composer.
 pub fn mark(frame: &mut Frame, area: Rect, top: usize, search: &Search) {
     for row in 0..area.height {
         let line = top + row as usize;
