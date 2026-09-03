@@ -128,3 +128,111 @@ per-run socket — bingo serves MCP to its own ACP children only.
 - The bridge's peer may reconnect (its MCP client respawns a dead
   proxy): a token is re-usable after its stream closed; only a second
   concurrent stream is refused.
+
+## Verified
+
+2026-09-03, macOS 15 (aarch64), branch `m39-joint`.
+
+### The gates
+
+```
+$ cargo fmt --all -- --check
+(no output)
+
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.77s
+
+$ cargo test --workspace --locked
+60 suites: 2580 passed; 0 failed
+
+$ cargo test -p bingo --test cli acp::
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out
+
+$ scripts/check_discipline.sh
+dependency direction ok
+kernel names no tool
+cohesion ok
+discipline ok
+
+$ scripts/budget.sh
+dependencies (unique, normal): 310 (max  310)
+warm cargo check -p bingo-core: 0s (max  20s)
+relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
+budget ok
+
+$ cargo deny check
+advisories ok, bans ok, licenses ok, sources ok
+
+$ cargo check -p bingo-provider-acp --all-targets --target x86_64-pc-windows-msvc
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.72s
+
+$ scripts/tui-smoke.sh
+16 scenes, ending "a button on a pinned board fires its command…"
+tui-smoke ok
+```
+
+The joint added no dependency: 310 is the number the transport half
+measured, unmoved.
+
+### The Windows cross-check of the binary
+
+`cargo check -p bingo --all-targets --target x86_64-pc-windows-msvc`
+does not run on this machine, and did not before this milestone:
+
+```
+error occurred in cc-rs: command did not execute successfully …
+  aws-lc-sys-0.44.0/aws-lc/third_party/jitterentropy/…/jitterentropy-timer.c
+```
+
+`aws-lc-sys` (reached through `bingo-auth-oauth`) compiles C against the
+Windows SDK headers, which a developer's macOS box does not have. It
+fails in a build script, before a line of bingo is compiled, and it fails
+the same way on an untouched crate — worker R checked that on the
+transport half. CI's `windows` job is the backstop. Everything M39 added
+to the binary is one hidden subcommand that is the same code on both
+platforms; the platform-shaped half (socket / named pipe, the proxy's
+stream bounds) lives in `bingo-provider-acp`, whose cross-check is green
+above.
+
+### What the criteria were ticked on
+
+Every scenario runs the shipped binary against the scripted agent, which
+dials the injected row through the real `acp-mcp-proxy` and speaks MCP by
+hand — no library on the client side, so what is proven is the protocol
+(`crates/bingo/tests/cli/acp/bridge.rs`):
+
+- `a_bridged_call_posts_to_the_parent_and_is_journaled_under_the_turn`
+- `a_call_with_no_turn_in_flight_is_refused_with_a_reason`
+- `an_interrupt_drops_a_bridged_call_and_the_child_serves_the_next_turn`
+- `the_bridge_offers_the_sessions_tools_and_not_the_agents_own_hands`
+- `a_tool_a_plugin_registered_reaches_the_bridge_with_no_edit_here`
+- `a_row_that_names_its_tools_is_offered_only_those`
+- `a_persons_own_servers_are_forwarded_verbatim_and_leave_the_offer`
+- `a_row_that_keeps_its_servers_home_serves_their_tools_on_the_bridge`
+- `a_row_this_agent_cannot_take_is_skipped_and_named`
+
+And the risk the plan asked for a look at:
+`bingo-surface-tui` `a_call_that_lands_while_the_assistant_is_still_writing`
+— a tool item under a turn whose assistant item is still being written
+reads as itself, at both sizes. No rendering change was needed.
+
+### Two findings, recorded rather than cured
+
+1. **An sse row cannot be "skipped and said".** ADR-0036 §4 says an sse
+   row rides no further and is named. It cannot get that far: `bingo-mcp`
+   refuses the transport where it reads `mcpServers`, so an sse row stops
+   that plugin at boot and there is no row for anyone to forward —
+   `[error] code=INTERNAL msg=plugin bingo.mcp failed to register:
+   configuration: unknown variant `sse`, expected `stdio` or `http``.
+   Making it forwardable would mean weakening a fail-fast that is right,
+   so the translation keeps its skip-and-name arm for any transport it
+   does not know (unit-tested against an sse row in
+   `servers::theirs`), and the live path is pinned by the case that *can*
+   happen: an http row to an agent whose handshake did not claim http.
+2. **The offer is read through a service, not a second settings key.**
+   The kernel refuses two plugins one key, so `bingo-mcp` registers
+   `mcp.servers` (ADR-0031) and answers the rows it holds *now* — a
+   `/mcp disable` takes a server out of the answer the same moment it
+   takes it out of bingo's hands. The rows carry a person's own env and
+   headers, which is what ADR-0036 §4 chose; the service has no wire
+   face, so they never leave the process.
