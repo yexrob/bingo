@@ -158,9 +158,12 @@ $ grep -rEinw 'bypass|bypassPermissions|dontAsk' \
 
 $ cargo fmt --all -- --check                       # clean
 $ cargo clippy --workspace --all-targets --locked -- -D warnings
-    Finished `dev` profile ... in 33.14s           # exit 0
-$ cargo test --workspace --locked                  # 1580 passed, 0 failed
+    Finished `dev` profile ...                     # exit 0
+$ cargo test --workspace --locked                  # 3325 passed, 0 failed
 $ scripts/check_discipline.sh                      # discipline ok
 $ scripts/budget.sh                                # 310 (max 310), budget ok
 $ cargo deny check                                 # advisories/bans/licenses/sources ok
+$ cargo check -p bingo-provider-acp --all-targets \
+      --target x86_64-pc-windows-msvc               # exit 0 (nothing here is
+                                                    #  platform-shaped; run anyway)
 ```
