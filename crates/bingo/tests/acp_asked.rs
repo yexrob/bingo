@@ -259,7 +259,7 @@ async fn a_person_answers_the_agents_question_and_the_agent_gets_their_choice() 
         frames
             .iter()
             .any(|frame| matches!(frame.event, Event::InteractionResolved { .. })),
-        "the journal holds the answer like any other question's"
+        "the question was resolved, not cancelled under"
     );
     assert_eq!(configured.answered()["outcome"], "selected");
     assert_eq!(
@@ -293,4 +293,47 @@ async fn a_person_answers_the_agents_question_and_the_agent_gets_their_choice() 
         .await
         .expect("the server shuts down")
         .unwrap();
+
+    // And it is in the journal on disk, as a gate question's is: an
+    // interaction is durable, so what was asked and what was answered survive
+    // the run that asked it.
+    let journaled = journal(&server.sessions_dir());
+    let opened = journaled
+        .iter()
+        .find(|line| line["event"]["type"] == "interactionOpened")
+        .expect("the question is journaled");
+    assert_eq!(
+        opened["event"]["interaction"]["kind"]["options"][0]["role"], "allowing",
+        "the role rides the option it was written on"
+    );
+    let resolved = journaled
+        .iter()
+        .find(|line| line["event"]["type"] == "interactionResolved")
+        .expect("and so is the answer");
+    assert_eq!(resolved["event"]["answer"]["ids"][0], "allow-once");
+}
+
+/// Every frame every session of this run journaled.
+fn journal(sessions: &Path) -> Vec<Value> {
+    let mut lines = Vec::new();
+    collect(sessions, &mut lines);
+    lines
+}
+
+fn collect(dir: &Path, into: &mut Vec<Value>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, into);
+        } else if path.file_name().is_some_and(|name| name == "journal.jsonl") {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            into.extend(
+                text.lines()
+                    .filter_map(|line| serde_json::from_str(line).ok()),
+            );
+        }
+    }
 }
