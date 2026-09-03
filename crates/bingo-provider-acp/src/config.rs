@@ -1,9 +1,10 @@
 //! The one settings key this plugin claims: `acp.adapters`.
 //!
-//! An adapter is three fields — command, args, env — and its name. A new agent
-//! is a new row and no code (ADR-0035 §1), which is why nothing about any
-//! particular adapter is written down here: the npm scopes renamed themselves
-//! twice in 2026 and a default row would have aged badly.
+//! An adapter is what to run — command, args, env — and what to say to it once
+//! it is up, and its name. A new agent is a new row and no code (ADR-0035 §1),
+//! which is why nothing about any particular adapter is written down here: the
+//! npm scopes renamed themselves twice in 2026 and a default row would have
+//! aged badly.
 //!
 //! The name is an identity: it is what `--provider` and `/model <name>/<model>`
 //! say, so the rules `bingo-provider-anthropic` settles for its instances
@@ -18,8 +19,8 @@
 //!     "adapters": {
 //!       "claude": {
 //!         "command": "npx",
-//!         "args": ["-y", "@agentclientprotocol/claude-agent-acp",
-//!                  "--permission-mode", "acceptEdits"]
+//!         "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+//!         "options": { "mode": "dontAsk" }
 //!       },
 //!       "codex-acp": {
 //!         "command": "npx",
@@ -38,9 +39,16 @@
 //! declared, and `/model` and `/think` reach it through the options it
 //! offered (ADR-0037). Login is the adapter's own (`claude login`, `codex
 //! login`), and so is permission: what the agent may do is said in *its*
-//! words, on its row — the `--permission-mode` and `CODEX_APPROVAL_POLICY`
-//! above — because bingo refuses a `session/request_permission` rather than
-//! standing a second gate in front of the agent's own (ADR-0035 §5).
+//! words, on its row — the `mode` above, `CODEX_APPROVAL_POLICY` beside it —
+//! because bingo refuses a `session/request_permission` rather than standing a
+//! second gate in front of the agent's own (ADR-0035 §5).
+//!
+//! Which door those words go through is the adapter's own too, and not every
+//! adapter has the same ones: codex-acp takes its approval policy from the
+//! environment, while claude-agent-acp has neither a flag nor a variable for
+//! its mode and listens for it only as a session config option. `options` is
+//! that door — one `session/set_config_option` per entry, in the agent's own
+//! ids, sent once a session is open and before its first prompt (ADR-0037 §4).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,6 +98,12 @@ pub struct Adapter {
     /// own credentials from there, so clearing it would take away the login it
     /// depends on.
     pub env: BTreeMap<String, String>,
+    /// What to set on this agent every time a session with it opens, in the
+    /// agent's own ids: `{ "mode": "dontAsk" }`. It is the door an adapter with
+    /// no flag and no variable for something leaves open, and bingo knows
+    /// nothing about what is said through it — the ids and the values are the
+    /// agent's, checked against what it declared and never against a list here.
+    pub options: BTreeMap<String, String>,
     /// A row a person keeps but does not want registered today.
     pub enabled: bool,
     /// What this agent is offered over the tool bridge, when the derived set
@@ -115,6 +129,7 @@ impl Default for Adapter {
             command: String::new(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            options: BTreeMap::new(),
             enabled: true,
             tools: None,
             forward_mcp: true,
@@ -138,9 +153,27 @@ pub fn adapters(settings: Settings) -> Result<Vec<(String, Adapter)>, PluginErro
                 "acp.adapters.{name}: `command` is what gets run, and it is empty"
             )));
         }
+        said(&name, &adapter.options)?;
         rows.push((name, adapter));
     }
     Ok(rows)
+}
+
+/// The only thing bingo can say about a row's options: that both halves of an
+/// entry are words. Which words they are is the agent's business — it declares
+/// its own ids when a session opens, and one it did not declare is a notice
+/// then, not a refusal now (ADR-0037).
+fn said(name: &str, options: &BTreeMap<String, String>) -> Result<(), PluginError> {
+    for (id, value) in options {
+        if id.trim().is_empty() || value.trim().is_empty() {
+            return Err(PluginError::Config(format!(
+                "acp.adapters.{name}.options: an entry is one of the agent's own \
+                 option ids and one of that option's own values, and `{id}`: \
+                 `{value}` is missing one of them"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn claim(named: &mut BTreeSet<String>, name: &str) -> Result<(), PluginError> {
@@ -252,6 +285,48 @@ mod tests {
         }))
         .expect("one row");
         assert_eq!(rows[0].1.tools.as_deref(), Some([].as_slice()));
+    }
+
+    /// The door an adapter with no flag for something leaves open: what to set
+    /// once a session is open, in the agent's own ids.
+    #[test]
+    fn a_row_may_say_what_to_set_once_a_session_opens() {
+        let rows = rows(json!({
+            "acp": { "adapters": { "claude": {
+                "command": "claude-agent-acp",
+                "options": { "mode": "dontAsk", "effort": "high" }
+            } } }
+        }))
+        .expect("one row");
+        assert_eq!(rows[0].1.options["mode"], "dontAsk");
+        assert_eq!(rows[0].1.options["effort"], "high");
+    }
+
+    #[test]
+    fn a_row_that_says_nothing_sets_nothing() {
+        let rows = rows(json!({
+            "acp": { "adapters": { "claude": { "command": "npx" } } }
+        }))
+        .expect("one row");
+        assert!(rows[0].1.options.is_empty());
+    }
+
+    /// Both halves are words or the entry is not one. Nothing else is checked:
+    /// the ids are the agent's own, and bingo does not know them.
+    #[test]
+    fn an_option_missing_either_half_is_refused_by_name() {
+        let entry = |id: &str, value: &str| {
+            json!({ "acp": { "adapters": { "claude": {
+                "command": "npx", "options": { id: value }
+            } } } })
+        };
+        let said = refusal(entry("mode", ""));
+        assert!(said.contains("acp.adapters.claude.options"), "{said}");
+        assert!(refusal(entry("", "dontAsk")).contains("options"));
+        assert!(
+            rows(entry("mode", "dontAsk")).is_ok(),
+            "and a word bingo has never heard of is not its business"
+        );
     }
 
     #[test]
