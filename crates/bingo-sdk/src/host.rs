@@ -353,6 +353,42 @@ pub trait HostApi: Send + Sync {
         ))
     }
 
+    /// Put a question to whoever is at this session (ADR-0039 §1): one door
+    /// onto the interaction machinery the gate already asks through, for a
+    /// question no tool defines. `answers` are the answers the kernel will
+    /// take, as a gate question states them.
+    ///
+    /// The session answers first, through its policy's one `stance`: a
+    /// session that lets everything happen answers the question's allowing
+    /// option and a session with nobody at it answers its refusing one —
+    /// both at once, with no interaction opened and nothing journaled, as a
+    /// call the gate allows leaves no receipt. Otherwise the interaction is
+    /// opened and whatever surface is attached renders it, exactly as it
+    /// renders a gate question; the person's answer comes back here.
+    ///
+    /// Unlike `invoke`, a question need not arrive mid-turn: an interaction
+    /// is the session's, not a turn's, so an asker between turns is served.
+    ///
+    /// A question that could not be put to anybody after all — the turn was
+    /// interrupted under it, the session closed — comes back as the refusing
+    /// option rather than as an error, so no caller has to read a refusal out
+    /// of one. A question that names no option for the role its session needs
+    /// is refused outright, and so is a session this host does not run: the
+    /// door never answers "allowed" for a question nobody could have asked.
+    ///
+    /// It does not join the JSON-RPC wire.
+    async fn ask(
+        &self,
+        _session: &SessionId,
+        _kind: InteractionKind,
+        _answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError> {
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            "this host runs no sessions",
+        ))
+    }
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 
     /// Say one line to the person, wherever they are: a transcript notice on

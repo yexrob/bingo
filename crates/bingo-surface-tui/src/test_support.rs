@@ -489,11 +489,13 @@ pub fn question(multi: bool, free_text: bool) -> Interaction {
                     id: "a".into(),
                     label: "Anthropic".into(),
                     description: Some("claude models".into()),
+                    role: None,
                 },
                 QuestionOption {
                     id: "o".into(),
                     label: "OpenAI".into(),
                     description: None,
+                    role: None,
                 },
             ],
             free_text,

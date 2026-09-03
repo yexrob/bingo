@@ -192,6 +192,7 @@ fn crowded_question(focus: usize) -> (Tree, Ui, Now) {
                 id: format!("o{i}"),
                 label: format!("option {i:02}"),
                 description: Some(format!("what option {i:02} means")),
+                role: None,
             })
             .collect();
     }

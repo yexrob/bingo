@@ -187,6 +187,21 @@
         "activation"
       ]
     },
+    "AnswerRole": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "allowing",
+          "description": "\"Let it happen.\""
+        },
+        {
+          "type": "string",
+          "const": "refusing",
+          "description": "The refusal a question falls to when nobody answers it."
+        }
+      ],
+      "description": "The two options a session may answer a question with when nobody is asked\n(ADR-0039 §2). The asker names them in its own words; the kernel reads\nwhich is which and never the words."
+    },
     "AnswerSpec": {
       "type": "string",
       "enum": [
@@ -2478,6 +2493,17 @@
             "string",
             "null"
           ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnswerRole"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What picking it would mean to a session that answers for the person\n(ADR-0039 §2). Unmarked options are a person's alone."
         }
       },
       "required": [
