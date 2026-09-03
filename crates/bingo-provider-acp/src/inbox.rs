@@ -70,9 +70,9 @@ impl Inbox {
         self.loading.store(loading, Ordering::Release);
     }
 
-    /// The question, put to whoever is at this session. `None` when there was
-    /// nobody to put it to at all: no session behind this conversation, a door
-    /// that refused it, or a surface that declined what it was handed.
+    /// The question, put to whoever is at this session. `None` when nothing
+    /// chose an option: no session behind this conversation, a door that
+    /// refused it, or a surface that declined what it was handed.
     async fn put(&self, request: &RequestPermissionRequest) -> Option<RequestPermissionResponse> {
         let (host, session) = (self.host.as_ref()?, self.session.as_ref()?);
         let answer = host
@@ -113,8 +113,8 @@ impl Client for Inbox {
     }
 
     /// One `session/request_permission` is one question (ADR-0039 §3). The
-    /// agent always gets an answer: what came back when somebody answered, and
-    /// its own refusal when nobody could.
+    /// agent always gets an answer: the option that was chosen, or — when none
+    /// was — its own refusal, and one line to the person saying so.
     async fn permission(
         &self,
         request: RequestPermissionRequest,
