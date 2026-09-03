@@ -210,4 +210,20 @@ mod tests {
     fn the_catalogue_learns_which_plugin_a_tool_came_from() {
         assert_eq!(meta("wordcount")["plugin"], json!("wordcount"));
     }
+
+    /// A plugin that shows an element this host has no word for (ADR-0038):
+    /// the result still reads, and the display folds to the text the plugin
+    /// wrote. Before the catch-all, one unknown `kind` failed the whole tool
+    /// call — a newer plugin broke an older host.
+    #[test]
+    fn a_display_this_host_has_no_word_for_folds_instead_of_failing() {
+        let mut output = serde_json::to_value(ToolOutput::text("3 rows")).expect("an output");
+        output["display"] = json!({"kind": "chart.candles", "series": [1, 2], "fold": "AAPL 1 2"});
+        let result: ToolCallResult = serde_json::from_value(json!({"output": output}))
+            .expect("a word from a newer plugin is not a failure");
+        assert_eq!(
+            result.output.display.map(|view| view.fold()),
+            Some("AAPL 1 2".to_string())
+        );
+    }
 }
