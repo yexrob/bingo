@@ -31,6 +31,7 @@
 //!       "usage": { "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 },
 //!       "awaitCancel": false,
 //!       "thenExit": false,
+//!       "diesAtPromptOnce": false,
 //!       "mcpList": false,
 //!       "mcp": [ { "tool": "SendMessage", "arguments": {…} } ]
 //!     }
@@ -130,6 +131,16 @@ struct Turn {
     /// does. The next turn must find a new child.
     #[serde(default)]
     then_exit: bool,
+    /// The agent goes *during* this turn, having streamed whatever the turn
+    /// streams and answered nothing — the death a client discovers at its own
+    /// write rather than before it. Once per script: the first child to be
+    /// told this leaves a mark beside the script, and the one that replaces it
+    /// answers. With no updates it is a turn that said nothing before it went;
+    /// with updates it is one that said something first, which is the
+    /// difference between a turn that may be asked again and one that may not
+    /// (ADR-0035 §3).
+    #[serde(default)]
+    dies_at_prompt_once: bool,
     /// Ask the bridge what it offers, mid-turn. What comes back is logged, so
     /// an offer that moved between turns can be seen to have moved.
     #[serde(default)]
@@ -162,6 +173,7 @@ async fn main() -> Result<(), Failed> {
     let log = std::env::var(LOG).ok().map(PathBuf::from);
     Agent {
         script,
+        died: PathBuf::from(format!("{path}.died")),
         log,
         turn: 0,
         out: tokio::io::stdout(),
@@ -173,6 +185,11 @@ async fn main() -> Result<(), Failed> {
 
 struct Agent {
     script: Script,
+    /// Where a `diesAtPromptOnce` turn leaves its mark, so the child that
+    /// replaces it answers instead of dying in its turn. Beside the script it
+    /// was handed, because that path is already one per scenario: a second env
+    /// var would be a second name for a place this one already knows.
+    died: PathBuf,
     log: Option<PathBuf>,
     turn: usize,
     out: Stdout,
@@ -375,6 +392,9 @@ impl Agent {
         for update in turn.updates {
             self.update(update).await?;
         }
+        if turn.dies_at_prompt_once && self.first_to_die() {
+            std::process::exit(0);
+        }
         let stop = if turn.await_cancel {
             self.wait_for_cancel(lines).await?
         } else {
@@ -390,6 +410,18 @@ impl Agent {
             std::process::exit(0);
         }
         Ok(())
+    }
+
+    /// Whether this process is the first to be told to die. Claiming the mark
+    /// and finding it already there are one act, so two children racing for it
+    /// cannot both win — and a mark that cannot be written at all means the
+    /// scenario gets a live agent, which fails loudly rather than hanging.
+    fn first_to_die(&self) -> bool {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.died)
+            .is_ok()
     }
 
     /// What this turn does over the bridge, before it says anything: the agent
@@ -572,6 +604,7 @@ fn script_turn(turn: &Turn) -> Turn {
         usage: turn.usage.clone(),
         await_cancel: turn.await_cancel,
         then_exit: turn.then_exit,
+        dies_at_prompt_once: turn.dies_at_prompt_once,
         mcp_list: turn.mcp_list,
         mcp_until: turn.mcp_until.clone(),
         mcp: turn.mcp.clone(),

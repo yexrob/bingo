@@ -57,33 +57,6 @@ fn two_turns() -> Value {
     ])
 }
 
-/// The frames a host-driven run wrote. `--output-format json` is the stream
-/// every surface reads, so a notice raised inside the run is on it and so is
-/// what a `/command` answered.
-fn frames(ended: &stream_json::Ended) -> Vec<Frame> {
-    ended
-        .lines
-        .iter()
-        .filter(|line| line.get("event").is_some())
-        .map(|line| {
-            serde_json::from_str(&line.to_string()).unwrap_or_else(|e| panic!("{e}: {line}"))
-        })
-        .collect()
-}
-
-fn said_notices(ended: &stream_json::Ended) -> Vec<(String, String)> {
-    frames(ended)
-        .into_iter()
-        .filter_map(|frame| match frame.event {
-            Event::ItemCompleted { item } => match item.body {
-                ItemBody::Notice { code, text, .. } => Some((code, text)),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
 /// Everything the run's `/command`s answered with, run together.
 fn receipts(ended: &stream_json::Ended) -> String {
     frames(ended)
@@ -157,12 +130,8 @@ fn a_thinking_change_reaches_the_agent_before_the_next_prompt() {
         "`max` clamped to the deepest this agent offers"
     );
 
-    let all = said_notices(&ended);
-    let clamped: Vec<&String> = all
-        .iter()
-        .filter(|(code, _)| code == "ACP_LEVEL")
-        .map(|(_, text)| text)
-        .collect();
+    let all = notices(frames(&ended));
+    let clamped = coded(&all, "ACP_LEVEL");
     assert_eq!(clamped.len(), 1, "{all:?}");
     assert!(
         clamped[0].contains("max") && clamped[0].contains("High"),
@@ -361,12 +330,8 @@ fn an_agent_with_neither_knob_gets_no_config_call_and_one_notice() {
         ],
         "nothing was sent for a knob that is not there"
     );
-    let all = said_notices(&ended);
-    let told: Vec<&String> = all
-        .iter()
-        .filter(|(code, _)| code == "ACP_KNOB")
-        .map(|(_, text)| text)
-        .collect();
+    let all = notices(frames(&ended));
+    let told = coded(&all, "ACP_KNOB");
     assert_eq!(told.len(), 1, "said once, not once a turn: {all:?}");
     assert!(
         told[0].contains("acp.adapters.scripted"),

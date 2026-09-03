@@ -20,13 +20,14 @@ use agent_client_protocol_schema::v1::{
 };
 use async_trait::async_trait;
 use bingo_sdk::{
-    AuthStatus, CancellationToken, ContentPart, EndpointCapabilities, Message, ModelEvent,
-    ModelInfo, ModelRequest, ModelStream, Provider, ProviderError, Role, SessionId,
+    AuthStatus, CancellationToken, ContentPart, Effort, EndpointCapabilities, Message, ModelEvent,
+    ModelInfo, ModelRequest, ModelStream, Provider, ProviderError, Role, SessionId, ToolSpec,
 };
 use futures::stream;
 use tokio::sync::mpsc;
 
 use crate::config::{self, AGENT, Adapter};
+use crate::error::AcpError;
 use crate::events::Mapper;
 use crate::knobs::Wanted;
 use crate::session::{Link, Sessions};
@@ -50,6 +51,105 @@ impl AcpProvider {
             sessions,
             images: AtomicBool::new(false),
         }
+    }
+
+    /// The request, taken apart into what it takes to ask it — and taken
+    /// apart by moving: the turn keeps every piece for as long as it might
+    /// have to ask again, and a copy of the fold would be the conversation
+    /// twice in memory.
+    fn asking(&self, request: ModelRequest) -> Result<Asking, ProviderError> {
+        let session = request.session.ok_or_else(nobody)?;
+        let (history, asked) = split(request.messages);
+        Ok(Asking {
+            sessions: self.sessions.clone(),
+            name: self.name.clone(),
+            adapter: self.adapter.clone(),
+            session,
+            history,
+            asked,
+            tools: request.tools,
+            reasoning: request.reasoning,
+            model: request.model,
+        })
+    }
+}
+
+/// One request's question, and everything it takes to put it again.
+///
+/// A child that died between turns is replaced rather than asked (ADR-0035
+/// §3). `Sessions::prepare` finds most of those deaths before the prompt is
+/// written, but that check is an optimisation and not the rule: a child can go
+/// in the moment between it and the write, and the rule has to hold wherever
+/// the death is discovered. So the turn keeps what it was built from, and a
+/// prompt that comes back as a dead pipe having said nothing is asked once
+/// more on a new child.
+struct Asking {
+    sessions: Arc<Sessions>,
+    name: String,
+    adapter: Adapter,
+    session: SessionId,
+    /// The turns before this one: what the restore ladder is handed when it
+    /// has to open a conversation from nothing.
+    history: Vec<Message>,
+    /// What the person just said, which is all of the fold that crosses.
+    asked: String,
+    tools: Vec<ToolSpec>,
+    reasoning: Option<Effort>,
+    model: String,
+}
+
+impl Asking {
+    /// A link ready to carry this request: the ladder climbed if it has to be,
+    /// the doors handed this request's offer, the knobs turned to what it asks
+    /// for. All of it, both times — a turn asked again is not a lesser turn.
+    async fn ready(&self) -> Result<Arc<Link>, ProviderError> {
+        let link = self
+            .sessions
+            .prepare(&self.name, &self.adapter, &self.session, &self.history)
+            .await?;
+        // The offer is this request's own tool list (ADR-0036 §1). A request
+        // that moves it is what `tools/list_changed` is made of, so the bridge
+        // hears about it before the prompt that will be answered with it.
+        if link.observe(&self.tools).await {
+            self.sessions.offer_changed().await;
+        }
+        // ADR-0037 §4: between turns, never inside one. What the request asks
+        // for is applied to the agent before the prompt that will be answered
+        // under it — and only what moved crosses.
+        self.sessions
+            .tune(
+                &self.name,
+                &link,
+                Wanted {
+                    effort: self.reasoning,
+                    model: &self.model,
+                },
+            )
+            .await;
+        Ok(link)
+    }
+
+    /// The same, on a child of its own. The one that was there is let go of
+    /// first — and the person told it went — so the ladder opens a
+    /// conversation instead of handing back the dead one.
+    async fn afresh(&self) -> Result<Arc<Link>, ProviderError> {
+        self.sessions.bury(&self.name, &self.session).await;
+        self.ready().await
+    }
+
+    /// What crosses: what the link has to say first, then what the person
+    /// said. Taken from the link that will carry it, never before — a freshly
+    /// opened child has its own first words, and a turn asked again on one
+    /// must say them.
+    async fn prompt(&self, link: &Link) -> PromptRequest {
+        let text = match link.take_preamble().await {
+            Some(said) => format!("{said}\n\n{}", self.asked),
+            None => self.asked.clone(),
+        };
+        PromptRequest::new(
+            AcpSessionId::new(link.acp.as_str()),
+            vec![ContentBlock::Text(TextContent::new(text))],
+        )
     }
 }
 
@@ -78,36 +178,13 @@ impl Provider for AcpProvider {
         request: ModelRequest,
         cancel: CancellationToken,
     ) -> Result<ModelStream, ProviderError> {
-        let session = request.session.clone().ok_or_else(nobody)?;
-        let (history, asked) = split(&request.messages);
-        let link = self
-            .sessions
-            .prepare(&self.name, &self.adapter, &session, history)
-            .await?;
+        let asking = self.asking(request)?;
+        let link = asking.ready().await?;
         self.images.store(
             link.capabilities.prompt_capabilities.image,
             Ordering::Relaxed,
         );
-        // The offer is this request's own tool list (ADR-0036 §1). A request
-        // that moves it is what `tools/list_changed` is made of, so the bridge
-        // hears about it before the prompt that will be answered with it.
-        if link.observe(&request.tools).await {
-            self.sessions.offer_changed().await;
-        }
-        // ADR-0037 §4: between turns, never inside one. What the request asks
-        // for is applied to the agent before the prompt that will be answered
-        // under it — and only what moved crosses.
-        self.sessions
-            .tune(
-                &self.name,
-                &link,
-                Wanted {
-                    effort: request.reasoning,
-                    model: &request.model,
-                },
-            )
-            .await;
-        Ok(hold(link, asked, cancel).await)
+        Ok(hold(link, asking, cancel))
     }
 
     /// The agent's own catalogue (ADR-0037 §2), served through the door every
@@ -150,10 +227,15 @@ fn nobody() -> ProviderError {
 }
 
 /// The turns before this one, and what the person just said. ACP is stateful,
-/// so only the second crosses.
-fn split(messages: &[Message]) -> (&[Message], String) {
-    match messages.split_last() {
-        Some((last, before)) if last.role == Role::User => (before, said(last)),
+/// so only the second crosses. Consuming: both halves outlive the request they
+/// came from, because the turn may have to be asked again.
+fn split(mut messages: Vec<Message>) -> (Vec<Message>, String) {
+    match messages.last() {
+        Some(last) if last.role == Role::User => {
+            let asked = said(last);
+            messages.pop();
+            (messages, asked)
+        }
         // No trailing user turn — a continuation the kernel asked for, or a
         // request built by hand. The whole fold is history and there is
         // nothing new to say.
@@ -170,46 +252,99 @@ fn said(message: &Message) -> String {
         .join("\n")
 }
 
-/// One `session/prompt`, held open, with the stream folded as it arrives.
-async fn hold(link: Arc<Link>, asked: String, cancel: CancellationToken) -> ModelStream {
-    let updates = link.listen().await;
-    let text = match link.take_preamble().await {
-        Some(said) => format!("{said}\n\n{asked}"),
-        None => asked,
-    };
-    let prompt = PromptRequest::new(
-        AcpSessionId::new(link.acp.as_str()),
-        vec![ContentBlock::Text(TextContent::new(text))],
-    );
+/// The turn, as a stream. The asking runs on a task of its own so the stream
+/// is there to be read the moment it is handed over.
+fn hold(link: Arc<Link>, asking: Asking, cancel: CancellationToken) -> ModelStream {
     let (out, events) = mpsc::unbounded_channel();
-    tokio::spawn(turn(link, updates, prompt, cancel, out));
+    tokio::spawn(round(link, asking, cancel, Telling::new(out)));
     Box::pin(stream::unfold(events, |mut events| async move {
         events.recv().await.map(|event| (event, events))
     }))
 }
 
-/// The turn: updates folded as they arrive, an interrupt sent as
-/// `session/cancel`, and the finish written when the prompt answers.
-async fn turn(
-    link: Arc<Link>,
-    mut updates: mpsc::UnboundedReceiver<agent_client_protocol_schema::v1::SessionNotification>,
-    prompt: PromptRequest,
-    cancel: CancellationToken,
+/// The turn's own stream, and whether anything has gone down it. One fact,
+/// because it is the fact that says whether the question may be put again: a
+/// turn that has said nothing can be asked afresh, and one that has said
+/// something cannot, because the second telling would be the first one twice.
+struct Telling {
     out: mpsc::UnboundedSender<Yielded>,
-) {
+    said: bool,
+}
+
+impl Telling {
+    fn new(out: mpsc::UnboundedSender<Yielded>) -> Self {
+        Self { out, said: false }
+    }
+
+    /// `false` once nobody is reading: the turn was dropped and there is no
+    /// reason to keep folding.
+    fn tell(&mut self, events: Vec<ModelEvent>) -> bool {
+        self.said |= !events.is_empty();
+        events
+            .into_iter()
+            .all(|event| self.out.send(Ok(event)).is_ok())
+    }
+
+    fn failed(&self, error: ProviderError) {
+        let _ = self.out.send(Err(error));
+    }
+}
+
+/// How one `session/prompt` ended.
+enum Attempt {
+    /// Answered, refused, cancelled or dropped: whatever there was to say has
+    /// been said, and the turn is over.
+    Done,
+    /// The child was gone before it said a word. Nothing of this attempt
+    /// reached the stream, so putting the question again is asking it rather
+    /// than repeating it.
+    Lost(AcpError),
+}
+
+/// The turn, and — once, and only if the first attempt said nothing at all —
+/// the same turn on a new child (ADR-0035 §3).
+///
+/// The death that ended the first attempt is not what the person is told: the
+/// notice that a child went is said where it is buried, and the turn's own
+/// answer is whatever the second child makes of the question.
+async fn round(link: Arc<Link>, asking: Asking, cancel: CancellationToken, mut out: Telling) {
+    let Attempt::Lost(_) = attempt(&link, &asking, &cancel, &mut out).await else {
+        return;
+    };
+    match asking.afresh().await {
+        Ok(fresh) => {
+            if let Attempt::Lost(gone) = attempt(&fresh, &asking, &cancel, &mut out).await {
+                out.failed(gone.into());
+            }
+        }
+        Err(refused) => out.failed(refused),
+    }
+}
+
+/// One `session/prompt`, held open: updates folded as they arrive, an
+/// interrupt sent as `session/cancel`, and the finish written when the prompt
+/// answers.
+async fn attempt(
+    link: &Arc<Link>,
+    asking: &Asking,
+    cancel: &CancellationToken,
+    out: &mut Telling,
+) -> Attempt {
+    let mut updates = link.listen().await;
+    let prompt = asking.prompt(link).await;
     let mut mapper = Mapper::default();
-    let asking = link.connection.call(prompt);
-    tokio::pin!(asking);
+    let waiting = link.connection.call(prompt);
+    tokio::pin!(waiting);
     let mut told = false;
     let answered = loop {
         tokio::select! {
             biased;
             Some(note) = updates.recv() => {
-                if !emit(&out, mapper.update(note.update)) {
-                    return;
+                if !out.tell(mapper.update(note.update)) {
+                    return Attempt::Done;
                 }
             }
-            answer = &mut asking => break answer,
+            answer = &mut waiting => break answer,
             () = cancel.cancelled(), if !told => {
                 told = true;
                 // ADR-0035 §6: one notification, then wait for the agent to
@@ -223,26 +358,42 @@ async fn turn(
     };
     // Whatever the agent said between its last update and its answer.
     while let Ok(note) = updates.try_recv() {
-        if !emit(&out, mapper.update(note.update)) {
-            return;
+        if !out.tell(mapper.update(note.update)) {
+            return Attempt::Done;
         }
     }
+    settle(answered, &mut mapper, cancel, out)
+}
+
+/// What the prompt answered with, and what it leaves the turn. A dead pipe
+/// with nothing said and no interrupt to explain it is the one outcome worth a
+/// second child; the agent's own refusal, a shape this build cannot read, and
+/// a death after the first word are all this turn's answer.
+fn settle(
+    answered: Result<PromptResponse, AcpError>,
+    mapper: &mut Mapper,
+    cancel: &CancellationToken,
+    out: &mut Telling,
+) -> Attempt {
     match answered {
-        Ok(response) => finish(&out, &mut mapper, &response),
+        Ok(response) => {
+            out.tell(mapper.finish(&response));
+            Attempt::Done
+        }
+        Err(gone) if transport(&gone) && !out.said && !cancel.is_cancelled() => Attempt::Lost(gone),
         Err(failed) => {
-            let _ = out.send(Err(failed.into()));
+            out.failed(failed.into());
+            Attempt::Done
         }
     }
 }
 
-fn finish(out: &mpsc::UnboundedSender<Yielded>, mapper: &mut Mapper, response: &PromptResponse) {
-    emit(out, mapper.finish(response));
-}
-
-/// `false` once nobody is reading: the turn was dropped and there is no reason
-/// to keep folding.
-fn emit(out: &mpsc::UnboundedSender<Yielded>, events: Vec<ModelEvent>) -> bool {
-    events.into_iter().all(|event| out.send(Ok(event)).is_ok())
+/// A failure of the pipe rather than of the agent: the child is gone, or has
+/// stopped speaking. Anything the agent itself answered — a refusal in its own
+/// words, an answer this build could not read — happened, and asking again
+/// would only be asking it twice.
+fn transport(error: &AcpError) -> bool {
+    matches!(error, AcpError::Transport(_))
 }
 
 /// Every configured adapter, as providers.
@@ -320,11 +471,13 @@ mod tests {
             Message::text(Role::Assistant, "Renamed it."),
             Message::text(Role::User, "and the tests?"),
         ];
-        let (history, asked) = split(&messages);
+        let (history, asked) = split(messages.clone());
         assert_eq!(asked, "and the tests?");
         assert_eq!(history.len(), 2);
 
-        let (history, asked) = split(&messages[..1]);
+        let mut only_the_first = messages;
+        only_the_first.truncate(1);
+        let (history, asked) = split(only_the_first);
         assert_eq!(asked, "rename the module");
         assert!(history.is_empty(), "a first turn has no history to carry");
     }
@@ -341,7 +494,7 @@ mod tests {
                 input: json!({}),
             }]),
         ];
-        let (history, asked) = split(&messages);
+        let (history, asked) = split(messages);
         assert_eq!(asked, "");
         assert_eq!(history.len(), 2);
     }
@@ -359,6 +512,35 @@ mod tests {
             .err()
             .expect("no session, no adapter");
         assert!(matches!(failed, ProviderError::Config { .. }));
+    }
+
+    /// The one failure worth a second child is the pipe's. An agent that
+    /// refused in its own words has answered, and asking it again would be
+    /// asking it twice (ADR-0035 §3).
+    #[test]
+    fn only_a_dead_pipe_is_worth_asking_again() {
+        use agent_client_protocol_schema::v1::Error as RpcError;
+        assert!(transport(&AcpError::transport("the adapter is gone")));
+        assert!(!transport(&AcpError::Refused(RpcError::new(
+            -32000,
+            "run `claude login`"
+        ))));
+        assert!(!transport(&AcpError::protocol("session/prompt: no stop")));
+        assert!(!transport(&AcpError::Spawn("no such command".into())));
+    }
+
+    /// What decides whether the question may be put again is whether anything
+    /// of the answer is already on the stream — and an update this build has
+    /// no meaning for leaves a turn as silent as it was.
+    #[test]
+    fn a_turn_has_said_nothing_until_an_event_goes_out() {
+        let (out, _reading) = mpsc::unbounded_channel();
+        let mut telling = Telling::new(out);
+        assert!(!telling.said);
+        assert!(telling.tell(Vec::new()));
+        assert!(!telling.said, "an update that meant nothing said nothing");
+        assert!(telling.tell(vec![ModelEvent::TextStart { id: "t1".into() }]));
+        assert!(telling.said);
     }
 
     #[test]

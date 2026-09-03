@@ -242,6 +242,11 @@ impl Sessions {
             // the next call would only fail as transport. The ladder is
             // climbed again from the journal's own pointer, so what it lost
             // is at most one rung, and the person is told (ADR-0035 §3).
+            //
+            // This is where most of those deaths are found, not all of them:
+            // a child can go between this check and the write, and the turn
+            // that discovers it there buries it and asks here again
+            // (`provider::Asking::afresh`).
             Some(_) => self.bury(name, session).await,
             None => {}
         }
@@ -255,8 +260,10 @@ impl Sessions {
     }
 
     /// Let go of a dead adapter — dropping the link takes what is left of its
-    /// process group — and say that it went.
-    async fn bury(&self, name: &str, session: &SessionId) {
+    /// process group — and say that it went. One death is one notice: whoever
+    /// found it buries it, and [`Self::prepare`] afterwards finds nothing left
+    /// to bury.
+    pub(crate) async fn bury(&self, name: &str, session: &SessionId) {
         self.links
             .lock()
             .await

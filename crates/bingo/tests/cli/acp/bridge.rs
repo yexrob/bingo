@@ -165,7 +165,7 @@ fn a_bridged_call_posts_to_the_parent_and_is_journaled_under_the_turn() {
         "and the tool's own receipt came back: {answered}"
     );
 
-    let posts: Vec<String> = bodies(&out)
+    let posts: Vec<String> = bodies(frames_of(&out))
         .into_iter()
         .filter_map(|body| match body {
             ItemBody::User { parts, .. } => {
@@ -530,12 +530,8 @@ fn a_row_this_agent_cannot_take_is_skipped_and_named() {
     assert_eq!(rows.len(), 1, "only ours crossed: {rows:?}");
     assert_eq!(rows[0]["name"], "bingo");
 
-    let all = notices(&out);
-    let said: Vec<&String> = all
-        .iter()
-        .filter(|(code, _)| code == "ACP_MCP")
-        .map(|(_, text)| text)
-        .collect();
+    let all = notices(frames_of(&out));
+    let said = coded(&all, "ACP_MCP");
     assert_eq!(said.len(), 1, "said once: {all:?}");
     assert!(
         said[0].contains("remote") && said[0].contains("http"),
