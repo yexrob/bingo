@@ -21,7 +21,9 @@ a mention store beside the log it was derivable from.
    against the room's members; a name that is not a member opens nothing.
    `@all` is one debt against the room, closed by any other member's post,
    and never chased member-by-member — the sigil did not pick a member, so
-   neither does the chase.
+   neither does the chase. (2026-09-03: the roster is asked before the
+   sigil — a room that seats a member called `all` spends the word on the
+   member, because a real name is never shadowed.)
 2. **Derived, never stored.** `mentions(posts) -> Vec<Mention>` is a pure
    fold over the room's own journal — the posts are already there, and so
    are the closures. No second store, nothing to keep in sync, and replay

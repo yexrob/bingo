@@ -4,7 +4,8 @@
 //! is whether a post opens that turn now.
 //!
 //! A seat is woken when its ear is live, and whatever its ear when the post
-//! calls on it by name (ADR-0029 §5). A patient seat the post does not name is
+//! calls on it — by name, or by the `@all` that calls on every member but the
+//! one who wrote it (ADR-0029 §5). A patient seat the post does not name is
 //! left where it is; its own patience wakes it later if it stays behind
 //! (`deadline`). The wake itself is a nudge — from the room and nobody in it,
 //! carrying no post — so nothing it does opens a debt or counts as read.
@@ -76,8 +77,8 @@ pub(crate) fn heard<'a>(
     text: &str,
 ) -> Vec<(&'a str, Heard)> {
     // Who the post calls on, asked of the mention fold against the room's own
-    // roster: the one matcher, so `@all` — which picked no member — pierces
-    // nothing, and a name nobody has calls on nobody.
+    // roster: the one matcher, so `@all` reaches the room as it stands at this
+    // moment and a name nobody has calls on nobody.
     let called = mentions::named(text, &room.members);
     room.members
         .iter()
@@ -110,12 +111,19 @@ fn wakes(room: &Room, member: &str, called: &[Owed]) -> Heard {
     Heard::Wait
 }
 
-/// Whether this seat is among the post's mentions.
+/// Whether the post calls on this seat: by its own name, or by the `@all` that
+/// calls on the whole room — and every seat asked here is a member the caller
+/// is already deciding for, which is everyone but the author.
+///
+/// The sigil is answered against the roster this fan-out was handed, never
+/// expanded into names when the post was written: the roster is the one
+/// authority, so a seat the room gains later is a late reader like any other
+/// rather than somebody an older list forgot.
 fn pierced(called: &[Owed], member: &str) -> bool {
-    called
-        .iter()
-        .filter_map(Owed::chased)
-        .any(|name| name::same(name, member))
+    called.iter().any(|owed| match owed {
+        Owed::Room => true,
+        Owed::Member(name) => name::same(name, member),
+    })
 }
 
 /// The name a rostered holder's posts sign, or nothing when the roster does
@@ -296,7 +304,7 @@ mod tests {
     /// The whole of ADR-0029 §1 and §5 under ADR-0034 §3, as one table over one
     /// roster: a live seat wakes, a patient one waits for its own next turn,
     /// and a post that calls on a seat by name wakes it whatever it wears.
-    /// `@all` picked no member, so it pierces nobody.
+    /// `@all` calls on the whole roster, the rostered holder with it.
     #[test]
     fn a_patient_seat_waits_for_what_it_is_not_called_on_by_name() {
         let room = roster(&["reviewer:0", "scout", "parent:120"]);
@@ -329,8 +337,8 @@ mod tests {
                 "@all stand-up in five",
                 vec![
                     ("reviewer", Heard::Wake),
-                    ("scout", Heard::Wait),
-                    (PARENT, Heard::Wait),
+                    ("scout", Heard::Wake),
+                    (PARENT, Heard::Wake),
                 ],
             ),
             (
@@ -349,6 +357,52 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    /// `@all` is every patient ear in the room pierced at once, and the one
+    /// seat it never reaches is the seat that wrote it — a question to
+    /// yourself is not one.
+    #[test]
+    fn at_all_wakes_every_member_but_the_one_who_wrote_it() {
+        let room = roster(&["reviewer", "scout", PARENT]);
+        assert_eq!(
+            heard(&room, Some(PARENT), "scout", "@all stand-up in five"),
+            [("reviewer", Heard::Wake), (PARENT, Heard::Wake)],
+            "the scout wrote it and is not written to"
+        );
+        assert_eq!(
+            heard(&room, Some(PARENT), PARENT, "@all stand-up in five"),
+            [("reviewer", Heard::Wake), ("scout", Heard::Wake)],
+            "the holder's own post is the holder's, like any member's"
+        );
+    }
+
+    /// The sigil is answered against the roster the fan-out holds, so the same
+    /// post reaches a room that grew — nothing was expanded into names when it
+    /// was written.
+    #[test]
+    fn at_all_reaches_the_room_as_it_stands_rather_than_as_it_stood() {
+        let text = "@all stand-up in five";
+        assert_eq!(
+            heard(&roster(&["reviewer"]), None, "scout", text),
+            [("reviewer", Heard::Wake)]
+        );
+        assert_eq!(
+            heard(&roster(&["reviewer", "latecomer"]), None, "scout", text),
+            [("reviewer", Heard::Wake), ("latecomer", Heard::Wake)]
+        );
+    }
+
+    /// A room that seats somebody called `all` spends the word on them: the
+    /// patient seats beside that member wait, exactly as `@scout` would leave
+    /// them (ADR-0022 §1).
+    #[test]
+    fn a_member_named_all_takes_the_word_back_and_the_rest_keep_waiting() {
+        let room = roster(&["all", "scout"]);
+        assert_eq!(
+            heard(&room, None, "reviewer", "@all stand-up in five"),
+            [("all", Heard::Wake), ("scout", Heard::Wait)]
+        );
     }
 
     /// A seat that retuned its own ear is heard as it now hears, and the

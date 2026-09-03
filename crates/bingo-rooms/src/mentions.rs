@@ -13,8 +13,9 @@ use jiff::Timestamp;
 use crate::name::{PARENT, same};
 use crate::room;
 
-/// The sigil that calls on the room rather than on anyone in it. Reserved: a
-/// member of this name is still the room's `@all`.
+/// The sigil that calls on the room rather than on anyone in it — which is
+/// every member of it but whoever posted. A room that seats a member of this
+/// name spends the word on the member: a real name is never shadowed.
 const ALL: &str = "all";
 
 /// Characters of a post that a nudge quotes back. Enough to tell two
@@ -26,7 +27,8 @@ const HEAD: usize = 48;
 pub enum Owed {
     /// A named member: the one a nudge goes to.
     Member(String),
-    /// `@all`: the room. The sigil picked nobody, so neither does the chase.
+    /// `@all`: the room. Everyone in it is called on and the fan-out reads it
+    /// so, but the sigil picked no member, so the chase picks none either.
     Room,
 }
 
@@ -164,16 +166,14 @@ fn in_name(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
-/// Who the word after an `@` names: the room, one member — spelled as the
-/// roster spells it — or nobody.
+/// Who the word after an `@` names: one member — spelled as the roster spells
+/// it — the room, or nobody. The roster answers first, so a member actually
+/// named `all` keeps its own name and the sigil is only what is left over.
 fn whom(word: &str, members: &[String]) -> Option<Owed> {
-    if same(word, ALL) {
-        return Some(Owed::Room);
+    match members.iter().find(|member| same(member, word)) {
+        Some(member) => Some(Owed::Member(member.clone())),
+        None => same(word, ALL).then_some(Owed::Room),
     }
-    members
-        .iter()
-        .find(|member| same(member, word))
-        .map(|member| Owed::Member(member.clone()))
 }
 
 fn is_member(who: &str, members: &[String]) -> bool {
@@ -329,6 +329,41 @@ mod tests {
             post(2, "scout", "on my way"),
         ];
         assert!(owed(&closed).is_empty());
+    }
+
+    /// A room that seats somebody called `all` spends the word on them: the
+    /// sigil is what is left over when no member answers to it, so nobody's
+    /// name is ever taken by it.
+    #[test]
+    fn a_member_named_all_takes_the_word_back_from_the_sigil() {
+        let seated = ["all".to_string(), "scout".to_string()];
+        assert_eq!(
+            named("@all stand-up in five", &seated),
+            [Owed::Member("all".into())],
+            "the member, and no debt against the room"
+        );
+        assert_eq!(
+            named("@all stand-up in five", &["scout".to_string()]),
+            [Owed::Room],
+            "and off that roster the word is the room's again"
+        );
+    }
+
+    /// The roster is asked at the fold, never baked into the post: a member
+    /// seated after `@all` was said answers it like any other.
+    #[test]
+    fn at_all_is_answered_by_a_member_the_room_gained_after_it_was_said() {
+        let asked = [post(1, "reviewer", "@all stand-up in five")];
+        let joined = ["reviewer", "scout", "latecomer"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(mentions(&asked, &joined).len(), 1, "still standing");
+
+        let answered = [
+            post(1, "reviewer", "@all stand-up in five"),
+            post(2, "latecomer", "here"),
+        ];
+        assert!(mentions(&answered, &joined).is_empty());
     }
 
     #[test]
