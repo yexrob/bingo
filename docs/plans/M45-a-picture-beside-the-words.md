@@ -108,13 +108,13 @@ clipboard module; `bingo/src/main.rs`; `bingo-surface-print/src/input.rs`;
 - [x] Kernel: empty text + image is accepted; bad media type and
   oversize are `InvalidInput`; the user item carries text then images.
 - [x] Wire: a submit with an image round-trips to the journal.
-- [ ] TUI: a paste puts `[image 1]` in the line and the submit carries
+- [x] TUI: a paste puts `[image 1]` in the line and the submit carries
   the image; `@shot.png` sends an image part; a missing file keeps
   the line and says so; PTY smoke green.
-- [ ] `--print --image` journals an image; stream-json image line too.
-- [ ] Feishu: image message, post with pictures, and a failed fetch —
+- [x] `--print --image` journals an image; stream-json image line too.
+- [x] Feishu: image message, post with pictures, and a failed fetch —
   each as specified, under wiremock.
-- [ ] Every AGENTS.md gate; no new lockfile crate; Windows
+- [x] Every AGENTS.md gate; no new lockfile crate; Windows
   cross-check for `bingo-sdk` and `bingo` (a path is read).
 
 ## Non-goals
@@ -161,3 +161,72 @@ green) all clean; `check_discipline.sh` → ok; `budget.sh` → ok, deps
 --target x86_64-pc-windows-msvc` clean (also `-p bingo-core`, `-p
 bingo-tool-fs`; a full-workspace Windows check hits a pre-existing
 `aws-lc-sys` cross-toolchain gap, unrelated).
+
+## Verified (slices T and C)
+
+Both written in the main session (Opus was overloaded; the user asked
+that no worker be used), each on its own branch, merged after its own
+gate run, then the whole gated once more on `dev`.
+
+**T.** `bingo-surface-tui/src/pictures.rs` is the pure brick: `[image N]`
+tokens read off the line, the next number minted past the highest, and
+`Held` — pictures by token — from which `carried(line)` derives what is
+sent, so a deleted token drops its picture without anyone remembering
+it. `clipboard.rs` is the one impure edge: three `cfg` arms (`osascript`
+writing `«class PNGf»` to a scratch file; `wl-paste` then `xclip` with
+the file as stdout; PowerShell `Clipboard::GetImage().Save`), each a
+bounded child, no dependency. `ctrl+v` is `Effect::PasteImage`; the loop
+reads the clipboard, holds the picture and inserts the token. At submit
+the loop reads the `@` mentions (`complete::attachments`, whose table
+is now `Image::media_type_of`) relative to the session's cwd; one that
+does not read restores the line and raises the status-line notice with
+the path and the reason. `--print --image PATH` rides `args.images` to
+the print surface, which reads it at start and answers `InvalidInput`
+before a session opens; stream-json `image` blocks (`source.type ==
+base64`) are a user line's pictures, and a line that is only a picture
+is a prompt. Black-box `crates/bingo/tests/cli/images.rs` reads the
+journal, since the stream does not echo a person's own prompt.
+
+Found beyond the plan: no transcript chip was needed — `said.rs` draws
+the text parts and the words already carry the token or the path.
+Two notes for later, unscheduled: Windows Terminal binds `ctrl+v` to
+its own paste, so there the picture route is `@path`; and `paste_image`
+runs the clipboard tool on the loop's thread (bounded at five seconds).
+
+**C.** `Incoming::Message.images`; `feishu/event.rs` stays a pure parse
+and yields `Heard.pictures` (message id + key) beside the `Incoming` —
+an `image` message is empty words and one key, a `post`'s `img` runs
+are keys in document order. `feishu/pictures.rs` fetches them through
+`Api::get_bytes` (`/im/v1/messages/{id}/resources/{key}?type=image`,
+the media type off `Content-Type`), after the ack and before the inbox;
+a picture that does not fetch is a `tracing::warn!` and the words still
+go. The ws loop's `inbox` argument became a `Delivery { api, inbox }` so
+the arity stayed under clippy's seven.
+
+```
+$ cargo test --workspace --locked        # slice T worktree: 3396 passed, 0 failed
+$ cargo test --workspace --locked        # slice C worktree: 3382 passed, 0 failed
+$ scripts/tui-smoke.sh                   # tui-smoke ok
+$ cargo check -p bingo-surface-tui -p bingo-surface-print --all-targets \
+      --target x86_64-pc-windows-msvc    # Finished
+$ scripts/check_discipline.sh            # discipline ok
+$ scripts/budget.sh                      # budget ok (310/310, no new crate)
+$ cargo deny check                       # advisories/bans/licenses/sources ok
+```
+Final run on `dev` (aae6810, K + T + C merged):
+```
+$ cargo fmt --all -- --check                                   # clean
+$ cargo clippy --workspace --all-targets --locked -- -D warnings  # Finished
+$ cargo test --workspace --locked        # 3401 passed, 0 failed
+$ scripts/check_discipline.sh            # discipline ok
+$ scripts/budget.sh                      # budget ok
+$ cargo deny check                       # advisories/bans/licenses/sources ok
+$ scripts/tui-smoke.sh                   # tui-smoke ok
+```
+The Windows cross-check passed for `bingo-sdk`, `bingo-surface-tui` and
+`bingo-surface-print` in their slice runs; the same check with
+`bingo-channels` added did not finish (`build failed`), and the run was
+stopped before the cause was read. The likely cause is the pre-existing
+`aws-lc-sys` cross-toolchain gap slice K already met through `reqwest`,
+but that is a guess, not a reading: CI's `windows` job is the backstop.
+
