@@ -102,6 +102,13 @@ if bad:
 print("kernel names no tool")
 PY
 
+# 4d. The kernel spells no permission mode (ADR-0039 §2): the policy owns its own
+#     vocabulary, and a door asks it for a stance rather than learning its words.
+modes=$(grep -rEinw 'bypass|bypassPermissions|dontAsk' crates/bingo-sdk/src crates/bingo-core/src --include='*.rs' 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*//' || true)
+if [ -n "$modes" ]; then
+  say "a permission mode named in kernel/sdk code:"; say "$modes" | head; fail=1
+fi
+
 # 5. Struct field count ≤ 16 and inherent impl spread ≤ 3 files per type (best effort, grep-based;
 #    the third file is ADR-0011 §4: the session actor is its loop, its interactions and its inputs).
 python3 - <<'PY' || fail=1
