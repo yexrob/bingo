@@ -39,6 +39,7 @@ pub mod refusal;
 pub mod render;
 pub mod servers;
 pub mod session;
+pub mod shared;
 pub mod transcript;
 pub mod wire;
 
