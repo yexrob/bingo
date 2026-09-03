@@ -27,9 +27,6 @@ pub const ROWS: usize = 8;
 /// first `@` inside a frame.
 const CAP: usize = 20_000;
 
-/// What a model can be handed as a picture (ADR-0009's parts).
-const IMAGES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
-
 /// Every file under `cwd` a person could mean, in the order the walk finds
 /// them, relative to `cwd`.
 pub fn walk(cwd: &Path) -> Vec<String> {
@@ -116,8 +113,6 @@ fn rows(line: &str, matched: Vec<String>, group: Group) -> Vec<Suggestion> {
 
 /// The images a line mentions, which is what reaches the model beside it. The
 /// line is the only record: nothing is remembered when a mention is deleted.
-// M45 slice T reads the mentions here; nothing in slice K calls this yet.
-#[allow(dead_code)]
 pub fn attachments(line: &str) -> Vec<String> {
     line.split_whitespace()
         .filter_map(|word| word.strip_prefix('@'))
@@ -127,12 +122,9 @@ pub fn attachments(line: &str) -> Vec<String> {
 }
 
 /// Whether a path names a picture, which is what makes it an attachment
-/// rather than a word.
+/// rather than a word. The table is `Image`'s (ADR-0040): one list.
 fn is_image(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|kind| kind.to_str())
-        .is_some_and(|kind| IMAGES.contains(&kind.to_lowercase().as_str()))
+    bingo_sdk::Image::media_type_of(Path::new(path)).is_some()
 }
 
 /// The word being typed: everything after the last space.

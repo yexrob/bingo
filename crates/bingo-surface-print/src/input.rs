@@ -36,6 +36,7 @@
 //! verdict is ignored — the kernel installs a session rule from `AllowSession`,
 //! which this protocol has no way to ask for.
 
+use bingo_sdk::Image;
 use serde_json::{Value, json};
 
 /// Where a run's prompts come from: `args.inputFormat`.
@@ -68,8 +69,9 @@ pub(crate) fn prompts_on_stdio(args: &Value) -> bool {
 /// One line of the host protocol.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Line {
-    /// A prompt: one turn.
-    User { text: String },
+    /// A prompt: one turn. The pictures are the line's `image` blocks
+    /// (ADR-0040); a line that is only pictures is still a prompt.
+    User { text: String, images: Vec<Image> },
     /// Stop the running turn, then acknowledge `request_id`.
     Interrupt { request_id: String },
     /// The host's verdict on a tool call this surface asked about.
@@ -127,35 +129,67 @@ pub(crate) fn parse_line(line: &str) -> Result<Line, ParseError> {
     }
 }
 
-/// The text of a user message. The rest of it — images, the tool results a
-/// host echoes back, `session_id`, `parent_tool_use_id` — is not a prompt.
+/// The text and the pictures of a user message. The rest of it — the tool
+/// results a host echoes back, `session_id`, `parent_tool_use_id` — is not a
+/// prompt.
 fn user(value: &Value) -> Result<Line, ParseError> {
     let content = value
         .pointer("/message/content")
         .ok_or_else(|| ParseError::new("a user line with no `message.content`"))?;
-    let text = match content {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(text_block)
-            .collect::<Vec<_>>()
-            .join("\n"),
+    let (text, images) = match content {
+        Value::String(text) => (text.clone(), Vec::new()),
+        Value::Array(blocks) => (
+            blocks
+                .iter()
+                .filter_map(text_block)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            blocks
+                .iter()
+                .filter_map(image_block)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         _ => {
             return Err(ParseError::new(
                 "`message.content` is neither a string nor a list of blocks",
             ));
         }
     };
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && images.is_empty() {
         return Err(ParseError::new("a user line with no text to submit"));
     }
-    Ok(Line::User { text })
+    Ok(Line::User { text, images })
 }
 
 fn text_block(block: &Value) -> Option<&str> {
     (block.get("type").and_then(Value::as_str) == Some("text"))
         .then(|| block.get("text").and_then(Value::as_str))
         .flatten()
+}
+
+/// An `image` block, in the shape the Anthropic API and Claude Code's host
+/// protocol share: `source: {type: base64, media_type, data}`. Any other
+/// source is a picture this surface cannot carry, and says so.
+fn image_block(block: &Value) -> Option<Result<Image, ParseError>> {
+    if block.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let source = &block["source"];
+    if source["type"].as_str() != Some("base64") {
+        return Some(Err(ParseError::new(
+            "an image block whose `source.type` is not `base64`",
+        )));
+    }
+    let (Some(media_type), Some(data)) = (source["media_type"].as_str(), source["data"].as_str())
+    else {
+        return Some(Err(ParseError::new(
+            "an image block with no `source.media_type` or `source.data`",
+        )));
+    };
+    Some(Ok(Image {
+        media_type: media_type.to_owned(),
+        data: data.to_owned(),
+    }))
 }
 
 fn control_request(value: &Value) -> Result<Line, ParseError> {
@@ -293,13 +327,14 @@ mod tests {
         assert_eq!(
             parse(line),
             Line::User {
-                text: "hello".into()
+                text: "hello".into(),
+                images: Vec::new(),
             }
         );
     }
 
     #[test]
-    fn the_text_blocks_of_a_user_line_are_the_prompt_and_the_rest_is_dropped() {
+    fn the_text_blocks_are_the_prompt_and_the_image_blocks_its_pictures() {
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"text","text":"look at this"},
             {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}},
@@ -307,8 +342,33 @@ mod tests {
         assert_eq!(
             parse(line),
             Line::User {
-                text: "look at this\nand this".into()
+                text: "look at this\nand this".into(),
+                images: vec![Image {
+                    media_type: "image/png".into(),
+                    data: "iVBOR".into(),
+                }],
             }
+        );
+    }
+
+    #[test]
+    fn a_user_line_that_is_only_a_picture_is_a_prompt() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/"}}]}}"#;
+        let Line::User { text, images } = parse(line) else {
+            panic!("a prompt");
+        };
+        assert_eq!(text, "");
+        assert_eq!(images.len(), 1);
+    }
+
+    #[test]
+    fn an_image_block_this_surface_cannot_carry_is_said() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[
+            {"type":"image","source":{"type":"url","url":"https://x/y.png"}}]}}"#;
+        assert_eq!(
+            error(line),
+            "an image block whose `source.type` is not `base64`"
         );
     }
 

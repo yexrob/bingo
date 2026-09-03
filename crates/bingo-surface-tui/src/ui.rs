@@ -25,6 +25,7 @@ use crate::frame::Regions;
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
 use crate::pager::Pager;
+use crate::pictures::Held;
 use crate::rail::{CardId, Pin};
 use crate::rewind::Rewind;
 use crate::roster;
@@ -327,6 +328,8 @@ impl Layer {
 #[derive(Debug)]
 pub struct Ui {
     pub composer: Composer,
+    /// The pasted pictures behind the composer's line, by their `[image N]`.
+    pub pictures: Held,
     pub history: PromptHistory,
     pub dialog: Dialog,
     pub scroll: Scroll,
@@ -391,6 +394,7 @@ impl Ui {
     pub fn new(history: Vec<String>, now: Instant) -> Self {
         Self {
             composer: Composer::default(),
+            pictures: Held::default(),
             history: PromptHistory::new(history),
             dialog: Dialog::default(),
             scroll: Scroll::default(),

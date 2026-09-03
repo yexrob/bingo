@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use bingo_sdk::QuestionOption;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
-    ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Input, IntentId, IntentOutcome,
+    ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId, IntentOutcome,
     Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin, PluginError,
     PluginManifest, Registrar, SessionHandle, SessionId, SessionState, Surface, SurfaceKind,
     SurfaceOptions, TurnStatus,
@@ -142,7 +142,7 @@ pub(crate) async fn drive(
     } = opts;
     let mode = Mode::from_args(&args);
     let renderer = Renderer::new(mode, console.human(), tool_names(host).await);
-    let start = start(Format::from_args(&args), prompt, console)?;
+    let start = start(Format::from_args(&args), prompt, &args, console)?;
     let attachment = host
         .open(
             selector,
@@ -159,8 +159,8 @@ pub(crate) async fn drive(
         .await?;
     let run = Attached::open(attachment, renderer, console, out, err)?;
     match start {
-        Start::Once(prompt) => {
-            run.submit(IntentId::mint(), prompt);
+        Start::Once { prompt, images } => {
+            run.submit(IntentId::mint(), prompt, images);
             run.single().await
         }
         Start::Hosted { first, lines } => {
@@ -173,8 +173,8 @@ pub(crate) async fn drive(
 /// Where a run's inputs come from, decided before the session is opened
 /// because a text run reads the whole of stdin to find its prompt.
 enum Start {
-    /// One prompt, one turn.
-    Once(String),
+    /// One prompt, one turn; the pictures are `--image`'s.
+    Once { prompt: String, images: Vec<Image> },
     /// The host protocol: the prompt argument, when there was one, and then
     /// stdin's lines for as long as it stays open.
     Hosted {
@@ -186,10 +186,14 @@ enum Start {
 fn start(
     format: Format,
     prompt: Option<String>,
+    args: &serde_json::Value,
     console: &mut (dyn Console + Send),
 ) -> Result<Start, KernelError> {
     match format {
-        Format::Text => prompt_from(prompt, console).map(Start::Once),
+        Format::Text => Ok(Start::Once {
+            prompt: prompt_from(prompt, console)?,
+            images: images_from(args)?,
+        }),
         Format::StreamJson => Ok(Start::Hosted {
             first: prompt,
             lines: console.lines(),
@@ -244,9 +248,15 @@ impl<'a> Attached<'a> {
         self.console.human()
     }
 
-    fn submit(&self, intent: IntentId, text: String) {
-        self.handle
-            .submit(intent, Input::text(text, Origin::surface(SURFACE_ID)));
+    fn submit(&self, intent: IntentId, text: String, images: Vec<Image>) {
+        self.handle.submit(
+            intent,
+            Input::Text {
+                text,
+                images,
+                origin: Origin::surface(SURFACE_ID),
+            },
+        );
     }
 
     /// Fold and render one frame; `false` when it was stale or from a session
@@ -347,6 +357,24 @@ fn prompt_from(
         ));
     }
     Ok(prompt)
+}
+
+/// `--image`'s paths (`args.images`), read at the edge: a path that does not
+/// read is the run's answer, before a session is opened for it.
+fn images_from(args: &serde_json::Value) -> Result<Vec<Image>, KernelError> {
+    let paths = args
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    paths
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|path| {
+            Image::read(std::path::Path::new(path))
+                .map_err(|e| KernelError::new(ErrorCode::InvalidInput, format!("{path}: {e}")))
+        })
+        .collect()
 }
 
 fn asks_a_person(event: &Event) -> bool {
@@ -1563,6 +1591,43 @@ pub(crate) mod tests {
             run.err,
             "error: The anthropic provider has no credentials. Set ANTHROPIC_API_KEY.\n"
         );
+    }
+
+    #[tokio::test]
+    async fn an_image_that_does_not_read_is_invalid_input_before_any_turn() {
+        let run = play(
+            vec![completed(1)],
+            &mut TestConsole::headless(),
+            options(Some("look"), json!({ "images": ["/nowhere/shot.txt"] })),
+        )
+        .await;
+        let Err(error) = run.exit else {
+            panic!("the run must not start");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert!(error.message.starts_with("/nowhere/shot.txt: "), "{error}");
+        assert!(run.out.is_empty(), "nothing reached stdout");
+    }
+
+    #[tokio::test]
+    async fn an_image_that_reads_goes_beside_the_prompt() {
+        let path =
+            std::env::temp_dir().join(format!("bingo-print-{}-shot.png", std::process::id()));
+        std::fs::write(&path, b"png").unwrap();
+        let run = play(
+            vec![completed(1)],
+            &mut TestConsole::headless(),
+            options(Some("look"), json!({ "images": [path.to_string_lossy()] })),
+        )
+        .await;
+        let _ = std::fs::remove_file(&path);
+        let submitted = run.session.submitted();
+        let [Input::Text { text, images, .. }] = submitted.as_slice() else {
+            panic!("one prompt: {submitted:?}");
+        };
+        assert_eq!(text, "look");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].media_type, "image/png");
     }
 
     #[tokio::test]
