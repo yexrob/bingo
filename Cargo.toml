@@ -38,6 +38,7 @@ bingo-experience = { path = "crates/bingo-experience" }
 bingo-channels = { path = "crates/bingo-channels" }
 bingo-schedule = { path = "crates/bingo-schedule" }
 bingo-provider-acp = { path = "crates/bingo-provider-acp" }
+bingo-pictures = { path = "crates/bingo-pictures" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
@@ -140,6 +141,24 @@ terminal-colorsaurus = "1.0"
 # tokens, and `unstable_elicitation` is how `elicitation/create` is declined in
 # the protocol's own word rather than a shape invented here (ADR-0035 §5).
 # Neither adds a dependency. Every other unstable feature stays off.
+# M46 (docs/plans/M46-the-picture-is-seen.md, ADR-0041): the decoders behind
+# `bingo-pictures`, so a terminal that draws pictures is handed the one format
+# it takes whatever a person pasted. Measured at +20 crates. Default features
+# are off — no `rayon` (a second thread pool), no `default-formats` (which
+# would pull `avif`/`exr` and their C-adjacent stacks); the ten listed are the
+# formats a person's clipboard, screenshot key or `Read` can produce.
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "tiff",
+  "ico",
+  "qoi",
+  "tga",
+  "pnm",
+] }
 agent-client-protocol-schema = { version = "=1.5.0", features = [
     "unstable_end_turn_token_usage",
     "unstable_elicitation",

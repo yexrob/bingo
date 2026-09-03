@@ -335,6 +335,8 @@ pub struct Recorder {
     pub copies: Vec<Vec<u8>>,
     /// The bytes sent to the desktop, verbatim.
     pub notifications: Vec<Vec<u8>>,
+    /// The bytes the pictures of a frame were made of, verbatim.
+    pub places: Vec<Vec<u8>>,
 }
 
 impl Recorder {
@@ -368,6 +370,11 @@ impl Screen for Recorder {
 
     fn copy(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.copies.push(bytes.to_vec());
+        Ok(())
+    }
+
+    fn place(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.places.push(bytes.to_vec());
         Ok(())
     }
 

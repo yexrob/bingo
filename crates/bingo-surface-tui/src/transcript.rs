@@ -16,6 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::clock::{self, Anim, Now};
 use crate::fold::{self, Fold, Folds};
+use crate::graphics::{Decoded, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
 use crate::{acp, markdown, paths, theme, views, wrap};
@@ -23,6 +24,9 @@ use crate::{acp, markdown, paths, theme, views, wrap};
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
 mod said;
+
+/// The picture under the words, where the terminal draws one (§5).
+mod pictured;
 
 pub(crate) use said::quiet;
 
@@ -64,6 +68,10 @@ pub struct Rows<'a> {
     pub commands: &'a [CommandSpec],
     /// The frame being drawn: what every cue below is a function of.
     pub now: Now,
+    /// The pictures already turned into pixels. A row that draws one has to
+    /// know how many pixels it is before it can say how many cells it takes,
+    /// and that answer is kept rather than worked out again every frame.
+    pub pictures: &'a Decoded,
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
@@ -83,6 +91,7 @@ impl<'a> Rows<'a> {
         width: usize,
         folds: &'a Folds,
         commands: &'a [CommandSpec],
+        pictures: &'a Decoded,
         now: Now,
     ) -> Self {
         Self {
@@ -91,6 +100,7 @@ impl<'a> Rows<'a> {
             folds,
             commands,
             now,
+            pictures,
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
         }
@@ -129,18 +139,45 @@ pub fn joins_the_row_above(item: &Item) -> bool {
     matches!(item.body, ItemBody::PermissionReceipt { .. })
 }
 
+/// One item's block: the lines it draws, and the pictures those lines stand
+/// for. The two are one rendering — a placeholder cell says nothing without
+/// the picture behind it — so they are answered together and kept together
+/// ([`crate::blocks`]), and a frame that draws no picture carries none.
+#[derive(Debug, Default)]
+pub struct Block {
+    pub lines: Vec<Line<'static>>,
+    pub pictures: Vec<Picture>,
+}
+
 /// One item's block. `previous` is the item before it, which a receipt joins;
 /// `agents` the sub-sessions this transcript's calls spawned.
-pub fn item_lines(
+pub fn item_block(
     item: &Item,
     previous: Option<&Item>,
     agents: &Agents<'_>,
     rows: &Rows<'_>,
     cue: Cue,
-) -> Vec<Line<'static>> {
+) -> Block {
     // How much of this block is on the screen — what `ctrl+o` and a click both
     // write, over the start its kind has. One question, asked once, here.
     let fold = fold::fold_of(rows.folds, item);
+    pictured::under_the_words(
+        item,
+        item_lines(item, previous, agents, rows, cue, fold),
+        fold,
+        rows,
+    )
+}
+
+/// The words of one item's block, which is every row of it but the picture.
+fn item_lines(
+    item: &Item,
+    previous: Option<&Item>,
+    agents: &Agents<'_>,
+    rows: &Rows<'_>,
+    cue: Cue,
+    fold: Fold,
+) -> Vec<Line<'static>> {
     match &item.body {
         ItemBody::User { parts, origin } => said::lines(item, parts, origin, fold, rows),
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
@@ -899,7 +936,8 @@ mod tests {
     fn rendered_with(state: &SessionState, folds: &Folds, commands: &[CommandSpec]) -> Vec<String> {
         let welcomed = crate::welcome::lines(state, 60).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let rows = Rows::of(state, 60, folds, commands, scene().1);
+        let pictures = Decoded::default();
+        let rows = Rows::of(state, 60, folds, commands, &pictures, scene().1);
         let height = blocks.sync(state, &Agents::new(), &rows, Vec::new());
         let mut rows: Vec<String> = blocks
             .window(0, height)
@@ -1561,7 +1599,8 @@ mod tests {
         let welcomed = crate::welcome::lines(&state, 160).len();
         let mut blocks = crate::blocks::Blocks::default();
         let folds = Folds::new();
-        let rows = Rows::of(&state, 160, &folds, &[], scene().1);
+        let pictures = Decoded::default();
+        let rows = Rows::of(&state, 160, &folds, &[], &pictures, scene().1);
         let height = blocks.sync(&state, &Agents::new(), &rows, Vec::new());
         let widest = blocks
             .window(0, height)

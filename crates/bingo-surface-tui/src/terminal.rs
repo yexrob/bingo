@@ -62,6 +62,12 @@ pub(crate) trait Screen: Send {
     /// Hand the terminal a selection for its own clipboard.
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()>;
 
+    /// Hand the terminal the pictures the frame just drew placeholders for
+    /// (design §5). Out of band, as the title and the clipboard are: they
+    /// paint no cell of their own — the cells are already on the screen, and
+    /// these are what the terminal draws into them.
+    fn place(&mut self, bytes: &[u8]) -> io::Result<()>;
+
     /// How many rows it has, for the screenful printed back on the way out.
     fn rows(&self) -> u16;
 }
@@ -74,9 +80,12 @@ pub struct Tui {
 
 impl Tui {
     pub fn enter() -> io::Result<Self> {
-        // The background is read before the terminal is ours: the probe wants
-        // a plain terminal to write its escape to and read the answer from.
+        // The background and the graphics are read before the terminal is
+        // ours: each probe wants a plain terminal to write its escape to and
+        // read the answer from, and they run one after the other so neither
+        // reads the other's answer.
         crate::theme::detect();
+        crate::graphics::detect();
         let mut out = io::stdout();
         out.write_all(SAVE_TITLE)?;
         enable_raw_mode()?;
@@ -134,6 +143,10 @@ impl Screen for Tui {
     }
 
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()> {
+        out_of_band(bytes)
+    }
+
+    fn place(&mut self, bytes: &[u8]) -> io::Result<()> {
         out_of_band(bytes)
     }
 

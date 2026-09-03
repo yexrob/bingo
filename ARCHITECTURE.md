@@ -18,6 +18,8 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │                                           three lanes, and what a plugin author reads first
 ├── libraries (`[package.metadata.bingo] tier = "library"`: register nothing, depend on bingo-sdk only)
 │   bingo-auth-oauth            PKCE loopback · device code · auth.json · single-flight refresh (ADR-0012)
+│   bingo-pictures              a picture as pixels: whatever a decoder reads, as the PNG a terminal
+│                               takes · the one place that knows a decoder (ADR-0041)
 └── bingo-sdk                   stable API: ids · Message/ContentPart · Frame/Event/Item · SessionState + apply
                                 · traits (Plugin, Provider, Tool, PermissionPolicy, Hook, ContextContributor,
                                   Command, Surface, SessionStore, Compactor) · HostApi · Service registry · testing fakes

@@ -280,10 +280,11 @@ pub fn detect() {
 #[cfg(test)]
 pub fn detect() {}
 
-/// How long the background probe is given. A terminal that has not answered by
-/// then is one whose answer would have arrived after the first frame.
+/// How long a probe of the terminal is given, this one and the graphics probe
+/// beside it ([`crate::graphics`]). A terminal that has not answered by then is
+/// one whose answer would have arrived after the first frame.
 #[cfg(not(test))]
-const PROBE: std::time::Duration = std::time::Duration::from_millis(400);
+pub(crate) const PROBE: std::time::Duration = std::time::Duration::from_millis(400);
 
 #[cfg(not(test))]
 fn asked() -> Ask {
@@ -719,6 +720,11 @@ mod tests {
                 || matches!(
                     name.as_str(),
                     "doubles.rs"
+                        // The kitty protocol carries a picture's id in the
+                        // foreground colour (M46): a number in a colour's
+                        // clothing, and the one place outside this table
+                        // that has to spell one.
+                        | "graphics/kitty.rs"
                         | "motion.rs"
                         | "painted.rs"
                         | "screens.rs"
@@ -808,6 +814,9 @@ mod tests {
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
+                    // The chip that names a picture a terminal cannot draw
+                    // (§5's image row).
+                    "transcript/pictured.rs",
                     "transcript/said.rs",
                     "tree.rs",
                     "view.rs",

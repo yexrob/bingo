@@ -1,0 +1,30 @@
+[package]
+name = "bingo-pictures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "A picture as pixels: whatever a decoder can read, as PNG"
+
+# A library (ADR-0012 §1): registers nothing, any plugin may depend on it.
+[package.metadata.bingo]
+tier = "library"
+
+[features]
+# Pictures a test can hand over, so a surface's tests need no decoder of their
+# own and no bytes pasted into a source file.
+testing = []
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+# The ten decoders of ADR-0041. Every picture a surface may be handed becomes
+# the one format a terminal takes, here and nowhere else.
+image.workspace = true
+# `Image.data` is base64 (ADR-0040); the pixels are behind it.
+base64.workspace = true
+thiserror.workspace = true

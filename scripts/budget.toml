@@ -42,6 +42,14 @@
 # without the member. The full `agent-client-protocol` SDK was measured at +27,
 # fourteen of them a second async runtime, and refused: the newline-framed
 # JSON-RPC client loop is written in the plugin, in tokio, `Send`.
-max_dependencies = 310
+# M46 (docs/plans/M46-the-picture-is-seen.md, ADR-0041) raises 310 → 331 by
+# the measured 21: `image` with ten decoders (+20 — image, png, fdeflate,
+# zune-jpeg, zune-core, gif, color_quant, weezl, image-webp, tiff, fax,
+# qoi, moxcms, pxfm, half, bytemuck, byteorder-lite, quick-error, zerocopy,
+# zerocopy-derive) and the member `bingo-pictures` (+1). M11e refused images
+# at +33 because `ratatui-image`'s sixel quantiser was two thirds of it; the
+# kitty path needs no quantiser, so what is bought here is the decoders
+# alone. Default features are off: no `rayon`, no `default-formats`.
+max_dependencies = 331
 max_core_check_seconds = 20
 max_target_gb = 5

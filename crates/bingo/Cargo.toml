@@ -73,6 +73,9 @@ tokio.workspace = true
 futures.workspace = true
 # The terminal surface through a real pty (M11a): what the shell is left with
 # after `exit` is a terminal question, not a unit-test one.
+# The picture the pty test writes into the session's directory, drawn by the
+# crate that reads it back (M46).
+bingo-pictures = { workspace = true, features = ["testing"] }
 portable-pty.workspace = true
 vt100.workspace = true
 # M39 (ADR-0036 §3): the tool bridge end to end — a real MCP client speaking

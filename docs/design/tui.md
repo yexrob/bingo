@@ -177,7 +177,7 @@ Each kind has a degrade so `--print` and an IM channel never lose information:
 | progress | gradient fill `████████░░ 80 % · label`; a moving sheen when unbounded | `label 80 %` |
 | badge | `[ text ]` in the tone's colour | `[text]` |
 | tree | `├─ └─` with glyphs and badges, folds on `←` | indented lines |
-| image | kitty / iTerm2 / sixel, else half-block cells, else `[image: name]`; full-size in a sheet | `[image: name]` |
+| image | **kitty landed 2026-09-04 (M46)**: the terminal is asked at start-up and a picture it can draw is drawn, whatever format it arrived in (`bingo-pictures` decodes; kitty takes PNG). iTerm2, sixel, half-block cells and the full-size sheet are still owed. Everywhere else `[image: <media type>]` | `[image: name]` |
 | meter | `▁▂▃▅▇` sparkline; the context meter in the `/status` sheet | `42 %` |
 | view (plugin) | ADR-0013's vocabulary, any nesting, in a block, a rail card or a signal | `View::text()` |
 | custom | the fold, as text: a word this surface has not learned draws nothing of its own (ADR-0038) | the fold |
