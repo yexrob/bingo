@@ -17,7 +17,8 @@ use ratatui::text::{Line, Span};
 
 use super::{Block, Rows, returns, speaks_indent, under};
 use crate::fold::Fold;
-use crate::graphics::{self, Graphics, Picture, kitty, picture};
+use crate::graphics::picture::{self, Source};
+use crate::graphics::{self as graphics, Graphics, Picture, kitty};
 use crate::theme;
 
 /// How many rows of a picture a block that is only peeked at shows — a
@@ -79,7 +80,11 @@ fn drawn(
     let Graphics::Kitty { cell } = graphics::chosen() else {
         return None;
     };
-    let id = picture::id_of(&at.item.id, at.part);
+    let source = Source::Journal {
+        item: at.item.id.clone(),
+        part: at.part,
+    };
+    let id = source.id();
     let png = rows.pictures.png(id, image)?;
     let size = (png.width, png.height);
     let (cols, tall) = picture::fit(size, cell, at.hangs.room(rows), height(fold));
@@ -87,8 +92,7 @@ fn drawn(
         .map(|row| kitty::placeholder(id, row, cols))
         .collect();
     let picture = Picture {
-        item: at.item.id.clone(),
-        part: at.part,
+        source,
         cols,
         rows: tall,
     };
@@ -167,7 +171,7 @@ impl Hangs {
 mod tests {
     use super::*;
     use crate::blocks::Blocks;
-    use crate::graphics::{Decoded, kitty::PLACEHOLDER, picture::id_of};
+    use crate::graphics::{Decoded, kitty::PLACEHOLDER};
     use crate::test_support::{folded, item, scene, solo};
     use crate::tree::Agents;
     use bingo_pictures::testing::{png, unreadable};
@@ -246,8 +250,10 @@ mod tests {
         assert_eq!(
             block.pictures,
             vec![Picture {
-                item: bingo_sdk::ItemId::from_raw("itm_1"),
-                part: 0,
+                source: Source::Journal {
+                    item: bingo_sdk::ItemId::from_raw("itm_1"),
+                    part: 0,
+                },
                 cols: 10,
                 rows: 10,
             }],
@@ -272,7 +278,11 @@ mod tests {
     #[test]
     fn every_cell_carries_the_picture_it_belongs_to() {
         let block = block(&read(&png(100, 200)), graphics::drawing(), Fold::Peek);
-        let id = id_of(&bingo_sdk::ItemId::from_raw("itm_1"), 0);
+        let id = Source::Journal {
+            item: bingo_sdk::ItemId::from_raw("itm_1"),
+            part: 0,
+        }
+        .id();
         let colour = Style::new().fg(Color::Rgb(
             ((id >> 16) & 0xff) as u8,
             ((id >> 8) & 0xff) as u8,

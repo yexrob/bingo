@@ -25,6 +25,9 @@ pub const COMPOSER_MAX: u16 = 12;
 pub struct Demand {
     /// Rows of text in the input box, before its border.
     pub composer: u16,
+    /// Rows of thumbnails inside the box above the prompt, when the draft
+    /// carries pictures a terminal can draw (M48).
+    pub strip: u16,
     /// Rows between the transcript and the box: the activity row and whatever
     /// is queued behind it.
     pub activity: u16,
@@ -62,7 +65,7 @@ impl Regions {
 pub fn regions(size: Rect, demand: Demand) -> Regions {
     let mut rest = size;
     let status = take_bottom(&mut rest, 1);
-    let rows = composer_rows(demand.composer, rest.height);
+    let rows = composer_rows(demand.composer, demand.strip, rest.height);
     let composer = take_bottom(&mut rest, rows);
     let rows = activity_rows(demand.activity, rest.height);
     let activity = take_bottom(&mut rest, rows);
@@ -80,9 +83,13 @@ pub fn regions(size: Rect, demand: Demand) -> Regions {
 
 /// The box grows with the draft and stops at ten rows; it never shrinks below
 /// one row, and it takes what is left when even that does not fit.
-fn composer_rows(text: u16, room: u16) -> u16 {
+///
+/// The strip is rows on top of those ten rather than out of them: a picture
+/// pasted into a full draft must not push a line of it off the screen.
+fn composer_rows(text: u16, strip: u16, room: u16) -> u16 {
     text.saturating_add(2)
         .clamp(COMPOSER_MIN, COMPOSER_MAX)
+        .saturating_add(strip)
         .min(room)
 }
 
@@ -132,6 +139,7 @@ mod tests {
     fn demand() -> Demand {
         Demand {
             composer: 1,
+            strip: 0,
             activity: 0,
             rail: true,
         }
@@ -230,6 +238,33 @@ mod tests {
         assert_eq!(rows(40), COMPOSER_MAX, "it never eats the transcript");
     }
 
+    /// A strip of thumbnails is rows of its own on top of the ten: a picture
+    /// pasted into a full draft costs the transcript, never the draft.
+    #[test]
+    fn a_strip_grows_the_box_without_eating_the_ten_rows_of_draft() {
+        let rows = |text, strip| {
+            at(
+                80,
+                40,
+                Demand {
+                    composer: text,
+                    strip,
+                    ..demand()
+                },
+            )
+            .composer
+            .height
+        };
+        assert_eq!(rows(1, 3), COMPOSER_MIN + 3);
+        assert_eq!(rows(10, 3), COMPOSER_MAX + 3);
+        assert_eq!(rows(40, 3), COMPOSER_MAX + 3);
+        assert_eq!(
+            rows(1, 0),
+            COMPOSER_MIN,
+            "and none of it when there is none"
+        );
+    }
+
     #[test]
     fn the_activity_rows_give_way_before_the_transcript_does() {
         let r = at(
@@ -262,6 +297,7 @@ mod tests {
             40,
             Demand {
                 composer: 2,
+                strip: 0,
                 activity: 2,
                 rail: true,
             },

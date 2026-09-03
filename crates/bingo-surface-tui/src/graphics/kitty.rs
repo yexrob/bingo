@@ -83,12 +83,6 @@ fn opening(id: u32, cols: u16, rows: u16, more: bool) -> String {
     keys
 }
 
-/// Move an already stored picture into a rectangle of another size: what a
-/// fold opening under it needs, without sending the bytes again.
-pub fn place(id: u32, cols: u16, rows: u16) -> Vec<u8> {
-    apc(&format!("a=p,q=2,U=1,i={id},c={cols},r={rows}"), b"")
-}
-
 /// Forget a picture: its placements and its bytes both (`d=I`), which is the
 /// half that gives the terminal its memory back.
 pub fn delete(id: u32) -> Vec<u8> {
@@ -188,11 +182,6 @@ mod tests {
             Some(CHUNK),
             "the first chunk is full"
         );
-    }
-
-    #[test]
-    fn a_placement_moves_a_picture_without_sending_it_again() {
-        assert_eq!(place(9, 20, 12), b"\x1b_Ga=p,q=2,U=1,i=9,c=20,r=12\x1b\\");
     }
 
     #[test]

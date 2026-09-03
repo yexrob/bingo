@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::clock::{self, Now};
 use crate::effect::Effect;
-use crate::graphics::{Graphics, Picture, Stored};
+use crate::graphics::{Cell, Graphics, Picture, Stored};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
@@ -262,14 +262,24 @@ async fn attach(
     Ok((run, Some(attachment.events)))
 }
 
-/// The bytes that make the terminal hold the pictures this frame placed.
+/// The bytes that make the terminal hold the pictures this frame placed, cut
+/// to the cells each of them covers.
 ///
-/// A picture the terminal has not got is resolved back to the item it came
-/// from and decoded once ([`crate::graphics::Decoded`]); one it already has
-/// costs nothing at all.
-fn placing(ui: &Ui, state: &SessionState, stored: &mut Stored, placed: &[Picture]) -> Vec<u8> {
+/// A picture the terminal has not got is resolved back to where it came from
+/// — the journal, or the composer's own held pictures — and decoded and
+/// shrunk once ([`crate::graphics::Decoded`]); one it already has costs
+/// nothing at all.
+fn placing(
+    ui: &Ui,
+    state: &SessionState,
+    cell: Cell,
+    stored: &mut Stored,
+    placed: &[Picture],
+) -> Vec<u8> {
     stored.catch_up(placed, |picture| {
-        ui.decoded.png(picture.id(), picture.image_in(state)?)
+        let image = picture.image_in(state, &ui.pictures)?;
+        ui.decoded
+            .thumbnail(picture.id(), image, picture.pixels(cell))
     })
 }
 
@@ -418,16 +428,12 @@ impl Run {
     /// frame whose pictures the terminal is already holding: the whole cost
     /// of a redraw is one walk of the blocks.
     fn hand_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
-        if crate::graphics::chosen() == Graphics::Off {
+        let Graphics::Kitty { cell } = crate::graphics::chosen() else {
             return Ok(());
-        }
-        let placed = self.ui.painted.borrow().blocks.pictures();
-        let bytes = placing(
-            &self.ui,
-            self.session.tree.viewed(),
-            &mut self.stored,
-            &placed,
-        );
+        };
+        let placed = self.ui.painted.borrow().placed();
+        let state = self.session.tree.viewed();
+        let bytes = placing(&self.ui, state, cell, &mut self.stored, &placed);
         if bytes.is_empty() {
             return Ok(());
         }
@@ -1901,6 +1907,55 @@ mod tests {
         assert_eq!(sent.len(), 1, "one write, not one per frame: {sent:?}");
         assert!(sent[0].starts_with("\x1b_Ga=T,f=100,q=2,U=1,"), "{sent:?}");
         assert!(sent[0].contains("c=10,r=10"), "{sent:?}");
+    }
+
+    /// The pictures behind the composer's line go to the terminal like any
+    /// others — at the strip's own small size, and forgotten the moment their
+    /// token leaves the line (M48 bricks 3 and 4).
+    #[test]
+    fn a_carried_picture_is_sent_small_and_forgotten_with_its_token() {
+        use base64::Engine;
+        let mut run = idle(Instant::now());
+        let mut recorder = Recorder::default();
+        let now = crate::test_support::scene().1;
+        crate::graphics::with(crate::graphics::drawing(), || {
+            let token = run
+                .ui
+                .pictures
+                .hold("", bingo_pictures::testing::png(400, 300));
+            run.ui.composer.insert(&pictures::placeholder(token));
+            run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
+            // What a submit leaves behind: the line taken and the pictures
+            // let go (`input::submit`, `Run::send_text`).
+            run.ui.composer.take();
+            run.ui.pictures.clear();
+            run.paint(&mut recorder, Wake::Frame, now).expect("another");
+        });
+        let sent: Vec<String> = recorder
+            .places
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect();
+        assert_eq!(sent.len(), 2, "one send, one forget: {sent:?}");
+        // 400×300 pixels of a 10×20 cell is 40 by 15 cells, and the strip's
+        // three rows cut that to eight by three.
+        assert!(sent[0].starts_with("\x1b_Ga=T,f=100,q=2,U=1,"), "{sent:?}");
+        assert!(sent[0].contains("c=8,r=3"), "{sent:?}");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(
+                sent[0]
+                    .split_once(';')
+                    .expect("a payload")
+                    .1
+                    .trim_end_matches("\x1b\\"),
+            )
+            .expect("base64");
+        assert_eq!(
+            bingo_pictures::png_size(&png),
+            Some((80, 60)),
+            "the pixels of eight cells by three, not the picture's own"
+        );
+        assert!(sent[1].contains("a=d,d=I"), "{sent:?}");
     }
 
     /// A terminal that draws no pictures is handed none, whatever the

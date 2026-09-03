@@ -75,6 +75,44 @@ pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
+/// The picture at no more than `within` pixels, its shape kept.
+///
+/// A picture is drawn into a rectangle of cells, and the cells are all the
+/// terminal will ever show of it: sending a 4000×3000 screenshot for a
+/// twelve-row block is megabytes the terminal throws away. A picture already
+/// inside the box is handed back as it came — a thumbnail is never blown up
+/// to fill its cells, which would cost bytes to look worse.
+pub fn scaled(png: &Png, within: (u32, u32)) -> Png {
+    if png.width <= within.0 && png.height <= within.1 {
+        return png.clone();
+    }
+    // It decoded once to become a `Png`, so this cannot normally fail; if it
+    // does, the picture a person can see is worth more than the bytes it costs.
+    resized(&png.bytes, within).unwrap_or_else(|_| png.clone())
+}
+
+/// The filter the shrink uses. Triangle over Lanczos3: at thumbnail sizes the
+/// two are indistinguishable and Triangle is several times faster, and this
+/// runs on the draw thread (M48 Verified has the measurement).
+const FILTER: image::imageops::FilterType = image::imageops::FilterType::Triangle;
+
+/// Decode, shrink to fit `within`, and write the result back out as PNG.
+/// `DynamicImage::resize` keeps the aspect ratio and fills the box it is
+/// given, so the shape is kept by the resize itself and not by arithmetic
+/// here.
+fn resized(bytes: &[u8], within: (u32, u32)) -> Result<Png, PictureError> {
+    let smaller = image::load_from_memory(bytes)?.resize(within.0.max(1), within.1.max(1), FILTER);
+    let mut out = Vec::new();
+    let encoder =
+        PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive);
+    smaller.write_with_encoder(encoder)?;
+    Ok(Png {
+        bytes: out,
+        width: smaller.width(),
+        height: smaller.height(),
+    })
+}
+
 /// Decode whatever this is and write it back out as PNG. The compression is
 /// the fast one: these bytes are on their way to a terminal on the same
 /// machine, so a second spent squeezing them is a second a person waits.
@@ -168,6 +206,59 @@ mod tests {
             data: "!!!!not base64!!!!".into(),
         };
         assert!(matches!(to_png(&image), Err(PictureError::NotBase64(_))));
+    }
+
+    /// A picture bigger than its box comes back inside it, with its shape.
+    #[test]
+    fn a_picture_too_big_for_its_box_is_shrunk_to_fit_it() {
+        let big = to_png(&handed(&drawn(400, 300, ImageFormat::Png), "image/png")).expect("pixels");
+        let small = scaled(&big, (40, 40));
+        assert_eq!((small.width, small.height), (40, 30), "the shape is kept");
+        assert_eq!(png_size(&small.bytes), Some((40, 30)), "and it is a PNG");
+        assert!(
+            small.bytes.len() < big.bytes.len(),
+            "{} is not fewer bytes than {}",
+            small.bytes.len(),
+            big.bytes.len()
+        );
+    }
+
+    /// The point of the shrink: what goes to the terminal is the size of the
+    /// cells it will cover, not the size of the screenshot.
+    #[test]
+    fn only_the_pixels_the_cells_show_are_sent() {
+        let shot =
+            to_png(&handed(&drawn(2000, 1500, ImageFormat::Png), "image/png")).expect("pixels");
+        let block = scaled(&shot, (40 * 10, 12 * 20));
+        assert_eq!((block.width, block.height), (320, 240));
+        let thumbnail = scaled(&shot, (12 * 10, 3 * 20));
+        assert_eq!((thumbnail.width, thumbnail.height), (80, 60));
+        assert!(
+            thumbnail.bytes.len() < block.bytes.len(),
+            "a thumbnail costs less than a block"
+        );
+    }
+
+    /// Never upsized: a picture inside its box is the bytes that came in,
+    /// untouched.
+    #[test]
+    fn a_picture_already_inside_its_box_is_handed_back_as_it_came() {
+        let bytes = drawn(8, 6, ImageFormat::Png);
+        let small = to_png(&handed(&bytes, "image/png")).expect("pixels");
+        for within in [(8, 6), (400, 300)] {
+            let same = scaled(&small, within);
+            assert_eq!(same, small, "{within:?}");
+            assert_eq!(same.bytes, bytes, "{within:?} the very bytes");
+        }
+    }
+
+    /// A box of no pixels still leaves a picture: a rectangle of cells is at
+    /// least one cell, so a scale to nothing can only be a caller's slip.
+    #[test]
+    fn a_box_of_nothing_still_leaves_a_pixel() {
+        let big = to_png(&handed(&drawn(40, 30, ImageFormat::Png), "image/png")).expect("pixels");
+        let least = scaled(&big, (0, 0));
+        assert_eq!((least.width, least.height), (1, 1));
     }
 
     /// The header read, and the three ways it is not a PNG at all.

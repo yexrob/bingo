@@ -1,13 +1,15 @@
 //! What the terminal is holding, and the bytes that make it hold what the
 //! frame just drew.
 //!
-//! The transcript says which pictures a frame placed and how big; this is the
-//! one place that turns the difference between that and what went out before
-//! into bytes. The invariant is a sentence: **the terminal holds exactly the
-//! last [`KEPT`] pictures the transcript holds**. A picture drawn for the
-//! first time is transmitted, one whose rectangle changed is placed again
-//! without sending its bytes twice, and one that has fallen off the end is
-//! deleted so a long conversation cannot fill the terminal's memory.
+//! The frame says which pictures it placed and how big; this is the one place
+//! that turns the difference between that and what went out before into
+//! bytes. The invariant is a sentence: **the terminal holds exactly the last
+//! [`KEPT`] pictures the frame placed**. A picture drawn for the first time
+//! is transmitted, one whose rectangle changed is transmitted again — the
+//! bytes are cut to the cells they will cover (M48 brick 2), so a bigger
+//! rectangle is a picture the terminal was never given — and one that has
+//! fallen off the end is deleted, so a long conversation cannot fill the
+//! terminal's memory.
 
 use std::sync::Arc;
 
@@ -56,22 +58,23 @@ impl Stored {
         out
     }
 
-    /// What one picture costs: everything, when the terminal has never seen
-    /// it; a new rectangle, when only that changed; nothing at all otherwise.
+    /// What one picture costs: nothing, when the terminal is already holding
+    /// it at this very rectangle; the pixels of that rectangle otherwise.
     fn sending(
         &self,
         picture: &Picture,
         pixels: &impl Fn(&Picture) -> Option<Arc<Png>>,
     ) -> Option<Vec<u8>> {
-        let id = picture.id();
-        match self.held.iter().find(|kept| kept.id() == id) {
-            Some(kept) if kept == picture => Some(Vec::new()),
-            Some(_) => Some(kitty::place(id, picture.cols, picture.rows)),
-            None => {
-                let png = pixels(picture)?;
-                Some(kitty::transmit(id, &png.bytes, picture.cols, picture.rows))
-            }
+        if self.held.contains(picture) {
+            return Some(Vec::new());
         }
+        let png = pixels(picture)?;
+        Some(kitty::transmit(
+            picture.id(),
+            &png.bytes,
+            picture.cols,
+            picture.rows,
+        ))
     }
 
     /// The bytes for everything the terminal is holding that this frame did
@@ -86,22 +89,25 @@ impl Stored {
     }
 }
 
-/// The last [`KEPT`] of what the frame placed. The transcript hands them over
-/// in its own order, so the ones that survive are the newest — which is where
-/// a person is reading.
+/// The last [`KEPT`] of what the frame placed. They are handed over in the
+/// order they were drawn, so the ones that survive are the newest — which is
+/// where a person is reading, and where the composer's own strip is.
 fn wanted(placed: &[Picture]) -> &[Picture] {
     &placed[placed.len().saturating_sub(KEPT)..]
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::picture::Source;
     use super::*;
     use bingo_sdk::ItemId;
 
     fn picture(item: &str, cols: u16, rows: u16) -> Picture {
         Picture {
-            item: ItemId::from_raw(item),
-            part: 0,
+            source: Source::Journal {
+                item: ItemId::from_raw(item),
+                part: 0,
+            },
             cols,
             rows,
         }
@@ -132,16 +138,17 @@ mod tests {
         );
     }
 
-    /// A fold opening under a picture changes its rectangle and not its
-    /// bytes, so the terminal is told where it goes rather than sent it again.
+    /// A fold opening under a picture asks for a bigger rectangle, and the
+    /// bytes the terminal was given were cut to the small one: what it never
+    /// had it is sent, at the size it will now show.
     #[test]
-    fn a_picture_that_changed_size_is_placed_again_and_not_sent_again() {
+    fn a_picture_that_grew_is_sent_again_at_the_size_it_grew_to() {
         let mut stored = Stored::default();
         stored.catch_up(&[picture("itm_1", 4, 2)], pixels);
         let moved = text(stored.catch_up(&[picture("itm_1", 40, 12)], pixels));
-        assert!(moved.starts_with("\x1b_Ga=p,"), "{moved:?}");
+        assert!(moved.starts_with("\x1b_Ga=T,f=100"), "{moved:?}");
         assert!(moved.contains("c=40,r=12"), "{moved:?}");
-        assert!(!moved.contains("a=T"), "the bytes did not go twice");
+        assert_eq!(stored.held, vec![picture("itm_1", 40, 12)]);
     }
 
     #[test]
