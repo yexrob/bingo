@@ -105,11 +105,10 @@ fn role_of(
     yes: Option<&PermissionOptionId>,
     no: Option<&PermissionOptionId>,
 ) -> Option<AnswerRole> {
-    match option {
-        _ if yes == Some(option) => Some(AnswerRole::Allowing),
-        _ if no == Some(option) => Some(AnswerRole::Refusing),
-        _ => None,
+    if yes == Some(option) {
+        return Some(AnswerRole::Allowing);
     }
+    (no == Some(option)).then_some(AnswerRole::Refusing)
 }
 
 /// What the agent wants to do, in its own title for the call — nothing of this
