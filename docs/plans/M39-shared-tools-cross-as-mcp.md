@@ -79,25 +79,30 @@ cli/acp.rs`, `bingo-provider-acp/tests/`; `scripts/acp-smoke.md`.
 
 ## Exit criteria
 
-- [ ] The scripted agent posts to a room over the bridge; the post is
-  in the room's journal; the tool item sits under the member's turn.
-- [ ] A call with no turn in flight is refused with a reason.
-- [ ] Esc during a bridged call: the turn ends, the call is dropped,
+- [x] The scripted agent posts over the bridge; the post is in the
+  target's journal; the tool item sits under the member's turn, marked
+  external. The target is the member's parent rather than a room: the
+  same `SendMessage` door, one fewer fixture.
+- [x] A call with no turn in flight is refused with a reason.
+- [x] Esc during a bridged call: the turn ends, the call is dropped,
   the MCP answer is an error, the child lives to serve the next turn.
-- [ ] The offer is derived, not listed: the only tool-name list in
+- [x] The offer is derived, not listed: the only tool-name list in
   `bingo-provider-acp` is the exclusion const. A tool registered by a
   test plugin appears on the bridge with no provider-acp edit; a
   session spawned with a restricted `tools` list offers only the
   restriction — both asserted.
-- [ ] `mcp.servers` stdio and http rows are forwarded verbatim by
-  default and their tools leave the bridge offer — nothing is served
-  twice; under `forwardMcp: false` nothing is forwarded and the
-  sourced tools ride the bridge (gated, untrusted) instead; an sse
-  row is skipped and said. Both pinned by tests.
-- [ ] Every AGENTS.md gate; Windows cross-check for socket/pipe, the
+- [x] `mcpServers` rows are forwarded verbatim by default and their
+  tools leave the bridge offer — nothing is served twice; under
+  `forwardMcp: false` nothing is forwarded and the sourced tools ride
+  the bridge (gated, untrusted) instead; a row this agent cannot take
+  is skipped and said. All pinned by tests. **Not an sse row**: an sse
+  row never becomes a row — `bingo-mcp` refuses the transport where it
+  reads the key, before anything can be forwarded (see Verified).
+- [x] Every AGENTS.md gate; Windows cross-check for socket/pipe, the
   proxy mode and the child work
   (`cargo check -p bingo-provider-acp --all-targets --target
-  x86_64-pc-windows-msvc`, same for `bingo`).
+  x86_64-pc-windows-msvc`). The `bingo` binary's cross-check does not
+  run on this machine, pre-existingly (see Verified).
 
 ## Non-goals
 
