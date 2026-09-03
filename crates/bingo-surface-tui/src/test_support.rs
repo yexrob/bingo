@@ -746,6 +746,16 @@ pub fn draw_tree(width: u16, height: u16, tree: &Tree, ui: &Ui, now: Now) -> Str
     drawn(width, height, tree, ui, now).to_string()
 }
 
+/// The screen row carrying `needle`, for a test that puts the pointer on the
+/// text a person sees rather than on a row counted by hand.
+pub fn row_carrying(screen: &str, needle: &str) -> u16 {
+    let row = screen
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no row carries {needle:?}:\n{screen}"));
+    u16::try_from(row).expect("a row of the screen")
+}
+
 /// The terminal one draw leaves, for a test that asks where a style landed.
 pub fn drawn(width: u16, height: u16, tree: &Tree, ui: &Ui, now: Now) -> TestBackend {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
