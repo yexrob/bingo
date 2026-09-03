@@ -202,7 +202,7 @@ async fn a_load_replays_and_the_replay_is_ours_to_swallow() {
 }
 
 /// Both questions an agent may put to a client, refused in the agent's own
-/// words, over real pipes — and the turn goes on to finish (ADR-0035 §5).
+/// words, over real pipes — and the turn goes on to finish (ADR-0039 §3).
 #[tokio::test]
 async fn a_question_the_agent_asks_is_refused_and_the_turn_goes_on() {
     let fake = Fake::new(json!({

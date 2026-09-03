@@ -142,7 +142,7 @@ async fn harvest(
     name: &str,
     adapter: &Adapter,
 ) -> Result<Declared, ProviderError> {
-    let inbox = sessions.inbox(name).await;
+    let inbox = sessions.inbox(name, None).await;
     let cwd = sessions.env().home.clone();
     let (connection, _child) = sessions.spawn(adapter, &cwd, inbox)?;
     connection.call(handshake()).await?;

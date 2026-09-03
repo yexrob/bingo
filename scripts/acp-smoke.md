@@ -64,15 +64,20 @@ finding.
       which rung the adapter took: `claude-agent-acp` should resume,
       `codex-acp` should not.
 - [ ] **Permission.** With no permission words on the row, ask for something
-      the agent would normally ask about (`edit README.md`). If the agent asks
-      bingo, the call is refused, one `ACP_ASKED` notice names
-      `acp.adapters.<name>`, and the turn goes on. Then put the adapter's own
-      permission mode on the row and watch the same request succeed without
-      bingo being asked at all. That is the whole of ADR-0035 §5. Which door
-      that mode goes through is the adapter's: `codex-acp` takes one from
-      `env`, and `claude-agent-acp` has neither a flag nor a variable for it —
-      its mode is the session config option `options` sets, so that is the
-      half of the row to change for it.
+      the agent would normally ask about (`edit README.md`). In the TUI the
+      agent's question appears as a question — its own title, its own option
+      labels — and the option you pick is the one the agent acts on: pick
+      *yes* and the edit happens, pick *no* and it does not. The same run
+      headlessly (`bingo --print`) has nobody to ask, so the agent gets its own
+      refusal, one `ACP_ASKED` notice names `acp.adapters.<name>`, and the turn
+      goes on. `--permission-mode bypassPermissions` answers the agent's allow
+      option without asking anybody; `dontAsk` answers its reject option. That
+      is ADR-0039 §3. The row still speaks first (§4): put the adapter's own
+      permission mode on it and watch the same request succeed without bingo
+      being asked at all. Which door that mode goes through is the adapter's:
+      `codex-acp` takes one from `env`, and `claude-agent-acp` has neither a
+      flag nor a variable for it — its mode is the session config option
+      `options` sets, so that is the half of the row to change for it.
 - [ ] **Login refused.** Log the adapter out and run a turn. The error is the
       adapter's own words on `session/new`, and `bingo login claude` does not
       offer to fix it — auth is `NotApplicable` and the fix is

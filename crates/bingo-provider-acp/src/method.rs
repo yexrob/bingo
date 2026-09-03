@@ -80,11 +80,11 @@ impl Notify for CancelNotification {
 pub enum Incoming {
     /// The stream of a turn: chunks, tool calls, usage.
     Update(Box<SessionNotification>),
-    /// The agent asking whether it may do something. Refused: it brings its
-    /// own permission machinery (ADR-0035 §5).
+    /// The agent asking whether it may do something. Put to whoever is at the
+    /// session, in the agent's own words (ADR-0039 §3).
     Permission(Box<RequestPermissionRequest>),
-    /// The agent asking this client to collect something from a person.
-    /// Declined at the same door, for the same reason.
+    /// The agent asking this client to collect something from a person. A door
+    /// of another shape, and still declined.
     Elicitation(Box<CreateElicitationRequest>),
     /// A method this client declared it does not have.
     Unsupported,
@@ -264,7 +264,7 @@ mod tests {
     }
 
     /// The other door a person could be reached through, and the word this
-    /// client answers it with (ADR-0035 §5).
+    /// client answers it with (ADR-0039 §3).
     #[test]
     fn the_elicitation_door_round_trips() {
         reads::<CreateElicitationRequest>(fixtures::elicitation_create());

@@ -43,6 +43,7 @@ pub mod error;
 pub mod events;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod inbox;
 pub mod knobs;
 pub mod ladder;
 pub mod legacy;
@@ -50,6 +51,7 @@ pub mod method;
 pub mod options;
 pub mod probe;
 pub mod provider;
+pub mod question;
 pub mod refusal;
 pub mod render;
 pub mod servers;

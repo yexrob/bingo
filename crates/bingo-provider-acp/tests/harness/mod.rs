@@ -121,9 +121,9 @@ impl Fake {
 }
 
 /// A client that collects the stream and answers a question the way the plugin
-/// does: with the refusal, because permissions are the adapter's own
-/// (ADR-0035 §5). The notice that goes with it belongs to the session, not to
-/// the wire, so it is not here.
+/// does when there is nobody behind it to ask: with the agent's own refusal
+/// (ADR-0039 §3). What a session with somebody at it does instead is a
+/// scenario about a person, not about this wire, and is black-box.
 pub struct Collector {
     pub updates: Arc<Mutex<Vec<SessionNotification>>>,
 }

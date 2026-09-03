@@ -14,14 +14,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol_schema::v1::{
-    AgentCapabilities, CreateElicitationRequest, CreateElicitationResponse, Error as RpcError,
-    InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionNotification,
+    AgentCapabilities, InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest,
+    ResumeSessionRequest, SessionNotification,
 };
-use async_trait::async_trait;
 use bingo_sdk::{
     Env, HostHandle, KernelError, Level, Message, ModelInfo, ProviderError, SessionId, ToolSpec,
 };
@@ -31,12 +28,13 @@ use tokio::sync::{Mutex, mpsc};
 use crate::bridge::Bridge;
 use crate::child::{self, Spawned};
 use crate::config::Adapter;
-use crate::connection::{Client, Connection};
+use crate::connection::Connection;
 use crate::crossing::{self, Crossing};
 use crate::error::AcpError;
+use crate::inbox::Inbox;
 use crate::knobs::{Declared, Knobs, Wanted, Wire};
 use crate::ladder::{self, Opening};
-use crate::{probe, refusal, transcript};
+use crate::{probe, transcript};
 
 /// The plugin id the extension is journaled under (ADR-0011 §2).
 pub const PLUGIN: &str = "bingo.acp";
@@ -44,71 +42,6 @@ pub const PLUGIN: &str = "bingo.acp";
 /// One extension kind per adapter, so two adapters on one session do not
 /// overwrite each other's pointer.
 pub const KIND_PREFIX: &str = "session:";
-
-/// Where a running turn's stream goes.
-type Sink = mpsc::UnboundedSender<SessionNotification>;
-
-/// The client half of one link: where updates go, whether they are being
-/// swallowed, and what the agent is told when it asks a question whose answer
-/// is already written on its own row.
-pub(crate) struct Inbox {
-    adapter: String,
-    sink: Mutex<Option<Sink>>,
-    /// True while `session/load` replays. The journal already holds those
-    /// turns; writing them again would be the conversation twice.
-    loading: AtomicBool,
-    /// Whether this adapter has already been told, once, where its permissions
-    /// are configured.
-    told: AtomicBool,
-    host: Option<HostHandle>,
-}
-
-#[async_trait]
-impl Client for Inbox {
-    async fn update(&self, notification: SessionNotification) {
-        if self.loading.load(Ordering::Acquire) {
-            return;
-        }
-        if let Some(sink) = self.sink.lock().await.as_ref() {
-            let _ = sink.send(notification);
-        }
-    }
-
-    /// ADR-0035 §5: an ACP agent brings its own permission machinery, and the
-    /// row that spawned it says what it may do. A question that arrives anyway
-    /// is refused in the agent's own words, and the turn goes on.
-    async fn permission(
-        &self,
-        request: RequestPermissionRequest,
-    ) -> Result<RequestPermissionResponse, RpcError> {
-        self.say_where_the_answer_lives().await;
-        Ok(refusal::refused(&request))
-    }
-
-    async fn elicitation(
-        &self,
-        _request: CreateElicitationRequest,
-    ) -> Result<CreateElicitationResponse, RpcError> {
-        self.say_where_the_answer_lives().await;
-        Ok(refusal::declined())
-    }
-}
-
-impl Inbox {
-    /// The one thing this plugin must not do silently: an agent asked, and was
-    /// refused by a rule the person never sees unless it is said. Said once —
-    /// an agent may ask on every call it makes.
-    async fn say_where_the_answer_lives(&self) {
-        if self.told.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let Some(host) = self.host.as_ref() else {
-            return;
-        };
-        let (level, code, text) = refusal::told(&self.adapter);
-        let _ = host.notice(level, &code, &text).await;
-    }
-}
 
 /// One live conversation: the child, the wire to it, and which session on the
 /// far side it is.
@@ -135,9 +68,7 @@ impl Link {
     /// Take the stream of the turn that is starting. The previous turn's sink,
     /// if any, is dropped with it.
     pub async fn listen(&self) -> mpsc::UnboundedReceiver<SessionNotification> {
-        let (sink, updates) = mpsc::unbounded_channel();
-        *self.inbox.sink.lock().await = Some(sink);
-        updates
+        self.inbox.listen().await
     }
 
     /// What the agent must be told first, said once and then forgotten.
@@ -323,7 +254,7 @@ impl Sessions {
         cwd: &Path,
         history: &[Message],
     ) -> Result<Arc<Link>, ProviderError> {
-        let inbox = self.inbox(name).await;
+        let inbox = self.inbox(name, Some(session)).await;
         let (connection, handle) = self.spawn(adapter, cwd, inbox.clone())?;
         let hello = connection.call(handshake()).await.map_err(from_acp)?;
         let crossing = self
@@ -469,15 +400,10 @@ impl Sessions {
     /// The client half every conversation with this adapter is read through,
     /// a cold ask's included: it answers the two questions an agent may put
     /// before it is prompted, and a probe that left them unanswered would
-    /// leave an agent waiting on the way in.
-    pub(crate) async fn inbox(&self, name: &str) -> Arc<Inbox> {
-        Arc::new(Inbox {
-            adapter: name.to_string(),
-            sink: Mutex::new(None),
-            loading: AtomicBool::new(false),
-            told: AtomicBool::new(false),
-            host: self.host.lock().await.clone(),
-        })
+    /// leave an agent waiting on the way in. A cold ask names no session,
+    /// because it is nobody's (`crate::inbox`).
+    pub(crate) async fn inbox(&self, name: &str, session: Option<&SessionId>) -> Arc<Inbox> {
+        Arc::new(Inbox::new(name, self.host.lock().await.clone(), session))
     }
 
     /// One adapter process and the wire to it. The one place a child is
@@ -524,7 +450,7 @@ impl Sessions {
                 .await
             {
                 Ok(entered) => {
-                    self.say(&rung, &inbox.adapter).await;
+                    self.say(&rung, inbox.adapter()).await;
                     return Ok(entered);
                 }
                 Err(refused) => match ladder::below(&rung, !history.is_empty()) {
@@ -589,9 +515,9 @@ impl Sessions {
         id: &str,
         place: &Where<'_>,
     ) -> Result<Declared, AcpError> {
-        inbox.loading.store(true, Ordering::Release);
+        inbox.replaying(true);
         let outcome = connection.call_seen(load_session(id, place)).await;
-        inbox.loading.store(false, Ordering::Release);
+        inbox.replaying(false);
         let (answer, body) = outcome?;
         Ok(Declared::of(answer.config_options, &body))
     }
