@@ -593,6 +593,33 @@ pub(crate) mod tests {
         );
     }
 
+    /// A word this binary has no name for still reaches a person (ADR-0038
+    /// §2): the display reads as the fold its author wrote, where a parse
+    /// failure would have taken the whole tool result with it.
+    #[test]
+    fn a_display_of_a_kind_this_surface_never_learned_prints_its_fold() {
+        let display: bingo_sdk::View = serde_json::from_value(serde_json::json!({
+            "kind": "chart.candles",
+            "series": [1, 2],
+            "fold": "AAPL 1 2",
+        }))
+        .expect("a word from a newer speaker is text, not an error");
+        let output = ToolOutput {
+            display: Some(display),
+            ..ToolOutput::text("charted AAPL")
+        };
+        let frames = vec![frame(
+            1,
+            Event::ItemCompleted {
+                item: tool_call("itm_2", "Chart", Some(output), ItemStatus::Completed),
+            },
+        )];
+        assert_eq!(
+            play(Mode::Text, &frames).err(),
+            "[tool] Chart ok (12ms)\n  AAPL 1 2\n"
+        );
+    }
+
     #[test]
     fn a_failed_tool_reports_error_with_its_duration() {
         let frames = vec![frame(

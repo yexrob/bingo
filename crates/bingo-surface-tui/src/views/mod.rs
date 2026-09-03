@@ -69,6 +69,10 @@ pub fn marked(view: &View, width: usize, marks: &Marks) -> Vec<Line<'static>> {
         View::Columns { children } => columns::lines(children, width, marks),
         View::Panel { title, child } => panel::lines(title, child, width, marks),
         View::Actions { items } => actions::lines(items, width, marks),
+        // A word this surface has not learned is the text its author wrote
+        // for exactly this (ADR-0038 §1). Learning a kind richly is a
+        // surface's own affair, and no kind is learned here yet.
+        View::Custom { fold, .. } => text::lines(fold),
     }
 }
 

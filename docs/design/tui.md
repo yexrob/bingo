@@ -175,6 +175,7 @@ Each kind has a degrade so `--print` and an IM channel never lose information:
 | image | kitty / iTerm2 / sixel, else half-block cells, else `[image: name]`; full-size in a sheet | `[image: name]` |
 | meter | `▁▂▃▅▇` sparkline; the context meter in the `/status` sheet | `42 %` |
 | view (plugin) | ADR-0013's vocabulary, any nesting, in a block, a rail card or a signal | `View::text()` |
+| custom | the fold, as text: a word this surface has not learned draws nothing of its own (ADR-0038) | the fold |
 
 ## 6. Motion
 
@@ -227,6 +228,8 @@ A plugin never sees the TUI. It describes what to show as a `View` and chooses a
 Interaction: a `View::Actions` row (`[ 1 Approve ] [ 2 Next hunk ]`) fires `Input::Action{name, args}` into the plugin's command; a question that must stop the turn is `ToolHost::ask` as always. A live `Progress` gets the gradient and the sheen for free; a `Table` in a rail card gets the hairlines; a `Badge` with tone `attention` pulses like everything that wants you. The TUI renders each node exactly once, tested once; a plugin's UI is a value asserted with `assert_eq!`.
 
 What the surface decides, and a plugin never asks about: a panel is pinned into the rail with `⏎` on its row in the `ctrl+t` sheet, and the pin is remembered per session; a signal is a rail card the moment it arrives and needs no pinning; `tab` walks the cards and `❯` marks the one the keyboard is talking to; a key on that card fires the button it names — the plugin's `key` hint, else the button's position — and the button wears `…` until the session's stream answers. One plugin gets eight rows in the rail before the rest folds to `… +N lines`; below 120 columns the same cards draw under the running rows instead.
+
+A word the vocabulary does not have is `View::Custom{kind, data, fold}` (ADR-0038): the plugin names the element, ships the data it owns and writes the fold, and this surface draws the fold — the same text it draws for a `kind` off the wire that is newer than the binary reading it. No kind is learned richly here yet; when one is, it is a module inside this crate and the sdk never hears of it.
 
 The worked example is `crates/bingo-demo-ui` — read it whole; this is its middle, and `cargo test --doc -p bingo-demo-ui` compiles it:
 
