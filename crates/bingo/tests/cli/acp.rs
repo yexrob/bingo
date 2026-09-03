@@ -1157,3 +1157,41 @@ fn a_row_that_keeps_its_servers_home_serves_their_tools_on_the_bridge() {
         "the server's tools ride the bridge instead: {offered:?}"
     );
 }
+
+/// A row the agent could not take does not cross, and is not dropped in
+/// silence: ACP only allows an http server row to an agent whose handshake
+/// claimed http, and the scripted one claims none. The person is told which
+/// row stayed behind (ADR-0036 §4).
+#[test]
+fn a_row_this_agent_cannot_take_is_skipped_and_named() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::configured(
+        agent,
+        bridged(Vec::new(), vec![chunk("Listed.")]),
+        json!({}),
+        // Nothing listens there; forwarding is decided by the row and the
+        // handshake, never by whether the server answers.
+        json!({ "mcpServers": { "remote": {
+            "type": "http", "url": "http://127.0.0.1:9/mcp"
+        }}}),
+    );
+    let out = adapter.turn("what have you got");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let rows = injected(&adapter);
+    assert_eq!(rows.len(), 1, "only ours crossed: {rows:?}");
+    assert_eq!(rows[0]["name"], "bingo");
+
+    let all = notices(&out);
+    let said: Vec<&String> = all
+        .iter()
+        .filter(|(code, _)| code == "ACP_MCP")
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(said.len(), 1, "said once: {all:?}");
+    assert!(
+        said[0].contains("remote") && said[0].contains("http"),
+        "the notice names the row and why: {}",
+        said[0]
+    );
+}
