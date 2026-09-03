@@ -1607,7 +1607,10 @@ mod tests {
         let mut state = state();
         state.summary.cwd = dir.path().to_string_lossy().into_owned();
         let session = std::sync::Arc::new(TestSession::default());
-        let run = idle_in(state, std::sync::Arc::clone(&session), Instant::now());
+        let mut run = idle_in(state, std::sync::Arc::clone(&session), Instant::now());
+        // A submit appends to the prompt history; that belongs in the
+        // scratch directory, not beside the crate's sources.
+        run.data_dir = dir.path().to_path_buf();
         (dir, run, session)
     }
 
