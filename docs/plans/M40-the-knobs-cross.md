@@ -52,14 +52,14 @@ config.rs?}`, `bingo-provider-acp/tests/` harness + `fake_agent.rs`,
 
 ## Exit criteria
 
-- [ ] `/thinking high` mid-session: exactly one `set_config_option`
+- [x] `/thinking high` mid-session: exactly one `set_config_option`
   with the agent's own value id before the next prompt; the fake
   agent's record proves order.
-- [ ] `/model` lists the agent's declared models under the instance;
+- [x] `/model` lists the agent's declared models under the instance;
   choosing one applies it; `agent` applies nothing.
-- [ ] An agent with neither knob: zero config calls, one notice.
-- [ ] A clamped value is said in the option's own words.
-- [ ] Every AGENTS.md gate; no new dependency (budget unchanged).
+- [x] An agent with neither knob: zero config calls, one notice.
+- [x] A clamped value is said in the option's own words.
+- [x] Every AGENTS.md gate; no new dependency (budget unchanged).
 
 ## Non-goals
 
@@ -75,3 +75,70 @@ counting (still ADR-0035 §6). Session modes and slash commands.
   (codex's `model[effort]`); brick 1 owns that spelling.
 - M39's joint slice touches the same files; this milestone starts
   only after it lands.
+
+## Verified
+
+2026-09-03, macOS aarch64, branch `m40-knobs` on `dev` at aa9ee52.
+
+**The ids, verified against the adapters' own sources** (not the plan's
+guesses): codex-acp `src/ModelConfigOption.ts` has
+`REASONING_EFFORT_CONFIG_ID = "reasoning_effort"` and
+`MODEL_CONFIG_ID = "model"`, category `thought_level` and `model`, model
+values plain slugs; claude-agent-acp `src/session-config-ids.ts` has
+`EFFORT_CONFIG_ID = "effort"`, `acp-agent.ts` `MODEL_CONFIG_ID = "model"`,
+same two categories, with a `default` sentinel first in both lists and
+levels `low|medium|high|xhigh|max` from the SDK. The legacy door is
+`session/set_model` with `{sessionId, modelId}`, `modelId` spelled
+`model[effort]` (`src/AcpExtensions.ts`). Neither id is a gate: codex's
+effort values are `ReasoningEffort = string`, supplied by its own server.
+
+```
+$ cargo fmt --all -- --check
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 15s
+$ cargo test --workspace --locked
+test result: ok. 151 passed; …   (bingo-provider-acp lib)
+test result: ok. 162 passed; …   (bingo --test cli, 24 of them acp::)
+… 3244 tests, 0 failed
+$ scripts/check_discipline.sh
+kernel names no tool
+cohesion ok
+discipline ok
+$ scripts/budget.sh
+dependencies (unique, normal): 310 (max  310)
+warm cargo check -p bingo-core: 0s (max  20s)
+relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
+budget ok
+$ cargo deny check
+advisories ok, bans ok, licenses ok, sources ok
+$ cargo check -p bingo-provider-acp --all-targets --locked \
+    --target x86_64-pc-windows-msvc
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.45s
+```
+
+The eight black-box scenarios (`bingo/tests/cli/acp/knobs.rs`), each
+driving the real binary against the scripted agent and reading its log:
+
+```
+test acp::knobs::a_thinking_change_reaches_the_agent_before_the_next_prompt
+test acp::knobs::before_any_session_the_instance_serves_the_label_alone
+test acp::knobs::the_model_list_is_the_agents_own_once_a_session_has_opened
+test acp::knobs::a_model_change_reaches_the_agent_as_its_own_value
+test acp::knobs::the_agent_label_applies_nothing
+test acp::knobs::an_agent_with_neither_knob_gets_no_config_call_and_one_notice
+test acp::knobs::an_adapter_with_only_the_legacy_door_is_set_through_it
+test acp::knobs::a_spawn_that_names_the_agents_model_opens_the_session_already_set
+```
+
+Not verified: §5's two live checks are runbook text and were not run —
+they need a login and a network (`scripts/acp-smoke.md`).
+
+**Found in the building, and left standing.** A level reaches an ACP agent
+only when the model declares reasoning, and the embedded snapshot cannot
+know an agent's model — `models::resolve` reads
+`declared.reasoning.unwrap_or(facts.reasoning)` and `UNKNOWN.reasoning` is
+`false`, so `ModelRequest.reasoning` is `None` for `acp/agent` until
+settings say `models."<row>/agent".reasoning = true`. `/think` already
+tells a person exactly that line, and the black-box writes it; but it is a
+kernel default, out of this milestone's scope to change, and the honest
+statement of ADR-0037 §1 today is "with that line".
