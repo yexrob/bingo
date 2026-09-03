@@ -23,3 +23,4 @@ first record; 0036 §2 answered it before it was named).
 - [0012 — OAuth credentials: a library tier, one store, login as an interaction](0012-oauth-credentials.md)
 - [0013 — UI as data: one view vocabulary, three lanes, actions](0013-ui-as-data.md)
 - [0034 — The room is read, not delivered](0034-the-room-is-read-not-delivered.md)
+- [0040 — A picture beside the words](0040-a-picture-beside-the-words.md)
