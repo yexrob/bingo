@@ -289,13 +289,36 @@ mod tests {
         ]
     }
 
+    /// The committed shape of the vocabulary, and the fence the catch-all is
+    /// built against (ADR-0038 §2): a known kind reads back as itself and
+    /// writes the same bytes it was read from. This snapshot moving means a
+    /// reader that predates the change stopped understanding a word it knew.
     #[test]
     fn every_node_has_a_wire_shape_and_round_trips() {
         let views: Vec<View> = every_node().into_iter().map(|(v, _)| v).collect();
         insta::assert_json_snapshot!("views", views);
         for view in &views {
             let json = serde_json::to_string(view).unwrap();
-            assert_eq!(&serde_json::from_str::<View>(&json).unwrap(), view);
+            let read: View = serde_json::from_str(&json).unwrap();
+            assert_eq!(&read, view);
+            assert_eq!(serde_json::to_string(&read).unwrap(), json);
+        }
+    }
+
+    /// The other half of the fence: a word this sdk has no name for degrades
+    /// (ADR-0038 §2), but a known word spelled wrong is still a mistake, and
+    /// so is a node with no word at all.
+    #[test]
+    fn a_known_kind_that_is_malformed_is_still_an_error() {
+        for json in [
+            r#"{"kind":"text"}"#,
+            r#"{"kind":"table","headers":[]}"#,
+            r#"{"kind":"progress","value":"a lot"}"#,
+            r#"{"text":"no kind at all"}"#,
+            r#"{"kind":42,"text":"a kind is a word"}"#,
+            r#""not an object at all""#,
+        ] {
+            assert!(serde_json::from_str::<View>(json).is_err(), "{json}");
         }
     }
 
