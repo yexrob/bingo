@@ -23,7 +23,8 @@ use crate::model::ToolSpec;
 /// Nothing here says what an interrupt does, because a tool has no say in it:
 /// one `esc` ends the turn and every call in flight is dropped where it
 /// stands (`crate::executor` in the kernel).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolTraits {
     pub concurrency_safe: bool,
     pub read_only: bool,
@@ -76,7 +77,8 @@ impl ToolTraits {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ResultLimit {
     /// The kernel clips the result at its global cap.
     Global,
