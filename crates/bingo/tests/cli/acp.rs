@@ -48,6 +48,13 @@ struct Scripted {
 
 impl Scripted {
     fn new(agent: &Path, script: Value) -> Self {
+        Self::configured(agent, script, json!({}), json!({}))
+    }
+
+    /// One adapter, with whatever else the scenario needs written onto its row
+    /// and beside it — a `tools` list, a `forwardMcp`, a person's own MCP
+    /// servers.
+    fn configured(agent: &Path, script: Value, row: Value, beside: Value) -> Self {
         let home = tempfile::tempdir().unwrap();
         let scripted = Scripted {
             script: home.path().join("acp-script.json"),
@@ -56,20 +63,17 @@ impl Scripted {
             home,
         };
         scripted.obeys(script);
-        std::fs::write(
-            &scripted.settings,
-            json!({
-                "acp": { "adapters": { "scripted": {
-                    "command": agent,
-                    "env": {
-                        "BINGO_FAKE_ACP_SCRIPT": scripted.script,
-                        "BINGO_FAKE_ACP_LOG": scripted.log,
-                    }
-                }}}
-            })
-            .to_string(),
-        )
-        .unwrap();
+        let mut adapter = json!({
+            "command": agent,
+            "env": {
+                "BINGO_FAKE_ACP_SCRIPT": scripted.script,
+                "BINGO_FAKE_ACP_LOG": scripted.log,
+            }
+        });
+        merge(&mut adapter, row);
+        let mut settings = json!({ "acp": { "adapters": { "scripted": adapter } } });
+        merge(&mut settings, beside);
+        std::fs::write(&scripted.settings, settings.to_string()).unwrap();
         scripted
     }
 
@@ -174,6 +178,22 @@ impl Scripted {
     /// A turn that carries on the last conversation in this directory.
     fn again(&self, said: &str) -> Output {
         run(self.bingo(&["--continue"]).arg(said))
+    }
+}
+
+/// One object's keys written over another's, so a scenario says only what it
+/// changes.
+fn merge(into: &mut Value, from: Value) {
+    let (Some(into), Some(from)) = (into.as_object_mut(), from.as_object()) else {
+        return;
+    };
+    for (key, value) in from {
+        match into.get_mut(key) {
+            Some(held) if held.is_object() && value.is_object() => merge(held, value.clone()),
+            _ => {
+                into.insert(key.clone(), value.clone());
+            }
+        }
     }
 }
 
@@ -630,4 +650,61 @@ fn an_adapter_that_died_between_turns_is_replaced_and_said() {
         ],
         "a second handshake, and back into the same agent session"
     );
+}
+
+// ------------------------------------------------- the tool bridge (ADR-0036)
+
+/// What the agent was offered on the bridge, from the `tools/list` it logged.
+fn offered(adapter: &Scripted) -> Vec<String> {
+    let listed = adapter
+        .first("mcp/tools")
+        .expect("the agent listed the bridge");
+    listed["tools"]
+        .as_array()
+        .expect("a list of tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// A script whose agent dials the bridge and calls one tool mid-turn.
+fn bridged(calls: Vec<Value>, updates: Vec<Value>) -> Value {
+    json!({
+        "sessionId": "acp-bridge",
+        "capabilities": { "resume": true },
+        "mcp": true,
+        "turns": [{ "mcp": calls, "updates": updates, "stopReason": "end_turn" }]
+    })
+}
+
+/// The offer is the session's own tool set, less the hands the agent brought
+/// (ADR-0036 §1). Nothing in `bingo-provider-acp` names the tools that cross:
+/// what is asserted here is that the house's tools arrived and the machine's
+/// did not.
+#[test]
+fn the_bridge_offers_the_sessions_tools_and_not_the_agents_own_hands() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::new(agent, bridged(Vec::new(), vec![chunk("Listed.")]));
+    let out = adapter.turn("what have you got");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let offered = offered(&adapter);
+    assert!(
+        offered.iter().any(|name| name == "SendMessage"),
+        "the house's own tools cross: {offered:?}"
+    );
+    for brought in [
+        "Read",
+        "Write",
+        "Edit",
+        "Bash",
+        "WebFetch",
+        "SpawnAgent",
+        "AskUserQuestion",
+    ] {
+        assert!(
+            !offered.iter().any(|name| name == brought),
+            "{brought} is the agent's own hand and does not cross: {offered:?}"
+        );
+    }
 }
