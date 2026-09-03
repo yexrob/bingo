@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 pub const TICK: &str = "board.tick";
 pub const RESET: &str = "board.reset";
 
+/// This plugin's own word for an element the sdk has none for (ADR-0038 §1),
+/// namespaced by the plugin that owns its shape.
+pub const SPARKLINE: &str = "demo.sparkline";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum State {
@@ -28,6 +32,15 @@ impl State {
         match self {
             State::Pending => State::Running,
             State::Running | State::Done => State::Done,
+        }
+    }
+
+    /// How far along a row is, as a number a sparkline can plot.
+    fn reached(self) -> u64 {
+        match self {
+            State::Pending => 0,
+            State::Running => 1,
+            State::Done => 2,
         }
     }
 
@@ -88,13 +101,14 @@ impl Board {
         }
     }
 
-    /// What a person sees: a table of the rows, and the buttons under it.
-    /// Nothing here knows what a terminal is (ADR-0013 §4).
+    /// What a person sees: a table of the rows, how far they have got as an
+    /// element the sdk has no word for, and the buttons under both. Nothing
+    /// here knows what a terminal is (ADR-0013 §4).
     pub fn view(&self) -> View {
         View::Panel {
             title: "Board".into(),
             child: Box::new(View::Stack {
-                children: vec![self.table(), buttons()],
+                children: vec![self.table(), self.sparkline(), buttons()],
             }),
         }
     }
@@ -116,6 +130,23 @@ impl Board {
         Some(Self {
             rows: table.iter().filter_map(|cells| row(cells)).collect(),
         })
+    }
+
+    /// The porch beside the house (ADR-0038 §4): an element this plugin has a
+    /// word for and the sdk does not. A surface that learns `demo.sparkline`
+    /// draws the points; every surface that has not — which today is all of
+    /// them — reads the fold, so the plugin owes one that is honest.
+    fn sparkline(&self) -> View {
+        let points: Vec<u64> = self.rows.iter().map(|row| row.state.reached()).collect();
+        View::Custom {
+            kind: SPARKLINE.into(),
+            fold: points
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+            data: serde_json::json!({ "points": points }),
+        }
     }
 
     fn table(&self) -> View {
@@ -220,12 +251,32 @@ mod tests {
                 ],
             }
         );
-        let View::Actions { items } = &children[1] else {
+        let View::Actions { items } = &children[2] else {
             panic!("buttons");
         };
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].action.name, TICK);
         assert_eq!(items[0].key, None, "which key fires it is the surface's");
+    }
+
+    /// The element the sdk has no word for, beside the ones it does: what it
+    /// plots is this plugin's business, what every surface shows until one
+    /// learns the word is the fold.
+    #[test]
+    fn the_board_shows_one_element_the_sdk_has_no_word_for() {
+        let mut board = Board::default();
+        board.tick();
+        board.tick();
+        board.tick();
+        assert_eq!(
+            board.sparkline(),
+            View::Custom {
+                kind: SPARKLINE.into(),
+                data: serde_json::json!({"points": [2, 1, 0]}),
+                fold: "2 1 0".into(),
+            }
+        );
+        assert_eq!(board.view().fold().lines().nth(5), Some("2 1 0"));
     }
 
     /// The payload is the view, and the view is the board: what the journal
