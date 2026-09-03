@@ -131,7 +131,9 @@ struct Turn {
     #[serde(default)]
     mcp: Vec<Value>,
     /// Calls to make once the turn has been answered — which is nobody's turn,
-    /// and must be refused (ADR-0036 §2).
+    /// and must be refused (ADR-0036 §2). Tried again until they are, because
+    /// a turn is not over the instant its answer is written and a scenario
+    /// must wait on the fact rather than on a clock.
     #[serde(default)]
     mcp_after: Vec<Value>,
 }
@@ -321,7 +323,7 @@ impl Agent {
             answer["usage"] = usage;
         }
         self.send(wire::result(id, answer)).await?;
-        self.bridged(false, &turn.mcp_after).await?;
+        self.after(&turn.mcp_after).await?;
         if turn.then_exit {
             std::process::exit(0);
         }
@@ -332,25 +334,52 @@ impl Agent {
     /// is blocked on each answer, which is the whole point of serving a call
     /// while the turn's stream is open (ADR-0036 §2).
     async fn bridged(&mut self, list: bool, calls: &[Value]) -> Result<(), Failed> {
-        let Some(server) = self.bridge.as_mut() else {
+        let (Some(server), log) = (self.bridge.as_mut(), &self.log) else {
             return Ok(());
         };
-        let mut said = Vec::new();
         if list {
-            said.push(("mcp/tools", server.list().await?));
+            let offered = server.list().await?;
+            record(log, "mcp/tools", &offered).await?;
         }
         for call in calls {
             let name = call["tool"].as_str().unwrap_or_default().to_string();
-            let arguments = call["arguments"].clone();
-            let answered = server.call(&name, &arguments).await?;
-            said.push(("mcp/called", json!({ "tool": name, "answer": answered })));
+            // Said before the call, not after: a scenario that means to
+            // interrupt one has to know it is in flight.
+            record(log, "mcp/calling", &json!({ "tool": name })).await?;
+            let answered = server.call(&name, &call["arguments"]).await?;
+            record(
+                log,
+                "mcp/called",
+                &json!({ "tool": name, "answer": answered }),
+            )
+            .await?;
         }
-        let heard = std::mem::take(&mut server.heard);
-        for (what, value) in said {
-            self.record(what, &value).await?;
+        for method in std::mem::take(&mut server.heard) {
+            record(log, &format!("mcp/{method}"), &Value::Null).await?;
         }
-        for method in heard {
-            self.record(&format!("mcp/{method}"), &Value::Null).await?;
+        Ok(())
+    }
+
+    /// Calls made when this agent is answering nobody. Each is tried until it
+    /// is refused: writing a turn's answer and the turn being over are not the
+    /// same instant, and what is being waited for is the second.
+    async fn after(&mut self, calls: &[Value]) -> Result<(), Failed> {
+        let (Some(server), log) = (self.bridge.as_mut(), &self.log) else {
+            return Ok(());
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        for call in calls {
+            let name = call["tool"].as_str().unwrap_or_default().to_string();
+            loop {
+                let answered = server.call(&name, &call["arguments"]).await?;
+                let refused = answered["isError"] == json!(true);
+                if refused || std::time::Instant::now() > deadline {
+                    let said = json!({ "tool": name, "answer": answered });
+                    record(log, "mcp/called", &said).await?;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
         }
         Ok(())
     }
@@ -360,14 +389,14 @@ impl Agent {
     /// on its own schedule, so a tool sourced from one arrives when it
     /// arrives; waiting on the fact beats sleeping on a guess.
     async fn wait_for_tool(&mut self, wanted: &str) -> Result<(), Failed> {
-        let Some(server) = self.bridge.as_mut() else {
+        let (Some(server), log) = (self.bridge.as_mut(), &self.log) else {
             return Ok(());
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             let offered = server.list().await?;
             if named(&offered, wanted) || std::time::Instant::now() > deadline {
-                return self.record("mcp/tools", &offered).await;
+                return record(log, "mcp/tools", &offered).await;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -443,18 +472,25 @@ impl Agent {
     }
 
     async fn record(&self, method: &str, params: &Value) -> Result<(), Failed> {
-        let Some(path) = &self.log else {
-            return Ok(());
-        };
-        let line = format!("{}\n", json!({ "method": method, "params": params }));
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
-        Ok(())
+        record(&self.log, method, params).await
     }
+}
+
+/// One line of what this agent was told or did. A free function, not a
+/// method: the bridge and the log are two fields, and a call being logged
+/// while the bridge is being spoken to must borrow only the one it needs.
+async fn record(log: &Option<PathBuf>, method: &str, params: &Value) -> Result<(), Failed> {
+    let Some(path) = log else {
+        return Ok(());
+    };
+    let line = format!("{}\n", json!({ "method": method, "params": params }));
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(line.as_bytes()).await?;
+    Ok(())
 }
 
 /// The script's turn, taken by value so the borrow of `self` ends here.
