@@ -65,7 +65,7 @@ fn speech(message: &Message) -> String {
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.clone()),
-            ContentPart::Image { .. } => Some("(an image)".to_string()),
+            ContentPart::Image(_) => Some("(an image)".to_string()),
             _ => None,
         })
         .collect::<Vec<_>>()

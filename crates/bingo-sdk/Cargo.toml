@@ -26,6 +26,10 @@ tokio-util.workspace = true
 futures.workspace = true
 ulid.workspace = true
 jiff.workspace = true
+# A picture reaches the model as base64 (ADR-0040); already a workspace
+# dependency, no new crate in the lockfile.
+base64.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+tempfile.workspace = true

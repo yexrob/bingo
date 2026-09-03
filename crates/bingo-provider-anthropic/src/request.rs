@@ -5,8 +5,8 @@
 //! breakpoints, and the blocks a reasoning turn has to replay.
 
 use bingo_sdk::{
-    ContentPart, Effort, EndpointCapabilities, Message, ModelRequest, ProviderMetadata, Role,
-    SystemBlock, ToolSpec,
+    ContentPart, Effort, EndpointCapabilities, Image, Message, ModelRequest, ProviderMetadata,
+    Role, SystemBlock, ToolSpec,
 };
 use serde_json::{Map, Value, json};
 
@@ -196,7 +196,7 @@ fn role(role: Role) -> &'static str {
 fn part(part: &ContentPart) -> Option<Value> {
     Some(match part {
         ContentPart::Text { text } => json!({ "type": "text", "text": text }),
-        ContentPart::Image { media_type, data } => json!({
+        ContentPart::Image(Image { media_type, data }) => json!({
             "type": "image",
             "source": { "type": "base64", "media_type": media_type, "data": data },
         }),
@@ -404,10 +404,10 @@ mod tests {
     fn an_image_becomes_a_base64_source_block() {
         let request = request(vec![Message::user(vec![
             ContentPart::text("what is this?"),
-            ContentPart::Image {
+            ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
-            },
+            }),
         ])]);
         insta::assert_json_snapshot!(encode(&request, &caps(false)));
     }

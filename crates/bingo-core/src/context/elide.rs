@@ -73,7 +73,7 @@ fn chars_of(parts: &[ContentPart]) -> usize {
         .iter()
         .map(|p| match p {
             ContentPart::Text { text } => text.chars().count(),
-            ContentPart::Image { data, .. } => data.len(),
+            ContentPart::Image(image) => image.data.len(),
             ContentPart::ToolResult { parts, .. } => chars_of(parts),
             ContentPart::ToolUse { input, .. } => input.to_string().len(),
             ContentPart::Reasoning { text, .. } => text.chars().count(),

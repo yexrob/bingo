@@ -142,12 +142,19 @@ impl Actor {
     /// A `Log` session's input (ADR-0011 §1): a user item in the journal at
     /// once, acknowledged as applied, and nothing answers it.
     async fn log_input(&mut self, intent: IntentId, input: Input) {
-        let Input::Text { text, origin, .. } = input else {
+        let Input::Text {
+            text,
+            images,
+            origin,
+        } = input
+        else {
             return self
                 .reject(intent, ErrorCode::InvalidInput, "a log records text")
                 .await;
         };
-        let id = self.journal_prose(None, intent.clone(), text, origin).await;
+        let id = self
+            .journal_prose(None, intent.clone(), text, images, origin)
+            .await;
         self.applied(intent, json!({ "item": id })).await;
     }
 

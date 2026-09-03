@@ -104,10 +104,10 @@ clipboard module; `bingo/src/main.rs`; `bingo-surface-print/src/input.rs`;
 
 ## Exit criteria
 
-- [ ] `frames.snap` unchanged by the `Image` extraction.
-- [ ] Kernel: empty text + image is accepted; bad media type and
+- [x] `frames.snap` unchanged by the `Image` extraction.
+- [x] Kernel: empty text + image is accepted; bad media type and
   oversize are `InvalidInput`; the user item carries text then images.
-- [ ] Wire: a submit with an image round-trips to the journal.
+- [x] Wire: a submit with an image round-trips to the journal.
 - [ ] TUI: a paste puts `[image 1]` in the line and the submit carries
   the image; `@shot.png` sends an image part; a missing file keeps
   the line and says so; PTY smoke green.
@@ -131,3 +131,33 @@ re-encoding on the way in.
   without it sees the notice, not a failure of the words.
 - Base64 in the journal grows sessions; elision already counts it,
   and the cap bounds one picture.
+
+## Verified (slice K)
+
+Bricks 1–5 landed on `m45-kernel`. `Image` (sdk `model.rs`) with its
+table, cap, `media_type_of`/`is_known`/`from_bytes`/`read`/`decoded_len`,
+`ImageError`; `ContentPart::Image(Image)` — `frames.snap` untouched, a
+new round-trip test pins the tagged JSON shape. `Input::Text.images`
+replaces `attachments`; all fifteen match sites and every construction
+site follow. `read.rs` uses `Image::media_type_of`/`from_bytes`, its own
+table gone. Wire test added; `schema/{rpc,plugin}.json` regenerated —
+only the `Input`/`Image` shapes moved.
+
+Found beyond the plan: `Image::MEDIA_TYPES` stays module-private (the
+three accessors are the public surface). `turn.rs`'s mid-turn `barrier()`
+built a steer's `ItemBody::User` by hand and would have dropped its
+pictures; in review it now records through the same `user_parts`, with
+a test (`a_picture_steered_in_at_the_barrier_is_kept`) whose scripted
+model has no vision — so what it proves is the whole path: kept in the
+items, projected to the note at the request. Also in review:
+`Image::EXTENSIONS` (a second copy of the table's keys) became
+`Image::extensions()` read off the table, and `decoded_len` saturates
+on a payload that is only padding instead of underflowing.
+
+Gates, all from the worktree: `fmt --check`, `check --workspace
+--all-targets`, `clippy -D warnings`, `test --workspace` (every crate
+green) all clean; `check_discipline.sh` → ok; `budget.sh` → ok, deps
+310/310 (no new lockfile crate); `deny check` → ok; `check -p bingo-sdk
+--target x86_64-pc-windows-msvc` clean (also `-p bingo-core`, `-p
+bingo-tool-fs`; a full-workspace Windows check hits a pre-existing
+`aws-lc-sys` cross-toolchain gap, unrelated).

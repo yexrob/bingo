@@ -77,7 +77,7 @@ fn shorten(sentence: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bingo_sdk::{ItemId, ItemStatus, Origin};
+    use bingo_sdk::{Image, ItemId, ItemStatus, Origin};
     use jiff::Timestamp;
 
     fn item(body: ItemBody) -> Item {
@@ -171,10 +171,10 @@ mod tests {
     fn the_first_ask_is_the_first_prose_a_person_wrote() {
         let items = vec![
             answered("hello"),
-            asked(vec![ContentPart::Image {
+            asked(vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "AA".into(),
-            }]),
+            })]),
             asked(vec![ContentPart::text("fix the parser")]),
             asked(vec![ContentPart::text("and the lexer")]),
         ];

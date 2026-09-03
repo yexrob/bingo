@@ -100,7 +100,7 @@ fn merge_provider_options(body: &mut Map<String, Value>, extra: Option<&Map<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bingo_sdk::{ContentPart, Message, ProviderMetadata, Role};
+    use bingo_sdk::{ContentPart, Image, Message, ProviderMetadata, Role};
 
     const MODEL: &str = "gpt-5.4";
 
@@ -211,10 +211,10 @@ mod tests {
     fn an_image_becomes_a_data_url_input_image() {
         let request = request(vec![Message::user(vec![
             ContentPart::text("what is this?"),
-            ContentPart::Image {
+            ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
-            },
+            }),
         ])]);
         insta::assert_json_snapshot!(encode(&request, Variant::Default));
     }

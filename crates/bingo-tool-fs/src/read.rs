@@ -5,9 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use base64::Engine;
 use bingo_sdk::{
-    ContentPart, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    ContentPart, Image, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
     input_schema,
 };
 use schemars::JsonSchema;
@@ -18,16 +17,9 @@ use crate::output;
 use crate::path::resolve;
 
 /// Beyond this a read is a mistake, not a request; the model gets the size back.
+/// A file cap, not `Image::MAX_BYTES` (decoded picture bytes) — the two bound
+/// different things and happen to differ.
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
-
-/// Extensions the model can look at, and what to call them on the wire.
-const IMAGE_TYPES: &[(&str, &str)] = &[
-    ("png", "image/png"),
-    ("jpg", "image/jpeg"),
-    ("jpeg", "image/jpeg"),
-    ("gif", "image/gif"),
-    ("webp", "image/webp"),
-];
 
 const DESCRIPTION: &str = "\
 Read a file from the filesystem. Give an absolute path, or one relative to the \
@@ -54,14 +46,6 @@ impl ReadTool {
         let args: ReadArgs = serde_json::from_value(input.clone()).ok()?;
         Some(resolve(&args.file_path, cwd))
     }
-}
-
-fn media_type(path: &Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    IMAGE_TYPES
-        .iter()
-        .find(|(name, _)| *name == ext)
-        .map(|(_, media)| *media)
 }
 
 /// `cat -n` layout: the number right-aligned in six columns, then a tab.
@@ -126,12 +110,11 @@ impl Tool for ReadTool {
             .await
             .map_err(|e| ToolError::Failed(format!("reading {shown}: {e}")))?;
 
-        if let Some(media_type) = media_type(&path) {
+        if let Some(media_type) = Image::media_type_of(&path) {
+            let image = Image::from_bytes(media_type, &bytes)
+                .map_err(|e| ToolError::Failed(e.to_string()))?;
             return Ok(ToolOutput {
-                parts: vec![ContentPart::Image {
-                    media_type: media_type.into(),
-                    data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                }],
+                parts: vec![ContentPart::Image(image)],
                 is_error: false,
                 display: None,
             });
@@ -282,10 +265,25 @@ mod tests {
             .expect("read");
         assert_eq!(
             out.parts,
-            vec![ContentPart::Image {
+            vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw==".into(),
-            }]
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_image_over_the_cap_fails_by_size() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("big.png"), vec![0u8; Image::MAX_BYTES + 1]).expect("write");
+        let cx = context(dir.path());
+        let error = ReadTool
+            .call(serde_json::json!({ "file_path": "big.png" }), &cx)
+            .await
+            .err();
+        assert!(
+            matches!(&error, Some(ToolError::Failed(m)) if m.starts_with("image too large:")),
+            "got {error:?}"
         );
     }
 

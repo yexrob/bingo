@@ -73,17 +73,33 @@ impl Queue {
 }
 
 fn entry(intent: &IntentId, input: &Input, position: u32) -> QueueEntry {
-    let (text, origin) = match input {
-        Input::Text { text, origin, .. } => (text.as_str(), origin.clone()),
-        Input::Action { action } => (action.name.as_str(), Origin::default()),
-    };
     QueueEntry {
         intent: intent.clone(),
         position,
-        preview: text.chars().take(PREVIEW_CHARS).collect(),
+        preview: preview(input),
         steerable: !commands::is_command(input),
-        origin,
+        origin: origin_of(input),
     }
+}
+
+fn origin_of(input: &Input) -> Origin {
+    match input {
+        Input::Text { origin, .. } => origin.clone(),
+        Input::Action { .. } => Origin::default(),
+    }
+}
+
+/// The words shown for a queued ask, cut to length; an ask that carries a
+/// picture and no words previews as `(an image)`.
+fn preview(input: &Input) -> String {
+    let text = match input {
+        Input::Text { text, images, .. } if text.is_empty() && !images.is_empty() => {
+            return "(an image)".to_string();
+        }
+        Input::Text { text, .. } => text.as_str(),
+        Input::Action { action } => action.name.as_str(),
+    };
+    text.chars().take(PREVIEW_CHARS).collect()
 }
 
 #[cfg(test)]
@@ -130,5 +146,21 @@ mod tests {
         assert_eq!(entries[0].position, 1);
         assert!(entries[0].steerable);
         assert!(!entries[1].steerable);
+    }
+
+    #[test]
+    fn an_image_only_ask_previews_as_an_image() {
+        let image = Image::from_bytes("image/png", b"abc").expect("a small image");
+        let input = Input::Text {
+            text: String::new(),
+            images: vec![image],
+            origin: Origin::surface("test"),
+        };
+        let mut q = Queue::default();
+        q.push(IntentId::mint(), input);
+        let Event::QueueChanged { entries, .. } = q.changed() else {
+            panic!("a queue change");
+        };
+        assert_eq!(entries[0].preview, "(an image)");
     }
 }

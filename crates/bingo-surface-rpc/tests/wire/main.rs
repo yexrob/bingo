@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bingo_sdk::{
     Activation, Answer, Attachment, CatalogKind, Delivery, ErrorCode, Exit, HostApi, HostHandle,
-    Input, IntentId, InteractionId, InterruptScope, KernelError, OpenOptions, Origin,
+    Image, Input, IntentId, InteractionId, InterruptScope, KernelError, OpenOptions, Origin,
 };
 use bingo_surface_rpc::codec::{
     self, INVALID_PARAMS, INVALID_REQUEST, Id, KERNEL_ERROR, METHOD_NOT_FOUND, Message,
@@ -301,6 +301,41 @@ async fn a_delivery_an_extension_and_a_signal_reach_the_kernel_verbatim() {
             "things".to_string(),
             json!([1, 2, 3])
         )]
+    );
+}
+
+/// `Image` is on the wire by serde alone (ADR-0040 §4): a submit carrying one
+/// reaches the kernel as the `Input::Text` a surface built, unaltered.
+#[tokio::test]
+async fn a_submitted_image_reaches_the_kernel_beside_the_text() {
+    let (host, session) = TestHost::with(script());
+    let mut wire = Wire::opened(host).await;
+    let image = Image::from_bytes("image/png", b"a tiny picture").expect("a small image");
+    let input = Input::Text {
+        text: "look".into(),
+        images: vec![image.clone()],
+        origin: Origin::surface("test"),
+    };
+    wire.call(
+        name::SESSION_SUBMIT,
+        json!({
+            "session": json!(session_id()),
+            "intent": json!(IntentId::from_raw("req_1")),
+            "input": input,
+        }),
+    )
+    .await
+    .expect("a submit with an image is accepted");
+    assert_eq!(wire.finish().await, Exit { code: 0 });
+    let submits = session.submits();
+    assert_eq!(submits.len(), 1);
+    assert_eq!(
+        submits[0].1,
+        Input::Text {
+            text: "look".into(),
+            images: vec![image],
+            origin: Origin::surface("test"),
+        }
     );
 }
 

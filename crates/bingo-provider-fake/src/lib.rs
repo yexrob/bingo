@@ -359,7 +359,7 @@ fn push_part_text(text: &mut String, part: &ContentPart) {
                 push_part_text(text, part);
             }
         }
-        ContentPart::Image { .. } => {}
+        ContentPart::Image(_) => {}
     }
 }
 
@@ -367,7 +367,7 @@ fn part_chars(part: &ContentPart) -> usize {
     match part {
         ContentPart::Text { text } => text.chars().count(),
         ContentPart::Reasoning { text, .. } => text.chars().count(),
-        ContentPart::Image { data, .. } => data.chars().count(),
+        ContentPart::Image(image) => image.data.chars().count(),
         ContentPart::ToolUse { name, input, .. } => name.chars().count() + json_chars(input),
         ContentPart::ToolResult { parts, .. } => parts.iter().map(part_chars).sum(),
     }

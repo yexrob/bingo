@@ -21,7 +21,7 @@ pub fn parts(parts: &[ContentPart]) -> u64 {
         .iter()
         .map(|p| match p {
             ContentPart::Text { text: t } | ContentPart::Reasoning { text: t, .. } => text(t),
-            ContentPart::Image { .. } => IMAGE_TOKENS,
+            ContentPart::Image(_) => IMAGE_TOKENS,
             ContentPart::ToolUse { name, input, .. } => text(name) + text(&input.to_string()),
             ContentPart::ToolResult { parts: inner, .. } => self::parts(inner),
         })
@@ -74,6 +74,7 @@ pub fn estimate(system: &[SystemBlock], messages: &[Message], tools: &[ToolSpec]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Image;
 
     #[test]
     fn four_ascii_characters_are_one_token_and_a_cjk_character_is_one() {
@@ -85,10 +86,10 @@ mod tests {
 
     #[test]
     fn an_image_costs_a_flat_sixteen_hundred_wherever_it_sits() {
-        let image = ContentPart::Image {
+        let image = ContentPart::Image(Image {
             media_type: "image/png".into(),
             data: "aaaa".into(),
-        };
+        });
         assert_eq!(parts(std::slice::from_ref(&image)), IMAGE_TOKENS);
         assert_eq!(
             parts(&[ContentPart::ToolResult {
