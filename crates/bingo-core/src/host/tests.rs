@@ -6,6 +6,7 @@ use serde_json::json;
 use super::*;
 use crate::test_support::*;
 
+mod ask;
 mod commands;
 mod login;
 mod models;

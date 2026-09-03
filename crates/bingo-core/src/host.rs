@@ -3,6 +3,7 @@
 //! collects every contribution into one registry, and serves `HostApi` over
 //! a map of session actors. It knows no plugin by name.
 
+mod ask;
 mod catalog;
 mod refresh;
 mod registry;
@@ -388,6 +389,14 @@ impl Host {
         depth
     }
 
+    /// The one policy a plugin registered, or the kernel's own when none did.
+    fn policy(&self) -> Arc<dyn PermissionPolicy> {
+        self.registry
+            .policy
+            .clone()
+            .unwrap_or_else(|| Arc::new(DefaultPolicy))
+    }
+
     /// A session's own way of asking a person (ADR-0012 §5): what a command
     /// hands a provider's `login`.
     pub fn prompter(&self, session: &SessionId) -> Result<Arc<dyn Prompter>, KernelError> {
@@ -617,11 +626,7 @@ impl Host {
                 sources: self.registry.sources.tools.clone(),
                 only: spec.tools.clone(),
             },
-            policy: self
-                .registry
-                .policy
-                .clone()
-                .unwrap_or_else(|| Arc::new(DefaultPolicy)),
+            policy: self.policy(),
             hooks: HookSet {
                 fixed: self.registry.hooks.clone(),
                 sources: self.registry.sources.hooks.clone(),
@@ -904,6 +909,15 @@ impl HostApi for Host {
         call: ToolCall,
     ) -> Result<ToolOutcome, KernelError> {
         self.live(session)?.mailbox.invoke(call).await
+    }
+
+    async fn ask(
+        &self,
+        session: &SessionId,
+        kind: InteractionKind,
+        answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError> {
+        ask::put(self, session, kind, answers).await
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
