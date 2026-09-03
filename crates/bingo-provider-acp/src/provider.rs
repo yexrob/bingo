@@ -4,7 +4,9 @@
 //! crosses: an ACP session is stateful and holds everything before it
 //! (ADR-0035 §3), so replaying the folded context would tell the agent its own
 //! history back. The system prompt does not cross either — the agent has its
-//! own — nor `Effort`, nor `max_tokens` (ADR-0035 §6). The tools do, but not
+//! own — nor `max_tokens` (ADR-0035 §6). `Effort` and the model do, but not
+//! on this wire: they are the agent's own knobs, turned between turns through
+//! the options it declared (ADR-0037, `crate::knobs`). The tools do, but not
 //! on this wire: they were handed over at `session/new` as an MCP server the
 //! agent dials, and the request's list of them only says what that server now
 //! offers (ADR-0036 §1).

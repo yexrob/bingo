@@ -12,6 +12,12 @@
 //! climbs the [`ladder`] to get back into it, [`events`] turns what comes back
 //! into `ModelEvent`s, and [`provider`] is the face the kernel sees.
 //!
+//! Two of the request's own fields are the agent's to answer for rather than
+//! ours: [`options`] reads the effort and model knobs out of what the agent
+//! declared, [`knobs`] remembers where they stand and turns what moved before
+//! the next prompt, and [`legacy`] is the older door one adapter has instead
+//! (ADR-0037).
+//!
 //! Beside all of that runs [`bridge`], which is the conversation the other
 //! way: bingo's shared tools served to the agent as MCP, so an ACP member can
 //! act and not only read (ADR-0036).
