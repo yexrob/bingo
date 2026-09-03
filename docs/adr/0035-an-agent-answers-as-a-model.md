@@ -71,7 +71,9 @@ tokio, `Send`).
    need is recorded here, not built.
 6. **Not mapped, on purpose**: our tools do not cross (no MCP handover
    — the agent brings its own); `system`, `Effort`, caching and token
-   counting do not cross either. ACP's plans, modes and slash commands
+   counting do not cross either. (ADR-0037 amends this: `Effort` and the
+   model now cross as `session/set_config_option` between turns; the rest
+   of the list stands.) ACP's plans, modes and slash commands
    stay unmapped; `fs/*` and `terminal/*` are declared unsupported.
    `cancel` → the `session/cancel` notification; usage fills from what
    the adapter reports and is zero otherwise, honestly.

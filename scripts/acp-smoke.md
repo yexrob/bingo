@@ -1,4 +1,4 @@
-# ACP live smoke (M38, M39)
+# ACP live smoke (M38, M39, M40)
 
 The one thing the suite cannot do: run a real agent. Everything else about
 `bingo-provider-acp` is proven offline against the scripted agent and recorded
@@ -109,6 +109,39 @@ finding.
          `--output-format json` on a fresh session): it names the bridge and
          says a call is served only during the turn.
 
+- [ ] **The thinking level (M40, ADR-0037).** codex-acp is the one to run
+      this on: its effort values come from the Codex app-server at runtime, so
+      what it offers is the live answer to "what vocabulary is out there".
+      1. Say `models."codex-acp/agent".reasoning = true` in settings first.
+         A model the embedded snapshot has never heard of fails closed on
+         reasoning, and no level reaches any provider without that line —
+         `/think` says so itself when the model does not declare it.
+      2. In the TUI, `/think max`, then ask something. Codex's own `/status`
+         (or its transcript header) says the effort it is running at. It is
+         the deepest codex offers, not `max`: an `ACP_LEVEL` notice named the
+         clamp in codex's own word.
+      3. `/think low`, ask again: `/status` moves. `/think low` a second time
+         sends nothing — the level did not move, so no message did.
+      4. An agent with neither knob (any adapter that declares no
+         `configOptions`) gets one `ACP_KNOB` notice and keeps its own level,
+         and every turn still runs.
+- [ ] **The model list (M40, ADR-0037 §2).** Before any session, `/models`
+      lists `codex-acp` with `agent` alone — an external agent picks its own
+      models per session and there is no door to ask before one is open.
+      1. Run a turn. Then `/models refresh` and `/models`: the instance now
+         serves the agent's own ids beside `agent` — codex's plain slugs
+         (`gpt-5.4-codex`, …), claude-agent-acp's `default`, `opus`,
+         `sonnet`.
+      2. `/model codex-acp/<one of them>`, then ask something. Codex answers
+         on that model — its `/status` says which — and the change crossed as
+         one `session/set_config_option` before the prompt, never inside it.
+      3. `/model codex-acp/agent` sends nothing: `agent` is bingo's word for
+         the agent's own, and it never crosses.
+      4. An adapter old enough to have no `model` option but the legacy
+         `session/set_model` is set through that instead, with the bracketed
+         `model[effort]` id it lists. If neither is there, an `ACP_KNOB`
+         notice says so once.
+
 ## 3. What a failure means
 
 - A turn that hangs with no output: the adapter is writing something that is
@@ -124,6 +157,13 @@ finding.
   proxy — run `BINGO_ACP_BRIDGE_ADDRESS=… BINGO_ACP_BRIDGE_TOKEN=… bingo
   acp-mcp-proxy` by hand against a live run and see what it says. If the row
   is not there, an `ACP_BRIDGE` notice on the session says why.
+- `/think` moves nothing and no `session/set_config_option` crosses: either
+  the model does not declare reasoning (say `models."<row>/agent".reasoning =
+  true`, and `/think` will have told you so), or the agent declared no
+  effort-shaped option — an `ACP_KNOB` notice says which. Read the
+  `session/new` answer: `configOptions` is where the knobs are, and an
+  adapter that suppresses the block for some clients suppresses it for this
+  one too.
 - The agent lists the bridge's tools but every call is refused: the calls are
   arriving outside a turn. That is the rule, not a fault — an agent that
   batches its tool calls until after it has answered cannot use this bridge,
