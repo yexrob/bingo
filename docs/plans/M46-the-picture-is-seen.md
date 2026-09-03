@@ -85,22 +85,27 @@ Pure first; the terminal last.
 
 ## Exit criteria
 
-- [ ] `parse` on the six captured answers; `png_size`, `fit`,
+- [x] `parse` on the six captured answers; `png_size`, `fit`,
   `transmit`, `placeholder` byte-exact.
-- [ ] Kitty on: a PNG tool result and a pasted PNG draw as placeholder
+- [x] Kitty on: a PNG tool result and a pasted PNG draw as placeholder
   blocks and are transmitted once; JPEG and kitty-off draw the chip.
-- [ ] The probe ends on DA1; a terminal that answers nothing costs at
+  (Scope changed mid-flight: a JPEG is now *decoded* and drawn — only a
+  payload no decoder reads takes the chip.)
+- [x] The probe ends on DA1; a terminal that answers nothing costs at
   most `PROBE`; `BINGO_GRAPHICS=off` and tmux ask nothing.
-- [ ] tui-smoke's two new scenes; every AGENTS.md gate; budget +0;
-  Windows cross-check for `bingo-surface-tui` (a tty is read).
+- [x] tui-smoke's two new scenes; every AGENTS.md gate; budget 310 → 331
+  by the measured 21 (ADR-0041); Windows cross-check for
+  `bingo-surface-tui` and `bingo-pictures`.
 
 ## Non-goals
 
-iTerm2 and sixel (the row's other columns); half-block cells (needs a
-decoder); the full-size sheet (§5 "full-size in a sheet" — the block
-is the fold's peek and open; the sheet is its own slice); JPEG, GIF,
-WebP as pixels (kitty wants PNG or raw; no decoder); tmux passthrough;
-images in `--print` and channels (the degrade is theirs).
+iTerm2 and sixel (the row's other columns); half-block cells (a
+terminal that draws no pictures at all); the full-size sheet (§5
+"full-size in a sheet" — the block is the fold's peek and open; the
+sheet is its own slice); tmux passthrough; images in `--print` and
+channels (the degrade is theirs). *JPEG, GIF and WebP as pixels left
+the non-goals mid-flight*: the user took the dependency, so every
+format a decoder reads is drawn (ADR-0041).
 
 ## Risks
 
@@ -111,3 +116,165 @@ images in `--print` and channels (the degrade is theirs).
   cell size; `Graphics` stays `Off` rather than guessing 8×16.
 - The probe shares the tty with colorsaurus's; both run before raw
   mode, one after the other, never interleaved.
+
+## Verified
+
+### What landed
+
+The six bricks, plus a seventh the scope change brought (below).
+
+1. **The probe's parser** — `bingo-surface-tui/src/graphics/probe.rs`.
+   `QUERY` is the three questions in one write; `parse` reads what came
+   back before the DA1 reply and `answered` says when that reply has
+   landed. Tested on six answers **written from the protocol, not
+   captured off six machines**: kitty, WezTerm and Ghostty (`OK` and a
+   cell size, three different cell sizes), iTerm2 and Apple Terminal
+   (DA1 alone), and an empty answer. Also: an `OK` for another image id,
+   a refusal, an unterminated APC, a cell reply of zero pixels and one
+   with a single number — every one of them fails closed.
+2. **The read** — `graphics::detect()`, called from `Tui::enter` right
+   after `theme::detect()`. `BINGO_GRAPHICS=off` and a multiplexer skip
+   the ask. Three deviations, each with its reason under "What the plan
+   got wrong".
+3. **The encoder** — `graphics/kitty.rs`, byte-exact: `transmit`,
+   `place`, `delete`, `placeholder`, the 128-entry diacritic table
+   (copied from kitty's own `gen/rowcolumn-diacritics.txt`, fetched and
+   diffed rather than recalled). `png_size` and the geometry moved:
+   `png_size` is `bingo-pictures`' (it is the PNG fast path) and `fit`
+   is `graphics/picture.rs`'.
+4. **The block in the transcript** — `transcript/pictured.rs`. A tool's
+   picture hangs under its `⎿`, a person's under their own line with no
+   mark. `IMAGE_ROWS` (12) at a peek, the whole height when open,
+   nothing when shut. The chip is `[image: <media type>]` under a tool
+   row and nothing under a person's line (their words already name it).
+5. **The send** — `Screen::place`, `Run::hand_pictures` after the draw,
+   `graphics/stored.rs` as the state machine. Its invariant is one
+   sentence: *the terminal holds exactly the last `KEPT` (32) pictures
+   the transcript holds*. New picture → `transmit`; same picture, new
+   rectangle → `place` (no bytes twice); gone → `delete` with `d=I`, so
+   the memory goes with it.
+6. **Tests.** 9 in `transcript/pictured.rs` (cells, colour, chip,
+   person's line, the three folds, a whole `TestBackend` frame, and a
+   block kept between frames keeping its picture), 7 in `stored.rs`,
+   3 in `decoded.rs`, 7 in `probe.rs`, 6 in `kitty.rs`, 8 in
+   `picture.rs`, 2 in `run.rs` (the picture goes out once across two
+   frames; a terminal that draws none is handed none), 6 in
+   `bingo-pictures`. Two new pty tests and two new smoke scenes.
+
+### What the scope change brought
+
+Mid-flight the user took the dependency: **every format a decoder reads
+is drawn**, not PNG only. `crates/bingo-pictures` (library tier) is the
+one place that knows a decoder — `to_png` passes a PNG through
+untouched (size off the header, no decode, no re-encode) and decodes
+anything else, a GIF as its first frame, re-encoding at
+`CompressionType::Fast` because these bytes are going to a terminal on
+the same machine. `graphics/decoded.rs` keeps the answers (the failures
+too, or an undecodable 5 MiB payload would be re-decoded every frame),
+capped at the same 32.
+
+### What the plan got wrong
+
+- **The pictures cannot ride a `RefCell<Placed>` on `Ui`.** The block
+  cache draws an item once and clones it ever after, so a collector
+  filled at render time is empty on the second frame — and the send
+  would then delete a picture whose cells are still on the screen. They
+  ride *with the lines*, in the block's `Entry`, and `Blocks::pictures()`
+  derives the frame's list from them. `item_lines` became `item_block`
+  and answers with `Block { lines, pictures }`. A test pins exactly this
+  (`a_block_kept_between_frames_keeps_its_picture`).
+- **`terminal-trx` is not used, and is not in the tree.** Its `lock()`
+  takes `stdout().lock()` for the terminal it opens, so a probe thread
+  abandoned at the deadline would deadlock every later frame's write.
+  The probe opens `/dev/tty` itself with `O_NONBLOCK` and polls to a
+  deadline on the calling thread — no thread to abandon, no lock to
+  hold, and it works with stdout redirected. That costs `libc` as a
+  `cfg(unix)` dependency for the one constant `O_NONBLOCK` (no call, no
+  `unsafe`); it was already in the lockfile, so the count did not move
+  for it.
+- **Windows asks nothing.** No Windows console host speaks the kitty
+  protocol, and a console that will never answer would cost every
+  start-up the whole 400 ms. `exchange()` is `cfg`-split with its unix
+  counterpart in the same function pair, and `QUERY`/`answered` carry
+  `cfg(any(unix, test))` so they stay compiled and asserted on Windows
+  CI without being dead code there. **WezTerm on Windows does speak the
+  protocol and will get the chip** — a stated limitation, not an
+  oversight.
+- **`a=d,d=i` frees nothing.** Lowercase `d=i` deletes placements and
+  leaves the image data in the terminal's memory, which is the opposite
+  of the eviction's purpose; `d=I` is what the code sends.
+- **Every cell carries both diacritics**, not "the row on the first
+  cell". The protocol's diacritics are positional — the first is the
+  row, the second the column — so there is no way to spell a column
+  without a row. Both on every cell also means a half-drawn row still
+  resolves, which is what the plan wanted.
+- **`Ui.graphics` would have been a second copy** of a run-wide fact.
+  `graphics::chosen()` is a `OnceLock` with a thread-local override for
+  tests, exactly as `theme.rs` settles the look — so no field, no
+  plumbing, and no way for a stale copy to exist. It never probes
+  lazily: a run that did not call `detect()` draws no pictures.
+- **tmux cannot answer the probe**, so the plan's kitty smoke scene is
+  impossible: under a multiplexer the ask is skipped by design. The
+  smoke gained the two scenes it *can* prove on a real terminal (the
+  chip, and `BINGO_GRAPHICS=off`, both asserting that no byte of
+  graphics protocol reaches a terminal that was never asked), and the
+  kitty half moved to `crates/bingo/tests/pty.rs`, whose harness now
+  answers the probe: it sees the query in the child's output and writes
+  kitty's `OK` + `CSI 6;20;10t` + DA1 back. That test reads a real PNG
+  through the `Read` tool and asserts one `ESC _ G a=T,f=100` went out,
+  `U=1` with it, and no chip on the screen; its twin answers DA1 only
+  and asserts the chip with not one byte of protocol.
+- **Two ends the plan does not mention, both found by reading the exit
+  path.** A picture's placeholder cells are not text: printed back into
+  the shell's own screen on the way out (design §3) they would be a row
+  of glyphs no font has, so `Blocks::tail` leaves them behind with the
+  alternate screen. And a picture the terminal is holding for this
+  surface would outlive the run, so `Run::leave` hands it back — one
+  `catch_up(&[])` against an empty frame, which is the same reconciler
+  saying "hold nothing". Each has a test.
+- **`png_size`'s "IHDR at offset 16"** is right about the size but says
+  nothing about the signature or the chunk type; both are checked, so a
+  JPEG cannot be mistaken for a PNG with an absurd size.
+
+### What is not verified
+
+- **No real kitty, WezTerm or Ghostty was driven.** Every terminal in
+  these tests is one this repository wrote: the probe answers are
+  spelled from the protocol document (fetched from
+  `sw.kovidgoyal.net/kitty/graphics-protocol/`), and the pty harness
+  plays the terminal's part. What is proven is that the right bytes go
+  out and the right cells are drawn — not that a real kitty paints a
+  picture. That needs a person at a kitty window.
+- **"The probe ends on DA1 rather than on the clock"** is proven
+  structurally (the loop's condition is `probe::answered`, which has its
+  own test) and behaviourally (a DA1-only pty comes up and draws), not
+  by timing: a wall-clock assertion would pin the machine it was written
+  on (AGENTS.md).
+- **The decode runs on the draw thread.** A 5 MiB JPEG is decoded and
+  re-encoded inside `terminal.draw`, once per picture; on a slow machine
+  that frame may trip the surface's own "slow draw" notice. Bounded by
+  `Image::MAX_BYTES` and by the 32-entry memo, but not measured.
+- **Memory.** Up to 32 decoded pictures are held beside the journal's
+  own copies. Worst case with 5 MiB pictures that is ~160 MB on top of
+  what the journal already holds. Not measured on a real conversation.
+- The **eviction and the re-place path** (a picture scrolled past 32
+  others, a fold opened under a picture the terminal already holds) are
+  covered by `stored.rs`'s unit tests, not by a driven terminal.
+
+### Gates, all from the worktree
+
+```
+$ cargo fmt --all -- --check                                   # clean
+$ cargo check --workspace --all-targets --locked               # Finished
+$ cargo clippy --workspace --all-targets --locked -- -D warnings  # Finished
+$ cargo test --workspace --locked                              # 3454 passed, 0 failed
+$ scripts/check_discipline.sh                                  # discipline ok
+$ scripts/budget.sh            # dependencies (unique, normal): 331 (max 331); budget ok
+$ cargo deny check                        # advisories ok, bans ok, licenses ok, sources ok
+$ scripts/tui-smoke.sh                                         # tui-smoke ok
+$ cargo check -p bingo-surface-tui --all-targets --locked \
+      --target x86_64-pc-windows-msvc                          # Finished, no warnings
+$ cargo check -p bingo-pictures --all-targets --locked \
+      --target x86_64-pc-windows-msvc                          # Finished
+```
+No known flake was hit; the suite was run twice and passed both times.

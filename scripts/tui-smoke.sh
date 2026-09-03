@@ -79,6 +79,11 @@ mouse() {
   tmux -L "$SOCKET" send-keys -t "$SESSION" -l "$(printf '\033[<%s;%s;%sM' "$1" "$2" "$3")"
 }
 
+# A real picture on disk, since a picture reaches a transcript by being read.
+# Two blue pixels: the smallest thing the fs tool will call `image/png`.
+SHOT=iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR42mO4WR4ORAwQCgAwWgadFBKCuwAAAABJRU5ErkJggg==
+picture() { printf '%s' "$SHOT" | base64 -d >"$WORK/cwd/shot.png"; }
+
 # Start bingo on a scripted provider. The script's own text never appears in
 # the command line, so `await` matches the output and not the echo of itself.
 # `$2` is any extra environment the step wants, `$3` any extra flags.
@@ -263,6 +268,36 @@ if pane | grep -qE 'notify|777|Ptmux'; then
   exit 1
 fi
 focus I
+finish
+
+# tmux is a terminal of its own, so the graphics probe is not asked through it
+# (M46) and every picture here takes design §5's degrade. That is the half of
+# the row this script can prove on a real terminal: the words are right and no
+# escape of a protocol the terminal never agreed to reaches the screen. The
+# other half — a terminal that answers the probe and is sent the picture — is
+# driven by `crates/bingo/tests/pty.rs`, which can answer it.
+step 'a picture is named where the terminal does not draw pictures'
+picture
+start '{"responses":[
+  {"steps":[{"toolCall":{"name":"Read","input":{"file_path":"shot.png"}}}]},
+  {"steps":[{"text":"That is the picture."}]}]}'
+keys 'look at it' Enter
+await '[image: image/png]'
+await 'That is the picture.'
+if pane | grep -qE '_Ga=|10eeee'; then
+  echo 'tui-smoke: a graphics sequence reached a terminal that was never asked' >&2
+  pane >&2
+  exit 1
+fi
+finish
+
+step 'BINGO_GRAPHICS=off asks nothing and still names the picture'
+picture
+start '{"responses":[
+  {"steps":[{"toolCall":{"name":"Read","input":{"file_path":"shot.png"}}}]},
+  {"steps":[{"text":"That is the picture."}]}]}' 'BINGO_GRAPHICS=off'
+keys 'look at it' Enter
+await '[image: image/png]'
 finish
 
 step 'BINGO_ASCII=1 and NO_COLOR leave a terminal nothing it cannot draw'

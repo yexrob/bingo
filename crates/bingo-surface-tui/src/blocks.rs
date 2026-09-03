@@ -20,6 +20,7 @@ use ratatui::text::Line;
 
 use crate::clock::{FRAME, Now};
 use crate::fold::{self, Fold};
+use crate::graphics::Picture;
 use crate::skill;
 use crate::transcript::{self, Cue, Rows};
 use crate::tree::Agents;
@@ -156,6 +157,11 @@ struct Entry {
     /// A receipt hangs from the row above it: no blank row before it.
     joins: bool,
     lines: Vec<Line<'static>>,
+    /// The pictures these lines stand for (§5). They are kept with the lines
+    /// because they are the same rendering: a block drawn once and cloned
+    /// ever after would otherwise forget, on its second frame, what its own
+    /// placeholder cells are placeholders for.
+    pictures: Vec<Picture>,
     motion: Motion,
 }
 
@@ -268,8 +274,8 @@ impl Blocks {
         }
         let motion = self.motion(held, item, &revision, rows.now);
         self.renders += 1;
-        let lines = transcript::item_lines(item, previous, agents, rows, motion.cue(now));
-        if lines.is_empty() {
+        let drawn = transcript::item_block(item, previous, agents, rows, motion.cue(now));
+        if drawn.lines.is_empty() {
             // An item with nothing to say is not a block at all.
             if same {
                 self.blocks.remove(at);
@@ -280,7 +286,8 @@ impl Blocks {
             id: item.id.clone(),
             revision,
             joins: transcript::joins_the_row_above(item),
-            lines,
+            lines: drawn.lines,
+            pictures: drawn.pictures,
             motion,
         };
         match self.blocks.get_mut(at) {
@@ -378,14 +385,31 @@ impl Blocks {
         out
     }
 
+    /// Every picture the transcript is holding, in transcript order: what the
+    /// terminal is asked to hold ([`crate::graphics::Stored`]). Derived from
+    /// the blocks rather than remembered beside them, so a rewind that drops
+    /// an item drops its picture with it.
+    pub fn pictures(&self) -> Vec<Picture> {
+        self.blocks
+            .iter()
+            .flat_map(|entry| entry.pictures.iter().cloned())
+            .collect()
+    }
+
     /// The last `rows` lines as plain text: what is printed back into the
     /// shell's own screen when the surface leaves (design §3).
+    ///
+    /// A picture's cells are not text. Printed into the shell's own screen
+    /// they would be a row of glyphs no font has, standing for a picture the
+    /// terminal has already been told to forget — so those rows are left
+    /// behind with the alternate screen they were drawn on.
     pub fn tail(&self, rows: usize) -> Vec<String> {
         let height = self.height();
         let from = height.saturating_sub(rows);
         self.window(from, height - from)
             .iter()
             .map(|line| line.to_string().trim_end().to_string())
+            .filter(|line| !line.contains(crate::graphics::kitty::PLACEHOLDER))
             .collect()
     }
 
@@ -469,7 +493,8 @@ mod tests {
 
     fn sync_at(blocks: &mut Blocks, state: &SessionState, width: usize, now: Now) -> usize {
         let folds = crate::fold::Folds::new();
-        let rows = Rows::of(state, width, &folds, &[], now);
+        let pictures = crate::graphics::Decoded::default();
+        let rows = Rows::of(state, width, &folds, &[], &pictures, now);
         blocks.sync(state, &Agents::new(), &rows, Vec::new())
     }
 

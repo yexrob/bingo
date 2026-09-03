@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::clock::{self, Now};
 use crate::effect::Effect;
+use crate::graphics::{Graphics, Picture, Stored};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
@@ -122,6 +123,10 @@ struct Run {
     replies: mpsc::Sender<Reply>,
     /// A selection a key asked for, handed to the terminal between frames.
     clipboard: Option<String>,
+    /// The pictures the terminal is holding, which the frames that draw them
+    /// keep in step (design §5). Empty on every run: a terminal taken afresh
+    /// holds nothing this surface put there.
+    stored: Stored,
     /// When the last frame was painted, and whether anything has happened
     /// since that has not been.
     painted: Instant,
@@ -227,6 +232,7 @@ async fn attach(
         // Older than a frame, on the loop's own clock, so the first thing
         // that happens is drawn.
         painted: older_than_a_frame(),
+        stored: Stored::default(),
         behind: false,
         sluggish: false,
         exit: None,
@@ -239,6 +245,17 @@ async fn attach(
         )));
     }
     Ok((run, Some(attachment.events)))
+}
+
+/// The bytes that make the terminal hold the pictures this frame placed.
+///
+/// A picture the terminal has not got is resolved back to the item it came
+/// from and decoded once ([`crate::graphics::Decoded`]); one it already has
+/// costs nothing at all.
+fn placing(ui: &Ui, state: &SessionState, stored: &mut Stored, placed: &[Picture]) -> Vec<u8> {
+    stored.catch_up(placed, |picture| {
+        ui.decoded.png(picture.id(), picture.image_in(state)?)
+    })
 }
 
 /// An instant one frame in the past, or this one on a machine that has not
@@ -329,6 +346,7 @@ impl Run {
         now: Now,
     ) -> Result<Farewell, KernelError> {
         self.paint(screen, Wake::Frame, now)?;
+        self.forget_pictures(screen)?;
         let root = self.session.tree.root_id().clone();
         let _ = self.host.close(&root, CloseReason::Client).await;
         Ok(Farewell {
@@ -363,7 +381,42 @@ impl Run {
             .draw(&self.session.tree, &self.ui, now)
             .map_err(stdio)?;
         self.grumble(began.elapsed());
-        Ok(())
+        self.hand_pictures(screen)
+    }
+
+    /// Give the terminal its memory back on the way out: a picture it is
+    /// holding for this surface outlives the run otherwise, and nothing will
+    /// ever place it again.
+    fn forget_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
+        let bytes = self.stored.catch_up(&[], |_| None);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        screen.place(&bytes).map_err(stdio)
+    }
+
+    /// The pictures the frame drew placeholders for, after the frame: the
+    /// cells are on the screen and these are what the terminal draws into
+    /// them, so they go out of band as the title and the clipboard do.
+    ///
+    /// A terminal that draws no pictures is asked for none, and neither is a
+    /// frame whose pictures the terminal is already holding: the whole cost
+    /// of a redraw is one walk of the blocks.
+    fn hand_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
+        if crate::graphics::chosen() == Graphics::Off {
+            return Ok(());
+        }
+        let placed = self.ui.painted.borrow().blocks.pictures();
+        let bytes = placing(
+            &self.ui,
+            self.session.tree.viewed(),
+            &mut self.stored,
+            &placed,
+        );
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        screen.place(&bytes).map_err(stdio)
     }
 
     /// Own up, once per run, when drawing itself is the latency a person
@@ -1587,6 +1640,7 @@ mod tests {
     /// mentioned picture is looked for, and its handle is what is submitted.
     fn idle_in(state: SessionState, session: std::sync::Arc<TestSession>, at: Instant) -> Run {
         Run {
+            stored: Stored::default(),
             host: TestHost::with(vec![]).0,
             data_dir: std::path::PathBuf::new(),
             session: Attached::new(state, SessionHandle(session)),
@@ -1647,6 +1701,56 @@ mod tests {
             "the notice names the path: {:?}",
             run.ui.notices
         );
+    }
+
+    /// A picture goes to the terminal once, however many frames draw it: the
+    /// cells are redrawn from the block cache and the bytes behind them are
+    /// already there (design §5).
+    #[test]
+    fn a_picture_is_handed_to_the_terminal_once_and_not_again() {
+        let picture = bingo_pictures::testing::png(100, 200);
+        let read = tool(
+            "itm_1",
+            "Read",
+            serde_json::json!({ "file_path": "shot.png" }),
+            Some(bingo_sdk::ToolOutput {
+                parts: vec![bingo_sdk::ContentPart::Image(picture)],
+                display: None,
+                is_error: false,
+            }),
+            ItemStatus::Completed,
+        );
+        let at = Instant::now();
+        let mut run = idle_in(
+            folded(vec![frame(1, Event::ItemCompleted { item: read })]),
+            std::sync::Arc::new(TestSession::default()),
+            at,
+        );
+        let mut recorder = Recorder::default();
+        let now = crate::test_support::scene().1;
+        crate::graphics::with(crate::graphics::drawing(), || {
+            run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
+            run.paint(&mut recorder, Wake::Frame, now).expect("another");
+        });
+        let sent: Vec<String> = recorder
+            .places
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect();
+        assert_eq!(sent.len(), 1, "one write, not one per frame: {sent:?}");
+        assert!(sent[0].starts_with("\x1b_Ga=T,f=100,q=2,U=1,"), "{sent:?}");
+        assert!(sent[0].contains("c=10,r=10"), "{sent:?}");
+    }
+
+    /// A terminal that draws no pictures is handed none, whatever the
+    /// transcript holds.
+    #[test]
+    fn a_terminal_that_draws_no_pictures_is_handed_nothing() {
+        let mut run = idle(Instant::now());
+        let mut recorder = Recorder::default();
+        run.paint(&mut recorder, Wake::Frame, crate::test_support::scene().1)
+            .expect("a frame");
+        assert!(recorder.places.is_empty());
     }
 
     #[test]

@@ -448,6 +448,7 @@ fn render_transcript(
             area.width as usize,
             &ui.folds,
             &ui.catalogs.commands,
+            &ui.decoded,
             now,
         ),
         live,

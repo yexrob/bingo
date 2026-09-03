@@ -22,6 +22,7 @@ use crate::composer::Composer;
 use crate::dialog::Dialog;
 use crate::fold::Folds;
 use crate::frame::Regions;
+use crate::graphics::Decoded;
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
 use crate::pager::Pager;
@@ -379,6 +380,10 @@ pub struct Ui {
     pub switched: Option<Instant>,
     /// The frame as the last draw left it.
     pub painted: RefCell<Painted>,
+    /// The pictures the transcript has turned into pixels. A memo of work
+    /// already done, like [`Painted`], and holding no more of them than the
+    /// terminal itself is asked to hold.
+    pub decoded: Decoded,
     /// The paths the `@` dropdown ranks, walked when the first one asks.
     files: RefCell<Files>,
 }
@@ -417,6 +422,7 @@ impl Ui {
             focused: true,
             switched: None,
             painted: RefCell::default(),
+            decoded: Decoded::default(),
             files: RefCell::default(),
         }
     }

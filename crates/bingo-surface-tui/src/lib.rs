@@ -36,6 +36,9 @@
 //! - [`complete`] is the `@` dropdown's ranking and [`mentions`] is who it can
 //!   reach from the session on the screen — the agents under it, or, in a
 //!   room, the seats on its roster.
+//! - [`graphics`] asks the terminal whether it draws pictures and, where it
+//!   does, turns one into the cells and the bytes that put it on the screen
+//!   (design §5's image row).
 //! - [`skill`] answers whether an item is a skill run and which one, so the
 //!   model's `Skill(guide)` and a person's `/guide` come to the one row, and
 //!   [`acp`] answers the same for a call an ACP agent ran on its own side
@@ -58,6 +61,7 @@ mod dialog;
 mod effect;
 mod fold;
 mod frame;
+mod graphics;
 mod highlight;
 mod history;
 mod input;

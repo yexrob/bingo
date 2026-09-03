@@ -35,9 +35,21 @@ two-face.workspace = true
 nucleo-matcher.workspace = true
 terminal-colorsaurus.workspace = true
 ignore.workspace = true
+# A picture the terminal can draw: whatever a person or a tool handed over,
+# as the one format the protocol takes (M46, ADR-0041).
+bingo-pictures.workspace = true
+
+# `O_NONBLOCK` for the graphics probe's own handle on the terminal, and
+# nothing else: a constant, no call and no `unsafe`. Already in the tree
+# under tokio and crossterm, so it costs no crate (M46).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
+# The pictures the transcript's tests hand over, drawn by the crate that
+# reads them back rather than pasted into a source file.
+bingo-pictures = { workspace = true, features = ["testing"] }
 insta.workspace = true
 tempfile.workspace = true
 # Virtual time, so "an idle surface draws nothing in two seconds" is a test
