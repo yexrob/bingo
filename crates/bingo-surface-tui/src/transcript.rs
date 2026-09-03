@@ -6,8 +6,8 @@
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{
-    CommandSpec, ContentPart, DecisionKind, Item, ItemBody, ItemStatus, Origin, SessionState,
-    ToolOutput, TurnStatus, View,
+    CommandSpec, ContentPart, DecisionKind, Driver, Item, ItemBody, ItemStatus, Origin,
+    SessionState, ToolOutput, TurnStatus, View,
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -61,6 +61,11 @@ pub struct Rows<'a> {
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
+    /// What answers the session in view. A room answers nobody (ADR-0011 §1),
+    /// and that one fact is what tells a room's own transcript — where its
+    /// conversation is read — from a member's, where none of it belongs
+    /// (ADR-0034).
+    pub driver: Driver,
 }
 
 impl<'a> Rows<'a> {
@@ -81,6 +86,7 @@ impl<'a> Rows<'a> {
             commands,
             now,
             title: state.summary.title.as_deref(),
+            driver: state.summary.driver,
         }
     }
 }
@@ -130,10 +136,7 @@ pub fn item_lines(
     // write, over the start its kind has. One question, asked once, here.
     let fold = fold::fold_of(rows.folds, item);
     match &item.body {
-        ItemBody::User { parts, origin } => match quiet(origin) {
-            true => notice(item, parts, origin, fold, rows),
-            false => user(parts, origin.principal.as_deref(), rows),
-        },
+        ItemBody::User { parts, origin } => said_to(item, parts, origin, fold, rows),
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
         // An agent that runs its own tools journals each finished call as a
         // reasoning item whose metadata is the whole call (ADR-0035 §4), so
@@ -330,13 +333,58 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 /// being added or left out, deliberately, and the cost of each mistake says
 /// which way to lean — a person's own words drawn as machinery is a wrong
 /// nobody can undo by reading harder.
-const QUIET_SURFACES: &[&str] = &["agent", "bash", commands::SURFACE, "room", "schedule"];
+const QUIET_SURFACES: &[&str] = &["agent", "bash", commands::SURFACE, ROOMS, "schedule"];
+
+/// The surface everything a room sends wears: a post it fanned out before
+/// ADR-0034 stopped copying them, and the nudge that wakes a seat with nothing
+/// in it (`bingo-rooms`' own `room`). A surface may not import a plugin
+/// (ADR-0001), so the word is the whole of the contract.
+const ROOMS: &str = "room";
+
+/// The origin the kernel stamps on what a context contributor folded into the
+/// head of a turn (`contributor:<id>`), for the one that reads a member's rooms
+/// there — `[#design, since you last read]` and the posts under it (ADR-0034
+/// §4).
+const ROOMS_READING: &str = "contributor:rooms";
 
 /// Whether a delivery is the machinery reporting in. The composer's pending
 /// area asks the same question of what is still queued (ADR-0028), so the set
 /// stays one list read from two places rather than two lists to keep in step.
 pub(crate) fn quiet(origin: &Origin) -> bool {
     QUIET_SURFACES.contains(&origin.surface.as_str())
+}
+
+/// What a `User` item draws, and — in a member's own transcript — what it does
+/// not.
+///
+/// A room's activity is the room's: a member's transcript, the holder's
+/// included, shows none of it, and a wake just opens a turn (ADR-0034). The two
+/// things a room still puts in a member's journal are the nudge and the reading
+/// its turn folded in; both are dropped here rather than drawn, because the
+/// room's own view is where they are read and it is one keystroke away.
+///
+/// It is the two origins and nothing wider: a peer's message carries a
+/// conversation of its own and still draws, and every other contributor still
+/// speaks.
+fn said_to(
+    item: &Item,
+    parts: &[ContentPart],
+    origin: &Origin,
+    fold: Fold,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
+    if rows.driver != Driver::Log && rooms_machinery(origin) {
+        return Vec::new();
+    }
+    match quiet(origin) {
+        true => notice(item, parts, origin, fold, rows),
+        false => user(parts, origin.principal.as_deref(), rows),
+    }
+}
+
+/// Whether this is the rooms plugin talking rather than somebody in the room.
+fn rooms_machinery(origin: &Origin) -> bool {
+    origin.surface == ROOMS || origin.surface == ROOMS_READING
 }
 
 /// What a `User` item says, as its parts spell it.
@@ -984,15 +1032,17 @@ mod tests {
     };
     use bingo_sdk::{Event, ItemId};
 
+    /// A member's own transcript: a session a model answers.
     fn drawn(items: Vec<Item>) -> Vec<String> {
-        drawn_in(None, items)
+        rendered(&stated(items))
     }
 
-    /// The same items in a session of that name: a room's own transcript when
-    /// the name is the room's.
-    fn drawn_in(title: Option<&str>, items: Vec<Item>) -> Vec<String> {
+    /// The same items in the room's own transcript: a session nothing answers,
+    /// under the room's name (ADR-0011 §1).
+    fn drawn_in_room(items: Vec<Item>) -> Vec<String> {
         let mut state = stated(items);
-        state.summary.title = title.map(str::to_string);
+        state.summary.title = Some("#design".to_string());
+        state.summary.driver = Driver::Log;
         rendered(&state)
     }
 
@@ -1048,33 +1098,66 @@ mod tests {
         rows
     }
 
+    /// The whole of ADR-0034 in one transcript: a room's activity is the
+    /// room's, so a member's own — the holder's included — draws none of it,
+    /// and what the person typed is still a block of their own.
     #[test]
-    fn a_post_says_who_wrote_it_and_a_persons_own_line_does_not() {
+    fn a_members_transcript_draws_none_of_its_rooms_machinery() {
         assert_eq!(
             drawn(vec![
-                post("itm_1", "reviewer", "two nits, otherwise fine"),
-                person("itm_2", "thanks"),
+                delivered(
+                    "itm_1",
+                    "room",
+                    None,
+                    "#design has posts you have not read."
+                ),
+                delivered(
+                    "itm_2",
+                    "contributor:rooms",
+                    None,
+                    "[#design, since you last read]\nscout: found it",
+                ),
+                post("itm_3", "reviewer", "two nits, otherwise fine"),
+                person("itm_4", "thanks"),
             ]),
-            vec![
-                "⏺ reviewer in #design: two nits, otherwise fine".to_string(),
-                String::new(),
-                "> thanks".to_string(),
-            ],
-            "the machinery is marked; what a person typed is a block"
+            vec!["> thanks".to_string()],
+            "the nudge, the reading and a copied post are the room's"
         );
     }
 
-    /// Where a post is read decides whether it says where it came from: a
-    /// member's own transcript carries every conversation it is in, and a
-    /// room's carries one.
+    /// The set is exactly the two origins the rooms plugin writes: a message
+    /// from a peer names a conversation of its own and still draws, and every
+    /// other contributor still speaks.
     #[test]
-    fn a_post_names_its_room_everywhere_but_in_the_room() {
-        let post = || vec![post("itm_1", "scout", "found it")];
-        assert_eq!(drawn(post()), vec!["⏺ scout in #design: found it"]);
+    fn only_the_rooms_own_origins_are_kept_out_of_a_member() {
         assert_eq!(
-            drawn_in(Some("#design"), post()),
+            drawn(vec![delivered(
+                "itm_1",
+                "agent",
+                Some("scout"),
+                "Two nits, else fine."
+            )]),
+            vec!["⏺ scout: Two nits, else fine.".to_string()],
+        );
+        assert_eq!(
+            drawn(vec![delivered(
+                "itm_2",
+                "contributor:experience:recall",
+                None,
+                "you have seen this before"
+            )]),
+            vec!["> you have seen this before".to_string()],
+        );
+    }
+
+    /// The room's own transcript is where its activity is read, and it is
+    /// unchanged: every post it holds is drawn there.
+    #[test]
+    fn the_rooms_own_transcript_still_draws_every_post() {
+        assert_eq!(
+            drawn_in_room(vec![post("itm_1", "scout", "found it")]),
             vec!["⏺ scout: found it"],
-            "in the room's own transcript the name stands alone"
+            "and the name stands alone: the room is the conversation"
         );
     }
 
@@ -1088,15 +1171,21 @@ mod tests {
 
     /// The whole of the closed set, read from the list itself, and a handful
     /// of surfaces outside it — the ones that exist and one that never will.
+    /// The room's own is quieter still — it is read in the room and nowhere
+    /// else — so it is the one member of the set that draws no row here.
     #[test]
     fn every_quiet_surface_is_a_marked_line_and_nothing_else_is() {
-        for surface in QUIET_SURFACES {
+        for surface in QUIET_SURFACES.iter().filter(|surface| **surface != ROOMS) {
             assert_eq!(
                 drawn(vec![delivered("itm_1", surface, None, "it ended")]),
                 vec!["⏺ it ended".to_string()],
                 "{surface} is quiet"
             );
         }
+        assert!(
+            drawn(vec![delivered("itm_1", ROOMS, None, "it ended")]).is_empty(),
+            "and the room's own is not drawn in a member at all"
+        );
         for loud in ["tui", "print", "rpc", "acp", "channels", "brand-new"] {
             assert_eq!(
                 drawn(vec![delivered("itm_1", loud, None, "it ended")]),

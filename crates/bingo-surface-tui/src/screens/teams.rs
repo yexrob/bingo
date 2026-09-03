@@ -28,28 +28,49 @@ fn a_room_transcript() {
     both("room_transcript", &tree, &ui, now);
 }
 
-/// The same posts where a member reads them. A member's own transcript
-/// carries every conversation it is in, so a post says which one it came
-/// from; a direct message came from nowhere but its sender.
+/// What a member's own transcript shows of the room it sits in: nothing
+/// (ADR-0034). The wake that opened its turn, the reading that turn folded in,
+/// and a post an older journal still carries are all the room's, and the room's
+/// own view is one keystroke away. A message from a peer is not the room's, and
+/// still arrives.
 #[test]
 fn a_room_post_in_a_member_s_own_transcript() {
     let state = folded(vec![
-        item(1, post("itm_1", "reviewer", "the plan is thin on tests")),
+        item(
+            1,
+            delivered(
+                "itm_1",
+                "room",
+                None,
+                "#design has posts you have not read. Post in #design if any of \
+                 it falls to you.",
+            ),
+        ),
         item(
             2,
-            delivered("itm_2", "agent", Some("scout"), "Two nits, else fine."),
+            delivered(
+                "itm_2",
+                "contributor:rooms",
+                None,
+                "[#design, since you last read]\nreviewer: the plan is thin on tests",
+            ),
+        ),
+        item(3, post("itm_3", "reviewer", "the plan is thin on tests")),
+        item(
+            4,
+            delivered("itm_4", "agent", Some("scout"), "Two nits, else fine."),
         ),
     ]);
     let tree = solo(&state);
     let (ui, now) = scene();
     let screen = draw_tree(80, 24, &tree, &ui, now);
     assert!(
-        screen.contains("⏺ reviewer in #design: the plan"),
-        "{screen}"
+        !screen.contains("#design"),
+        "not the nudge, not the reading, not the post: {screen}"
     );
     assert!(
         screen.contains("⏺ scout: Two nits"),
-        "a direct message names no room: {screen}"
+        "a message from a peer is not a room's: {screen}"
     );
     both("room_post", &tree, &ui, now);
 }
