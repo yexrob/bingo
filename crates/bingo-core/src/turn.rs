@@ -526,9 +526,14 @@ impl Turn<'_> {
     /// the barrier contributors see the round that just happened.
     async fn barrier(&mut self) {
         for (_intent, input) in self.host.absorb().await {
-            if let Input::Text { text, origin, .. } = input {
+            if let Input::Text {
+                text,
+                images,
+                origin,
+            } = input
+            {
                 self.record(ItemBody::User {
-                    parts: vec![ContentPart::text(text)],
+                    parts: crate::session::user_parts(text, images),
                     origin,
                 });
             }

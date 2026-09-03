@@ -425,6 +425,40 @@ async fn queued_input_is_absorbed_at_the_barrier() {
     assert_eq!(user.parts[1].as_text(), Some("also do this"));
 }
 
+/// A steer that carries a picture reaches the model with it: the barrier
+/// records an ask through the same parts as a fresh one (ADR-0040 §3).
+#[tokio::test]
+async fn a_picture_steered_in_at_the_barrier_is_kept() {
+    let provider = ScriptedProvider::new(vec![
+        Script::Events(tool_call("Echo", json!({"v": 1}))),
+        Script::Events(text("ok")),
+    ]);
+    let cfg = config(
+        provider.clone(),
+        vec![Arc::new(EchoTool { read_only: true })],
+    );
+    let host = RecordingHost::new();
+    let image = bingo_sdk::Image::from_bytes("image/png", b"png").unwrap();
+    host.queue.lock().unwrap().push((
+        IntentId::mint(),
+        Input::Text {
+            text: "and this".into(),
+            images: vec![image],
+            origin: Origin::surface("tui"),
+        },
+    ));
+    run(&cfg, &host, CancellationToken::new()).await;
+    let second = &provider.requests()[1].messages;
+    let user = &second[2];
+    assert_eq!(user.parts[1].as_text(), Some("and this"));
+    // The scripted model has no vision, so the part that reaches it is the
+    // projection's note — which exists only because the picture was kept.
+    assert_eq!(
+        user.parts[2].as_text(),
+        Some(crate::models::vision::omitted_note("m").as_str())
+    );
+}
+
 /// Where an absorbed input lands in the journal: after the tool item of the
 /// round it was queued during, and before the next round's. A tool that reads
 /// its own session therefore sees everything absorbed at earlier barriers and

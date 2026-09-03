@@ -826,8 +826,9 @@ async fn run_session_hooks(hooks: HookSet, phase: Phase, cx: HookContext) {
 
 /// The parts a person's ask becomes (ADR-0040 §3): the words, when there are
 /// any, then the pictures in the order they were sent — an image-only ask
-/// carries no empty text part.
-fn user_parts(text: String, images: Vec<Image>) -> Vec<ContentPart> {
+/// carries no empty text part. The turn's barrier records a steer through
+/// the same function, so a picture steered in mid-turn is not dropped.
+pub(crate) fn user_parts(text: String, images: Vec<Image>) -> Vec<ContentPart> {
     let mut parts = Vec::with_capacity(images.len() + 1);
     if !text.is_empty() {
         parts.push(ContentPart::text(text));

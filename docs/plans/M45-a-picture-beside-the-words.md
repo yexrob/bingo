@@ -145,9 +145,14 @@ only the `Input`/`Image` shapes moved.
 
 Found beyond the plan: `Image::MEDIA_TYPES` stays module-private (the
 three accessors are the public surface). `turn.rs`'s mid-turn `barrier()`
-still drops an image from a queued steer (it builds `ItemBody::User` by
-hand, not through `journal_prose`, and isn't in this slice's file list)
-— flagged for slice T, not fixed here.
+built a steer's `ItemBody::User` by hand and would have dropped its
+pictures; in review it now records through the same `user_parts`, with
+a test (`a_picture_steered_in_at_the_barrier_is_kept`) whose scripted
+model has no vision — so what it proves is the whole path: kept in the
+items, projected to the note at the request. Also in review:
+`Image::EXTENSIONS` (a second copy of the table's keys) became
+`Image::extensions()` read off the table, and `decoded_len` saturates
+on a payload that is only padding instead of underflowing.
 
 Gates, all from the worktree: `fmt --check`, `check --workspace
 --all-targets`, `clippy -D warnings`, `test --workspace` (every crate

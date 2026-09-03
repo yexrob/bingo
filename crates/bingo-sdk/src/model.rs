@@ -96,9 +96,11 @@ impl Image {
     /// picture is a mistake, not a request.
     pub const MAX_BYTES: usize = 5 * 1024 * 1024;
 
-    /// The extensions [`Image::media_type_of`] recognises, kept in the same
-    /// order as `MEDIA_TYPES` (a test pins the two together).
-    pub const EXTENSIONS: &'static [&'static str] = &["png", "jpg", "jpeg", "gif", "webp"];
+    /// The extensions [`Image::media_type_of`] recognises, read off the one
+    /// table.
+    pub fn extensions() -> impl Iterator<Item = &'static str> {
+        MEDIA_TYPES.iter().map(|(ext, _)| *ext)
+    }
 
     /// What a path's extension is sent as, when it names a picture at all.
     pub fn media_type_of(path: &Path) -> Option<&'static str> {
@@ -147,13 +149,11 @@ impl Image {
     }
 
     /// The decoded size, from the base64 length alone — no decode needed.
+    /// A payload that is not base64 is bounded, not trusted: the arithmetic
+    /// saturates and the provider is where it fails.
     pub fn decoded_len(&self) -> usize {
-        let len = self.data.len();
-        if len == 0 {
-            return 0;
-        }
         let padding = self.data.bytes().rev().take_while(|&b| b == b'=').count();
-        (len / 4) * 3 - padding
+        ((self.data.len() / 4) * 3).saturating_sub(padding)
     }
 }
 
@@ -523,9 +523,12 @@ mod tests {
     }
 
     #[test]
-    fn extensions_and_the_media_type_table_name_the_same_pictures() {
-        let table: Vec<&str> = MEDIA_TYPES.iter().map(|(ext, _)| *ext).collect();
-        assert_eq!(Image::EXTENSIONS, table.as_slice());
+    fn a_payload_that_is_only_padding_is_bounded_not_a_panic() {
+        let image = Image {
+            media_type: "image/png".into(),
+            data: "==".into(),
+        };
+        assert_eq!(image.decoded_len(), 0);
     }
 
     #[test]
