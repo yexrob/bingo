@@ -2,6 +2,13 @@
 
 One record per boundary decision: a trait shape, a wire format, a persisted format, a dependency, a crate split, a threshold family. Template: Context (≤10 lines) / Decision (≤15) / Consequences (≤10) / Supersedes. Hard cap 120 lines; longer material goes to `docs/design/` and is linked. Bug fixes are commit bodies, not ADRs.
 
+An ADR that opens a kernel door — a new `HostApi` verb, a new field on
+a kernel type, a new trait verb the kernel calls — must answer one
+question in its Context, in writing: **would refusing this door force
+a second representation of a kernel-owned fact somewhere else?** If
+the honest answer is no, the door stays shut (ADR-0039 is the ratchet's
+first record; 0036 §2 answered it before it was named).
+
 - [0001 — Crate map and dependency direction](0001-crate-map.md)
 - [0002 — One event stream: frames, journal, reducers, intents](0002-event-stream.md)
 - [0003 — Settings: three JSONC layers, merged per key by the claiming plugin](0003-settings.md)
