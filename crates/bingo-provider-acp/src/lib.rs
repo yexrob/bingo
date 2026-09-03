@@ -16,7 +16,9 @@
 //! ours: [`options`] reads the effort and model knobs out of what the agent
 //! declared, [`knobs`] remembers where they stand and turns what moved before
 //! the next prompt, and [`legacy`] is the older door one adapter has instead
-//! (ADR-0037).
+//! (ADR-0037). [`probe`] asks an adapter nobody has prompted what it declares,
+//! by opening a session on purpose and dropping it, so the catalogue answers
+//! cold.
 //!
 //! Beside all of that runs [`bridge`], which is the conversation the other
 //! way: bingo's shared tools served to the agent as MCP, so an ACP member can
@@ -46,6 +48,7 @@ pub mod ladder;
 pub mod legacy;
 pub mod method;
 pub mod options;
+pub mod probe;
 pub mod provider;
 pub mod refusal;
 pub mod render;
