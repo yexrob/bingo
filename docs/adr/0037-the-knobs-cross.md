@@ -47,8 +47,10 @@ caching and token counting still do not.
 - A value the agent does not offer is clamped to the nearest it does,
   in the option's own words; a knob the agent lacks is a notice once,
   never an error — the knob is the agent's, bingo only turns it.
-- An ACP instance's catalogue is as fresh as its last `session/new`;
-  before one, `agent` alone is served.
+- An ACP instance's catalogue is as fresh as its last `session/new`; with
+  no conversation to read one from, the refresh opens a session of its own
+  to ask and drops it (M44), and `agent` alone is what an adapter that
+  would not answer serves.
 - No schema bump, no new dependency, no kernel change; the scripted
   fake agent grows a `configOptions` capability to pin the contract.
 
