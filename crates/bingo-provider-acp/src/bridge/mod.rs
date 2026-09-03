@@ -7,10 +7,10 @@
 //! [`handshake`] that says which conversation a stream is, and `rmcp`'s server
 //! half on what was accepted ([`serve`]).
 //!
-//! The pieces below the transport are two: [`doors`] is the seam into bingo —
-//! the offer and the call — and [`shape`] is the pure translation between what
-//! a tool is here and what it is on the wire. Nothing in this module knows
-//! what a turn is.
+//! The pieces below the transport are three: [`doors`] is the seam into bingo
+//! — the offer and the call — [`offer`] is what of bingo's tools crosses at
+//! all, and [`shape`] is the pure translation between what a tool is here and
+//! what it is on the wire. Nothing in this module knows what a turn is.
 //!
 //! A bridge ends when it is dropped, the way everything else in this crate
 //! ends: dropping it stops the accept loop, and the listener that goes with it
@@ -18,6 +18,7 @@
 
 pub mod doors;
 pub mod handshake;
+pub mod offer;
 pub mod serve;
 pub mod shape;
 pub mod socket;
@@ -42,6 +43,11 @@ pub const ADDRESS_VAR: &str = "BINGO_ACP_BRIDGE_ADDRESS";
 
 /// Which conversation the proxy is. Same reason, and more of it.
 pub const TOKEN_VAR: &str = "BINGO_ACP_BRIDGE_TOKEN";
+
+/// The mode of the running binary a server row points at. Spelled once: the
+/// row is written here and the command is answered in `bingo`, and a name that
+/// agreed in only one of the two places would be a row that runs nothing.
+pub const PROXY_MODE: &str = "acp-mcp-proxy";
 
 /// One run's bridge. Dropping it is its stop.
 pub struct Bridge {

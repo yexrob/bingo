@@ -181,7 +181,7 @@ enum Command {
     /// tools (ADR-0036 §3). Hidden: it is a row in a `session/new` this
     /// binary writes for itself, not a thing a person types, and it reads
     /// where to dial from the environment rather than from here.
-    #[command(hide = true)]
+    #[command(hide = true, name = bingo_provider_acp::bridge::PROXY_MODE)]
     AcpMcpProxy,
 }
 
