@@ -74,6 +74,76 @@ pub fn new_session_response() -> Value {
     json!({ "sessionId": "sess_abc123" })
 }
 
+/// The same door, answered by an agent that declares its knobs (ADR-0037).
+/// codex-acp's ids and codex-acp's categories; claude-agent-acp spells the
+/// effort `effort` and puts a `default` sentinel first in both its lists,
+/// which is why neither id is a gate (`options.rs`).
+pub fn new_session_response_with_config_options() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "configOptions": [
+            {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "gpt-5.4-codex",
+                "options": [
+                    { "value": "gpt-5.4-codex", "name": "GPT-5.4 Codex" },
+                    { "value": "gpt-5.4", "name": "GPT-5.4" }
+                ]
+            },
+            {
+                "id": "reasoning_effort",
+                "name": "Reasoning effort",
+                "category": "thought_level",
+                "type": "select",
+                "currentValue": "medium",
+                "options": [
+                    { "value": "none", "name": "None", "description": "Off" },
+                    { "value": "low", "name": "Low", "description": "Fast" },
+                    { "value": "medium", "name": "Medium", "description": "Balanced" },
+                    { "value": "high", "name": "High", "description": "Thorough" }
+                ]
+            }
+        ]
+    })
+}
+
+/// One knob turned. The value is flattened into the request, so a select's
+/// value id sits beside `configId` with no `type` of its own.
+pub fn set_config_option_request() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "configId": "reasoning_effort",
+        "value": "high"
+    })
+}
+
+/// And the whole set comes back, current values and all — which is how a
+/// client learns that changing the model reshaped the levels.
+pub fn set_config_option_response() -> Value {
+    json!({
+        "configOptions": [{
+            "id": "reasoning_effort",
+            "name": "Reasoning effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "high",
+            "options": [
+                { "value": "low", "name": "Low" },
+                { "value": "high", "name": "High" }
+            ]
+        }]
+    })
+}
+
+/// codex-acp's own extension, which is not in the schema at all: the id pairs
+/// the model with an effort in one string (`crate::legacy`).
+pub fn set_model_request() -> Value {
+    json!({ "sessionId": "sess_abc123", "modelId": "gpt-5.4-codex[high]" })
+}
+
 pub fn load_session_request() -> Value {
     json!({ "mcpServers": [], "cwd": "/work/repo", "sessionId": "sess_abc123" })
 }

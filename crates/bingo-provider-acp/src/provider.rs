@@ -4,7 +4,9 @@
 //! crosses: an ACP session is stateful and holds everything before it
 //! (ADR-0035 §3), so replaying the folded context would tell the agent its own
 //! history back. The system prompt does not cross either — the agent has its
-//! own — nor `Effort`, nor `max_tokens` (ADR-0035 §6). The tools do, but not
+//! own — nor `max_tokens` (ADR-0035 §6). `Effort` and the model do, but not
+//! on this wire: they are the agent's own knobs, turned between turns through
+//! the options it declared (ADR-0037, `crate::knobs`). The tools do, but not
 //! on this wire: they were handed over at `session/new` as an MCP server the
 //! agent dials, and the request's list of them only says what that server now
 //! offers (ADR-0036 §1).
@@ -24,8 +26,9 @@ use bingo_sdk::{
 use futures::stream;
 use tokio::sync::mpsc;
 
-use crate::config::{self, Adapter};
+use crate::config::{self, AGENT, Adapter};
 use crate::events::Mapper;
+use crate::knobs::Wanted;
 use crate::session::{Link, Sessions};
 
 type Yielded = Result<ModelEvent, ProviderError>;
@@ -91,13 +94,33 @@ impl Provider for AcpProvider {
         if link.observe(&request.tools).await {
             self.sessions.offer_changed().await;
         }
+        // ADR-0037 §4: between turns, never inside one. What the request asks
+        // for is applied to the agent before the prompt that will be answered
+        // under it — and only what moved crosses.
+        self.sessions
+            .tune(
+                &self.name,
+                &link,
+                Wanted {
+                    effort: request.reasoning,
+                    model: &request.model,
+                },
+            )
+            .await;
         Ok(hold(link, asked, cancel).await)
     }
 
-    /// ACP has no model list. What a session calls its model is bingo's label
-    /// for it; the agent chooses its own and is never told ours.
+    /// The agent's own catalogue (ADR-0037 §2), served through the door every
+    /// endpoint-answered list rides (ADR-0026).
+    ///
+    /// An external agent's models are per-session state and nothing else:
+    /// there is no door in the protocol that answers "what do you serve"
+    /// before a session is open, which is why they are harvested at all three
+    /// that do — `session/new`, `session/load` and `session/resume` — and
+    /// refreshed from every set the client makes. Before any session, and
+    /// after the last one ends, `agent` alone is the honest answer.
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        Ok(Vec::new())
+        Ok(catalogue(self.sessions.models(&self.name).await))
     }
 
     /// The adapter owns its own login — a Claude subscription, a ChatGPT
@@ -106,6 +129,18 @@ impl Provider for AcpProvider {
     fn auth(&self) -> AuthStatus {
         AuthStatus::NotApplicable
     }
+}
+
+/// `agent` first and always: it is the one id an ACP instance serves whatever
+/// the agent has said, and it means "whatever you would have used". An agent
+/// that happens to call one of its own models that too is served once.
+fn catalogue(theirs: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    std::iter::once(ModelInfo {
+        id: AGENT.to_string(),
+        display: None,
+    })
+    .chain(theirs.into_iter().filter(|model| model.id != AGENT))
+    .collect()
 }
 
 fn nobody() -> ProviderError {

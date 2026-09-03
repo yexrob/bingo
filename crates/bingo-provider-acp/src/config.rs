@@ -32,9 +32,11 @@
 //! }
 //! ```
 //!
-//! `bingo --provider claude --model agent` then runs a turn through it. The
-//! model name is bingo's label for the conversation and never crosses: the
-//! agent picks its own. Login is the adapter's own (`claude login`, `codex
+//! `bingo --provider claude --model agent` then runs a turn through it.
+//! `agent` is bingo's label for the model the agent would have picked itself,
+//! and it is the one name that never crosses; any other is one the agent
+//! declared, and `/model` and `/think` reach it through the options it
+//! offered (ADR-0037). Login is the adapter's own (`claude login`, `codex
 //! login`), and so is permission: what the agent may do is said in *its*
 //! words, on its row — the `--permission-mode` and `CODEX_APPROVAL_POLICY`
 //! above — because bingo refuses a `session/request_permission` rather than
@@ -56,6 +58,11 @@ const BUILT_IN: [&str; 4] = ["anthropic", "codex", "fake", "openai"];
 /// person types; `Provider::family` is this, because that is the shape it
 /// speaks.
 pub const FAMILY: &str = "acp";
+
+/// The label for "whatever model the agent would have used on its own"
+/// (ADR-0037 §2). bingo's word and not the agent's: it is always served, is
+/// always valid, and never crosses the wire.
+pub const AGENT: &str = "agent";
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", default)]
