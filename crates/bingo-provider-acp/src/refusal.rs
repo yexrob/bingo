@@ -1,16 +1,17 @@
-//! What this client answers when nobody could be asked (ADR-0039 §3).
+//! What this client answers when a question came back with no answer
+//! (ADR-0039 §3).
 //!
 //! A `session/request_permission` is put to whoever is at the session
 //! ([`crate::question`]). This is the other end of that: what is answered when
-//! there was nobody to put it to — no session behind this conversation, a door
-//! that refused it, a surface that declined what it was handed. It fails
-//! closed, in the agent's own words: the answer is one of the ids the agent
-//! itself offered, never one invented here, and where it offered nothing to
-//! refuse with, the question is cancelled instead.
+//! nothing chose an option — no session behind this conversation, a door that
+//! refused it, a surface that declined what it was handed. It fails closed, in
+//! the agent's own words: the answer is one of the ids the agent itself
+//! offered, never one invented here, and where it offered nothing to refuse
+//! with, the question is cancelled instead.
 //!
-//! The person is told, once, because a question that reached nobody is a
-//! decision made by a rule they cannot see. The row is where they change it
-//! (ADR-0039 §4): an adapter configured in its own words never asks at all.
+//! The person is told, once, because a refusal nobody chose is a decision made
+//! by a rule they cannot see. The row is where they change it (ADR-0039 §4):
+//! an adapter configured in its own words never asks at all.
 
 use agent_client_protocol_schema::v1::{
     CreateElicitationResponse, ElicitationAction, RequestPermissionOutcome,
@@ -44,15 +45,20 @@ pub fn declined() -> CreateElicitationResponse {
 /// What a person is told, in the words of the thing they would change. Said
 /// once per adapter session: the agent may ask on every call it makes, and a
 /// line repeated twenty times is not a clearer line.
+///
+/// It says "got no answer" rather than "nobody was there", because both ways of
+/// reaching here look the same from the agent's side: a run with nobody at it
+/// declines every question it is handed, and so does a person who leaves the
+/// prompt.
 pub fn told(adapter: &str) -> (Level, String, String) {
     (
         Level::Warn,
         CODE.to_string(),
         format!(
-            "{adapter} asked for permission where nobody could answer, so it was \
-             refused. Run it where a person can answer, or say what it may do on \
-             its own row, `acp.adapters.{adapter}` — its permission mode or \
-             approval policy goes in `args` or `env`, in the adapter's own words."
+            "{adapter} asked for permission and got no answer, so it was refused. \
+             A headless run has nobody to ask; to decide in advance, say what it \
+             may do on its own row, `acp.adapters.{adapter}` — its permission mode \
+             or approval policy goes in `args` or `env`, in the adapter's own words."
         ),
     )
 }
@@ -113,7 +119,7 @@ mod tests {
         let (level, code, said) = told("codex-acp");
         assert_eq!(level, Level::Warn);
         assert_eq!(code, CODE);
-        assert!(said.contains("nobody could answer"), "{said}");
+        assert!(said.contains("got no answer"), "{said}");
         assert!(said.contains("acp.adapters.codex-acp"), "{said}");
         assert!(said.contains("args"), "{said}");
         assert!(said.contains("env"), "{said}");

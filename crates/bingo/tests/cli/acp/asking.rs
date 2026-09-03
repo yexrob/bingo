@@ -160,7 +160,7 @@ fn a_headless_run_puts_the_question_and_falls_closed_when_nobody_answers() {
     let told = coded(&all, "ACP_ASKED");
     assert_eq!(told.len(), 1, "said once: {all:?}");
     assert!(
-        told[0].contains("acp.adapters.scripted") && told[0].contains("nobody could answer"),
+        told[0].contains("acp.adapters.scripted") && told[0].contains("got no answer"),
         "the notice says what happened and names the row: {}",
         told[0]
     );
