@@ -4788,6 +4788,29 @@
             "kind",
             "items"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "customKind": {
+              "type": "string"
+            },
+            "data": true,
+            "fold": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "custom"
+            }
+          },
+          "required": [
+            "kind",
+            "customKind",
+            "data",
+            "fold"
+          ],
+          "description": "A word this sdk does not have (ADR-0038 §1): `kind` is the emitter's\nown name for the element, namespaced by its plugin (`demo.sparkline`),\n`data` is whatever shape that plugin documents, and `fold` is the text\nevery surface that has not learned the kind shows instead.\n\nIt is also where an unknown `kind` off the wire lands, and then `data`\nis the whole node as it arrived — nothing said is lost, whether or not\nthis sdk has the word for it."
         }
       ]
     }
