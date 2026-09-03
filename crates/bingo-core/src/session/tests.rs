@@ -7,6 +7,7 @@ use super::*;
 use crate::test_support::*;
 
 mod commands;
+mod invoke;
 mod log;
 mod naming;
 mod peers;

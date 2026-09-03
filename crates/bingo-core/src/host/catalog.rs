@@ -94,24 +94,37 @@ fn providers(resolved: &[Arc<dyn Provider>]) -> Vec<CatalogEntry> {
 }
 
 /// The registered tools, then every source's (ADR-0009); a tool's own
-/// `meta` rides beside its description.
+/// `meta` rides beside the facts the registry already holds about it.
 async fn tools(registry: &Registry) -> Vec<CatalogEntry> {
     let mut all = registry.tools.clone();
     for source in &registry.sources.tools {
         all.extend(source.tools().await);
     }
-    all.iter()
-        .map(|t| {
-            let spec = t.spec();
-            let mut meta = spec.meta;
-            meta.insert("description".into(), Value::String(spec.description));
-            CatalogEntry {
-                id: spec.name.clone(),
-                label: spec.name,
-                meta: Value::Object(meta),
-            }
-        })
-        .collect()
+    all.iter().map(|t| tool_entry(t.as_ref())).collect()
+}
+
+/// One tool as a client reads it: what it does, the schema a caller fills in,
+/// and the traits the gate reads — the facts the registry already holds, so a
+/// client that has to describe a tool to someone else copies them rather than
+/// keeping a description of its own.
+///
+/// The traits are asked with no input, because a catalogue has no call: a
+/// tool that sharpens them per call (a fetch of a documentation page is
+/// read-only, of anything else is not) shows its baseline here.
+fn tool_entry(tool: &dyn Tool) -> CatalogEntry {
+    let spec = tool.spec();
+    let mut meta = spec.meta;
+    meta.insert("description".into(), Value::String(spec.description));
+    meta.insert("inputSchema".into(), spec.input_schema);
+    meta.insert(
+        "traits".into(),
+        serde_json::to_value(tool.traits(&Value::Null)).unwrap_or(Value::Null),
+    );
+    CatalogEntry {
+        id: spec.name.clone(),
+        label: spec.name,
+        meta: Value::Object(meta),
+    }
 }
 
 /// The catalogue has no session, so a source is asked for the process's own
@@ -289,6 +302,76 @@ mod tests {
                     .max_output
             ),
             "a model the endpoint fronts keeps its maker's facts"
+        );
+    }
+
+    /// A tool that is nothing but a name, a schema and its traits.
+    struct Declared {
+        name: &'static str,
+        traits: ToolTraits,
+    }
+
+    #[async_trait]
+    impl Tool for Declared {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.into(),
+                description: "what it does".into(),
+                input_schema: json!({"type": "object", "properties": {"v": {"type": "string"}}}),
+                meta: Default::default(),
+            }
+        }
+
+        fn traits(&self, _input: &Value) -> ToolTraits {
+            self.traits
+        }
+
+        async fn call(&self, _input: Value, _cx: &ToolContext) -> Result<ToolOutput, ToolError> {
+            unreachable!("the catalogue runs no call")
+        }
+    }
+
+    fn declared(name: &'static str, traits: ToolTraits) -> Arc<dyn Tool> {
+        Arc::new(Declared { name, traits })
+    }
+
+    /// What a client reads a tool as: the schema a caller fills in and the
+    /// traits the gate reads ride beside the description, so nothing
+    /// downstream has to keep a second description of what a tool is.
+    #[tokio::test]
+    async fn a_tool_entry_carries_its_schema_and_its_traits() {
+        let registry = Registry {
+            tools: vec![
+                declared("Reads", ToolTraits::read_only()),
+                declared("Writes", ToolTraits::edit()),
+            ],
+            ..Registry::default()
+        };
+        let entries = tools(&registry).await;
+
+        let reads = entry(&entries, "Reads");
+        assert_eq!(keys(&reads), ["description", "inputSchema", "traits"]);
+        assert_eq!(reads.meta["description"], json!("what it does"));
+        assert_eq!(reads.meta["inputSchema"]["type"], json!("object"));
+        assert_eq!(
+            reads.meta["traits"],
+            json!({
+                "concurrencySafe": true,
+                "readOnly": true,
+                "destructive": false,
+                "edit": false,
+                "resultLimit": "global",
+                "trusted": true,
+            }),
+            "every trait the gate reads, spelled as the wire spells it"
+        );
+
+        let writes = entry(&entries, "Writes");
+        assert_eq!(writes.meta["traits"]["edit"], json!(true));
+        assert_eq!(writes.meta["traits"]["readOnly"], json!(false));
+        assert_eq!(
+            writes.meta["inputSchema"], reads.meta["inputSchema"],
+            "every tool is described as fully, whatever it does"
         );
     }
 

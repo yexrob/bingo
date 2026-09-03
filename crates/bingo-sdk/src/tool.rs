@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::KernelError;
-use crate::event::{ItemBody, Preview, ToolOutput};
+use crate::event::{ItemBody, ItemStatus, Preview, ToolOutput};
 use crate::host::{HostHandle, Prompter};
 use crate::ids::{ItemId, SessionId, TurnId};
 use crate::model::ToolSpec;
@@ -23,7 +23,8 @@ use crate::model::ToolSpec;
 /// Nothing here says what an interrupt does, because a tool has no say in it:
 /// one `esc` ends the turn and every call in flight is dropped where it
 /// stands (`crate::executor` in the kernel).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolTraits {
     pub concurrency_safe: bool,
     pub read_only: bool,
@@ -76,7 +77,8 @@ impl ToolTraits {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ResultLimit {
     /// The kernel clips the result at its global cap.
     Global,
@@ -101,6 +103,18 @@ pub struct ToolCall {
     pub call_id: String,
     pub name: String,
     pub input: Value,
+}
+
+/// What one call came to: the tool's own output, the item it was journaled
+/// as, and how long it took. The kernel's executor answers in these, and so
+/// does the door a call may be handed in through ([`crate::host::HostApi`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolOutcome {
+    pub item: ItemId,
+    pub call_id: String,
+    pub output: ToolOutput,
+    pub status: ItemStatus,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

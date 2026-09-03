@@ -6,6 +6,7 @@
 mod commands;
 mod inputs;
 mod interactions;
+mod invoke;
 mod mailbox;
 mod queue;
 mod spawn;
@@ -49,6 +50,13 @@ struct Running {
     turn: TurnId,
     cancel: CancellationToken,
     task: JoinHandle<()>,
+    /// The config this turn started under; the session's may have been
+    /// rebuilt since, and a call is judged by the turn's own.
+    config: Arc<TurnConfig>,
+    /// The tools it resolved, once it has said so (`Msg::Offered`). Empty
+    /// until then, which is the fail-closed reading: a call naming a tool
+    /// nothing has offered yet is refused.
+    tools: Vec<Arc<dyn Tool>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -172,6 +180,10 @@ impl Actor {
                 self.command_finished(intent, outcome).await
             }
             Msg::Reconfigure { config } => self.reconfigure(config).await,
+            Msg::Offered { turn, tools } => self.turn_offers(&turn, tools),
+            Msg::Invoke { call, reply } => self.invoke(call, reply).await,
+            Msg::CallAllowed { item, input } => self.call_allowed(&item, input).await,
+            Msg::CallFinished { outcome } => self.call_finished(outcome).await,
             Msg::Compact {
                 instructions,
                 reply,
@@ -695,6 +707,7 @@ impl Actor {
             mailbox: mailbox.clone(),
             turn: turn.clone(),
         };
+        let config = Arc::clone(&cfg);
         let task = tokio::spawn(async move {
             let outcome = AssertUnwindSafe(run_turn(&cfg, run, &host))
                 .catch_unwind()
@@ -705,7 +718,13 @@ impl Actor {
                 outcome,
             });
         });
-        Running { turn, cancel, task }
+        Running {
+            turn,
+            cancel,
+            task,
+            config,
+            tools: Vec::new(),
+        }
     }
 
     async fn turn_finished(&mut self, turn: TurnId, outcome: Result<TurnOutcome, String>) -> Flow {

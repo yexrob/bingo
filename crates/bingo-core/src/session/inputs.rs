@@ -1,15 +1,19 @@
-//! What reaches the actor from outside a turn: a client's submit — a command
-//! or prose — a peer's delivery, an interrupt, and the queue that holds what
-//! cannot run yet (ADR-0008 §2, ADR-0010 §1, ADR-0011 §1).
+//! What reaches the actor from outside: a client's submit — a command or
+//! prose — a peer's delivery, an interrupt, the queue that holds what cannot
+//! run yet (ADR-0008 §2, ADR-0010 §1, ADR-0011 §1), and a tool call handed
+//! into the running turn from outside the model (ADR-0036 §2), which is
+//! served beside the turn by [`super::invoke`].
 
 use std::sync::Arc;
 
 use bingo_sdk::*;
 use serde_json::json;
 
-use super::commands;
+use jiff::Timestamp;
+use serde_json::Value;
+
 use super::queue::Unit;
-use super::{Actor, validate};
+use super::{Actor, commands, invoke, validate};
 use crate::turn::TurnKind;
 
 impl Actor {
@@ -226,6 +230,135 @@ impl Actor {
         let turn = running.turn.clone();
         self.cancel_interactions(CancelReason::Interrupted).await;
         self.applied(intent, json!({ "turn": turn })).await;
+    }
+
+    // ----- a call handed into the running turn (ADR-0036 §2) -----
+
+    /// Refuse the call, or open its item and hand it to a server beside the
+    /// turn. Nothing here waits for the call: the actor goes on reading its
+    /// mailbox, which is what keeps the turn streaming and one `esc` heard.
+    pub(super) async fn invoke(&mut self, call: ToolCall, reply: invoke::Reply) {
+        let serving = match self.serving(&call.name) {
+            Ok(serving) => serving,
+            Err(refusal) => {
+                let _ = reply.send(Err(refusal));
+                return;
+            }
+        };
+        let item = self.open_call(&serving.turn, &call).await;
+        let bridged = invoke::Bridged {
+            config: serving.config,
+            mailbox: self.mailbox.clone(),
+            turn: serving.turn,
+            cancel: serving.cancel,
+            tool: serving.tool,
+            item,
+            call,
+        };
+        self.tracker.spawn(bridged.serve(reply));
+    }
+
+    /// The pieces this call would be served with, or why there are none. Fail
+    /// closed twice: no turn in flight is a refusal, and so is a name the
+    /// running turn's own offer does not carry — the tools the model was
+    /// given are the whole of what may be called.
+    fn serving(&self, name: &str) -> Result<invoke::Serving, KernelError> {
+        let Some(running) = &self.running else {
+            return Err(KernelError::new(
+                ErrorCode::NotReady,
+                "no turn is in flight in this session",
+            ));
+        };
+        let tool = running
+            .tools
+            .iter()
+            .find(|tool| tool.spec().name == name)
+            .cloned()
+            .ok_or_else(|| {
+                KernelError::new(
+                    ErrorCode::ToolNotFound,
+                    format!("the running turn was not offered a tool called {name}"),
+                )
+            })?;
+        Ok(invoke::Serving {
+            turn: running.turn.clone(),
+            cancel: running.cancel.child_token(),
+            config: Arc::clone(&running.config),
+            tool,
+        })
+    }
+
+    /// The tools the turn resolved when it started (ADR-0009 §1) — the offer
+    /// its requests carry. They are kept as the turn's own objects, not as a
+    /// list of names beside them: a door that resolved the set a second time
+    /// could serve a tool the model was never given.
+    pub(super) fn turn_offers(&mut self, turn: &TurnId, tools: Vec<Arc<dyn Tool>>) {
+        if let Some(running) = self.running.as_mut()
+            && &running.turn == turn
+        {
+            running.tools = tools;
+        }
+    }
+
+    /// The call's own item, journaled under the turn as the model's calls are
+    /// and marked as none of the model's: it is the caller's, and the
+    /// provider fold skips it (ADR-0036 §2).
+    async fn open_call(&mut self, turn: &TurnId, call: &ToolCall) -> ItemId {
+        let body = ItemBody::ToolCall {
+            call_id: call.call_id.clone(),
+            name: call.name.clone(),
+            input: call.input.clone(),
+            output: None,
+            progress: None,
+            duration_ms: None,
+        };
+        let mut item = self.fresh(Some(turn.clone()), None, body);
+        item.status = ItemStatus::Pending;
+        item.completed_at = None;
+        item.mark_external();
+        let id = item.id.clone();
+        self.publish(Event::ItemStarted { item }, None).await;
+        id
+    }
+
+    /// The gate let it through: the item goes `Running` and carries whatever a
+    /// hook rewrote, exactly as a call of the model's own does.
+    pub(super) async fn call_allowed(&mut self, item: &ItemId, input: Value) {
+        let Some(mut item) = self.item(item) else {
+            return;
+        };
+        item.status = ItemStatus::Running;
+        if let ItemBody::ToolCall { input: held, .. } = &mut item.body {
+            *held = input;
+        }
+        self.publish(Event::ItemUpdated { item }, None).await;
+    }
+
+    /// What the call came to, folded into its item. The turn it ran under may
+    /// already have ended — an `esc` drops a bridged call where it stands —
+    /// so this is published on its own account and never as the turn's.
+    pub(super) async fn call_finished(&mut self, outcome: ToolOutcome) {
+        let Some(mut item) = self.item(&outcome.item) else {
+            return;
+        };
+        item.status = outcome.status;
+        item.completed_at = Some(Timestamp::now());
+        if let ItemBody::ToolCall {
+            output,
+            duration_ms,
+            progress,
+            ..
+        } = &mut item.body
+        {
+            *output = Some(outcome.output);
+            *duration_ms = Some(outcome.duration_ms);
+            *progress = None;
+        }
+        self.publish(Event::ItemCompleted { item }, None).await;
+    }
+
+    fn item(&self, id: &ItemId) -> Option<Item> {
+        self.state.items.iter().find(|item| &item.id == id).cloned()
     }
 
     // ----- queue -----

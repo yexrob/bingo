@@ -307,9 +307,27 @@ pub struct Item {
     pub meta: serde_json::Map<String, Value>,
 }
 
+/// The meta key [`Item::external`] reads. A key rather than a field: it is
+/// true of a handful of items and false of every other, and `meta` is where an
+/// item's occasional facts already live.
+const EXTERNAL: &str = "external";
+
 impl Item {
     pub fn is_terminal(&self) -> bool {
         self.status.is_terminal()
+    }
+
+    /// Whether the session's own model neither asked for this nor is owed it:
+    /// a call handed in through [`crate::host::HostApi::invoke`] is run,
+    /// journaled and rendered like any other, but it belongs to the caller
+    /// that handed it in. The provider fold skips it — replaying it would put
+    /// words in a model's mouth that it never said.
+    pub fn external(&self) -> bool {
+        self.meta.get(EXTERNAL).and_then(Value::as_bool) == Some(true)
+    }
+
+    pub fn mark_external(&mut self) {
+        self.meta.insert(EXTERNAL.into(), Value::Bool(true));
     }
 }
 

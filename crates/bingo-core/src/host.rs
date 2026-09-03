@@ -895,6 +895,17 @@ impl HostApi for Host {
         Ok(())
     }
 
+    /// The session must be live and running a turn: one that is only stored
+    /// is answering nobody, and reopening it would open a session with no
+    /// turn to serve the call anyway (ADR-0036 §2).
+    async fn invoke(
+        &self,
+        session: &SessionId,
+        call: ToolCall,
+    ) -> Result<ToolOutcome, KernelError> {
+        self.live(session)?.mailbox.invoke(call).await
+    }
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         let resolved = self.providers().await;
         Ok(Catalog {
