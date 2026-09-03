@@ -46,11 +46,18 @@ them the `ContentPart::Image` the journal already keeps.
    through, the vision projection already handles a model that cannot
    see, elision already counts image bytes.
 4. **Each surface reads its own idiom.**
-   - TUI: `@path` mentions naming a picture are read at submit,
-     relative to the session's cwd. A path that does not read keeps
-     the line in the composer and says why; nothing is sent. The
-     transcript draws an image part as a marked chip on the person's
-     bar (the line still holds the word).
+   - TUI: the composer takes a picture two ways, the way Claude Code
+     and Codex do. A paste (`ctrl+v`) whose clipboard holds an image
+     puts `[image N]` at the cursor and keeps the bytes beside the
+     line, one per token; deleting the token drops the picture. The
+     clipboard is read through the platform's own tool (`osascript`,
+     `xclip`/`wl-paste`, PowerShell), all three written together, no
+     dependency. `@path` mentions naming a picture are read at submit,
+     relative to the session's cwd; one that does not read keeps the
+     line and says why in the status line. The text goes as typed —
+     the tokens and the words stay in it — and the pictures follow as
+     parts in token order. The transcript draws nothing extra: the
+     line already carries the word.
    - `--print`: a repeatable `--image <PATH>` beside the prompt; in
      `--input-format stream-json` a user line's `image` blocks
      (Claude Code's `source: {type: base64, media_type, data}`) are

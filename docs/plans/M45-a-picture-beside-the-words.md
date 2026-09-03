@@ -40,16 +40,32 @@ Three slices; the first lands before the other two start.
    regenerated and read for surprises.
 
 **T — TUI and print** (branch `m45-tui-print`, after K)
-6. TUI: at `Effect::Submit`, the `@` image mentions are read through
+6. TUI paste: on `ctrl+v` the composer asks the platform clipboard
+   for an image — `osascript` (`the clipboard as «class PNGf»`) on
+   macOS, `wl-paste -t image/png` then `xclip -selection clipboard -t
+   image/png -o` on Linux, PowerShell `Get-Clipboard -Format Image`
+   on Windows — each arm `cfg`-gated, all three written in this
+   change, none a dependency. A picture inserts `[image N]` at the
+   cursor (N = one more than the highest token in the line) and is
+   held beside the composer keyed to that token, via
+   `Image::from_bytes`; a token deleted from the line drops its
+   picture (derive the live set from the line at submit — the line is
+   the record, nothing is remembered that it does not say). No image
+   on the clipboard: nothing happens, terminal text paste is
+   untouched. The pure brick first: token minting, token scanning,
+   and the pairing of tokens to held pictures as functions on strings
+   with their own tests; the clipboard command is the only impure
+   edge, behind one small function per platform.
+7. TUI `@path`: at `Effect::Submit`, image mentions are read through
    `Image::read` relative to the session's cwd (`run.rs` has it via
    the tree root); a failed read leaves the composer as it was and
-   raises the existing notice kind with the path and the reason. The
-   `attachments` derivation in `complete.rs` becomes the list of
-   paths to read; its extension list is `Image::MEDIA_TYPES`' keys.
-7. TUI transcript: `said.rs` draws an image part as one chip on the
-   person's bar — a marked span, `▣ image/png`, in the same style the
-   design uses for a tool row's marks — after the text lines. A
-   `TestBackend` test and the PTY smoke.
+   raises the existing status-line notice with the path and the
+   reason; nothing is sent. `complete.rs`'s extension list becomes
+   `Image`'s. Submit sends the text as typed and the images in order:
+   pasted ones by token order, then mentioned ones by word order.
+   The transcript draws nothing extra for an image part; the words
+   carry `[image 1]` or `@shot.png`. A `TestBackend` test that a
+   pasted line submits text plus one image; the PTY smoke stays green.
 8. `--print`: `--image <PATH>` (repeatable, text mode) read through
    `Image::read` at the binary edge, an unreadable path is exit 1
    with the reason on stderr and nothing on stdout; stream-json
@@ -81,8 +97,8 @@ Three slices; the first lands before the other two start.
 `bingo-core/src/session.rs`, `session/{queue.rs,title.rs}`, tests;
 `bingo-tool-fs/src/read.rs`; `bingo-surface-rpc/{src/schema.rs,
 tests/wire}`; `bingo-plugin-rpc/examples/stub_plugin/hooks.rs`;
-`bingo-surface-tui/src/{input.rs,complete.rs,run.rs,transcript/
-said.rs}`; `bingo/src/main.rs`; `bingo-surface-print/src/input.rs`;
+`bingo-surface-tui/src/{input.rs,complete.rs,run.rs}` and a new
+clipboard module; `bingo/src/main.rs`; `bingo-surface-print/src/input.rs`;
 `bingo-channels/src/feishu/{api.rs,event.rs}` and the runner;
 `docs/adr/{0040,README}.md`.
 
@@ -92,8 +108,9 @@ said.rs}`; `bingo/src/main.rs`; `bingo-surface-print/src/input.rs`;
 - [ ] Kernel: empty text + image is accepted; bad media type and
   oversize are `InvalidInput`; the user item carries text then images.
 - [ ] Wire: a submit with an image round-trips to the journal.
-- [ ] TUI: `@shot.png` sends an image part; a missing file keeps the
-  line and says so; the chip draws (`TestBackend`); PTY smoke green.
+- [ ] TUI: a paste puts `[image 1]` in the line and the submit carries
+  the image; `@shot.png` sends an image part; a missing file keeps
+  the line and says so; PTY smoke green.
 - [ ] `--print --image` journals an image; stream-json image line too.
 - [ ] Feishu: image message, post with pictures, and a failed fetch —
   each as specified, under wiremock.
@@ -102,8 +119,7 @@ said.rs}`; `bingo/src/main.rs`; `bingo-surface-print/src/input.rs`;
 
 ## Non-goals
 
-Pasting a picture from the clipboard into the TUI (no portable
-clipboard-image path without a dependency; recorded). Sending a
+Drag-and-drop of a bare path without `@`. Sending a
 model's picture back out to Feishu. PDF and audio. Resizing or
 re-encoding on the way in.
 
