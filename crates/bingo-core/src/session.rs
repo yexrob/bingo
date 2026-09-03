@@ -788,9 +788,12 @@ impl Actor {
         if self.state.closed {
             return Flow::Stop;
         }
+        // Before the turn is told to stop, and whether or not there is one: a
+        // question opened between turns (ADR-0039 §1) is closed by the same
+        // close as any other.
+        self.cancel_interactions(CancelReason::SessionClosed).await;
         if let Some(running) = &self.running {
             running.cancel.cancel();
-            self.cancel_interactions(CancelReason::SessionClosed).await;
             self.closing = Some(reason);
             return Flow::Continue;
         }

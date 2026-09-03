@@ -41,7 +41,7 @@ pub use plugin::{
     CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, HookSource, Merge,
     Plugin, PluginError, PluginManifest, ProviderSource, Registrar, ToolSource,
 };
-pub use policy::{Decision, PermissionPolicy, PolicyInput, Reason, Verdict};
+pub use policy::{Decision, PermissionPolicy, PolicyInput, Reason, Stance, Verdict};
 pub use provider::{AuthStatus, LoginMethod, ModelInfo, Provider};
 /// `Service` and `Services` stay behind `service::`: the kernel has a bundle
 /// of its own by that name, and a glob import must not make either ambiguous.

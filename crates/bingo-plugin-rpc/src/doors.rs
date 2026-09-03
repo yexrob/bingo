@@ -513,6 +513,7 @@ mod tests {
                     id: "0".into(),
                     label: "main".into(),
                     description: None,
+                    role: None,
                 }],
                 free_text: true,
                 multi: false,
@@ -624,6 +625,7 @@ mod tests {
                 id: "0".into(),
                 label: "main".into(),
                 description: None,
+                role: None,
             }]
         ));
     }

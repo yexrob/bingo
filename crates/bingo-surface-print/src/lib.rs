@@ -702,6 +702,7 @@ pub(crate) mod tests {
                         id: (*id).into(),
                         label: (*label).into(),
                         description: None,
+                        role: None,
                     })
                     .collect(),
                 free_text: false,

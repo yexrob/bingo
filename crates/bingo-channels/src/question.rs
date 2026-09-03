@@ -371,6 +371,7 @@ mod tests {
                         id: (*id).into(),
                         label: format!("file {id}"),
                         description: None,
+                        role: None,
                     })
                     .collect(),
                 free_text: false,
@@ -470,6 +471,7 @@ mod tests {
                     id: "a".into(),
                     label: "Cargo.toml".into(),
                     description: None,
+                    role: None,
                 }],
                 free_text: false,
                 multi: false,

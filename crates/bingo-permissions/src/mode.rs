@@ -7,6 +7,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use bingo_sdk::Stance;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +50,18 @@ impl Mode {
             Self::Plan => "nothing that is not read-only runs at all",
             Self::BypassPermissions => "everything runs except what only a person may decide",
             Self::DontAsk => "nobody is there to answer, so what would have asked is denied",
+        }
+    }
+
+    /// How a session in this mode stands toward a question no tool defines
+    /// (ADR-0039 §2). The same sentence as [`Self::meaning`], read for a
+    /// question rather than a call: what runs everything answers it, what has
+    /// nobody to answer refuses it, and the rest put it to the person.
+    pub fn stance(self) -> Stance {
+        match self {
+            Self::BypassPermissions => Stance::Allow,
+            Self::DontAsk => Stance::Refuse,
+            Self::Default | Self::AcceptEdits | Self::Plan => Stance::Ask,
         }
     }
 }
@@ -108,6 +121,15 @@ mod tests {
     #[test]
     fn the_default_mode_is_default() {
         assert_eq!(Mode::default(), Mode::Default);
+    }
+
+    #[test]
+    fn only_the_mode_that_runs_everything_answers_a_question_for_the_person() {
+        assert_eq!(Mode::BypassPermissions.stance(), Stance::Allow);
+        assert_eq!(Mode::DontAsk.stance(), Stance::Refuse);
+        for mode in [Mode::Default, Mode::AcceptEdits, Mode::Plan] {
+            assert_eq!(mode.stance(), Stance::Ask, "{mode} has a person to ask");
+        }
     }
 
     #[test]

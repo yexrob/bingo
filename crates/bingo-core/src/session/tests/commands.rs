@@ -15,24 +15,45 @@ fn ack_of(frames: &[Frame], intent: &IntentId) -> Option<IntentOutcome> {
     })
 }
 
-/// Only a turn or a holding command can ask (ADR-0012 §5); an idle session
-/// has nobody to ask for.
+/// A turn's call asks under its turn and a holding command under none
+/// (ADR-0012 §5) — and so does a question handed in between turns
+/// (ADR-0039 §1): an interaction is the session's, so an idle session opens
+/// it rather than refusing it.
 #[tokio::test]
-async fn an_idle_session_refuses_to_ask() {
+async fn an_idle_session_opens_the_question_it_is_handed() {
     let provider = ScriptedProvider::new(vec![]);
     let mailbox = with_commands(provider, vec![]);
-    let refused = mailbox
-        .ask(
-            None,
-            InteractionKind::Confirm {
-                title: "t".into(),
-                detail: "d".into(),
-            },
-            vec![AnswerSpec::Confirm],
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(refused.code, ErrorCode::NotReady);
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    let asking = tokio::spawn({
+        let mailbox = mailbox.clone();
+        async move {
+            mailbox
+                .ask(
+                    None,
+                    InteractionKind::Confirm {
+                        title: "t".into(),
+                        detail: "d".into(),
+                    },
+                    vec![AnswerSpec::Confirm],
+                )
+                .await
+        }
+    });
+
+    drive(&mut events, &mut state, |f| {
+        matches!(f.event, Event::InteractionOpened { .. })
+    })
+    .await;
+    let interaction = state.interactions[0].clone();
+    assert_eq!(interaction.turn, None, "it belongs to no turn");
+    mailbox.answer(
+        IntentId::mint(),
+        interaction.id,
+        Answer::Confirm,
+        Activation::Programmatic,
+        who(),
+    );
+    assert_eq!(asking.await.unwrap().unwrap(), Answer::Confirm);
 }
 
 #[tokio::test]

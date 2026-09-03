@@ -112,6 +112,8 @@ fn interaction(question: &AskQuestion) -> InteractionKind {
                 id: index.to_string(),
                 label: option.label.clone(),
                 description: option.description.clone(),
+                // A model's question is a person's alone to answer.
+                role: None,
             })
             .collect(),
         // A person may always answer in their own words, which is why the
@@ -304,11 +306,13 @@ mod tests {
                     id: "0".into(),
                     label: "OAuth".into(),
                     description: Some("Redirect to the provider".into()),
+                    role: None,
                 },
                 QuestionOption {
                     id: "1".into(),
                     label: "API key".into(),
                     description: None,
+                    role: None,
                 },
             ]
         );

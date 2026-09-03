@@ -58,6 +58,22 @@ pub enum Verdict {
     Deny { feedback: Option<String> },
 }
 
+/// How a session stands toward a question no tool defines (ADR-0039 §2).
+///
+/// `Decision` judges a call; this judges the session, and only a session — a
+/// question the policy has no call to weigh. It is the one word a door needs
+/// from the policy, so no asker learns a policy's own vocabulary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stance {
+    /// The question is answered as its asker's allowing option; nobody is asked.
+    Allow,
+    /// A person is asked.
+    #[default]
+    Ask,
+    /// The question is answered as its asker's refusal; nobody is asked.
+    Refuse,
+}
+
 #[async_trait]
 pub trait PermissionPolicy: Send + Sync {
     fn id(&self) -> &str;
@@ -66,6 +82,13 @@ pub trait PermissionPolicy: Send + Sync {
 
     /// Install the session-scoped rule the user accepted. Never persisted by the kernel.
     async fn on_verdict(&self, _input: PolicyInput<'_>, _verdict: &Verdict) {}
+
+    /// How this session stands toward a question no tool defines (ADR-0039
+    /// §2): the one thing a door asks the policy before it asks a person.
+    /// A policy with nothing to say fails toward a person, never past one.
+    async fn stance(&self, _session: &SessionId) -> Stance {
+        Stance::Ask
+    }
 
     /// What a client may show of this session's policy — the mode, the rules
     /// it accepted. The kernel publishes it as `ConfigView.plugins[id]`

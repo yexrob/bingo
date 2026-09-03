@@ -543,6 +543,20 @@ pub enum InteractionKind {
     },
 }
 
+impl InteractionKind {
+    /// The answer that picks the option in this role, when the question names
+    /// one (ADR-0039 §2): what a door may answer without asking anybody.
+    pub fn answer_for(&self, role: AnswerRole) -> Option<Answer> {
+        let InteractionKind::Question { options, .. } = self else {
+            return None;
+        };
+        let option = options.iter().find(|option| option.role == Some(role))?;
+        Some(Answer::Choice {
+            ids: vec![option.id.clone()],
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionOption {
@@ -550,6 +564,22 @@ pub struct QuestionOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// What picking it would mean to a session that answers for the person
+    /// (ADR-0039 §2). Unmarked options are a person's alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AnswerRole>,
+}
+
+/// The two options a session may answer a question with when nobody is asked
+/// (ADR-0039 §2). The asker names them in its own words; the kernel reads
+/// which is which and never the words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum AnswerRole {
+    /// "Let it happen."
+    Allowing,
+    /// The refusal a question falls to when nobody answers it.
+    Refusing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1081,6 +1111,68 @@ mod tests {
                 reason: CloseReason::Client
             }
             .is_durable()
+        );
+    }
+
+    fn option(id: &str, role: Option<AnswerRole>) -> QuestionOption {
+        QuestionOption {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            role,
+        }
+    }
+
+    fn question(options: Vec<QuestionOption>) -> InteractionKind {
+        InteractionKind::Question {
+            question: "may it?".into(),
+            header: None,
+            options,
+            free_text: false,
+            multi: false,
+        }
+    }
+
+    #[test]
+    fn a_question_names_the_option_each_role_is_answered_with() {
+        let kind = question(vec![
+            option("yes", Some(AnswerRole::Allowing)),
+            option("always", None),
+            option("no", Some(AnswerRole::Refusing)),
+        ]);
+        assert_eq!(
+            kind.answer_for(AnswerRole::Allowing),
+            Some(Answer::Choice {
+                ids: vec!["yes".into()]
+            })
+        );
+        assert_eq!(
+            kind.answer_for(AnswerRole::Refusing),
+            Some(Answer::Choice {
+                ids: vec!["no".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn a_question_nobody_marked_is_a_persons_alone() {
+        let unmarked = question(vec![option("yes", None)]);
+        assert_eq!(unmarked.answer_for(AnswerRole::Allowing), None);
+        assert_eq!(unmarked.answer_for(AnswerRole::Refusing), None);
+        let confirm = InteractionKind::Confirm {
+            title: "t".into(),
+            detail: "d".into(),
+        };
+        assert_eq!(confirm.answer_for(AnswerRole::Allowing), None);
+    }
+
+    #[test]
+    fn an_unmarked_option_is_on_the_wire_as_it_was() {
+        let json = serde_json::to_value(option("yes", None)).expect("an option");
+        assert_eq!(json, serde_json::json!({ "id": "yes", "label": "yes" }));
+        assert_eq!(
+            serde_json::to_value(option("yes", Some(AnswerRole::Allowing))).expect("an option"),
+            serde_json::json!({ "id": "yes", "label": "yes", "role": "allowing" })
         );
     }
 }

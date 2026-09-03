@@ -16,6 +16,10 @@ pub const INTERACTION_GUARD_MS: i64 = 400;
 pub(super) struct Pending {
     pub(super) interaction: Interaction,
     pub(super) reply: oneshot::Sender<Result<Answer, KernelError>>,
+    /// Opened by a holding command, and closed when that command is done
+    /// (ADR-0012 §5). The turn it names cannot say so: a question that
+    /// arrived between turns names none either (ADR-0039 §1).
+    by_command: bool,
 }
 
 impl Actor {
@@ -26,19 +30,11 @@ impl Actor {
         answers: Vec<AnswerSpec>,
         reply: oneshot::Sender<Result<Answer, KernelError>>,
     ) {
-        // A turn's call asks under the turn; a holding command asks under
-        // none (ADR-0012 §5). Nothing else can be running to ask.
-        let turn = match (&self.running, self.commands.busy()) {
-            (Some(running), _) => Some(running.turn.clone()),
-            (None, true) => None,
-            (None, false) => {
-                let _ = reply.send(Err(KernelError::new(
-                    ErrorCode::NotReady,
-                    "no turn or command is running",
-                )));
-                return;
-            }
-        };
+        // A turn's call asks under the turn; a holding command (ADR-0012 §5)
+        // and a question handed in between turns (ADR-0039 §1) ask under
+        // none: an interaction is the session's, not the turn's.
+        let turn = self.running.as_ref().map(|r| r.turn.clone());
+        let by_command = self.commands.busy();
         let now = Timestamp::now();
         let interaction = Interaction {
             id: InteractionId::mint(),
@@ -58,6 +54,7 @@ impl Actor {
             Pending {
                 interaction: interaction.clone(),
                 reply,
+                by_command,
             },
         );
         self.publish(Event::InteractionOpened { interaction }, None)
@@ -130,13 +127,13 @@ impl Actor {
         self.cancel_each(pending, reason).await;
     }
 
-    /// The holding command that asked is done: what it left open closes,
-    /// and a turn's own questions (there is no turn) are not touched.
+    /// The holding command that asked is done: what it left open closes, and
+    /// what anything else opened — a turn's, a door's — is not touched.
     pub(super) async fn cancel_command_interactions(&mut self) {
         let ids: Vec<InteractionId> = self
             .pending
             .iter()
-            .filter(|(_, p)| p.interaction.turn.is_none())
+            .filter(|(_, p)| p.by_command)
             .map(|(id, _)| id.clone())
             .collect();
         let pending: Vec<_> = ids
