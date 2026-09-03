@@ -18,6 +18,7 @@ use crate::event::*;
 use crate::ids::{IntentId, InteractionId, ItemId, Seq, SessionId, TurnId};
 use crate::service::WireService;
 use crate::state::SessionState;
+use crate::tool::{ToolCall, ToolOutcome};
 
 pub type FrameStream = Pin<Box<dyn Stream<Item = Frame> + Send>>;
 pub type GatewayStream = Pin<Box<dyn Stream<Item = GatewayEvent> + Send>>;
@@ -325,6 +326,32 @@ pub trait HostApi: Send + Sync {
         kind: &str,
         payload: Value,
     ) -> Result<(), KernelError>;
+
+    /// Hand a tool call to a session's running turn and wait for what it comes
+    /// to (ADR-0036 §2). The turn's own machinery serves it: the same gate, a
+    /// real tool item journaled under the turn, a cancel token that is a child
+    /// of the turn's — so one `esc` drops the call where it stands and the
+    /// answer says so.
+    ///
+    /// It is served while the turn's stream is open, because whoever handed
+    /// the call in is blocked on the answer before it can go on. The outcome
+    /// goes back here and nowhere else: it never joins the provider's
+    /// messages, because the caller already holds it and a copy would be a
+    /// second representation of one call.
+    ///
+    /// Refused, fail closed, when no turn is in flight, and when the call
+    /// names a tool the running turn was not given — the turn's own offer is
+    /// the whole of what may be called.
+    async fn invoke(
+        &self,
+        _session: &SessionId,
+        _call: ToolCall,
+    ) -> Result<ToolOutcome, KernelError> {
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            "this host runs no turns",
+        ))
+    }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 

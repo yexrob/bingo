@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::KernelError;
-use crate::event::{ItemBody, Preview, ToolOutput};
+use crate::event::{ItemBody, ItemStatus, Preview, ToolOutput};
 use crate::host::{HostHandle, Prompter};
 use crate::ids::{ItemId, SessionId, TurnId};
 use crate::model::ToolSpec;
@@ -103,6 +103,18 @@ pub struct ToolCall {
     pub call_id: String,
     pub name: String,
     pub input: Value,
+}
+
+/// What one call came to: the tool's own output, the item it was journaled
+/// as, and how long it took. The kernel's executor answers in these, and so
+/// does the door a call may be handed in through ([`crate::host::HostApi`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolOutcome {
+    pub item: ItemId,
+    pub call_id: String,
+    pub output: ToolOutput,
+    pub status: ItemStatus,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

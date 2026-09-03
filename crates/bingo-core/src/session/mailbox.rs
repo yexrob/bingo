@@ -87,6 +87,28 @@ pub(crate) enum Msg {
     Reconfigure {
         config: Arc<TurnConfig>,
     },
+    /// The tools the running turn resolved when it started (ADR-0009 §1):
+    /// the offer its requests carry, and the whole of what a call handed in
+    /// from outside the turn may name (ADR-0036 §2).
+    Offered {
+        turn: TurnId,
+        tools: Vec<Arc<dyn Tool>>,
+    },
+    /// A tool call handed into the running turn from outside the model
+    /// (ADR-0036 §2); the outcome goes back to whoever handed it in.
+    Invoke {
+        call: ToolCall,
+        reply: super::invoke::Reply,
+    },
+    /// A bridged call the gate let through, on its way to running.
+    CallAllowed {
+        item: ItemId,
+        input: Value,
+    },
+    /// What a bridged call came to, for the item it was opened as.
+    CallFinished {
+        outcome: ToolOutcome,
+    },
     /// A turn that only compacts (ADR-0008 §4).
     Compact {
         instructions: Option<String>,
@@ -271,6 +293,21 @@ impl Mailbox {
         self.send(Msg::Reconfigure { config });
     }
 
+    /// Hand a call to the running turn and wait for what it comes to
+    /// (ADR-0036 §2). Refused when no turn is in flight, and when the turn
+    /// was never offered the tool the call names.
+    pub async fn invoke(&self, call: ToolCall) -> Result<ToolOutcome, KernelError> {
+        self.call(|reply| Msg::Invoke { call, reply }).await?
+    }
+
+    pub(super) fn call_allowed(&self, item: ItemId, input: Value) {
+        self.send(Msg::CallAllowed { item, input });
+    }
+
+    pub(super) fn call_finished(&self, outcome: ToolOutcome) {
+        self.send(Msg::CallFinished { outcome });
+    }
+
     /// Open a turn that only compacts; refused while a turn runs.
     pub async fn compact(&self, instructions: Option<String>) -> Result<(), KernelError> {
         self.call(|reply| Msg::Compact {
@@ -332,6 +369,13 @@ pub(super) struct TurnMail {
 
 #[async_trait]
 impl TurnHost for TurnMail {
+    fn offered(&self, tools: Vec<Arc<dyn Tool>>) {
+        self.mailbox.send(Msg::Offered {
+            turn: self.turn.clone(),
+            tools,
+        });
+    }
+
     fn emit(&self, event: Event) {
         self.mailbox.send(Msg::Emit {
             turn: self.turn.clone(),

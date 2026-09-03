@@ -43,15 +43,6 @@ impl std::fmt::Debug for PendingCall {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Outcome {
-    pub item: ItemId,
-    pub call_id: String,
-    pub output: ToolOutput,
-    pub status: ItemStatus,
-    pub duration_ms: u64,
-}
-
 /// Execute in order. `context` builds the per-call context; `on_done` sees
 /// each outcome as it lands. The returned list is in input order.
 pub async fn execute<C, F>(
@@ -59,10 +50,10 @@ pub async fn execute<C, F>(
     cancel: &CancellationToken,
     mut context: C,
     mut on_done: F,
-) -> Vec<Outcome>
+) -> Vec<ToolOutcome>
 where
     C: FnMut(&PendingCall) -> ToolContext,
-    F: FnMut(&Outcome),
+    F: FnMut(&ToolOutcome),
 {
     let mut outcomes = Vec::with_capacity(calls.len());
     let mut i = 0;
@@ -104,8 +95,22 @@ where
     outcomes
 }
 
-fn interrupted(pc: &PendingCall) -> Outcome {
-    Outcome {
+/// One call, alone: what a door outside the turn hands in (ADR-0036 §2). The
+/// same two steps a batch takes for a single call, so nothing about how a
+/// call runs is written twice.
+pub async fn execute_one(
+    call: PendingCall,
+    cancel: &CancellationToken,
+    cx: ToolContext,
+) -> ToolOutcome {
+    if cancel.is_cancelled() {
+        return interrupted(&call);
+    }
+    run_one(&call, cx, cancel).await
+}
+
+fn interrupted(pc: &PendingCall) -> ToolOutcome {
+    ToolOutcome {
         item: pc.item.clone(),
         call_id: pc.call.call_id.clone(),
         output: ToolOutput::error(INTERRUPTED_MARKER),
@@ -114,9 +119,9 @@ fn interrupted(pc: &PendingCall) -> Outcome {
     }
 }
 
-async fn run_one(pc: &PendingCall, cx: ToolContext, cancel: &CancellationToken) -> Outcome {
+async fn run_one(pc: &PendingCall, cx: ToolContext, cancel: &CancellationToken) -> ToolOutcome {
     let started = Instant::now();
-    let finish = |output: ToolOutput, status: ItemStatus| Outcome {
+    let finish = |output: ToolOutput, status: ItemStatus| ToolOutcome {
         item: pc.item.clone(),
         call_id: pc.call.call_id.clone(),
         output,

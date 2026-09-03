@@ -41,6 +41,11 @@ pub const MAX_LENGTH_RECOVERIES: u32 = 3;
 #[async_trait]
 pub trait TurnHost: Send + Sync {
     fn emit(&self, event: Event);
+    /// The tools this turn resolved when it started (ADR-0009 §1): the offer
+    /// every one of its requests carries. The session keeps them so that a
+    /// call handed in from outside the turn is served by the very set the
+    /// model was given (ADR-0036 §2).
+    fn offered(&self, tools: Vec<Arc<dyn Tool>>);
     async fn ask(
         &self,
         item: Option<ItemId>,
@@ -139,6 +144,7 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         model: Some(model.id.clone()),
     };
     let late = Late::gather(cfg).await;
+    host.offered(late.tools.clone());
     for name in &late.shadowed {
         host.emit(Event::Notice {
             level: Level::Warn,
@@ -677,7 +683,7 @@ impl Turn<'_> {
     }
 
     /// Run the gated calls and fold each result back into the item that made it.
-    async fn run_tools(&mut self, calls: Vec<PendingCall>) -> Vec<executor::Outcome> {
+    async fn run_tools(&mut self, calls: Vec<PendingCall>) -> Vec<ToolOutcome> {
         let cfg = self.cfg;
         let session = cfg.session.id.clone();
         let turn = self.id.clone();
@@ -726,7 +732,7 @@ impl Turn<'_> {
     }
 
     /// Let the `AfterTool` hooks see each result; one of them may stop the turn.
-    async fn after_tool_hooks(&self, outcomes: &[executor::Outcome]) -> bool {
+    async fn after_tool_hooks(&self, outcomes: &[ToolOutcome]) -> bool {
         let mut stop_after = false;
         let hooks = self.cfg.hooks.gather().await;
         for o in outcomes {

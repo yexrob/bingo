@@ -108,6 +108,11 @@ impl Folder {
                 text,
                 provider_metadata,
             } => self.reasoning(text, provider_metadata),
+            // A call the model never asked for is not its to answer: it was
+            // handed in from outside the turn and its outcome went back to
+            // whoever handed it in (ADR-0036 §2). Replaying it here would put
+            // words in the model's mouth that it never said.
+            ItemBody::ToolCall { .. } if item.external() => {}
             ItemBody::ToolCall {
                 call_id,
                 name,
@@ -386,6 +391,36 @@ mod tests {
                 Some("anyone?"),
             ]
         );
+    }
+
+    /// A call handed in through the host's door ran under this turn and is in
+    /// the journal, but the model never asked for it and its outcome went
+    /// back to whoever handed it in (ADR-0036 §2). Folding it would tell the
+    /// model it had made a call it never made.
+    #[test]
+    fn a_call_the_model_never_made_never_reaches_it() {
+        let mut bridged = tool("i2", "c1", Some("posted"));
+        bridged.mark_external();
+        let items = vec![user("i1", "go"), bridged, tool("i3", "c2", Some("read"))];
+        let msgs = ContextView::fold_items(&items);
+        let uses: Vec<&str> = msgs
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter_map(|part| match part {
+                ContentPart::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses, ["c2"], "only the call the model made");
+        let results: Vec<&str> = msgs
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter_map(|part| match part {
+                ContentPart::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, ["c2"], "and no result it is not owed");
     }
 
     #[test]

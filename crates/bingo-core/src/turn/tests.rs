@@ -55,6 +55,8 @@ impl RecordingHost {
 
 #[async_trait]
 impl TurnHost for RecordingHost {
+    fn offered(&self, _tools: Vec<Arc<dyn Tool>>) {}
+
     fn emit(&self, event: Event) {
         self.events.lock().unwrap().push(event);
     }
