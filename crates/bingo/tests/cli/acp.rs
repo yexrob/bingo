@@ -19,6 +19,10 @@ use super::*;
 /// conversation the other way, and it reads on its own terms.
 mod bridge;
 
+/// And so is the catalogue answering before anybody has said a word to the
+/// agent: what a cold `/models refresh` finds is its own story (M44).
+mod catalogue;
+
 /// So is the pair of knobs: `/think` and `/model` reaching the agent is its
 /// own story (ADR-0037), and it reads on its own terms.
 mod knobs;
@@ -66,8 +70,21 @@ impl Scripted {
 
     /// One adapter, with whatever else the scenario needs written onto its row
     /// and beside it — a `tools` list, a `forwardMcp`, a person's own MCP
-    /// servers.
+    /// servers. On a machine that already knows what this adapter serves: see
+    /// [`Scripted::asked_before`].
     fn configured(agent: &Path, script: Value, row: Value, beside: Value) -> Self {
+        let scripted = Self::written(agent, script, row, beside);
+        scripted.asked_before();
+        scripted
+    }
+
+    /// The same adapter on a machine that has never asked it anything — which
+    /// is what the catalogue's own scenarios are about (`super::catalogue`).
+    fn cold(agent: &Path, script: Value, row: Value) -> Self {
+        Self::written(agent, script, row, json!({}))
+    }
+
+    fn written(agent: &Path, script: Value, row: Value, beside: Value) -> Self {
         let home = tempfile::tempdir().unwrap();
         let scripted = Scripted {
             script: home.path().join("acp-script.json"),
@@ -95,6 +112,27 @@ impl Scripted {
     /// about what it can restore.
     fn obeys(&self, script: Value) {
         std::fs::write(&self.script, script.to_string()).unwrap();
+    }
+
+    /// A home that was already told what this adapter serves.
+    ///
+    /// A machine with no cached list has every provider asked the moment the
+    /// host is built (ADR-0026 §4), and an ACP instance answers that by
+    /// opening a session of its own (`bingo_provider_acp::probe`) — a second
+    /// child beside the one the scenario is about, arriving at a moment
+    /// nothing can pin down. Every scenario here but the catalogue's own is
+    /// about what *one* conversation is told, so the cache is left looking
+    /// freshly asked and the top-up finds nothing stale to ask.
+    fn asked_before(&self) {
+        let file = self.home.path().join(".bingo/data/served-models.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let served = json!({
+            "scripted": {
+                "fetched": jiff::Timestamp::now().to_string(),
+                "models": [{ "id": "agent" }]
+            }
+        });
+        std::fs::write(&file, served.to_string()).unwrap();
     }
 
     /// Forget what the agent heard, so the next run's log is only its own.
