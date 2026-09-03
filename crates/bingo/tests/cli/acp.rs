@@ -665,9 +665,14 @@ fn an_adapter_that_died_between_turns_is_replaced_and_said() {
 
 /// What the agent was offered on the bridge, from the `tools/list` it logged.
 fn offered(adapter: &Scripted) -> Vec<String> {
+    // The last list, not the first: a scenario that waited for a tool to
+    // arrive is asking about the list it waited for.
     let listed = adapter
-        .first("mcp/tools")
-        .expect("the agent listed the bridge");
+        .heard()
+        .into_iter()
+        .rfind(|line| line["method"] == "mcp/tools")
+        .expect("the agent listed the bridge")["params"]
+        .clone();
     listed["tools"]
         .as_array()
         .expect("a list of tools")
@@ -854,8 +859,7 @@ fn last_answer(adapter: &Scripted) -> Value {
     adapter
         .heard()
         .into_iter()
-        .filter(|line| line["method"] == "mcp/called")
-        .next_back()
+        .rfind(|line| line["method"] == "mcp/called")
         .expect("the agent called the bridge")["params"]["answer"]
         .clone()
 }
