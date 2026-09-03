@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use schemars::{JsonSchema, SchemaGenerator};
 use serde::{Deserialize, Deserializer};
+use serde_json::{Value, json};
 
 /// The claimed slice, as the kernel hands it over.
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -142,6 +143,36 @@ impl<'de> Deserialize<'de> for Server {
     }
 }
 
+/// One configured server written back out in the shape it was read in — an
+/// [`Entry`], the thing on disk.
+///
+/// Somebody else may have to dial these servers instead of us (an ACP agent
+/// handed them at `session/new`, ADR-0036 §4), and what they must be handed is
+/// the row a person wrote: their own command, their own env, their own
+/// headers. Written here, beside the reader, so the two spellings of the entry
+/// cannot drift apart — the round trip is a test.
+pub fn row(server: &Server) -> Value {
+    match server {
+        Server::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => json!({
+            "type": "stdio",
+            "command": command,
+            "args": args,
+            "env": env,
+            "cwd": cwd,
+        }),
+        Server::Http { url, headers } => json!({
+            "type": "http",
+            "url": url,
+            "headers": headers,
+        }),
+    }
+}
+
 /// The schema a client reads is the entry's: the two transports are one shape
 /// on disk, told apart by `type`.
 impl JsonSchema for Server {
@@ -264,6 +295,33 @@ mod tests {
         .expect("a readable slice");
         assert_eq!(settings.mcp_servers.len(), 1);
         assert_eq!(settings.disabled_mcp_servers, ["files"]);
+    }
+
+    /// The row written out is the row that was read: whatever a person put on
+    /// disk comes back out of [`row`] and parses to the same server.
+    #[test]
+    fn a_row_written_back_out_reads_as_the_server_it_came_from() {
+        for written in [
+            json!({ "command": "npx", "args": ["-y", "files"], "env": { "TOKEN": "s3cret" }, "cwd": "/work" }),
+            json!({ "type": "http", "url": "https://mcp.example.com/mcp",
+                    "headers": { "Authorization": "Bearer s3cret" } }),
+        ] {
+            let parsed = server(written).expect("a readable entry");
+            assert_eq!(
+                server(row(&parsed)).expect("and the row it writes reads back"),
+                parsed
+            );
+        }
+    }
+
+    /// A row is handed to whoever dials the server, so it carries what dialling
+    /// it takes — the values, not only their names.
+    #[test]
+    fn a_row_carries_what_dialling_the_server_takes() {
+        let parsed = server(json!({ "command": "npx", "env": { "TOKEN": "s3cret" } }))
+            .expect("a readable entry");
+        assert_eq!(row(&parsed)["env"]["TOKEN"], json!("s3cret"));
+        assert_eq!(row(&parsed)["type"], json!("stdio"));
     }
 
     #[test]
