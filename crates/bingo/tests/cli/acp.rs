@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use bingo_sdk::ItemBody;
+use bingo_sdk::{ContentPart, ItemBody};
 use serde_json::{Value, json};
 
 use super::*;
@@ -707,4 +707,135 @@ fn the_bridge_offers_the_sessions_tools_and_not_the_agents_own_hands() {
             "{brought} is the agent's own hand and does not cross: {offered:?}"
         );
     }
+}
+
+/// What the agent got back from one bridged call.
+fn answer(adapter: &Scripted) -> Value {
+    adapter
+        .first("mcp/called")
+        .expect("the agent called the bridge")["answer"]
+        .clone()
+}
+
+fn answered_text(answered: &Value) -> String {
+    answered["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every frame of every session this run journaled, wherever it lives. A
+/// bridged call is journaled under the ACP member's own turn, and that member
+/// is a sub-session with a journal of its own.
+fn journaled(home: &Path) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    collect(&home.join(".bingo/data/sessions"), &mut frames);
+    frames
+}
+
+fn collect(dir: &Path, into: &mut Vec<Frame>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, into);
+        } else if path.file_name().is_some_and(|name| name == "journal.jsonl") {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            into.extend(
+                text.lines()
+                    .filter_map(|line| serde_json::from_str(line).ok()),
+            );
+        }
+    }
+}
+
+/// ADR-0036 §2: a bridged call is the turn's call. An ACP member spawned by a
+/// root posts to that root mid-turn; the post reaches the root's journal, and
+/// the tool item sits under the member's own turn wearing the mark that says
+/// no model asked for it.
+#[test]
+fn a_bridged_call_posts_to_the_parent_and_is_journaled_under_the_turn() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::new(
+        agent,
+        bridged(
+            vec![json!({
+                "tool": "SendMessage",
+                "arguments": { "to": "parent", "text": "the member spoke" }
+            })],
+            vec![chunk("Posted.")],
+        ),
+    );
+    let root = adapter.home.path().join("root.json");
+    std::fs::write(
+        &root,
+        json!({ "responses": [
+            { "steps": [{ "toolCall": { "name": "SpawnAgent", "input": {
+                "prompt": "say something upward", "name": "member",
+                "provider": "scripted", "model": "agent", "background": false
+            }}}]},
+            { "steps": [{ "text": "root done" }]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run_within(
+        adapter
+            .bingo(&[])
+            .env("BINGO_FAKE_SCRIPT", &root)
+            .arg("spawn the member"),
+        Duration::from_secs(60),
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let answered = answer(&adapter);
+    assert_eq!(
+        answered["isError"],
+        json!(false),
+        "the call ran: {answered}"
+    );
+    assert!(
+        answered_text(&answered).contains("parent"),
+        "and the tool's own receipt came back: {answered}"
+    );
+
+    let posts: Vec<String> = bodies(&out)
+        .into_iter()
+        .filter_map(|body| match body {
+            ItemBody::User { parts, .. } => {
+                Some(parts.iter().filter_map(ContentPart::as_text).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        posts.iter().any(|text: &String| text == "the member spoke"),
+        "the post is in the root's own journal: {posts:?}"
+    );
+
+    let calls: Vec<(String, bool)> = journaled(adapter.home.path())
+        .into_iter()
+        .filter_map(|frame| match frame.event {
+            Event::ItemCompleted { item } => match &item.body {
+                ItemBody::ToolCall { name, .. } if name == "SendMessage" => {
+                    Some((name.clone(), item.external()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [("SendMessage".to_string(), true)],
+        "one tool item, under the member's turn, marked as none of the model's"
+    );
 }

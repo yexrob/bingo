@@ -121,10 +121,19 @@ struct Turn {
     /// an offer that moved between turns can be seen to have moved.
     #[serde(default)]
     mcp_list: bool,
+    /// Ask again until this tool is among what is offered, or give up. A tool
+    /// that reaches the offer late — an MCP server bingo was still dialling
+    /// when the turn began — is waited for rather than slept on.
+    #[serde(default)]
+    mcp_until: Option<String>,
     /// Calls to make over the bridge before anything is streamed: the agent is
     /// blocked on each answer, the way a real one is.
     #[serde(default)]
     mcp: Vec<Value>,
+    /// Calls to make once the turn has been answered — which is nobody's turn,
+    /// and must be refused (ADR-0036 §2).
+    #[serde(default)]
+    mcp_after: Vec<Value>,
 }
 
 fn end_turn() -> String {
@@ -295,6 +304,9 @@ impl Agent {
             self.ask(method::ELICITATION_CREATE, "elicitation", request, lines)
                 .await?;
         }
+        if let Some(wanted) = &turn.mcp_until {
+            self.wait_for_tool(wanted).await?;
+        }
         self.bridged(turn.mcp_list, &turn.mcp).await?;
         for update in turn.updates {
             self.update(update).await?;
@@ -309,6 +321,7 @@ impl Agent {
             answer["usage"] = usage;
         }
         self.send(wire::result(id, answer)).await?;
+        self.bridged(false, &turn.mcp_after).await?;
         if turn.then_exit {
             std::process::exit(0);
         }
@@ -340,6 +353,24 @@ impl Agent {
             self.record(&format!("mcp/{method}"), &Value::Null).await?;
         }
         Ok(())
+    }
+
+    /// List until a tool is offered, or until the wait is longer than any
+    /// scenario should need. Bingo dials the MCP servers a person configured
+    /// on its own schedule, so a tool sourced from one arrives when it
+    /// arrives; waiting on the fact beats sleeping on a guess.
+    async fn wait_for_tool(&mut self, wanted: &str) -> Result<(), Failed> {
+        let Some(server) = self.bridge.as_mut() else {
+            return Ok(());
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let offered = server.list().await?;
+            if named(&offered, wanted) || std::time::Instant::now() > deadline {
+                return self.record("mcp/tools", &offered).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// A question the agent puts to the client, and the wait for its answer.
@@ -437,8 +468,17 @@ fn script_turn(turn: &Turn) -> Turn {
         await_cancel: turn.await_cancel,
         then_exit: turn.then_exit,
         mcp_list: turn.mcp_list,
+        mcp_until: turn.mcp_until.clone(),
         mcp: turn.mcp.clone(),
+        mcp_after: turn.mcp_after.clone(),
     }
+}
+
+/// Whether a `tools/list` result holds a tool of this name.
+fn named(offered: &Value, wanted: &str) -> bool {
+    offered["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == json!(wanted)))
 }
 
 /// The row bingo wrote for itself among the servers it handed over. A row for
