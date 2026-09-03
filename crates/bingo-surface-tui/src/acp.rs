@@ -89,10 +89,10 @@ fn name(kind: &str) -> &'static str {
     }
 }
 
-/// What the row says the call was about: the input in the words every other
-/// row is read in — the one field a person recognises, shortened against the
-/// session's directory — and the adapter's own title where the call carried no
-/// input to read it from.
+/// What the row says the call was about: the input read the way every other
+/// row's is ([`crate::transcript::summarize`], and the row shortens the path it
+/// finds against the session's own directory), and the adapter's own title
+/// where the call carried no input to read.
 fn about(acp: &Map<String, Value>) -> String {
     let summarised = acp
         .get("rawInput")
