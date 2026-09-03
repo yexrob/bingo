@@ -8,7 +8,7 @@
 //! `function_call_output{call_id,output}`, `reasoning{id,summary,
 //! encrypted_content}`.
 
-use bingo_sdk::{ContentPart, Message, ProviderMetadata, Role};
+use bingo_sdk::{ContentPart, Image, Message, ProviderMetadata, Role};
 use serde_json::{Value, json};
 
 use crate::events::PROVIDER;
@@ -46,7 +46,7 @@ impl Input {
         for part in parts {
             match part {
                 ContentPart::Text { text } => content.push(input_text(text)),
-                ContentPart::Image { media_type, data } => {
+                ContentPart::Image(Image { media_type, data }) => {
                     content.push(input_image(media_type, data));
                 }
                 ContentPart::ToolResult {
@@ -163,14 +163,14 @@ fn images(parts: &[ContentPart]) -> Vec<Value> {
     parts
         .iter()
         .filter_map(|part| match part {
-            ContentPart::Image { media_type, data } => Some(input_image(media_type, data)),
+            ContentPart::Image(Image { media_type, data }) => Some(input_image(media_type, data)),
             _ => None,
         })
         .collect()
 }
 
 fn is_image(part: &ContentPart) -> bool {
-    matches!(part, ContentPart::Image { .. })
+    matches!(part, ContentPart::Image(_))
 }
 
 #[cfg(test)]
@@ -228,10 +228,10 @@ mod tests {
     fn an_image_a_tool_returned_follows_as_an_input_image() {
         let items = items(&[Message::user(vec![ContentPart::ToolResult {
             tool_use_id: "call_3".into(),
-            parts: vec![ContentPart::Image {
+            parts: vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
-            }],
+            })],
             is_error: false,
         }])]);
         assert_eq!(kinds(&items), ["function_call_output", "message"]);

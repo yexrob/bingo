@@ -8,7 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bingo_sdk::{ContentPart, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits};
+use bingo_sdk::{
+    ContentPart, Image, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject};
 use serde_json::Value;
 
@@ -106,10 +108,10 @@ fn part(block: &ContentBlock) -> ContentPart {
         ContentBlock::Text(text) => ContentPart::Text {
             text: text.text.clone(),
         },
-        ContentBlock::Image(image) => ContentPart::Image {
+        ContentBlock::Image(image) => ContentPart::Image(Image {
             media_type: image.mime_type.clone(),
             data: image.data.clone(),
-        },
+        }),
         other => ContentPart::text(
             serde_json::to_string(other)
                 .unwrap_or_else(|_| "[a content block that will not serialize]".to_string()),
@@ -211,10 +213,10 @@ mod tests {
         );
         assert_eq!(
             output.parts[1],
-            ContentPart::Image {
+            ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "QUJD".into()
-            }
+            })
         );
         let ContentPart::Text { text } = &output.parts[2] else {
             panic!("an audio block reaches the model as text");

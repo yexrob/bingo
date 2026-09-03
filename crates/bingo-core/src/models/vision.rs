@@ -31,7 +31,7 @@ pub fn project_images_out(messages: &[Message], note: &str) -> Option<Vec<Messag
 
 fn has_image(part: &ContentPart) -> bool {
     match part {
-        ContentPart::Image { .. } => true,
+        ContentPart::Image(_) => true,
         ContentPart::ToolResult { parts, .. } => parts.iter().any(has_image),
         _ => false,
     }
@@ -39,7 +39,7 @@ fn has_image(part: &ContentPart) -> bool {
 
 fn project(part: &ContentPart, note: &str) -> ContentPart {
     match part {
-        ContentPart::Image { .. } => ContentPart::text(note),
+        ContentPart::Image(_) => ContentPart::text(note),
         ContentPart::ToolResult {
             tool_use_id,
             parts,
@@ -56,13 +56,13 @@ fn project(part: &ContentPart, note: &str) -> ContentPart {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bingo_sdk::Role;
+    use bingo_sdk::{Image, Role};
 
     fn image() -> ContentPart {
-        ContentPart::Image {
+        ContentPart::Image(Image {
             media_type: "image/png".into(),
             data: "iVBORw0KGgo=".into(),
-        }
+        })
     }
 
     #[test]

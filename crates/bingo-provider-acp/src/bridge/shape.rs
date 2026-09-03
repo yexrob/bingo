@@ -5,7 +5,7 @@
 //! between them is a function with a fixture rather than a branch inside a
 //! server loop.
 
-use bingo_sdk::{ContentPart, ToolCall, ToolOutput, ToolSpec};
+use bingo_sdk::{ContentPart, Image, ToolCall, ToolOutput, ToolSpec};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject, Tool};
 use serde_json::Value;
 use std::sync::Arc;
@@ -60,7 +60,9 @@ fn block(part: &ContentPart) -> ContentBlock {
     match part {
         ContentPart::Text { text } => ContentBlock::text(text.clone()),
         ContentPart::Reasoning { text, .. } => ContentBlock::text(text.clone()),
-        ContentPart::Image { media_type, data } => ContentBlock::image(data.clone(), media_type),
+        ContentPart::Image(Image { media_type, data }) => {
+            ContentBlock::image(data.clone(), media_type)
+        }
         other => ContentBlock::text(
             serde_json::to_string(other).unwrap_or_else(|_| "[unreadable content]".to_string()),
         ),
@@ -208,10 +210,10 @@ mod tests {
     #[test]
     fn an_image_keeps_its_media_type() {
         let output = ToolOutput {
-            parts: vec![ContentPart::Image {
+            parts: vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "AAAA".into(),
-            }],
+            })],
             is_error: false,
             display: None,
         };

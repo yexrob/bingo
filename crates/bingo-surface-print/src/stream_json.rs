@@ -34,7 +34,7 @@
 //! (`TurnUsage`) and reports the total once, in the `result` line.
 
 use bingo_sdk::{
-    ContentPart, ErrorCode, Event, Frame, InterruptReason, Item, ItemBody, SessionState,
+    ContentPart, ErrorCode, Event, Frame, Image, InterruptReason, Item, ItemBody, SessionState,
     ToolOutput, TurnStatus, Usage,
 };
 
@@ -320,7 +320,7 @@ fn tool_content(output: Option<&ToolOutput>) -> Value {
 }
 
 fn is_image(part: &ContentPart) -> bool {
-    matches!(part, ContentPart::Image { .. })
+    matches!(part, ContentPart::Image(_))
 }
 
 fn joined_text(parts: &[ContentPart]) -> String {
@@ -336,7 +336,7 @@ fn joined_text(parts: &[ContentPart]) -> String {
 fn block(part: &ContentPart) -> Option<Value> {
     match part {
         ContentPart::Text { text } => Some(text_block(text)),
-        ContentPart::Image { media_type, data } => Some(json!({
+        ContentPart::Image(Image { media_type, data }) => Some(json!({
             "type": "image",
             "source": { "type": "base64", "media_type": media_type, "data": data },
         })),
@@ -801,10 +801,10 @@ mod tests {
         let output = ToolOutput {
             parts: vec![
                 ContentPart::text("the chart"),
-                ContentPart::Image {
+                ContentPart::Image(Image {
                     media_type: "image/png".into(),
                     data: "iVBORw0KGgo=".into(),
-                },
+                }),
             ],
             is_error: false,
             display: None,

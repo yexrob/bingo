@@ -644,12 +644,17 @@ impl Actor {
         let mut ids = Vec::new();
         let mut acks = Vec::new();
         for (intent, input) in inputs {
-            let Input::Text { text, origin, .. } = input else {
+            let Input::Text {
+                text,
+                images,
+                origin,
+            } = input
+            else {
                 continue;
             };
             acks.push(intent.clone());
             ids.push(
-                self.journal_prose(Some(turn.clone()), intent, text, origin)
+                self.journal_prose(Some(turn.clone()), intent, text, images, origin)
                     .await,
             );
         }
@@ -664,10 +669,11 @@ impl Actor {
         turn: Option<TurnId>,
         intent: IntentId,
         text: String,
+        images: Vec<Image>,
         origin: Origin,
     ) -> ItemId {
         let body = ItemBody::User {
-            parts: vec![ContentPart::text(text)],
+            parts: user_parts(text, images),
             origin,
         };
         let item = self.fresh(turn, Some(intent.clone()), body);
@@ -818,22 +824,44 @@ async fn run_session_hooks(hooks: HookSet, phase: Phase, cx: HookContext) {
     }
 }
 
-/// What the kernel accepts as prose: text, for now without attachments.
+/// The parts a person's ask becomes (ADR-0040 §3): the words, when there are
+/// any, then the pictures in the order they were sent — an image-only ask
+/// carries no empty text part.
+fn user_parts(text: String, images: Vec<Image>) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        parts.push(ContentPart::text(text));
+    }
+    parts.extend(images.into_iter().map(ContentPart::Image));
+    parts
+}
+
+/// What the kernel accepts as prose: words, a picture, or both — an ask with
+/// neither is empty, and a picture the table or the cap refuses names why.
 pub(super) fn validate(input: &Input) -> Result<(), String> {
     match input {
-        Input::Text {
-            text, attachments, ..
-        } => {
-            if text.trim().is_empty() {
+        Input::Text { text, images, .. } => {
+            if text.trim().is_empty() && images.is_empty() {
                 return Err("empty input".into());
             }
-            if !attachments.is_empty() {
-                return Err("attachments are not supported".into());
-            }
-            Ok(())
+            images.iter().try_for_each(validate_image)
         }
         Input::Action { action } => Err(format!("unknown action: {}", action.name)),
     }
+}
+
+fn validate_image(image: &Image) -> Result<(), String> {
+    if !Image::is_known(&image.media_type) {
+        return Err(format!("unknown image media type `{}`", image.media_type));
+    }
+    let bytes = image.decoded_len();
+    if bytes > Image::MAX_BYTES {
+        return Err(format!(
+            "image too large: {bytes} bytes, the limit is {}",
+            Image::MAX_BYTES
+        ));
+    }
+    Ok(())
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {

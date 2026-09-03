@@ -116,6 +116,8 @@ fn rows(line: &str, matched: Vec<String>, group: Group) -> Vec<Suggestion> {
 
 /// The images a line mentions, which is what reaches the model beside it. The
 /// line is the only record: nothing is remembered when a mention is deleted.
+// M45 slice T reads the mentions here; nothing in slice K calls this yet.
+#[allow(dead_code)]
 pub fn attachments(line: &str) -> Vec<String> {
     line.split_whitespace()
         .filter_map(|word| word.strip_prefix('@'))

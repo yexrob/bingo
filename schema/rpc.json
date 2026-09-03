@@ -416,24 +416,16 @@
           ]
         },
         {
+          "$ref": "#/$defs/Image",
           "type": "object",
           "properties": {
-            "mediaType": {
-              "type": "string"
-            },
-            "data": {
-              "type": "string",
-              "description": "Base64 payload."
-            },
             "type": {
               "type": "string",
               "const": "image"
             }
           },
           "required": [
-            "type",
-            "mediaType",
-            "data"
+            "type"
           ]
         },
         {
@@ -1395,6 +1387,23 @@
         "session"
       ]
     },
+    "Image": {
+      "type": "object",
+      "properties": {
+        "mediaType": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string",
+          "description": "Base64 payload."
+        }
+      },
+      "required": [
+        "mediaType",
+        "data"
+      ],
+      "description": "A picture handed to the model, already the shape the journal keeps and a\nprovider's request encodes: one struct, so a surface that reads a picture\noff disk, a wire client that already holds the bytes, and a tool result\nthat returns one all produce the same thing."
+    },
     "InitializeParams": {
       "type": "object",
       "properties": {
@@ -1445,12 +1454,12 @@
             "text": {
               "type": "string"
             },
-            "attachments": {
+            "images": {
               "type": "array",
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/Image"
               },
-              "default": []
+              "description": "The pictures the ask carries, in the order they reach the journal\n(ADR-0040): exactly as they will be journaled, because a surface\nresolves a picture and the kernel does no file I/O for input."
             },
             "origin": {
               "$ref": "#/$defs/Origin"

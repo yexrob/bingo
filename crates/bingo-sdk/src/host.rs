@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::error::{ErrorCode, KernelError};
 use crate::event::*;
 use crate::ids::{IntentId, InteractionId, ItemId, Seq, SessionId, TurnId};
+use crate::model::Image;
 use crate::service::WireService;
 use crate::state::SessionState;
 use crate::tool::{ToolCall, ToolOutcome};
@@ -107,8 +108,11 @@ pub struct Action {
 pub enum Input {
     Text {
         text: String,
-        #[serde(default)]
-        attachments: Vec<String>,
+        /// The pictures the ask carries, in the order they reach the journal
+        /// (ADR-0040): exactly as they will be journaled, because a surface
+        /// resolves a picture and the kernel does no file I/O for input.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<Image>,
         origin: Origin,
     },
     Action {
@@ -120,7 +124,7 @@ impl Input {
     pub fn text(text: impl Into<String>, origin: Origin) -> Self {
         Input::Text {
             text: text.into(),
-            attachments: Vec::new(),
+            images: Vec::new(),
             origin,
         }
     }

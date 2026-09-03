@@ -562,10 +562,10 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
     if let Event::ItemCompleted { item } = &mut frames[0].event
         && let ItemBody::User { parts, .. } = &mut item.body
     {
-        parts.push(ContentPart::Image {
+        parts.push(ContentPart::Image(Image {
             media_type: "image/png".into(),
             data: "iVBORw0KGgo=".into(),
-        });
+        }));
     }
     let out = run_turn(
         &cfg,

@@ -6,8 +6,10 @@
 //! reasoning round-trip without the kernel knowing what they are.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use base64::Engine;
 use futures::Stream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -66,6 +68,110 @@ impl Message {
     }
 }
 
+/// Extensions a picture may arrive under, and the media type each is sent as
+/// (ADR-0040): the one table a wire client, the fs tool and the TUI's
+/// mention completion all read.
+const MEDIA_TYPES: &[(&str, &str)] = &[
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+];
+
+/// A picture handed to the model, already the shape the journal keeps and a
+/// provider's request encodes: one struct, so a surface that reads a picture
+/// off disk, a wire client that already holds the bytes, and a tool result
+/// that returns one all produce the same thing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Image {
+    pub media_type: String,
+    /// Base64 payload.
+    pub data: String,
+}
+
+impl Image {
+    /// Decoded bytes, not the base64 that carries them: beyond this a
+    /// picture is a mistake, not a request.
+    pub const MAX_BYTES: usize = 5 * 1024 * 1024;
+
+    /// The extensions [`Image::media_type_of`] recognises, kept in the same
+    /// order as `MEDIA_TYPES` (a test pins the two together).
+    pub const EXTENSIONS: &'static [&'static str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+    /// What a path's extension is sent as, when it names a picture at all.
+    pub fn media_type_of(path: &Path) -> Option<&'static str> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        MEDIA_TYPES
+            .iter()
+            .find(|(name, _)| *name == ext)
+            .map(|(_, media)| *media)
+    }
+
+    /// Whether a media type is one the table knows, whoever handed it in.
+    pub fn is_known(media_type: &str) -> bool {
+        MEDIA_TYPES.iter().any(|(_, known)| *known == media_type)
+    }
+
+    /// Bytes, checked against the table and the cap, then base64-encoded —
+    /// the one place a picture becomes this shape.
+    pub fn from_bytes(media_type: impl Into<String>, bytes: &[u8]) -> Result<Image, ImageError> {
+        let media_type = media_type.into();
+        if !Self::is_known(&media_type) {
+            return Err(ImageError::UnknownMediaType(media_type));
+        }
+        if bytes.len() > Self::MAX_BYTES {
+            return Err(ImageError::TooLarge {
+                bytes: bytes.len(),
+                max: Self::MAX_BYTES,
+            });
+        }
+        Ok(Image {
+            media_type,
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    /// A picture read off disk (std, not tokio: a surface calls this off its
+    /// own thread or accepts the blocking read); the extension says what it
+    /// is sent as.
+    pub fn read(path: &Path) -> Result<Image, ImageError> {
+        let media_type =
+            Self::media_type_of(path).ok_or_else(|| ImageError::NotAnImage(path.to_path_buf()))?;
+        let bytes = std::fs::read(path).map_err(|source| ImageError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_bytes(media_type, &bytes)
+    }
+
+    /// The decoded size, from the base64 length alone — no decode needed.
+    pub fn decoded_len(&self) -> usize {
+        let len = self.data.len();
+        if len == 0 {
+            return 0;
+        }
+        let padding = self.data.bytes().rev().take_while(|&b| b == b'=').count();
+        (len / 4) * 3 - padding
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ImageError {
+    #[error("not an image: {}", .0.display())]
+    NotAnImage(PathBuf),
+    #[error("unknown image media type: {0}")]
+    UnknownMediaType(String),
+    #[error("image too large: {bytes} bytes, the limit is {max}")]
+    TooLarge { bytes: usize, max: usize },
+    #[error("reading {}: {source}", .path.display())]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "type",
@@ -76,11 +182,7 @@ pub enum ContentPart {
     Text {
         text: String,
     },
-    Image {
-        media_type: String,
-        /// Base64 payload.
-        data: String,
-    },
+    Image(Image),
     ToolUse {
         id: String,
         name: String,
@@ -398,6 +500,100 @@ impl ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire shape is load-bearing (ADR-0040): an internally tagged
+    /// newtype variant flattens the struct's fields beside the tag, and this
+    /// is the exact JSON a client and the journal both read.
+    #[test]
+    fn an_image_part_tags_and_flattens_beside_it() {
+        let part = ContentPart::Image(Image {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+        });
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "image",
+                "mediaType": "image/png",
+                "data": "iVBORw0KGgo=",
+            })
+        );
+        assert_eq!(serde_json::from_value::<ContentPart>(json).unwrap(), part);
+    }
+
+    #[test]
+    fn extensions_and_the_media_type_table_name_the_same_pictures() {
+        let table: Vec<&str> = MEDIA_TYPES.iter().map(|(ext, _)| *ext).collect();
+        assert_eq!(Image::EXTENSIONS, table.as_slice());
+    }
+
+    #[test]
+    fn a_known_extension_resolves_and_an_unknown_one_does_not() {
+        assert_eq!(
+            Image::media_type_of(Path::new("shot.PNG")),
+            Some("image/png")
+        );
+        assert_eq!(Image::media_type_of(Path::new("shot.txt")), None);
+        assert_eq!(Image::media_type_of(Path::new("shot")), None);
+    }
+
+    #[test]
+    fn from_bytes_refuses_an_unknown_type_and_an_oversized_payload() {
+        assert!(matches!(
+            Image::from_bytes("image/tiff", b"x"),
+            Err(ImageError::UnknownMediaType(t)) if t == "image/tiff"
+        ));
+        let big = vec![0u8; Image::MAX_BYTES + 1];
+        assert!(matches!(
+            Image::from_bytes("image/png", &big),
+            Err(ImageError::TooLarge { bytes, max })
+                if bytes == Image::MAX_BYTES + 1 && max == Image::MAX_BYTES
+        ));
+    }
+
+    #[test]
+    fn from_bytes_encodes_a_known_type_within_the_cap() {
+        let image = Image::from_bytes("image/png", b"abc").unwrap();
+        assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.data, "YWJj");
+        assert_eq!(image.decoded_len(), 3);
+    }
+
+    #[test]
+    fn decoded_len_reads_the_base64_length_without_decoding() {
+        assert_eq!(
+            Image::from_bytes("image/png", b"").unwrap().decoded_len(),
+            0
+        );
+        assert_eq!(
+            Image::from_bytes("image/png", b"a").unwrap().decoded_len(),
+            1
+        );
+        assert_eq!(
+            Image::from_bytes("image/png", b"abcdefgh")
+                .unwrap()
+                .decoded_len(),
+            8
+        );
+    }
+
+    #[test]
+    fn read_rejects_a_path_the_table_does_not_know() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-an-image.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        assert!(matches!(Image::read(&path), Err(ImageError::NotAnImage(p)) if p == path));
+    }
+
+    #[test]
+    fn read_loads_a_known_picture_off_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pixel.png");
+        std::fs::write(&path, [0x89, b'P', b'N', b'G']).unwrap();
+        let image = Image::read(&path).unwrap();
+        assert_eq!(image.media_type, "image/png");
+    }
 
     #[test]
     fn a_tool_result_nests_parts_and_round_trips() {

@@ -98,7 +98,7 @@ fn guarded(mut call: ToolCall) -> Value {
 fn prefixed(input: Input) -> Value {
     let Input::Text {
         text,
-        attachments,
+        images,
         origin,
     } = input
     else {
@@ -106,7 +106,7 @@ fn prefixed(input: Input) -> Value {
     };
     let input = Input::Text {
         text: format!("{text} (stub)"),
-        attachments,
+        images,
         origin,
     };
     decided(HookOutcome::Continue, Some(HookValue::Input { input }))

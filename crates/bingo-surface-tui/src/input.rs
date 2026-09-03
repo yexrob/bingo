@@ -13,7 +13,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
-use crate::complete;
 use crate::effect::Effect;
 use crate::fold;
 use crate::keys;
@@ -826,9 +825,10 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         Some(Local::Exit) => vec![Effect::Exit],
         // A picture a person mentioned reaches the model as a part beside the
         // line, and the line still says which word it was.
+        // M45 slice T reads the mentions here and resolves them to images.
         None => vec![Effect::Submit(Input::Text {
-            attachments: complete::attachments(&text),
             text,
+            images: Vec::new(),
             origin: Origin::surface(SURFACE_ID),
         })],
     }
@@ -912,8 +912,10 @@ mod tests {
         );
     }
 
+    /// The read is not wired in this slice (M45 slice T reads mentions);
+    /// the mention still travels as words, and carries no image yet.
     #[test]
-    fn a_mentioned_picture_travels_beside_the_line() {
+    fn a_mentioned_picture_is_words_for_now() {
         let (_dir, state) = with_files();
         let tree = solo(&state);
         let (mut ui, now) = scene();
@@ -923,7 +925,7 @@ mod tests {
             effects,
             vec![Effect::Submit(Input::Text {
                 text: "look at @shot.png".into(),
-                attachments: vec!["shot.png".into()],
+                images: Vec::new(),
                 origin: Origin::surface(SURFACE_ID),
             })],
         );

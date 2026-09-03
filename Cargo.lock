@@ -588,12 +588,14 @@ name = "bingo-sdk"
 version = "0.4.2"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "futures",
  "insta",
  "jiff",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -725,7 +727,6 @@ name = "bingo-tool-fs"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.23.1",
  "bingo-sdk",
  "globset",
  "grep-regex",
