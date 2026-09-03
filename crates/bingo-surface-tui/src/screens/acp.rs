@@ -19,68 +19,9 @@ fn a_turn_of_its_own() -> bingo_sdk::SessionState {
     folded(vec![
         item(1, user("itm_1", "rename the wire module")),
         item(2, thought("itm_2", "the import list moves too")),
-        item(
-            3,
-            call(
-                "itm_3",
-                "read Read src/lib.rs (1 - 50)done\npub mod wire;",
-                json!({
-                    "external": true,
-                    "toolCallId": "toolu_01Read",
-                    "title": "Read src/lib.rs (1 - 50)",
-                    "kind": "read",
-                    "status": "completed",
-                    "content": [
-                        { "type": "content",
-                          "content": { "type": "text", "text": "pub mod wire;" } }
-                    ],
-                    "locations": [{ "path": "/tmp/project/src/lib.rs", "line": 1 }],
-                    "rawInput": { "file_path": "/tmp/project/src/lib.rs", "offset": 1 },
-                    "rawOutput": { "lines": 1 }
-                }),
-            ),
-        ),
-        item(
-            4,
-            call(
-                "itm_4",
-                "edit Edit src/lib.rsdone\n--- /tmp/project/src/lib.rs\n-pub mod wire;\n+pub mod envelope;",
-                json!({
-                    "external": true,
-                    "toolCallId": "toolu_02Edit",
-                    "title": "Edit src/lib.rs",
-                    "kind": "edit",
-                    "status": "completed",
-                    "content": [{
-                        "type": "diff",
-                        "path": "/tmp/project/src/lib.rs",
-                        "oldText": "pub mod wire;",
-                        "newText": "pub mod envelope;"
-                    }],
-                    "locations": [{ "path": "/tmp/project/src/lib.rs" }],
-                    "rawInput": { "file_path": "/tmp/project/src/lib.rs" }
-                }),
-            ),
-        ),
-        item(
-            5,
-            call(
-                "itm_5",
-                "run cargo test -p wirefailed\nerror: no target named `wire`",
-                json!({
-                    "external": true,
-                    "toolCallId": "toolu_03Bash",
-                    "title": "cargo test -p wire",
-                    "kind": "execute",
-                    "status": "failed",
-                    "content": [
-                        { "type": "content",
-                          "content": { "type": "text", "text": "error: no target named `wire`" } }
-                    ],
-                    "rawInput": { "command": "cargo test -p wire", "cwd": "/tmp/project" }
-                }),
-            ),
-        ),
+        item(3, a_read()),
+        item(4, an_edit()),
+        item(5, a_command_that_failed()),
         item(
             6,
             assistant(
@@ -90,6 +31,73 @@ fn a_turn_of_its_own() -> bingo_sdk::SessionState {
             ),
         ),
     ])
+}
+
+/// `claude-agent-acp`'s shape: the raw input, the locations, and the file it
+/// read as one content block.
+fn a_read() -> bingo_sdk::Item {
+    call(
+        "itm_3",
+        "read Read src/lib.rs (1 - 50)done\npub mod wire;",
+        json!({
+            "external": true,
+            "toolCallId": "toolu_01Read",
+            "title": "Read src/lib.rs (1 - 50)",
+            "kind": "read",
+            "status": "completed",
+            "content": [
+                { "type": "content", "content": { "type": "text", "text": "pub mod wire;" } }
+            ],
+            "locations": [{ "path": "/tmp/project/src/lib.rs", "line": 1 }],
+            "rawInput": { "file_path": "/tmp/project/src/lib.rs", "offset": 1 },
+            "rawOutput": { "lines": 1 }
+        }),
+    )
+}
+
+/// The call worth carrying structurally: an edit reports itself as a diff, and
+/// the row draws it through the renderer every other patch goes through.
+fn an_edit() -> bingo_sdk::Item {
+    call(
+        "itm_4",
+        "edit Edit src/lib.rsdone\n--- /tmp/project/src/lib.rs\n-pub mod wire;\n+pub mod envelope;",
+        json!({
+            "external": true,
+            "toolCallId": "toolu_02Edit",
+            "title": "Edit src/lib.rs",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/tmp/project/src/lib.rs",
+                "oldText": "pub mod wire;",
+                "newText": "pub mod envelope;"
+            }],
+            "locations": [{ "path": "/tmp/project/src/lib.rs" }],
+            "rawInput": { "file_path": "/tmp/project/src/lib.rs" }
+        }),
+    )
+}
+
+/// A failed call is still a call: the status is the agent's own, and the row
+/// says it where every other row says it.
+fn a_command_that_failed() -> bingo_sdk::Item {
+    call(
+        "itm_5",
+        "run cargo test -p wirefailed\nerror: no target named `wire`",
+        json!({
+            "external": true,
+            "toolCallId": "toolu_03Bash",
+            "title": "cargo test -p wire",
+            "kind": "execute",
+            "status": "failed",
+            "content": [
+                { "type": "content",
+                  "content": { "type": "text", "text": "error: no target named `wire`" } }
+            ],
+            "rawInput": { "command": "cargo test -p wire", "cwd": "/tmp/project" }
+        }),
+    )
 }
 
 /// A thought of the agent's own, which carries no `acp` mark and is drawn as
