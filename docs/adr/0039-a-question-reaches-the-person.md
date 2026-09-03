@@ -65,7 +65,12 @@ a second representation.)
   learn the permission modes.
 - MCP elicitation and future device-code prompts have their door
   ready; each is its own small mapping when its need arrives.
-- No new dependency; the wire is untouched; every change is behind a
-  defaulted method or a defaulted trait verb.
+- No new dependency; the method table is untouched. The building found
+  one wire ripple the decision missed: the role rides the question's
+  own option (`QuestionOption.role`, optional — `AnswerSpec` is a
+  fieldless spelling of an answer and could not carry it), so an
+  unmarked option serializes as before and the schemas gained one
+  optional field. Everything else is behind a defaulted method or a
+  defaulted trait verb.
 
 Refs: ADR-0035 §5, ADR-0036 §2, ADR-0011; Plan: M43
