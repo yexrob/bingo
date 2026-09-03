@@ -15,6 +15,10 @@
 //!   "capabilities": { "loadSession": true, "resume": true, "image": false },
 //!   "authRequired": false,
 //!   "replay": [ { "sessionUpdate": "user_message_chunk", "content": {…} } ],
+//!   "configOptions": [ { "id": "reasoning_effort", "name": "Reasoning effort",
+//!                        "category": "thought_level", "type": "select",
+//!                        "currentValue": "medium", "options": [ … ] } ],
+//!   "legacyModels": [ { "modelId": "gpt-5[high]", "name": "GPT-5 (high)" } ],
 //!   "turns": [
 //!     {
 //!       "permission": { "toolCall": { "toolCallId": "c1", "title": "Edit" },
@@ -71,6 +75,15 @@ struct Script {
     /// What `session/load` replays before it answers.
     #[serde(default)]
     replay: Vec<Value>,
+    /// The knobs this agent declares when a session opens (ADR-0037). Absent
+    /// is an agent that has none — the key is left off the answer entirely,
+    /// which is what "does not support this" looks like on the wire.
+    #[serde(default)]
+    config_options: Vec<Value>,
+    /// The models an agent that predates config options listed instead, and
+    /// the only thing that makes `session/set_model` answerable here.
+    #[serde(default)]
+    legacy_models: Vec<Value>,
     /// Whether this agent dials the server row it is handed and speaks MCP to
     /// it. Off by default: most scenarios have nothing to do with the bridge.
     #[serde(default)]
@@ -208,6 +221,8 @@ impl Agent {
             method::SESSION_LOAD => self.loaded(&params).await?,
             method::SESSION_RESUME => self.resumed(&params).await?,
             method::SESSION_PROMPT => return self.prompt(id, &params, lines).await,
+            method::SESSION_SET_CONFIG_OPTION => self.configured(&params),
+            method::SESSION_SET_MODEL => self.set_model(&params),
             _ => Err(refusal(-32601, "method not found")),
         };
         let body = match outcome {
@@ -240,7 +255,54 @@ impl Agent {
             return Ok(Err(refusal(-32000, "Authentication required")));
         }
         self.dial(params).await?;
-        Ok(Ok(json!({ "sessionId": self.script.session_id })))
+        let mut answer = json!({ "sessionId": self.script.session_id });
+        merge(&mut answer, self.knobs());
+        Ok(Ok(answer))
+    }
+
+    /// What this agent says about its knobs when a session opens. An agent
+    /// that has none says nothing at all: an absent key is the wire's way of
+    /// saying "not supported", and an empty list is not the same claim.
+    fn knobs(&self) -> Value {
+        let mut said = json!({});
+        if !self.script.config_options.is_empty() {
+            said["configOptions"] = json!(self.script.config_options);
+        }
+        if !self.script.legacy_models.is_empty() {
+            said["models"] = json!({
+                "availableModels": self.script.legacy_models,
+                "currentModelId": self.script.legacy_models[0]["modelId"],
+            });
+        }
+        said
+    }
+
+    /// One knob turned, answered with the whole set and its current values —
+    /// which is what the protocol says a set answers with, and how a client
+    /// learns that changing one option reshaped another.
+    fn configured(&mut self, params: &Value) -> Result<Value, Value> {
+        let id = params["configId"].clone();
+        let value = params["value"].clone();
+        let Some(option) = self
+            .script
+            .config_options
+            .iter_mut()
+            .find(|option| option["id"] == id)
+        else {
+            return Err(refusal(-32602, "no such config option"));
+        };
+        option["currentValue"] = value;
+        Ok(json!({ "configOptions": self.script.config_options }))
+    }
+
+    /// The door codex-acp had before config options. An agent that never had
+    /// it answers the way it answers any other method it does not have.
+    fn set_model(&mut self, params: &Value) -> Result<Value, Value> {
+        if self.script.legacy_models.is_empty() {
+            return Err(refusal(-32601, "method not found"));
+        }
+        let _ = params;
+        Ok(json!({}))
     }
 
     /// A load replays what it holds before it answers. The client is expected
@@ -253,7 +315,7 @@ impl Agent {
         for update in self.script.replay.clone() {
             self.update(update).await?;
         }
-        Ok(Ok(json!({})))
+        Ok(Ok(self.knobs()))
     }
 
     async fn resumed(&mut self, params: &Value) -> Result<Result<Value, Value>, Failed> {
@@ -261,7 +323,7 @@ impl Agent {
             return Ok(Err(refusal(-32601, "session/resume is not here")));
         }
         self.dial(params).await?;
-        Ok(Ok(json!({})))
+        Ok(Ok(self.knobs()))
     }
 
     /// Dial the row bingo wrote for itself and ask what is on it. Every rung
@@ -530,4 +592,15 @@ fn ours(params: &Value) -> Option<Value> {
 
 fn refusal(code: i64, message: &str) -> Value {
     json!({ "code": code, "message": message })
+}
+
+/// One object's keys written over another's, so an answer says what it has to
+/// say and the knobs are added beside it.
+fn merge(into: &mut Value, from: Value) {
+    let (Some(into), Some(from)) = (into.as_object_mut(), from.as_object()) else {
+        return;
+    };
+    for (key, value) in from {
+        into.insert(key.clone(), value.clone());
+    }
 }

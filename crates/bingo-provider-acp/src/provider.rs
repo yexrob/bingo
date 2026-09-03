@@ -109,8 +109,14 @@ impl Provider for AcpProvider {
     }
 
     /// The agent's own catalogue (ADR-0037 §2), served through the door every
-    /// endpoint-answered list rides (ADR-0026): the models the last session
-    /// opening declared, behind bingo's own label for the agent's default.
+    /// endpoint-answered list rides (ADR-0026).
+    ///
+    /// An external agent's models are per-session state and nothing else:
+    /// there is no door in the protocol that answers "what do you serve"
+    /// before a session is open, which is why they are harvested at all three
+    /// that do — `session/new`, `session/load` and `session/resume` — and
+    /// refreshed from every set the client makes. Before any session, and
+    /// after the last one ends, `agent` alone is the honest answer.
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(catalogue(self.sessions.models(&self.name).await))
     }

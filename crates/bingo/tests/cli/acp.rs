@@ -19,6 +19,10 @@ use super::*;
 /// conversation the other way, and it reads on its own terms.
 mod bridge;
 
+/// So is the pair of knobs: `/think` and `/model` reaching the agent is its
+/// own story (ADR-0037), and it reads on its own terms.
+mod knobs;
+
 /// The scripted agent is a binary of another crate, built beside this one.
 /// `cargo test --workspace` and CI build it; a bare `cargo test -p bingo` does
 /// not, and these tests say so once rather than failing on a file nobody in
@@ -160,6 +164,24 @@ impl Scripted {
     /// the only way to put two turns, or an interrupt, into one process.
     fn hosted(&self) -> Command {
         self.hosted_with(&[])
+    }
+
+    /// The same, answering in frames rather than the envelope: a scenario that
+    /// has to read what a `/command` inside the run answered reads the stream
+    /// every surface reads, not the host's summary of it.
+    fn driven(&self, model: &str) -> Command {
+        let mut cmd = self.base();
+        cmd.args([
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "json",
+            "--provider",
+            "scripted",
+            "--model",
+            model,
+        ]);
+        cmd
     }
 
     /// The same, for a scenario whose agent calls a tool the gate would stop

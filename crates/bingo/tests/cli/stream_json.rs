@@ -219,6 +219,21 @@ impl Host {
         Some(value)
     }
 
+    /// Read until a frame carries this event; the run is certainly past it by
+    /// then. For a host-driven run answering in frames rather than the
+    /// envelope — `until` reads the envelope's own `type`, and a frame has
+    /// none of its own.
+    pub(crate) fn until_event(&mut self, kind: &str) -> Value {
+        loop {
+            let line = self
+                .line()
+                .unwrap_or_else(|| panic!("stdout ended before a {kind} event"));
+            if line["event"]["type"] == kind {
+                return line;
+            }
+        }
+    }
+
     /// Read until a line of this type; the run is certainly past it by then.
     pub(crate) fn until(&mut self, kind: &str) -> Value {
         loop {
