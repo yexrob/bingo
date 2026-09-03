@@ -336,7 +336,7 @@ impl Sessions {
             .climb(&connection, &inbox, session, &place, history, opening)
             .await?;
         self.journal(session, name, &entered.acp).await;
-        Ok(Arc::new(Link {
+        let link = Arc::new(Link {
             connection,
             acp: entered.acp,
             capabilities: hello.agent_capabilities,
@@ -345,7 +345,24 @@ impl Sessions {
             knobs: Knobs::new(entered.declared),
             inbox,
             _adapter: handle,
-        }))
+        });
+        self.preset(name, adapter, &link).await;
+        Ok(link)
+    }
+
+    /// What the adapter's own row asks of every session with it, said once per
+    /// opening and before any prompt (`config::Adapter::options`). Here rather
+    /// than beside a turn because this is what an opening *is*: a respawned
+    /// child climbs back in through here too, and comes back set the way the
+    /// row says rather than the way its predecessor was left.
+    async fn preset(&self, name: &str, adapter: &Adapter, link: &Link) {
+        if adapter.options.is_empty() {
+            return;
+        }
+        let host = self.host.lock().await.clone();
+        link.knobs
+            .preset(&wire(name, link, &host), &adapter.options)
+            .await;
     }
 
     /// The knobs this request asks for, turned before its prompt goes out
@@ -353,13 +370,7 @@ impl Sessions {
     /// could not turn is a notice and a turn that still runs.
     pub async fn tune(&self, name: &str, link: &Link, wanted: Wanted<'_>) {
         let host = self.host.lock().await.clone();
-        let wire = Wire {
-            connection: &link.connection,
-            session: &link.acp,
-            adapter: name,
-            host: host.as_ref(),
-        };
-        link.knobs.apply(&wire, wanted).await;
+        link.knobs.apply(&wire(name, link, &host), wanted).await;
     }
 
     /// The models any live conversation with this adapter says it has. Derived
@@ -587,6 +598,18 @@ impl Sessions {
             return;
         };
         let _ = host.notice(level, &code, &text).await;
+    }
+}
+
+/// Where a knob's message goes and who hears about it. The host is the
+/// caller's to hold: it is a clone taken out from under a lock, and the wire
+/// only borrows it.
+fn wire<'a>(name: &'a str, link: &'a Link, host: &'a Option<HostHandle>) -> Wire<'a> {
+    Wire {
+        connection: &link.connection,
+        session: &link.acp,
+        adapter: name,
+        host: host.as_ref(),
     }
 }
 

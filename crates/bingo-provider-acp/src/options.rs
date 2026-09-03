@@ -63,6 +63,14 @@ pub fn effort(options: &[SessionConfigOption]) -> Option<Knob<'_>> {
     )
 }
 
+/// The option declared under exactly this id, whichever knob it turns out to
+/// be. No ladder and no guessing: a name that comes from a person's own row is
+/// the agent's word copied out of the agent's own list, and a near miss there
+/// is a misspelling to be told about rather than a hint to follow.
+pub fn by_id<'a>(options: &'a [SessionConfigOption], id: &str) -> Option<Knob<'a>> {
+    by(options, |option| &*option.id.0 == id)
+}
+
 /// The model-shaped option among these, if the agent declared one.
 pub fn model(options: &[SessionConfigOption]) -> Option<Knob<'_>> {
     find(

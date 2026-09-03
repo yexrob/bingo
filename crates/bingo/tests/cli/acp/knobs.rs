@@ -1,5 +1,5 @@
-//! Black-box: `/think` and `/model` reaching an ACP agent (ADR-0037), driven
-//! through the real binary against the scripted agent.
+//! Black-box: `/think`, `/model` and an adapter's own row reaching an ACP agent
+//! (ADR-0037), driven through the real binary against the scripted agent.
 //!
 //! Nothing here knows anything about the plugin's insides: a settings row, a
 //! prompt, a slash command, the frames that came out, and the log the agent
@@ -48,6 +48,28 @@ fn model_option() -> Value {
             { "value": "slow-model", "name": "Slow" }
         ]
     })
+}
+
+/// The knob claude-agent-acp has no flag and no environment variable for: its
+/// permission mode is a session config option or it is nothing, which is why a
+/// row can say `options` at all.
+fn mode_option() -> Value {
+    json!({
+        "id": "mode",
+        "name": "Mode",
+        "category": "mode",
+        "type": "select",
+        "currentValue": "default",
+        "options": [
+            { "value": "default", "name": "Default" },
+            { "value": "dontAsk", "name": "Don't ask" }
+        ]
+    })
+}
+
+/// A row that says what to set once a session with this agent is open.
+fn sets(options: Value) -> Value {
+    json!({ "options": options })
 }
 
 fn two_turns() -> Value {
@@ -375,6 +397,185 @@ fn an_adapter_with_only_the_legacy_door_is_set_through_it() {
         .first("session/set_model")
         .expect("the legacy door was used");
     assert_eq!(sent["modelId"], "gpt-5[low]");
+}
+
+/// An adapter whose permission mode has no flag and no variable is told it
+/// through the one door it has, from its own row: once the session is open,
+/// before the first prompt, in the agent's own words.
+#[test]
+fn a_row_option_reaches_the_agent_once_before_its_first_prompt() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::configured(
+        agent,
+        json!({
+            "sessionId": "acp-knob-8",
+            "capabilities": { "resume": true },
+            "configOptions": [mode_option()],
+            "turns": two_turns()
+        }),
+        sets(json!({ "mode": "dontAsk" })),
+        json!({}),
+    );
+    let mut host = stream_json::Host::start(&mut adapter.driven("agent"));
+    host.prompt("one");
+    host.until_event("turnCompleted");
+    host.prompt("two");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    assert_eq!(
+        adapter.methods(),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+            "session/prompt"
+        ],
+        "once for the session, not once a turn"
+    );
+    let calls = config_calls(&adapter);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0]["configId"], "mode");
+    assert_eq!(calls[0]["value"], "dontAsk");
+}
+
+/// A child that died between turns is a new opening (ADR-0035 §3), and an
+/// opening is what the row speaks at: the replacement comes back set the way
+/// the row says rather than the way its predecessor was left.
+#[test]
+fn a_respawned_child_is_set_from_the_row_again() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::configured(
+        agent,
+        json!({
+            "sessionId": "acp-knob-9",
+            "capabilities": { "resume": true },
+            "configOptions": [mode_option()],
+            "turns": [
+                { "updates": [chunk("First.")], "stopReason": "end_turn", "thenExit": true },
+                one_turn(vec![chunk("Second.")])
+            ]
+        }),
+        sets(json!({ "mode": "dontAsk" })),
+        json!({}),
+    );
+    let mut host = stream_json::Host::start(&mut adapter.hosted());
+    host.prompt("one");
+    host.until("result");
+    host.prompt("two");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    assert_eq!(
+        adapter.methods(),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+            "initialize",
+            "session/resume",
+            "session/set_config_option",
+            "session/prompt"
+        ],
+        "back into the same agent session, and set again on the way in"
+    );
+    let calls = config_calls(&adapter);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls.iter().all(|call| call["value"] == "dontAsk"));
+}
+
+/// The ids on a row are the agent's own words, and bingo does not know them:
+/// one it turns out not to have is a person to tell once, nothing sent, and a
+/// turn that still runs.
+#[test]
+fn an_option_the_agent_never_declared_is_one_notice_and_no_call() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::configured(
+        agent,
+        json!({
+            "sessionId": "acp-knob-10",
+            "capabilities": { "resume": true },
+            "configOptions": [effort_option()],
+            "turns": two_turns()
+        }),
+        sets(json!({ "mode": "dontAsk" })),
+        json!({}),
+    );
+    let out = adapter.turn("say hello");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(
+        adapter.methods(),
+        ["initialize", "session/new", "session/prompt"],
+        "nothing was sent for an option this agent does not have"
+    );
+
+    let all = notices(frames_of(&out));
+    let told = coded(&all, "ACP_KNOB");
+    assert_eq!(told.len(), 1, "{all:?}");
+    assert!(told[0].contains("`mode`"), "{}", told[0]);
+    assert!(
+        told[0].contains("acp.adapters.scripted.options"),
+        "the notice names the row that said it: {}",
+        told[0]
+    );
+}
+
+/// The row and `/think` are two hands on one knob, not two knobs: the row sets
+/// it on the way in, the first turn's diff finds it already there, and the
+/// change after that is one message.
+#[test]
+fn a_row_effort_and_a_later_change_are_two_messages() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::configured(
+        agent,
+        json!({
+            "sessionId": "acp-knob-11",
+            "capabilities": { "resume": true },
+            "configOptions": [effort_option()],
+            "turns": two_turns()
+        }),
+        sets(json!({ "reasoning_effort": "low" })),
+        reasons(),
+    );
+    let mut host = stream_json::Host::start(&mut adapter.driven("agent"));
+    host.prompt("one");
+    host.until_event("turnCompleted");
+    host.prompt("/think max");
+    host.until_event("intentAck");
+    host.prompt("two");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    assert_eq!(
+        adapter.methods(),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+            "session/set_config_option",
+            "session/prompt"
+        ],
+        "stderr: {}",
+        ended.err
+    );
+    let calls = config_calls(&adapter);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call["value"].clone())
+            .collect::<Vec<_>>(),
+        [json!("low"), json!("high")],
+        "the row's value first, then the change, and neither twice"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| call["configId"] == "reasoning_effort"),
+        "{calls:?}"
+    );
 }
 
 /// A spawn that names one of the agent's own models opens its session already
