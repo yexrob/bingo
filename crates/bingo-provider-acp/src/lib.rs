@@ -37,6 +37,7 @@ pub mod events;
 pub(crate) mod fixtures;
 pub mod ladder;
 pub mod method;
+pub mod options;
 pub mod provider;
 pub mod refusal;
 pub mod render;
