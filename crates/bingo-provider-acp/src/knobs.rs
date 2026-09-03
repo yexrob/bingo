@@ -57,6 +57,21 @@ impl Declared {
             legacy: legacy::models(body),
         }
     }
+
+    /// The models this declaration serves (ADR-0037 §2): the model-shaped
+    /// option's own values, or the list the older door rode in with where that
+    /// is all the agent has.
+    ///
+    /// It lives here rather than on [`Knobs`] because it is a fact about what
+    /// the agent said and not about where bingo has turned anything — which is
+    /// what lets a declaration nobody is holding a conversation with answer
+    /// too (`crate::probe`).
+    pub fn models(&self) -> Vec<ModelInfo> {
+        match options::model(&self.options) {
+            Some(knob) => knob.models(),
+            None => self.legacy.clone(),
+        }
+    }
 }
 
 /// What one request wants of these knobs.
@@ -181,13 +196,10 @@ impl Knobs {
         }
     }
 
-    /// This agent's own models, as the catalogue serves them (ADR-0026).
+    /// This agent's own models, as the catalogue serves them (ADR-0026) — as
+    /// this conversation last heard them, which a `set` answer may have moved.
     pub async fn models(&self) -> Vec<ModelInfo> {
-        let declared = self.declared.lock().await;
-        match options::model(&declared.options) {
-            Some(knob) => knob.models(),
-            None => declared.legacy.clone(),
-        }
+        self.declared.lock().await.models()
     }
 
     /// Everything this request moved, applied before its prompt goes out.
