@@ -541,6 +541,12 @@ impl Agent {
 /// One line of what this agent was told or did. A free function, not a
 /// method: the bridge and the log are two fields, and a call being logged
 /// while the bridge is being spoken to must borrow only the one it needs.
+///
+/// Flushed, not merely written: `write_all` on a `tokio::fs::File` fills a
+/// buffer whose write happens on the blocking pool, and this agent's next act
+/// may be `std::process::exit`, which takes that buffer with it. A scenario
+/// about a child that dies would then be reading a log missing exactly the
+/// line that says what killed it.
 async fn record(log: &Option<PathBuf>, method: &str, params: &Value) -> Result<(), Failed> {
     let Some(path) = log else {
         return Ok(());
@@ -552,6 +558,7 @@ async fn record(log: &Option<PathBuf>, method: &str, params: &Value) -> Result<(
         .open(path)
         .await?;
     file.write_all(line.as_bytes()).await?;
+    file.flush().await?;
     Ok(())
 }
 
