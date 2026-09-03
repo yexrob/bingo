@@ -11,9 +11,12 @@ use agent_client_protocol_schema::v1::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, RequestPermissionRequest,
     ResumeSessionRequest, ResumeSessionResponse, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+use crate::legacy::{SetModelRequest, SetModelResponse};
 
 pub const INITIALIZE: &str = "initialize";
 pub const AUTHENTICATE: &str = "authenticate";
@@ -22,6 +25,9 @@ pub const SESSION_LOAD: &str = "session/load";
 pub const SESSION_RESUME: &str = "session/resume";
 pub const SESSION_PROMPT: &str = "session/prompt";
 pub const SESSION_CANCEL: &str = "session/cancel";
+pub const SESSION_SET_CONFIG_OPTION: &str = "session/set_config_option";
+/// One adapter's own extension, not the spec's (`crate::legacy`).
+pub const SESSION_SET_MODEL: &str = "session/set_model";
 pub const SESSION_UPDATE: &str = "session/update";
 pub const SESSION_REQUEST_PERMISSION: &str = "session/request_permission";
 pub const FS_READ_TEXT_FILE: &str = "fs/read_text_file";
@@ -59,6 +65,8 @@ call!(NewSessionRequest => SESSION_NEW, NewSessionResponse);
 call!(LoadSessionRequest => SESSION_LOAD, LoadSessionResponse);
 call!(ResumeSessionRequest => SESSION_RESUME, ResumeSessionResponse);
 call!(PromptRequest => SESSION_PROMPT, PromptResponse);
+call!(SetSessionConfigOptionRequest => SESSION_SET_CONFIG_OPTION, SetSessionConfigOptionResponse);
+call!(SetModelRequest => SESSION_SET_MODEL, SetModelResponse);
 
 impl Notify for CancelNotification {
     const METHOD: &'static str = SESSION_CANCEL;
@@ -173,6 +181,33 @@ mod tests {
         reads::<LoadSessionResponse>(fixtures::load_session_response());
         writes::<ResumeSessionRequest>(fixtures::resume_session_request());
         reads::<ResumeSessionResponse>(fixtures::resume_session_response());
+    }
+
+    /// ADR-0037: the knobs' own door, and the older one beside it. What the
+    /// agent declares at `session/new` and what a set answers with are the
+    /// same shape, because a set answers with the whole set.
+    #[test]
+    fn the_knobs_door_round_trips() {
+        let declared: NewSessionResponse =
+            reads(fixtures::new_session_response_with_config_options());
+        let options = declared.config_options.expect("an agent that has knobs");
+        assert_eq!(options.len(), 2);
+        assert!(
+            crate::options::effort(&options).is_some() && crate::options::model(&options).is_some()
+        );
+
+        let set: SetSessionConfigOptionRequest = writes(fixtures::set_config_option_request());
+        assert_eq!(&*set.config_id.0, "reasoning_effort");
+        assert_eq!(
+            set.value.as_value_id().map(|value| value.0.to_string()),
+            Some("high".into()),
+            "a select's value carries no `type` of its own on the wire"
+        );
+        let answered: SetSessionConfigOptionResponse =
+            reads(fixtures::set_config_option_response());
+        assert_eq!(answered.config_options.len(), 1);
+
+        writes::<SetModelRequest>(fixtures::set_model_request());
     }
 
     #[test]

@@ -190,8 +190,16 @@ fn flatten(options: &SessionConfigSelectOptions) -> Vec<&SessionConfigSelectOpti
 /// The level a value names, by its id or failing that by its label — the two
 /// adapters title-case the same word ("Xhigh" for `xhigh`), and one of them
 /// takes its ids from a server at runtime.
-fn level_of(value: &SessionConfigSelectOption) -> Option<Effort> {
+pub fn level_of(value: &SessionConfigSelectOption) -> Option<Effort> {
     named_level(&value.value.0).or_else(|| named_level(&value.name))
+}
+
+/// bingo's own word for a level, for a sentence about one.
+pub fn word(level: Effort) -> &'static str {
+    LADDER
+        .iter()
+        .find(|(_, known)| *known == level)
+        .map_or("", |(name, _)| name)
 }
 
 fn named_level(text: &str) -> Option<Effort> {

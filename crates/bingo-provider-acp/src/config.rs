@@ -57,6 +57,11 @@ const BUILT_IN: [&str; 4] = ["anthropic", "codex", "fake", "openai"];
 /// speaks.
 pub const FAMILY: &str = "acp";
 
+/// The label for "whatever model the agent would have used on its own"
+/// (ADR-0037 §2). bingo's word and not the agent's: it is always served, is
+/// always valid, and never crosses the wire.
+pub const AGENT: &str = "agent";
+
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {

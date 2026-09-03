@@ -22,7 +22,9 @@ use agent_client_protocol_schema::v1::{
     RequestPermissionResponse, ResumeSessionRequest, SessionNotification,
 };
 use async_trait::async_trait;
-use bingo_sdk::{Env, HostHandle, KernelError, Level, Message, ProviderError, SessionId, ToolSpec};
+use bingo_sdk::{
+    Env, HostHandle, KernelError, Level, Message, ModelInfo, ProviderError, SessionId, ToolSpec,
+};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 
@@ -32,6 +34,7 @@ use crate::config::Adapter;
 use crate::connection::{Client, Connection};
 use crate::crossing::{self, Crossing};
 use crate::error::AcpError;
+use crate::knobs::{Declared, Knobs, Wanted, Wire};
 use crate::ladder::{self, Opening};
 use crate::{refusal, transcript};
 
@@ -120,6 +123,9 @@ pub struct Link {
     /// Dropping it dismisses the token, which is why it is held here: the link
     /// and the conversation end together.
     crossing: Option<Crossing>,
+    /// What this agent said its knobs are, and where bingo has turned them
+    /// (ADR-0037). They belong to the conversation and end with it.
+    pub knobs: Knobs,
     inbox: Arc<Inbox>,
     /// Dropping this ends the process group.
     _adapter: child::Adapter,
@@ -329,9 +335,42 @@ impl Sessions {
             capabilities: hello.agent_capabilities,
             preamble: Mutex::new(prelude(entered.preamble.as_deref(), crossing.is_some())),
             crossing,
+            knobs: Knobs::new(entered.declared),
             inbox,
             _adapter: handle,
         }))
+    }
+
+    /// The knobs this request asks for, turned before its prompt goes out
+    /// (ADR-0037 §4). It answers nothing: a knob is the agent's, and one bingo
+    /// could not turn is a notice and a turn that still runs.
+    pub async fn tune(&self, name: &str, link: &Link, wanted: Wanted<'_>) {
+        let host = self.host.lock().await.clone();
+        let wire = Wire {
+            connection: &link.connection,
+            session: &link.acp,
+            adapter: name,
+            host: host.as_ref(),
+        };
+        link.knobs.apply(&wire, wanted).await;
+    }
+
+    /// The models any live conversation with this adapter says it has. Derived
+    /// from what the agent declared and never kept beside it: an instance's
+    /// catalogue is as fresh as its last session opening, and before one there
+    /// is nothing of the agent's to serve (ADR-0037 §2).
+    pub async fn models(&self, adapter: &str) -> Vec<ModelInfo> {
+        let live = self
+            .links
+            .lock()
+            .await
+            .iter()
+            .find(|((name, _), _)| name == adapter)
+            .map(|(_, link)| link.clone());
+        match live {
+            Some(link) => link.knobs.models().await,
+            None => Vec::new(),
+        }
     }
 
     /// This session's way back into bingo, if there is a bridge to open it on.
@@ -460,26 +499,32 @@ impl Sessions {
     ) -> Result<Entered, AcpError> {
         match rung {
             Opening::Resume(id) => {
-                connection.call(resume(id, place)).await?;
-                Ok(Entered::at(id))
+                let (answer, body) = connection.call_seen(resume(id, place)).await?;
+                Ok(Entered::at(id, Declared::of(answer.config_options, &body)))
             }
             Opening::Load(id) => {
-                self.load(connection, inbox, id, place).await?;
-                Ok(Entered::at(id))
+                let declared = self.load(connection, inbox, id, place).await?;
+                Ok(Entered::at(id, declared))
             }
-            Opening::New => {
-                let opened = connection.call(new_session(place)).await?;
-                Ok(Entered::at(opened.session_id.0.as_ref()))
-            }
+            Opening::New => self.fresh(connection, place).await,
             Opening::Fresh { transcript } => {
-                let opened = connection.call(new_session(place)).await?;
-                let mut entered = Entered::at(opened.session_id.0.as_ref());
+                let mut entered = self.fresh(connection, place).await?;
                 if *transcript {
                     entered.preamble = self.write_transcript(session, history);
                 }
                 Ok(entered)
             }
         }
+    }
+
+    /// A session the agent has never seen before. Every rung answers with the
+    /// knobs it is offering, and this is the one that also names the session.
+    async fn fresh(&self, connection: &Connection, place: &Where<'_>) -> Result<Entered, AcpError> {
+        let (opened, body) = connection.call_seen(new_session(place)).await?;
+        Ok(Entered::at(
+            opened.session_id.0.as_ref(),
+            Declared::of(opened.config_options, &body),
+        ))
     }
 
     /// A load replays the history it holds. Nothing of it reaches the journal:
@@ -490,11 +535,12 @@ impl Sessions {
         inbox: &Arc<Inbox>,
         id: &str,
         place: &Where<'_>,
-    ) -> Result<(), AcpError> {
+    ) -> Result<Declared, AcpError> {
         inbox.loading.store(true, Ordering::Release);
-        let outcome = connection.call(load_session(id, place)).await;
+        let outcome = connection.call_seen(load_session(id, place)).await;
         inbox.loading.store(false, Ordering::Release);
-        outcome.map(|_| ())
+        let (answer, body) = outcome?;
+        Ok(Declared::of(answer.config_options, &body))
     }
 
     /// The transcript is a projection of the conversation at this moment. A
@@ -553,17 +599,19 @@ pub fn session_id_from(payload: &serde_json::Value) -> Option<&str> {
     payload["sessionId"].as_str()
 }
 
-/// Where a rung landed.
+/// Where a rung landed, and what the agent said on the way in.
 struct Entered {
     acp: String,
     preamble: Option<PathBuf>,
+    declared: Declared,
 }
 
 impl Entered {
-    fn at(acp: &str) -> Self {
+    fn at(acp: &str, declared: Declared) -> Self {
         Self {
             acp: acp.to_string(),
             preamble: None,
+            declared,
         }
     }
 }

@@ -24,8 +24,9 @@ use bingo_sdk::{
 use futures::stream;
 use tokio::sync::mpsc;
 
-use crate::config::{self, Adapter};
+use crate::config::{self, AGENT, Adapter};
 use crate::events::Mapper;
+use crate::knobs::Wanted;
 use crate::session::{Link, Sessions};
 
 type Yielded = Result<ModelEvent, ProviderError>;
@@ -91,13 +92,27 @@ impl Provider for AcpProvider {
         if link.observe(&request.tools).await {
             self.sessions.offer_changed().await;
         }
+        // ADR-0037 §4: between turns, never inside one. What the request asks
+        // for is applied to the agent before the prompt that will be answered
+        // under it — and only what moved crosses.
+        self.sessions
+            .tune(
+                &self.name,
+                &link,
+                Wanted {
+                    effort: request.reasoning,
+                    model: &request.model,
+                },
+            )
+            .await;
         Ok(hold(link, asked, cancel).await)
     }
 
-    /// ACP has no model list. What a session calls its model is bingo's label
-    /// for it; the agent chooses its own and is never told ours.
+    /// The agent's own catalogue (ADR-0037 §2), served through the door every
+    /// endpoint-answered list rides (ADR-0026): the models the last session
+    /// opening declared, behind bingo's own label for the agent's default.
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        Ok(Vec::new())
+        Ok(catalogue(self.sessions.models(&self.name).await))
     }
 
     /// The adapter owns its own login — a Claude subscription, a ChatGPT
@@ -106,6 +121,18 @@ impl Provider for AcpProvider {
     fn auth(&self) -> AuthStatus {
         AuthStatus::NotApplicable
     }
+}
+
+/// `agent` first and always: it is the one id an ACP instance serves whatever
+/// the agent has said, and it means "whatever you would have used". An agent
+/// that happens to call one of its own models that too is served once.
+fn catalogue(theirs: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    std::iter::once(ModelInfo {
+        id: AGENT.to_string(),
+        display: None,
+    })
+    .chain(theirs.into_iter().filter(|model| model.id != AGENT))
+    .collect()
 }
 
 fn nobody() -> ProviderError {

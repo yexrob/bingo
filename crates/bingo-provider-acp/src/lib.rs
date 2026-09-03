@@ -35,7 +35,9 @@ pub mod error;
 pub mod events;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod knobs;
 pub mod ladder;
+pub mod legacy;
 pub mod method;
 pub mod options;
 pub mod provider;

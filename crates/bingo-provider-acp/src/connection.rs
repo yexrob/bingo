@@ -104,11 +104,20 @@ impl Connection {
 
     /// Send a request and wait for the answer that carries its id.
     pub async fn call<C: Call>(&self, params: C) -> Result<C::Response, AcpError> {
+        self.call_seen(params).await.map(|(answer, _)| answer)
+    }
+
+    /// The same call, with the body the agent actually sent kept beside the
+    /// type it fits. For the one door whose answer carries an extension this
+    /// plugin reads: a session opening, whose legacy model list is not a field
+    /// the schema knows (`crate::legacy`).
+    pub async fn call_seen<C: Call>(&self, params: C) -> Result<(C::Response, Value), AcpError> {
         let id = RequestId::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
         let body = serde_json::to_value(params).map_err(AcpError::protocol)?;
         let answer = self.ask(id, C::METHOD, body).await?;
-        serde_json::from_value(answer)
-            .map_err(|e| AcpError::protocol(format!("{}: {e}", C::METHOD)))
+        let parsed = serde_json::from_value(answer.clone())
+            .map_err(|e| AcpError::protocol(format!("{}: {e}", C::METHOD)))?;
+        Ok((parsed, answer))
     }
 
     /// Send a notification. Nothing answers it, so nothing waits.
