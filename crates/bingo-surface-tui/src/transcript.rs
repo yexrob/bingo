@@ -1493,6 +1493,20 @@ mod tests {
         );
     }
 
+    /// Every field of the mark but the flag is optional, so a journal an older
+    /// build wrote still draws a row — the name it can state, and nothing else.
+    #[test]
+    fn a_thin_mark_from_an_older_build_still_draws_a_row() {
+        assert_eq!(
+            drawn(vec![agent_call(
+                "itm_1",
+                "tool something",
+                serde_json::json!({ "external": true }),
+            )]),
+            vec!["⏺ Tool".to_string()],
+        );
+    }
+
     /// A call that failed says so where every other row says it: the bullet.
     /// Nothing about the row is invented for it — the status is the agent's.
     #[test]

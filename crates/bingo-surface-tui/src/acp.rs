@@ -402,6 +402,19 @@ mod tests {
         );
     }
 
+    /// The mark is all this reads, and every field in it is optional: an item
+    /// an older build wrote, or one an adapter filled in thinly, is still a
+    /// call and still draws a row — it just claims nothing it was not told.
+    #[test]
+    fn a_thin_mark_is_still_a_call() {
+        let bare = agent_call("itm_1", "tool", json!({ "external": true }));
+        let call = call(&bare).expect("the flag is the whole contract");
+        assert_eq!(call.name, "Tool");
+        assert_eq!(call.about, "");
+        assert_eq!(call.status, ItemStatus::Interrupted);
+        assert!(call.output.is_none());
+    }
+
     /// An adapter newer than this build names a kind nobody here has heard of.
     /// It is still a call, and it still says so.
     #[test]
