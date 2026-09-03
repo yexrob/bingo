@@ -61,8 +61,13 @@ turn boundary already coalesces and a queue already holds.
    formation is the seater's, the stance is the seat's.
 5. **Obligation pierces every ear.** `@name` delivers `Wake` to that
    seat whatever its patience, and opens the ordinary debt; nudges
-   chase as ever, so demotion dodges nothing. `@all` pierces nothing —
-   its debt is the room's, not any seat's.
+   chase as ever, so demotion dodges nothing. `@all` pierces every ear
+   in the room but the poster's (2026-09-03: it pierced nothing, and a
+   word for everyone that wakes nobody is a word that means nothing).
+   Its debt is still the room's and not any seat's, so the chase is
+   unchanged; the sigil is answered against the roster at the moment of
+   the fan-out and never expanded into names on the post, so a seat the
+   room gains afterwards is a late reader like any other.
 
 ## Consequences
 

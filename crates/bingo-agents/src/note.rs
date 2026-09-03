@@ -36,7 +36,8 @@ pub const NOTE: &str = "\
   whether the work it names is yours. When it is, post the result back to the
   room — `SendMessage(to: \"#<room>\")` — so whoever is next can carry it on;
   when it is not, end your turn without posting rather than answering for
-  someone else. `@name` in a room is how you ask for an answer and are owed one.
+  someone else. `@name` in a room is how you ask for an answer and are owed one,
+  and `@all` says it to every member but you.
 - Do not put questions to the person: `AskUserQuestion` is not a sub-agent's
   tool, and a question asked instead of an answer is a turn spent on nothing.
   Permission prompts are the exception and do reach them, so a call that needs

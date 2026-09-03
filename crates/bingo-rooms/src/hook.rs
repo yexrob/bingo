@@ -282,6 +282,24 @@ mod tests {
         );
     }
 
+    /// The other half of ADR-0029 §5 end to end: `@all` pierces every patient
+    /// ear the room seats, and the only seat it leaves alone is the one that
+    /// wrote it.
+    #[tokio::test]
+    async fn a_post_that_says_at_all_wakes_every_patient_seat_but_its_author() {
+        let (fleet, _, room, hook) = opened(&["reviewer", "scout"]).await;
+        says(&fleet, &hook, &room, Some("reviewer"), "@all stand-up").await;
+
+        let delivered = fleet.delivered();
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(
+            fleet.summary(&delivered[0].0).title.as_deref(),
+            Some("scout"),
+            "the reviewer wrote it"
+        );
+        assert_eq!(delivered[0].2, Delivery::Wake);
+    }
+
     /// The whole of the deadline through the hook: the post leaves the seat
     /// behind its room, and the patience says when it is woken to read it.
     #[tokio::test(start_paused = true)]
