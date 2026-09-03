@@ -26,11 +26,21 @@
 //!       "stopReason": "end_turn",
 //!       "usage": { "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 },
 //!       "awaitCancel": false,
-//!       "thenExit": false
+//!       "thenExit": false,
+//!       "mcpList": false,
+//!       "mcp": [ { "tool": "SendMessage", "arguments": {…} } ]
 //!     }
 //!   ]
 //! }
 //! ```
+//!
+//! With `"mcp": true` at the top, the agent dials the server row bingo injects
+//! into `session/new` and speaks MCP to it over its stdio, the way a real
+//! adapter dials the servers it is handed (ADR-0036 §3). What it lists and
+//! what it calls both reach the log, so a black-box asserts what the agent was
+//! actually offered and actually got back.
+
+mod mcp;
 
 use std::path::PathBuf;
 
@@ -45,6 +55,9 @@ type Failed = Box<dyn std::error::Error>;
 const SCRIPT: &str = "BINGO_FAKE_ACP_SCRIPT";
 const LOG: &str = "BINGO_FAKE_ACP_LOG";
 
+/// The row bingo writes for itself, which is the one this agent dials.
+const BRIDGE: &str = "bingo";
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Script {
@@ -58,6 +71,10 @@ struct Script {
     /// What `session/load` replays before it answers.
     #[serde(default)]
     replay: Vec<Value>,
+    /// Whether this agent dials the server row it is handed and speaks MCP to
+    /// it. Off by default: most scenarios have nothing to do with the bridge.
+    #[serde(default)]
+    mcp: bool,
     #[serde(default)]
     turns: Vec<Turn>,
 }
@@ -100,6 +117,14 @@ struct Turn {
     /// does. The next turn must find a new child.
     #[serde(default)]
     then_exit: bool,
+    /// Ask the bridge what it offers, mid-turn. What comes back is logged, so
+    /// an offer that moved between turns can be seen to have moved.
+    #[serde(default)]
+    mcp_list: bool,
+    /// Calls to make over the bridge before anything is streamed: the agent is
+    /// blocked on each answer, the way a real one is.
+    #[serde(default)]
+    mcp: Vec<Value>,
 }
 
 fn end_turn() -> String {
@@ -116,6 +141,7 @@ async fn main() -> Result<(), Failed> {
         log,
         turn: 0,
         out: tokio::io::stdout(),
+        bridge: None,
     }
     .serve(BufReader::new(tokio::io::stdin()).lines())
     .await
@@ -126,6 +152,9 @@ struct Agent {
     log: Option<PathBuf>,
     turn: usize,
     out: Stdout,
+    /// The bridge, once this agent has dialled it. One per child, the way a
+    /// real adapter keeps one connection per configured server.
+    bridge: Option<mcp::Server>,
 }
 
 impl Agent {
@@ -164,9 +193,9 @@ impl Agent {
         let id = asked.id.clone();
         let outcome = match asked.method.as_ref() {
             method::INITIALIZE => Ok(self.handshake()),
-            method::SESSION_NEW => self.open(),
-            method::SESSION_LOAD => self.load().await?,
-            method::SESSION_RESUME => self.resume(),
+            method::SESSION_NEW => self.opened(&params).await?,
+            method::SESSION_LOAD => self.loaded(&params).await?,
+            method::SESSION_RESUME => self.resumed(&params).await?,
             method::SESSION_PROMPT => return self.prompt(id, &params, lines).await,
             _ => Err(refusal(-32601, "method not found")),
         };
@@ -195,30 +224,49 @@ impl Agent {
     }
 
     /// An adapter with no credential refuses here, in the protocol's own code.
-    fn open(&self) -> Result<Value, Value> {
+    async fn opened(&mut self, params: &Value) -> Result<Result<Value, Value>, Failed> {
         if self.script.auth_required {
-            return Err(refusal(-32000, "Authentication required"));
+            return Ok(Err(refusal(-32000, "Authentication required")));
         }
-        Ok(json!({ "sessionId": self.script.session_id }))
+        self.dial(params).await?;
+        Ok(Ok(json!({ "sessionId": self.script.session_id })))
     }
 
     /// A load replays what it holds before it answers. The client is expected
     /// to swallow that replay: the journal already has those turns.
-    async fn load(&mut self) -> Result<Result<Value, Value>, Failed> {
+    async fn loaded(&mut self, params: &Value) -> Result<Result<Value, Value>, Failed> {
         if !self.script.capabilities.load_session {
             return Ok(Err(refusal(-32601, "session/load is not here")));
         }
+        self.dial(params).await?;
         for update in self.script.replay.clone() {
             self.update(update).await?;
         }
         Ok(Ok(json!({})))
     }
 
-    fn resume(&self) -> Result<Value, Value> {
+    async fn resumed(&mut self, params: &Value) -> Result<Result<Value, Value>, Failed> {
         if !self.script.capabilities.resume {
-            return Err(refusal(-32601, "session/resume is not here"));
+            return Ok(Err(refusal(-32601, "session/resume is not here")));
         }
-        Ok(json!({}))
+        self.dial(params).await?;
+        Ok(Ok(json!({})))
+    }
+
+    /// Dial the row bingo wrote for itself and ask what is on it. Every rung
+    /// of the restore ladder carries the row, so whichever one opened this
+    /// conversation, this is where the bridge is met.
+    async fn dial(&mut self, params: &Value) -> Result<(), Failed> {
+        if !self.script.mcp || self.bridge.is_some() {
+            return Ok(());
+        }
+        let Some(row) = ours(params) else {
+            return self.record("mcp/absent", &params["mcpServers"]).await;
+        };
+        let mut server = mcp::Server::dial(&row).await?;
+        let offered = server.list().await?;
+        self.bridge = Some(server);
+        self.record("mcp/tools", &offered).await
     }
 
     async fn prompt(
@@ -247,6 +295,7 @@ impl Agent {
             self.ask(method::ELICITATION_CREATE, "elicitation", request, lines)
                 .await?;
         }
+        self.bridged(turn.mcp_list, &turn.mcp).await?;
         for update in turn.updates {
             self.update(update).await?;
         }
@@ -262,6 +311,33 @@ impl Agent {
         self.send(wire::result(id, answer)).await?;
         if turn.then_exit {
             std::process::exit(0);
+        }
+        Ok(())
+    }
+
+    /// What this turn does over the bridge, before it says anything: the agent
+    /// is blocked on each answer, which is the whole point of serving a call
+    /// while the turn's stream is open (ADR-0036 §2).
+    async fn bridged(&mut self, list: bool, calls: &[Value]) -> Result<(), Failed> {
+        let Some(server) = self.bridge.as_mut() else {
+            return Ok(());
+        };
+        let mut said = Vec::new();
+        if list {
+            said.push(("mcp/tools", server.list().await?));
+        }
+        for call in calls {
+            let name = call["tool"].as_str().unwrap_or_default().to_string();
+            let arguments = call["arguments"].clone();
+            let answered = server.call(&name, &arguments).await?;
+            said.push(("mcp/called", json!({ "tool": name, "answer": answered })));
+        }
+        let heard = std::mem::take(&mut server.heard);
+        for (what, value) in said {
+            self.record(what, &value).await?;
+        }
+        for method in heard {
+            self.record(&format!("mcp/{method}"), &Value::Null).await?;
         }
         Ok(())
     }
@@ -360,7 +436,20 @@ fn script_turn(turn: &Turn) -> Turn {
         usage: turn.usage.clone(),
         await_cancel: turn.await_cancel,
         then_exit: turn.then_exit,
+        mcp_list: turn.mcp_list,
+        mcp: turn.mcp.clone(),
     }
+}
+
+/// The row bingo wrote for itself among the servers it handed over. A row for
+/// somebody else's server is not this agent's to dial from here — a real one
+/// would dial them all, and this one is only ever asked about the bridge.
+fn ours(params: &Value) -> Option<Value> {
+    params["mcpServers"]
+        .as_array()?
+        .iter()
+        .find(|row| row["name"] == json!(BRIDGE))
+        .cloned()
 }
 
 fn refusal(code: i64, message: &str) -> Value {
