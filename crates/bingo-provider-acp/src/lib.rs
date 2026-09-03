@@ -27,6 +27,7 @@ pub mod bridge;
 pub mod child;
 pub mod config;
 pub mod connection;
+pub mod crossing;
 pub mod ear;
 pub mod error;
 pub mod events;
