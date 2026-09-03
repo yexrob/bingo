@@ -376,6 +376,11 @@ pub trait HostApi: Send + Sync {
     /// is refused outright, and so is a session this host does not run: the
     /// door never answers "allowed" for a question nobody could have asked.
     ///
+    /// Offer `Cancel` (or `Deny`) among the `answers`: it is how a surface
+    /// with nobody at the keyboard declines what it was handed, and a
+    /// question no surface can decline is a question that waits — nothing
+    /// here expires.
+    ///
     /// It does not join the JSON-RPC wire.
     async fn ask(
         &self,
