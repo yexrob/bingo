@@ -41,9 +41,16 @@ pub fn fold_of(folds: &Folds, item: &Item) -> Fold {
 /// and an action keep the cut they have always kept.
 fn start(item: &Item) -> Fold {
     match &item.body {
-        ItemBody::Reasoning { .. } if item.completed_at.is_some() => Fold::Shut,
+        ItemBody::Reasoning { .. } if thinking_is_over(item) => Fold::Shut,
         _ => Fold::Peek,
     }
+}
+
+/// A thought that has been had — and not one of an ACP agent's own calls,
+/// which is a reasoning item too (ADR-0035 §4) and draws as a tool row. What
+/// came back from a call is read, so it peeks the way every other result does.
+fn thinking_is_over(item: &Item) -> bool {
+    item.completed_at.is_some() && !crate::acp::is_call(item)
 }
 
 /// A click is one gesture on one row (§7): it advances the fold one step, and
@@ -130,6 +137,30 @@ mod tests {
             })
             .collect();
         assert_eq!(walk, vec![Fold::Open, Fold::Peek], "no shut to fall into");
+    }
+
+    /// An agent's own call is a reasoning item that is not a thought
+    /// (ADR-0035 §4): what came back from it is read, so it starts where every
+    /// other result does and has two states rather than three.
+    #[test]
+    fn an_agents_own_call_peeks_the_way_a_result_does() {
+        let call = crate::test_support::agent_call(
+            "itm_1",
+            "read Read src/lib.rs",
+            serde_json::json!({
+                "external": true, "kind": "read", "status": "completed",
+                "title": "Read src/lib.rs",
+                "content": [
+                    { "type": "content", "content": { "type": "text", "text": "pub mod wire;" } }
+                ]
+            }),
+        );
+        assert_eq!(fold_of(&Folds::new(), &call), Fold::Peek);
+        assert_eq!(
+            cycled(&call, Fold::Open),
+            Fold::Peek,
+            "no shut to fall into"
+        );
     }
 
     /// A person's own entry wins over the kind's start.

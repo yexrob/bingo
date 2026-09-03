@@ -18,7 +18,7 @@ use crate::effect::Effect;
 use crate::search::Search;
 use crate::tree::Tree;
 use crate::ui::{Open, Ui};
-use crate::{markdown, search, theme, transcript, wrap};
+use crate::{acp, markdown, search, theme, transcript, wrap};
 
 /// The rows the sheet spends on itself: what it is, and the air under it.
 pub const HEAD: usize = 2;
@@ -97,11 +97,7 @@ impl Window {
 pub fn lines(item: &Item, width: usize) -> Vec<Line<'static>> {
     let body = match &item.body {
         ItemBody::Assistant { text } => markdown::render(text, width),
-        // A thought that came back empty is a row and nothing else, so `⏎` on
-        // it opens no sheet (`transcript::thought`).
-        ItemBody::Reasoning { .. } => transcript::thought(item)
-            .map(|text| markdown::render(text, width))
-            .unwrap_or_default(),
+        ItemBody::Reasoning { .. } => reasoning(item, width),
         ItemBody::ToolCall {
             output: Some(output),
             ..
@@ -111,10 +107,29 @@ pub fn lines(item: &Item, width: usize) -> Vec<Line<'static>> {
     wrap::wrap_all(&body, width)
 }
 
+/// What a reasoning item opens on: what came back from one of the agent's own
+/// calls (ADR-0035 §4), else what was thought. A thought that came back empty
+/// is a row and nothing else, and so is a call that said nothing — `⏎` on
+/// either opens no sheet.
+fn reasoning(item: &Item, width: usize) -> Vec<Line<'static>> {
+    if let Some(call) = acp::call(item) {
+        return call
+            .output
+            .map(|output| transcript::whole(&output, width))
+            .unwrap_or_default();
+    }
+    transcript::thought(item)
+        .map(|text| markdown::render(text, width))
+        .unwrap_or_default()
+}
+
 /// What the sheet is of, on its first row.
 pub fn title(item: &Item) -> String {
     match &item.body {
-        ItemBody::Reasoning { .. } => "Thinking".to_string(),
+        ItemBody::Reasoning { .. } => match acp::call(item) {
+            Some(call) => format!("{}({})", call.name, call.about),
+            None => "Thinking".to_string(),
+        },
         ItemBody::Assistant { .. } => "Answer".to_string(),
         ItemBody::ToolCall { name, input, .. } => {
             format!("{name}({})", transcript::summarize(input))
@@ -347,6 +362,52 @@ mod tests {
             vec!["The manifest first, then the lockfile.".to_string()],
         );
         assert_eq!(title(&item), "Thinking");
+    }
+
+    /// One of the agent's own calls opens on what came back and says which
+    /// call it was, exactly as any other row's sheet does (ADR-0035 §4) — not
+    /// on the heading its item's text carries.
+    #[test]
+    fn an_agents_own_call_opens_on_what_came_back() {
+        let call = agent_call(
+            "itm_1",
+            "run npm testdone\nok",
+            serde_json::json!({
+                "external": true,
+                "toolCallId": "command-123",
+                "title": "npm test",
+                "kind": "execute",
+                "status": "completed",
+                "content": [
+                    { "type": "content", "content": { "type": "text", "text": "42 passed" } }
+                ],
+                "rawInput": { "command": "npm test", "cwd": "/tmp/project" }
+            }),
+        );
+        assert_eq!(
+            lines(&call, 60)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["42 passed".to_string()],
+        );
+        assert_eq!(title(&call), "Run(npm test)");
+    }
+
+    /// And a call that said nothing shows everything it has on its row, so
+    /// `⏎` opens no sheet on it — the same rule an empty thought follows.
+    #[test]
+    fn an_agents_call_that_said_nothing_opens_nothing() {
+        let call = agent_call(
+            "itm_1",
+            "mode plan",
+            serde_json::json!({
+                "external": true, "kind": "switch_mode", "status": "completed",
+                "title": "plan", "content": []
+            }),
+        );
+        assert!(lines(&call, 60).is_empty());
+        assert_eq!(title(&call), "Mode(plan)");
     }
 
     /// A table never wraps: it folds to the width it is laid out in (design

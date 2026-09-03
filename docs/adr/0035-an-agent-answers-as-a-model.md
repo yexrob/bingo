@@ -58,8 +58,11 @@ tokio, `Send`).
    its status and its output ride the reasoning item's provider
    metadata, marked `acp.external: true`: journaled whole, executed
    never. A surface that wants tool rows for them reads that metadata
-   — a surface slice, no kernel word; until it exists they read as
-   the thought's record.
+   — a surface slice, no kernel word. The TUI does, since 2026-09-03
+   (`bingo-surface-tui`'s `acp` module): a finished call draws as the
+   tool row it was, a call still arriving carries no metadata yet and
+   reads as the thought's record, and `--print` reads that record
+   still.
 5. **Permissions are the agent's own.** The adapter is a whole agent,
    permission machinery included; the row that spawns it says what it
    may do in the adapter's own words (args or env — Claude Code's

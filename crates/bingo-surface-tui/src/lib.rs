@@ -34,7 +34,9 @@
 //! - [`window`] is what every list a cursor walks draws when it outgrows its
 //!   room: the rows around the cursor, and a `…` at each end it cut.
 //! - [`skill`] answers whether an item is a skill run and which one, so the
-//!   model's `Skill(guide)` and a person's `/guide` come to the one row.
+//!   model's `Skill(guide)` and a person's `/guide` come to the one row, and
+//!   [`acp`] answers the same for a call an ACP agent ran on its own side
+//!   (ADR-0035 §4) — a reasoning item that draws as the tool row it was.
 //!
 //! # What a person types
 //!
@@ -42,6 +44,7 @@
 //! §6). Every other `/name` and every `!line` is submitted verbatim: the
 //! session actor parses commands, not the client.
 
+mod acp;
 mod blocks;
 mod clock;
 mod commands;

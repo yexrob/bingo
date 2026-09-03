@@ -18,7 +18,7 @@ use crate::clock::{self, Anim, Now};
 use crate::fold::{self, Fold, Folds};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{commands, markdown, paths, theme, views, wrap};
+use crate::{acp, commands, markdown, paths, theme, views, wrap};
 
 /// How long the comet tail of a block still arriving takes to cool (§6).
 pub const COMET: Duration = Duration::from_millis(180);
@@ -135,7 +135,14 @@ pub fn item_lines(
             false => user(parts, origin.principal.as_deref(), rows),
         },
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
-        ItemBody::Reasoning { .. } => thinking(item, fold, rows),
+        // An agent that runs its own tools journals each finished call as a
+        // reasoning item whose metadata is the whole call (ADR-0035 §4), so
+        // what a reasoning item draws is the one question of whether it is a
+        // thought or a call ([`crate::acp`]).
+        ItemBody::Reasoning { .. } => match acp::call(item) {
+            Some(call) => agent_call(call, fold, rows, cue),
+            None => thinking(item, fold, rows),
+        },
         ItemBody::ToolCall { .. } => called(item, agents, fold, rows, cue),
         ItemBody::Action { name, args, result } => {
             action(item.status, name, args, result.as_ref(), fold, rows)
@@ -197,7 +204,7 @@ fn called(
             Call {
                 status: item.status,
                 name,
-                input,
+                about: summarize(input),
                 output: output.as_ref(),
                 progress: progress.as_deref(),
                 fold,
@@ -207,6 +214,36 @@ fn called(
             cue,
         ),
     }
+}
+
+/// One of the agent's own calls, as the row every other call wears: the same
+/// bullet, the same signature, the same folded result. The heading lines the
+/// provider wrote into the item's text are what this row replaces — drawn as
+/// well as the row, the two would say the same thing twice.
+///
+/// A call still running has no metadata to read (the provider writes it when
+/// the block closes), so it never reaches here: it draws as the thought it
+/// looks like, which is what it did before this row existed.
+fn agent_call(call: acp::Call, fold: Fold, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
+    let acp::Call {
+        name,
+        about,
+        status,
+        output,
+    } = call;
+    tool_call(
+        Call {
+            status,
+            name,
+            about,
+            output: output.as_ref(),
+            progress: None,
+            fold,
+            run: None,
+        },
+        rows,
+        cue,
+    )
 }
 
 // ---- the two marks ------------------------------------------------------
@@ -617,7 +654,10 @@ pub fn thought(item: &Item) -> Option<&str> {
 struct Call<'a> {
     status: ItemStatus,
     name: &'a str,
-    input: &'a Value,
+    /// What the row says the call is about, in the words whoever built it
+    /// reads the call in: a tool's input as [`summarize`] spells it, an ACP
+    /// agent's own input or title ([`crate::acp`]).
+    about: String,
     output: Option<&'a ToolOutput>,
     progress: Option<&'a str>,
     /// How much of what came back is shown.
@@ -632,11 +672,7 @@ fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
     let style = live_bullet(call.status, failed, rows, cue);
     let mut out = match call.run {
         Some(run) => skill_row(run, style, rows),
-        None => speaks(
-            style,
-            vec![signature(call.name, &summarize(call.input), rows)],
-            rows,
-        ),
+        None => speaks(style, vec![signature(call.name, &call.about, rows)], rows),
     };
     out.extend(result(&call, rows));
     out
@@ -943,8 +979,8 @@ fn rule(text: &str, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::test_support::{
-        assistant, completed, delivered, folded, frame, item, post, receipt_item, running_tool,
-        scene, started, started_tool, tool, ts, user as person,
+        agent_call, assistant, completed, delivered, folded, frame, item, post, receipt_item,
+        running_tool, scene, started, started_tool, tool, ts, user as person,
     };
     use bingo_sdk::{Event, ItemId};
 
@@ -1390,6 +1426,114 @@ mod tests {
             drawn(vec![thinking_item("")]),
             vec!["✻ Thinking…".to_string()],
         );
+    }
+
+    /// ADR-0035 §4: an ACP agent runs its own tools and journals each finished
+    /// call as a reasoning item whose metadata is the whole call. It draws as
+    /// the call it was — the same bullet, signature and folded result every
+    /// other call wears — and the heading the item's text carries is what the
+    /// row replaces rather than repeats.
+    #[test]
+    fn an_agents_own_call_draws_as_a_tool_row_and_not_as_a_thought() {
+        assert_eq!(
+            drawn(vec![agent_call(
+                "itm_1",
+                "read Read src/lib.rs (1 - 50)done\npub mod wire;",
+                serde_json::json!({
+                    "external": true,
+                    "toolCallId": "toolu_01Read",
+                    "title": "Read src/lib.rs (1 - 50)",
+                    "kind": "read",
+                    "status": "completed",
+                    "content": [
+                        { "type": "content",
+                          "content": { "type": "text", "text": "pub mod wire;" } }
+                    ],
+                    "rawInput": { "file_path": "/tmp/project/src/lib.rs" },
+                    "rawOutput": { "lines": 1 }
+                }),
+            )]),
+            vec![
+                "⏺ Read(src/lib.rs)".to_string(),
+                "  ⎿  pub mod wire;".to_string(),
+            ],
+        );
+    }
+
+    /// A call still being made carries no metadata — the provider writes it
+    /// when the block closes — so it reads exactly as it did before the row
+    /// existed: the heading, under `✻ Thinking…`.
+    #[test]
+    fn an_agents_call_still_running_reads_as_the_text_it_is() {
+        assert_eq!(
+            drawn(vec![thinking_item("read Read src/lib.rs (1 - 50)")]),
+            vec![
+                "✻ Thinking…".to_string(),
+                "  ⎿  read Read src/lib.rs (1 - 50)".to_string(),
+            ],
+        );
+    }
+
+    /// And a thought is a thought: no metadata, no row. The mark is the whole
+    /// of what tells the two apart.
+    #[test]
+    fn a_thought_without_the_mark_is_untouched() {
+        assert_eq!(
+            drawn(vec![thought_item("The manifest first.", 2)]),
+            vec!["✻ Thought for 2s".to_string()],
+        );
+        assert_eq!(
+            drawn(vec![agent_call(
+                "itm_1",
+                "The manifest first.",
+                serde_json::json!({ "title": "not a call" }),
+            )]),
+            vec!["✻ Thought for 1s".to_string()],
+            "a namespace without the flag is somebody's private note, not a call"
+        );
+    }
+
+    /// Every field of the mark but the flag is optional, so a journal an older
+    /// build wrote still draws a row — the name it can state, and nothing else.
+    #[test]
+    fn a_thin_mark_from_an_older_build_still_draws_a_row() {
+        assert_eq!(
+            drawn(vec![agent_call(
+                "itm_1",
+                "tool something",
+                serde_json::json!({ "external": true }),
+            )]),
+            vec!["⏺ Tool".to_string()],
+        );
+    }
+
+    /// A call that failed says so where every other row says it: the bullet.
+    /// Nothing about the row is invented for it — the status is the agent's.
+    #[test]
+    fn a_failed_call_wears_the_row_a_failed_tool_wears() {
+        let state = stated(vec![agent_call(
+            "itm_1",
+            "tool toolu_04Bashfailed\nno such file",
+            serde_json::json!({
+                "external": true,
+                "toolCallId": "toolu_04Bash",
+                "title": "toolu_04Bash",
+                "status": "failed",
+                "content": [
+                    { "type": "content",
+                      "content": { "type": "text", "text": "no such file" } }
+                ]
+            }),
+        )]);
+        assert_eq!(
+            rendered(&state),
+            vec![
+                "⏺ Tool(toolu_04Bash)".to_string(),
+                "  ⎿  no such file".to_string(),
+            ],
+        );
+        let item = state.items.first().expect("the call");
+        assert_eq!(fold::fold_of(&Folds::new(), item), Fold::Peek);
     }
 
     /// Under a second is a moment, not no time at all.

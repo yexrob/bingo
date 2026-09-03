@@ -16,6 +16,9 @@ use crate::test_support::*;
 use crate::tree::Tree;
 use crate::ui::{Open, Switcher, Ui};
 
+/// The screens a call an ACP agent ran on its own side is read through
+/// (ADR-0035 §4).
+mod acp;
 /// Where the colour lands on these same scenes (§4).
 mod colours;
 /// The screens one skill run is read through (§4's skill row).
