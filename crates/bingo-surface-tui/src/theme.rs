@@ -776,6 +776,9 @@ mod tests {
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
+                    // What was said into a session, and who by: the name a
+                    // post carries and the words after it.
+                    "transcript/said.rs",
                     "view.rs",
                     "views/actions.rs",
                     "views/keyvalue.rs",
@@ -805,6 +808,7 @@ mod tests {
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
+                    "transcript/said.rs",
                     "tree.rs",
                     "view.rs",
                     "views/actions.rs",
@@ -828,7 +832,8 @@ mod tests {
                     "rail.rs",
                     "search.rs",
                     "select.rs",
-                    "transcript.rs",
+                    // The bar a person's own line is a band on.
+                    "transcript/said.rs",
                 ],
             ),
             (
