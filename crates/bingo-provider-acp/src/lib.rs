@@ -11,6 +11,10 @@
 //! [`method`] table, [`session`] keeps one conversation per bingo session and
 //! climbs the [`ladder`] to get back into it, [`events`] turns what comes back
 //! into `ModelEvent`s, and [`provider`] is the face the kernel sees.
+//!
+//! Beside all of that runs [`bridge`], which is the conversation the other
+//! way: bingo's shared tools served to the agent as MCP, so an ACP member can
+//! act and not only read (ADR-0036).
 
 use std::sync::{Arc, OnceLock};
 
@@ -19,6 +23,7 @@ use bingo_sdk::{
     Registrar,
 };
 
+pub mod bridge;
 pub mod child;
 pub mod config;
 pub mod connection;
