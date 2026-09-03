@@ -1,6 +1,13 @@
-//! A tree attachment (ADR-0010 §3): the root's frames and every live
-//! descendant's on one stream, and a port that answers an interaction
-//! wherever in the tree it was opened.
+//! A tree attachment (ADR-0010 §3): the root's frames and every descendant's
+//! on one stream, and a port that answers an interaction wherever in the tree
+//! it was opened.
+//!
+//! A tree has two authorities. The descendants this host runs are followed
+//! live; the ones only the store knows — a resume revives the root alone —
+//! are replayed from their journals onto the same stream, read-only, so a
+//! client folds the whole tree from frames whether or not this process runs
+//! it. A replayed session that later wakes here is followed on from where its
+//! replay stopped.
 //!
 //! The forwarder is the one subscriber of each session in the tree; the
 //! client reads a channel the forwarder fills. A session whose stream lags is
@@ -9,7 +16,7 @@
 //! client; what a lag loses is what it loses everywhere — the deltas and
 //! notices the journal never keeps.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -52,14 +59,13 @@ pub(super) async fn attach(
     let mut forwarder = Forwarder {
         host,
         root: root.id().clone(),
-        sessions: HashMap::new(),
-        last: HashMap::new(),
+        followed: HashMap::new(),
         streams: SelectAll::new(),
         owners: Arc::clone(&owners),
         gateway: Some(gateway),
         out,
     };
-    forwarder.follow(root.clone(), events);
+    forwarder.follow_live(root.clone(), events);
     forwarder.adopt_descendants().await;
     tokio::spawn(forwarder.run());
     let events = stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|f| (f, rx)) });
@@ -79,14 +85,34 @@ struct Forwarder {
     host: Weak<Host>,
     root: SessionId,
     /// Every session followed, root included.
-    sessions: HashMap<SessionId, Mailbox>,
-    /// The last `seq` forwarded per session, where a healed stream resumes.
-    last: HashMap<SessionId, Seq>,
+    followed: HashMap<SessionId, Followed>,
     streams: SelectAll<TaggedStream>,
     owners: Owners,
     /// `None` once the host is gone; the streams end on their own then.
     gateway: Option<broadcast::Receiver<GatewayEvent>>,
     out: mpsc::Sender<Frame>,
+}
+
+/// One session this attachment carries.
+struct Followed {
+    /// The last `seq` forwarded, where a healed or adopted stream resumes;
+    /// `ZERO` until the first frame goes out.
+    last: Seq,
+    source: Source,
+}
+
+/// Where a followed session's frames come from.
+enum Source {
+    /// It runs on this host: its mailbox heals a lag and owns its
+    /// interactions.
+    Live(Mailbox),
+    /// A stored journal still draining onto the stream. Nothing is followed
+    /// over it: the live stream would repeat what it has not reached yet.
+    Replaying,
+    /// Nothing is arriving from it — it never ran here, or it stopped. Its
+    /// `last` is kept, so a session that comes back is followed on from
+    /// there rather than from its head.
+    Absent,
 }
 
 impl Forwarder {
@@ -100,7 +126,7 @@ impl Forwarder {
                         }
                     }
                     Some(Tagged::End(session)) => {
-                        if self.ended(session) {
+                        if self.ended(session).await {
                             return;
                         }
                     }
@@ -111,10 +137,40 @@ impl Forwarder {
         }
     }
 
-    fn follow(&mut self, mailbox: Mailbox, frames: FrameStream) {
-        let id = mailbox.id().clone();
-        self.sessions.insert(id.clone(), mailbox);
+    /// Put one session's frames on the client's stream, keeping wherever an
+    /// earlier stream of the same session left off.
+    fn follow(&mut self, id: SessionId, frames: FrameStream, source: Source) {
+        let last = self.since(&id);
+        self.followed.insert(id.clone(), Followed { last, source });
         self.streams.push(tagged(id, frames));
+    }
+
+    fn follow_live(&mut self, mailbox: Mailbox, frames: FrameStream) {
+        let id = mailbox.id().clone();
+        self.follow(id, frames, Source::Live(mailbox));
+    }
+
+    /// Where this attachment left a session: `events_since` and the store's
+    /// `replay` both give what is *after* it, so a stream resumed here
+    /// repeats nothing.
+    fn since(&self, session: &SessionId) -> Seq {
+        self.followed.get(session).map_or(Seq::ZERO, |f| f.last)
+    }
+
+    fn mailbox(&self, session: &SessionId) -> Option<Mailbox> {
+        match self.followed.get(session).map(|f| &f.source) {
+            Some(Source::Live(mailbox)) => Some(mailbox.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether this session's frames are already on their way: it runs here,
+    /// or a replay of its journal is still draining.
+    fn arriving(&self, session: &SessionId) -> bool {
+        matches!(
+            self.followed.get(session).map(|f| &f.source),
+            Some(Source::Live(_) | Source::Replaying)
+        )
     }
 
     /// Returns whether the client is still there.
@@ -123,46 +179,71 @@ impl Forwarder {
             self.heal(frame.session).await;
             return true;
         }
-        self.last.insert(frame.session.clone(), frame.seq);
+        if let Some(followed) = self.followed.get_mut(&frame.session) {
+            followed.last = frame.seq;
+        }
         self.note_interaction(&frame);
         self.out.send(frame).await.is_ok()
     }
 
     /// A lagged stream ended at its marker; resume it from the journal.
     async fn heal(&mut self, session: SessionId) {
-        let Some(mailbox) = self.sessions.get(&session).cloned() else {
+        let Some(mailbox) = self.mailbox(&session) else {
             return;
         };
-        let since = self.last.get(&session).copied().unwrap_or(Seq::ZERO);
+        let since = self.since(&session);
         if let Ok(frames) = mailbox.events_since(since).await {
-            self.streams.push(tagged(session, frames));
+            self.follow(session, frames, Source::Live(mailbox));
         }
     }
 
     /// Returns whether the whole attachment is over.
-    fn ended(&mut self, session: SessionId) -> bool {
+    async fn ended(&mut self, session: SessionId) -> bool {
         if session == self.root {
             return true;
         }
-        // A healed stream's old half ends too; only a session that is gone
-        // is forgotten.
-        let live = self
-            .host
-            .upgrade()
-            .is_some_and(|host| host.live(&session).is_ok());
-        if !live {
-            self.sessions.remove(&session);
-            self.last.remove(&session);
+        if self.replaying(&session) {
+            self.replayed(&session).await;
+        } else if !self.lives(&session) {
+            // A healed stream's old half ends while its session runs on;
+            // this one does not, and nothing more is coming from it.
+            self.absent(&session);
         }
         false
+    }
+
+    fn replaying(&self, session: &SessionId) -> bool {
+        matches!(
+            self.followed.get(session).map(|f| &f.source),
+            Some(Source::Replaying)
+        )
+    }
+
+    /// A stored journal is out whole. If the session has woken on this host
+    /// meanwhile, its own stream carries on from where the replay stopped.
+    async fn replayed(&mut self, session: &SessionId) {
+        self.absent(session);
+        self.adopt(session).await;
+    }
+
+    fn absent(&mut self, session: &SessionId) {
+        if let Some(followed) = self.followed.get_mut(session) {
+            followed.source = Source::Absent;
+        }
+    }
+
+    fn lives(&self, session: &SessionId) -> bool {
+        self.host
+            .upgrade()
+            .is_some_and(|host| host.live(session).is_ok())
     }
 
     fn note_interaction(&self, frame: &Frame) {
         let mut owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
         match &frame.event {
             Event::InteractionOpened { interaction } => {
-                if let Some(mailbox) = self.sessions.get(&frame.session) {
-                    owners.insert(interaction.id.clone(), mailbox.clone());
+                if let Some(mailbox) = self.mailbox(&frame.session) {
+                    owners.insert(interaction.id.clone(), mailbox);
                 }
             }
             Event::InteractionResolved { id, .. } | Event::InteractionCancelled { id, .. } => {
@@ -178,30 +259,33 @@ impl Forwarder {
                 let under_tree = summary
                     .parent
                     .as_ref()
-                    .is_some_and(|p| self.sessions.contains_key(&p.session));
+                    .is_some_and(|p| self.followed.contains_key(&p.session));
                 if under_tree {
                     self.adopt(&summary.id).await;
                 }
             }
             Ok(_) => {}
-            // Something may have been created unseen; the list says what.
+            // Something may have been created unseen; the lists say what.
             Err(RecvError::Lagged(_)) => self.adopt_descendants().await,
             Err(RecvError::Closed) => self.gateway = None,
         }
     }
 
+    /// Both authorities on what this tree holds: the sessions this host runs,
+    /// then the ones only the store knows.
     async fn adopt_descendants(&mut self) {
-        let Some(host) = self.host.upgrade() else {
-            return;
-        };
-        for (id, _) in host.descendants(&self.root) {
-            self.adopt(&id).await;
+        if let Some(host) = self.host.upgrade() {
+            for (id, _) in host.descendants(&self.root) {
+                self.adopt(&id).await;
+            }
         }
+        self.adopt_stored().await;
     }
 
-    /// Follow a session from its head; a client folds it from nothing.
+    /// Follow a session that runs here, from its head or from the tail of a
+    /// replay already forwarded.
     async fn adopt(&mut self, id: &SessionId) {
-        if self.sessions.contains_key(id) {
+        if self.arriving(id) {
             return;
         }
         let Some(host) = self.host.upgrade() else {
@@ -210,8 +294,66 @@ impl Forwarder {
         let Ok(live) = host.live(id) else {
             return;
         };
-        if let Ok(frames) = live.mailbox.events_since(Seq::ZERO).await {
-            self.follow(live.mailbox, frames);
+        let since = self.since(id);
+        if let Ok(frames) = live.mailbox.events_since(since).await {
+            self.follow_live(live.mailbox, frames);
+        }
+    }
+
+    /// Every descendant the store knows of, breadth-first. One this host runs
+    /// is followed live; the rest are replayed, so a resume that revived the
+    /// root alone still shows the client a whole tree.
+    async fn adopt_stored(&mut self) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        let mut seen = HashSet::from([self.root.clone()]);
+        let mut frontier = vec![self.root.clone()];
+        while let Some(parent) = frontier.pop() {
+            for id in stored_children(store.as_ref(), &parent).await {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                frontier.push(id.clone());
+                self.adopt(&id).await;
+                self.replay(store.as_ref(), &id).await;
+            }
+        }
+    }
+
+    /// A descendant this host does not run: its journal, from wherever this
+    /// attachment left it. The journal is read, not held — a replay acquires
+    /// nothing, so whichever process owns the session keeps it, and what the
+    /// client is given here can be folded but not written back.
+    async fn replay(&mut self, store: &dyn SessionStore, id: &SessionId) {
+        if self.arriving(id) {
+            return;
+        }
+        let Ok(frames) = store.replay(id, self.since(id)).await else {
+            return;
+        };
+        self.follow(
+            id.clone(),
+            Box::pin(stream::iter(frames)),
+            Source::Replaying,
+        );
+    }
+
+    fn store(&self) -> Option<Arc<dyn SessionStore>> {
+        self.host.upgrade()?.registry.store.clone()
+    }
+}
+
+async fn stored_children(store: &dyn SessionStore, parent: &SessionId) -> Vec<SessionId> {
+    let filter = SessionFilter {
+        parent: Some(parent.clone()),
+        ..SessionFilter::default()
+    };
+    match store.list(&filter).await {
+        Ok(children) => children.into_iter().map(|s| s.id).collect(),
+        Err(error) => {
+            tracing::debug!(%error, %parent, "the store would not list a tree's children");
+            Vec::new()
         }
     }
 }

@@ -231,6 +231,171 @@ async fn a_resumed_session_with_no_lost_child_says_nothing() {
     );
 }
 
+/// A root, a sub-agent and a room, all in the store, on a host that is about
+/// to be forgotten; the root's id.
+async fn a_tree_on(store: &Arc<crate::journal::MemoryStore>) -> (SessionId, SessionId, SessionId) {
+    let host = host_on(
+        store.clone(),
+        ScriptedProvider::new(vec![Script::Events(text("one"))]),
+    )
+    .await;
+    let mut root = host
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    one_turn(&mut root, "hello").await;
+    let reviewer = born(&host, &root.session, "reviewer", Driver::Model).await;
+    let journal = born(&host, &root.session, "#design", Driver::Log).await;
+    (root.session.clone(), reviewer, journal)
+}
+
+/// One child of `parent`, opened and left in the store.
+async fn born(host: &Arc<Host>, parent: &SessionId, title: &str, driver: Driver) -> SessionId {
+    let spec = SessionSpec {
+        driver,
+        title: Some(title.into()),
+        parent: Some(ParentLink {
+            session: parent.clone(),
+            item: Some(ItemId::mint()),
+        }),
+        ..spec("/work")
+    };
+    host.open(
+        SessionSelector::Create { spec },
+        who(),
+        OpenOptions::default(),
+    )
+    .await
+    .unwrap()
+    .session
+}
+
+/// Read the tree's stream until every session named has been heard from.
+async fn frames_until(attachment: &mut Attachment, want: &[&SessionId]) -> Vec<Frame> {
+    let mut seen: Vec<Frame> = Vec::new();
+    while let Some(frame) = attachment.events.next().await {
+        seen.push(frame);
+        if want.iter().all(|id| seen.iter().any(|f| &&f.session == id)) {
+            break;
+        }
+    }
+    seen
+}
+
+/// The frames one session contributed, in the order the client saw them.
+fn of<'a>(frames: &'a [Frame], session: &SessionId) -> Vec<&'a Frame> {
+    frames.iter().filter(|f| &f.session == session).collect()
+}
+
+/// A resume revives the root alone (ADR-0005), so a tree attachment answers
+/// from both authorities: the descendants this host runs are followed live,
+/// and the ones only the store knows are replayed onto the same stream. The
+/// client folds every row and every view of the tree from frames either way.
+#[tokio::test]
+async fn a_resumed_tree_replays_the_descendants_only_the_store_has() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let (root, reviewer, journal) = a_tree_on(&store).await;
+    // A grandchild goes deeper than a live host mints, and the walk still
+    // reaches it: the store is the map, not the live table.
+    plant_child(
+        &store,
+        &reviewer,
+        "ses_helper",
+        "helper",
+        Driver::Model,
+        true,
+    )
+    .await;
+    let helper = SessionId::from_raw("ses_helper");
+
+    let host_b = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    let mut b = host_b
+        .open(
+            SessionSelector::ById { id: root.clone() },
+            who(),
+            OpenOptions::with_children(),
+        )
+        .await
+        .unwrap();
+    for id in [&reviewer, &journal, &helper] {
+        assert!(
+            host_b.live(id).is_err(),
+            "the resume revived the root alone"
+        );
+    }
+
+    let seen = frames_until(&mut b, &[&reviewer, &journal, &helper]).await;
+    for (id, title) in [
+        (&reviewer, "reviewer"),
+        (&journal, "#design"),
+        (&helper, "helper"),
+    ] {
+        let frames = of(&seen, id);
+        let head = frames.first().expect("a head");
+        assert_eq!(head.seq, Seq(1), "replayed from the head");
+        let Event::SessionUpdated { summary } = &head.event else {
+            panic!("a session announces itself: {:?}", head.event)
+        };
+        assert_eq!(summary.title.as_deref(), Some(title));
+        assert!(frames.windows(2).all(|w| w[0].seq < w[1].seq));
+    }
+}
+
+/// A replayed child that wakes on this host carries on from where its replay
+/// stopped: the client is given what it has not seen and no frame twice.
+#[tokio::test]
+async fn a_replayed_child_that_wakes_repeats_no_frame() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let (root, reviewer, journal) = a_tree_on(&store).await;
+    let stored = store.replay(&reviewer, Seq::ZERO).await.unwrap();
+    let replayed_to = stored.last().expect("a journal").seq;
+
+    let host_b = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    let mut b = host_b
+        .open(
+            SessionSelector::ById { id: root },
+            who(),
+            OpenOptions::with_children(),
+        )
+        .await
+        .unwrap();
+    let replay = frames_until(&mut b, &[&reviewer, &journal]).await;
+
+    host_b
+        .deliver(
+            &reviewer,
+            IntentId::mint(),
+            Input::text("are you there", Origin::surface("agent")),
+            Delivery::Hold,
+        )
+        .await
+        .expect("the stored child wakes");
+    let mut seqs: Vec<Seq> = of(&replay, &reviewer).iter().map(|f| f.seq).collect();
+    while let Some(frame) = b.events.next().await {
+        if frame.session != reviewer {
+            continue;
+        }
+        seqs.push(frame.seq);
+        if matches!(frame.event, Event::QueueChanged { .. }) {
+            break;
+        }
+    }
+    assert!(
+        seqs.iter().any(|seq| *seq > replayed_to),
+        "the live stream carried on past the replay: {seqs:?}"
+    );
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "no seq reached the client twice: {seqs:?}"
+    );
+}
+
 #[tokio::test]
 async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
     let store = Arc::new(crate::journal::MemoryStore::new());
