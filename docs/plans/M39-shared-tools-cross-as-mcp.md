@@ -11,14 +11,13 @@ so it syncs itself when a tool is added later.
 
 **Kernel words (`bingo-sdk`, `bingo-core`) — worker Q**
 
-1. `ToolTraits.shared`, default false. The catalog's `tools()` meta
-   gains `inputSchema` and the traits (catalog.rs:98 already copies
-   description). Declarations: `SendMessage`, `ListAgents`,
-   `WaitAgent` (agents), `OpenRoom`, `Listen` (rooms),
-   `TaskCreate/Get/List/Update` (tasks), `Skill` (skills),
-   `ListModels` (agents). Regenerate the plugin-rpc committed schema
-   if the wire shape moved. Fixture: one shared and one unshared
-   catalog entry, schema and traits present.
+1. The catalog's `tools()` meta gains `inputSchema` and the traits
+   (catalog.rs:98 already copies description) — the bridge's
+   bootstrap-before-the-first-prompt reads it. No new trait: the offer
+   is `ModelRequest.tools`, which the kernel already assembles per
+   session (ADR-0036 §1). Regenerate the plugin-rpc committed schema
+   if the wire shape moved. Fixture: a catalog entry shows schema and
+   traits.
 2. The door: one `HostApi` verb (worker names it) delivering a
    `ToolCall` into a session's running turn. Executed via the existing
    executor with the turn's gate; a real tool item journaled under the
@@ -28,7 +27,9 @@ so it syncs itself when a tool is added later.
    — the agent is blocked on the answer; the seam is the session
    actor, beside the turn loop, not inside it. Tests: executed and
    journaled mid-turn; refused idle; interrupt drops it and the caller
-   is told; a gate-denied call reports the denial.
+   is told; a gate-denied call reports the denial; a call for a tool
+   the turn's request did not offer is refused — the request is the
+   authority (ADR-0036 §2).
 
 **Transport (`bingo-provider-acp`, `bingo` bin) — worker R, parallel**
 
@@ -44,13 +45,18 @@ so it syncs itself when a tool is added later.
 
 **The joint — worker S, after Q and R**
 
-6. Real doors over `HostHandle` (catalog read filtered by `shared`,
-   the turn door). Injection at `session/new`: the bridge row (token
-   in env) plus forwarded `mcp.servers` rows (stdio and http verbatim,
-   sse skipped with a notice). Adapter row grows `tools` (explicit
-   offer, replaces the shared set) and `forwardMcp` (default false —
-   forwarded rows can carry credentials into a foreign agent; the
-   crossing is opt-in, ADR-0036 §4).
+6. Real doors over `HostHandle`. The offer: `ModelRequest.tools` of
+   the turn being served, minus the exclusion const (fs, bash, web
+   tool names + `SpawnAgent`, `AskUserQuestion` — the bridge's
+   `NOT_A_CHILDS` shape), minus source tools when they are forwarded;
+   bootstrap from the catalog minus the same, converging on the first
+   request; a changed offer → `tools/list_changed`. Injection at
+   `session/new`: the bridge row (token in env); under `forwardMcp:
+   true` (default false — forwarded rows can carry credentials into a
+   foreign agent, ADR-0036 §4) the `mcp.servers` rows ride verbatim
+   (stdio and http; sse skipped with a notice). Adapter row grows
+   `tools` (explicit offer, replaces the derived one) and
+   `forwardMcp`.
    The preamble names the bridge's tools. `CatalogChanged` →
    `tools/list_changed` to live sessions.
 7. Black-box (`bingo/tests/cli/acp.rs`; the scripted fake agent grows
@@ -78,15 +84,17 @@ cli/acp.rs`, `bingo-provider-acp/tests/`; `scripts/acp-smoke.md`.
 - [ ] A call with no turn in flight is refused with a reason.
 - [ ] Esc during a bridged call: the turn ends, the call is dropped,
   the MCP answer is an error, the child lives to serve the next turn.
-- [ ] The offer is derived, not listed: no literal tool-name list in
-  `bingo-provider-acp` (checked in review by grep); a tool declared
-  `shared` in a test-only plugin appears on the bridge with no
-  provider-acp edit — asserted by a contract test.
+- [ ] The offer is derived, not listed: the only tool-name list in
+  `bingo-provider-acp` is the exclusion const. A tool registered by a
+  test plugin appears on the bridge with no provider-acp edit; a
+  session spawned with a restricted `tools` list offers only the
+  restriction — both asserted.
 - [ ] `mcp.servers` stdio and http rows are forwarded verbatim only
   under `forwardMcp: true`; absent, nothing is forwarded; an sse row
   is skipped and said.
-- [ ] An MCP-sourced tool (a `ToolSource`'s) never enters the bridge
-  offer, whatever its server claims — pinned by a test.
+- [ ] An MCP-sourced tool rides the bridge (gated, untrusted) by
+  default and leaves the offer under `forwardMcp: true` — nothing is
+  served twice; pinned by a test.
 - [ ] Every AGENTS.md gate; Windows cross-check for socket/pipe, the
   proxy mode and the child work
   (`cargo check -p bingo-provider-acp --all-targets --target

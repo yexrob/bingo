@@ -17,20 +17,21 @@ of its sentence — no MCP handover — is repealed for shared tools.
 
 ## Decision
 
-1. **Whether a tool crosses is the tool's own word.** `ToolTraits`
-   gains `shared: bool`, default false — the fail-closed rule the
-   traits already live by. A shared tool acts on bingo's shared state
-   (journal, rooms, tasks, the catalog), not on the machine (the agent
-   has its own hands) and not on the user. First declarations:
-   `SendMessage`, `ListAgents`, `WaitAgent`, `OpenRoom`, `Listen`,
-   `TaskCreate/Get/List/Update`, `Skill`, `ListModels`. Not shared, on
-   purpose: fs, bash and web (own capability), `SpawnAgent` and
-   `AskUserQuestion` (the child rule — an ACP member holds what a
-   sub-agent holds). The bridge keeps no list: the tools catalog's
-   entries now carry `inputSchema` and the traits — facts the registry
-   already held — and the offer is derived. A new tool that says the
-   word appears on the bridge with no bridge edit, and appears live:
-   `CatalogChanged` becomes MCP's `tools/list_changed`.
+1. **The offer is the request's own tool list.** The agent stands as
+   the session's model, and the kernel already assembles what a model
+   of this session is offered: `ModelRequest.tools` — child-filtered
+   for a sub-agent seat, whole for a top-level one. The bridge serves
+   that list minus one short, spelled-out exclusion: the machine's
+   hands the agent already owns (the fs, bash and web tools) and the
+   two the child rule names (`SpawnAgent`, `AskUserQuestion`) — a
+   const beside the bridge, the same shape as `NOT_A_CHILDS`. No new
+   trait, no declaration, no second selection anywhere: a tool reaches
+   the agent the same turn it reaches any model, and a tool kept from
+   the session's models is kept from the bridge by the same fact.
+   Before the first prompt the offer is bootstrapped from the tools
+   catalog (whose entries now carry `inputSchema` and the traits)
+   minus the same exclusions, and converges on the first request — a
+   changed offer becomes MCP's `tools/list_changed`.
 2. **A bridged call is the turn's call.** It can only arrive while a
    `session/prompt` is in flight — an agent calls tools mid-turn — so
    the kernel door is one verb: deliver this call into the session's
@@ -42,6 +43,8 @@ of its sentence — no MCP handover — is repealed for shared tools.
    message stream (the agent already holds it — a copy would be a
    second representation). And it is served beside the stream, not
    after it: the agent is blocked on the answer before it speaks on.
+   A call for a tool the turn's request did not offer is refused the
+   same way — the request is the authority on the offer.
 3. **The rendezvous is ours.** The plugin listens on a per-run unix
    socket — a named pipe on Windows, written in the same change — and
    mints one token per ACP session: the token is the address, the
@@ -50,15 +53,17 @@ of its sentence — no MCP handover — is repealed for shared tools.
    `{command: <current exe>, args: ["acp-mcp-proxy", …]}` — a hidden
    bin mode that pumps stdio↔socket and owns no logic. `rmcp`'s server
    half speaks MCP on the accepted stream.
-4. **Third-party MCP crosses natively, not through the bridge.** The
-   `mcp.servers` rows ride the same `mcpServers` list — stdio and http
-   rows verbatim, an sse row skipped with a notice — so the agent
-   dials them itself: one hop, their own env and auth. Per adapter
-   row: `forwardMcp`, **default false**: a row's env and headers may
-   carry credentials, and a forwarded row hands them to a foreign
-   agent whose logs and model context we do not govern — that crossing
-   is the person's word to give, never a default. Recorded, not cured:
-   a server both sides use is dialled twice.
+4. **Third-party MCP rides the bridge by default, the wire on
+   request.** A `ToolSource`'s tools sit in the session's list like
+   any other — so they cross the bridge, gated and untrusted as ever
+   (ADR-0009 §2), and their credentials never leave home: bingo holds
+   the dial. `forwardMcp: true` on the adapter row upgrades to one
+   hop: the `mcp.servers` rows ride `session/new.mcpServers` verbatim
+   (stdio and http; an sse row skipped with a notice), and those tools
+   leave the bridge offer so nothing is served twice. Default false: a
+   forwarded row's env and headers may carry credentials into a
+   foreign agent whose logs and model context we do not govern — that
+   crossing is the person's word to give, never a default.
 5. **The first prompt says so.** The preamble that names the transcript
    now also names the bridge: what can be called, what will not be
    answered. A tool in the hand is no tool if nobody says it is there.
@@ -69,13 +74,15 @@ of its sentence — no MCP handover — is repealed for shared tools.
 
 ## Consequences
 
-- An ACP member aligns with a sub-agent: the same shared nouns, less
-  the two child refusals, plus its own hands for fs/bash under its own
-  permission words (ADR-0035 §5). The gate and the journal see bridged
-  calls as they see any call; surfaces render them with no new word.
-- The kernel changes by one trait field, two catalog lines and one
-  door into the running turn. No tool machinery is duplicated, and no
-  tool list exists twice.
+- An ACP member holds what a sub-agent holds by construction — the
+  same list, assembled by the same kernel path — less the machine's
+  hands, which it brings itself under its own permission words
+  (ADR-0035 §5). The gate and the journal see bridged calls as they
+  see any call; surfaces render them with no new word.
+- The kernel changes by two catalog lines and one door into the
+  running turn. No trait is added, no tool machinery duplicated, and
+  no tool list exists twice — the one list the bridge owns is an
+  exclusion, not an offer.
 - The turn must serve a bridged call while its stream is open; a door
   that waits for the stream's end deadlocks the agent against itself.
 - Budget: rmcp grows the `server` and `transport-io` features on a
