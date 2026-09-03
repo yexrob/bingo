@@ -28,7 +28,7 @@ use crate::effect::Effect;
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
-use crate::{SURFACE_ID, commands, history, input, pointer};
+use crate::{SURFACE_ID, clipboard, commands, complete, history, input, pictures, pointer};
 
 /// How often a frame is redrawn *while something is moving*: thirty a second
 /// (§6). Nothing moves when nothing is happening, and then there is no tick at
@@ -531,7 +531,27 @@ impl Run {
             Effect::ListSessions => self.list_sessions(),
             Effect::ListStored => self.list_stored(),
             Effect::Copy(text) => self.clipboard = Some(text),
+            Effect::PasteImage => self.paste_image(),
             Effect::Exit => self.exit = Some(Exit { code: 0 }),
+        }
+    }
+
+    /// A picture on the clipboard becomes `[image N]` in the line and is held
+    /// under that token; a clipboard with none leaves the line alone.
+    fn paste_image(&mut self) {
+        let Some(bytes) = clipboard::image() else {
+            return;
+        };
+        match bingo_sdk::Image::from_bytes("image/png", &bytes) {
+            Ok(image) => {
+                let n = self.ui.pictures.hold(self.ui.composer.text(), image);
+                self.ui.composer.insert(&pictures::placeholder(n));
+                self.ui.edited();
+            }
+            Err(error) => {
+                self.ui
+                    .notify(Level::Warn, format!("clipboard: {error}"), Instant::now())
+            }
         }
     }
 
@@ -540,12 +560,50 @@ impl Run {
             return self.not_yet();
         };
         let mut said = None;
-        if let Input::Text { text, .. } = &input {
-            history::append(&self.data_dir, text);
-            said = Some(text.clone());
-        }
+        let input = match input {
+            Input::Text {
+                text,
+                images,
+                origin,
+            } => {
+                let Some(images) = self.with_mentioned(&text, images) else {
+                    return self.ui.composer.set(&text);
+                };
+                history::append(&self.data_dir, &text);
+                said = Some(text.clone());
+                self.ui.pictures.clear();
+                Input::Text {
+                    text,
+                    images,
+                    origin,
+                }
+            }
+            action => action,
+        };
         let intent = self.mint(said);
         handle.submit(intent, input);
+    }
+
+    /// `images` with the pictures `text` mentions by path read in after them,
+    /// relative to the session's directory; `None`, and a notice saying
+    /// which, when one does not read — nothing is sent then.
+    fn with_mentioned(
+        &mut self,
+        text: &str,
+        mut images: Vec<bingo_sdk::Image>,
+    ) -> Option<Vec<bingo_sdk::Image>> {
+        let cwd = std::path::PathBuf::from(&self.session.tree.root().summary.cwd);
+        for path in complete::attachments(text) {
+            match bingo_sdk::Image::read(&cwd.join(&path)) {
+                Ok(image) => images.push(image),
+                Err(error) => {
+                    self.ui
+                        .notify(Level::Warn, format!("{path}: {error}"), Instant::now());
+                    return None;
+                }
+            }
+        }
+        Some(images)
     }
 
     fn interrupt(&mut self) {
@@ -1522,13 +1580,16 @@ mod tests {
 
     /// A run with nothing happening in it, whose one painted frame is `at`.
     fn idle(at: Instant) -> Run {
+        idle_in(state(), std::sync::Arc::new(TestSession::default()), at)
+    }
+
+    /// `idle`, over a session of one's choosing — its directory is where a
+    /// mentioned picture is looked for, and its handle is what is submitted.
+    fn idle_in(state: SessionState, session: std::sync::Arc<TestSession>, at: Instant) -> Run {
         Run {
             host: TestHost::with(vec![]).0,
             data_dir: std::path::PathBuf::new(),
-            session: Attached::new(
-                state(),
-                SessionHandle(std::sync::Arc::new(TestSession::default())),
-            ),
+            session: Attached::new(state, SessionHandle(session)),
             ui: Ui::new(Vec::new(), at),
             mine: HashMap::new(),
             replies: mpsc::channel(1).0,
@@ -1538,6 +1599,51 @@ mod tests {
             sluggish: false,
             exit: None,
         }
+    }
+
+    /// A line and the directory a mention is read from.
+    fn mentioning() -> (tempfile::TempDir, Run, std::sync::Arc<TestSession>) {
+        let dir = tempfile::tempdir().expect("a directory");
+        let mut state = state();
+        state.summary.cwd = dir.path().to_string_lossy().into_owned();
+        let session = std::sync::Arc::new(TestSession::default());
+        let run = idle_in(state, std::sync::Arc::clone(&session), Instant::now());
+        (dir, run, session)
+    }
+
+    fn prose(text: &str) -> Input {
+        Input::text(text, bingo_sdk::Origin::surface(SURFACE_ID))
+    }
+
+    #[test]
+    fn a_mentioned_picture_is_read_from_the_sessions_directory() {
+        let (dir, mut run, session) = mentioning();
+        std::fs::write(dir.path().join("shot.png"), b"png").expect("a picture");
+        run.submit(prose("look at @shot.png"));
+        let submitted = session.submitted();
+        let [Input::Text { text, images, .. }] = submitted.as_slice() else {
+            panic!("one submission: {submitted:?}");
+        };
+        assert_eq!(text, "look at @shot.png", "the words go as typed");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].media_type, "image/png");
+        assert!(run.ui.notices.is_empty());
+    }
+
+    #[test]
+    fn a_mention_that_does_not_read_keeps_the_line_and_says_so() {
+        let (_dir, mut run, session) = mentioning();
+        run.submit(prose("look at @missing.png"));
+        assert!(session.submitted().is_empty(), "nothing was sent");
+        assert_eq!(run.ui.composer.text(), "look at @missing.png");
+        assert!(
+            run.ui
+                .notices
+                .iter()
+                .any(|n| n.text.starts_with("missing.png: ")),
+            "the notice names the path: {:?}",
+            run.ui.notices
+        );
     }
 
     #[test]

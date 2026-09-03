@@ -710,6 +710,7 @@ fn control(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('w') => edit(ui, |c| c.delete_word_left()),
         KeyCode::Char('u') => edit(ui, |c| c.delete_to_line_start()),
         KeyCode::Char('k') => edit(ui, |c| c.delete_to_line_end()),
+        KeyCode::Char('v') => return vec![Effect::PasteImage],
         _ => {}
     }
     Vec::new()
@@ -823,12 +824,11 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         })],
         Some(Local::Resume(None)) => vec![Effect::ListSessions],
         Some(Local::Exit) => vec![Effect::Exit],
-        // A picture a person mentioned reaches the model as a part beside the
-        // line, and the line still says which word it was.
-        // M45 slice T reads the mentions here and resolves them to images.
+        // The pasted pictures the line still names go beside it; the ones it
+        // mentions by path are read by the loop, which knows the directory.
         None => vec![Effect::Submit(Input::Text {
+            images: ui.pictures.carried(&text),
             text,
-            images: Vec::new(),
             origin: Origin::surface(SURFACE_ID),
         })],
     }
@@ -912,10 +912,10 @@ mod tests {
         );
     }
 
-    /// The read is not wired in this slice (M45 slice T reads mentions);
-    /// the mention still travels as words, and carries no image yet.
+    /// A mention travels as words; the loop reads the file it names, since
+    /// only the loop knows the session's directory.
     #[test]
-    fn a_mentioned_picture_is_words_for_now() {
+    fn a_mentioned_picture_is_words_the_loop_reads() {
         let (_dir, state) = with_files();
         let tree = solo(&state);
         let (mut ui, now) = scene();
@@ -926,6 +926,42 @@ mod tests {
             vec![Effect::Submit(Input::Text {
                 text: "look at @shot.png".into(),
                 images: Vec::new(),
+                origin: Origin::surface(SURFACE_ID),
+            })],
+        );
+    }
+
+    /// `ctrl+v` asks the loop for the clipboard; the line is untouched until
+    /// the loop has a picture to put in it.
+    #[test]
+    fn ctrl_v_asks_for_the_clipboard() {
+        let (mut ui, now) = scene();
+        let tree = solo(&state());
+        let effects = on_key(&mut ui, &tree, ctrl('v'), now);
+        assert_eq!(effects, vec![Effect::PasteImage]);
+        assert!(ui.composer.is_empty());
+    }
+
+    /// The tokens still in the line at `⏎` say which held pictures go, in
+    /// the line's order; a deleted token's picture stays behind.
+    #[test]
+    fn a_pasted_picture_goes_beside_the_line_that_still_names_it() {
+        let (mut ui, now) = scene();
+        let tree = solo(&state());
+        let first = bingo_sdk::Image::from_bytes("image/png", b"one").unwrap();
+        let second = bingo_sdk::Image::from_bytes("image/png", b"two").unwrap();
+        let n = ui.pictures.hold("", first);
+        ui.composer
+            .insert(&format!("see {} ", crate::pictures::placeholder(n)));
+        let n = ui.pictures.hold(ui.composer.text(), second.clone());
+        ui.composer.insert(&crate::pictures::placeholder(n));
+        ui.composer.set("see [image 2]");
+        let effects = on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        assert_eq!(
+            effects,
+            vec![Effect::Submit(Input::Text {
+                text: "see [image 2]".into(),
+                images: vec![second],
                 origin: Origin::surface(SURFACE_ID),
             })],
         );

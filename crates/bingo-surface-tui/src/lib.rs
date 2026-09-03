@@ -49,6 +49,7 @@
 
 mod acp;
 mod blocks;
+mod clipboard;
 mod clock;
 mod commands;
 mod complete;
@@ -68,6 +69,7 @@ mod pager;
 mod panel;
 mod paths;
 mod permission;
+mod pictures;
 mod pointer;
 mod preview;
 mod rail;

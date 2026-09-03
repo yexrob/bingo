@@ -72,6 +72,11 @@ struct Cli {
     #[arg(long, value_name = "TOOL")]
     permission_prompt_tool: Option<PromptTool>,
 
+    /// A picture to hand the model beside the `--print` prompt (png, jpg,
+    /// gif, webp); repeat for more than one.
+    #[arg(long, value_name = "PATH")]
+    image: Vec<PathBuf>,
+
     /// The model provider; the settings' `provider`, else the first registered.
     #[arg(long, global = true)]
     provider: Option<String>,
@@ -517,6 +522,19 @@ fn check_input(cli: &Cli) -> Result<(), KernelError> {
              there is no other way for an answer to arrive",
         ));
     }
+    if !cli.image.is_empty() && !cli.print {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            "--image goes with --print: in the terminal, paste a picture or mention @its/path",
+        ));
+    }
+    if !cli.image.is_empty() && cli.input_format == InputFormat::StreamJson {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            "--image is for one prompt: under --input-format stream-json a user line carries \
+             its own image blocks",
+        ));
+    }
     Ok(())
 }
 
@@ -671,6 +689,7 @@ fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
             "inputFormat": cli.input_format.as_str(),
             "permissionPromptTool": cli.permission_prompt_tool.map(PromptTool::as_str),
             "noPrintOnExit": cli.no_print_on_exit,
+            "images": cli.image,
         }),
         env,
     }

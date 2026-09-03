@@ -612,6 +612,7 @@ mod context;
 mod experience;
 mod gateway;
 mod hooks;
+mod images;
 mod instances;
 mod jobs;
 mod login;

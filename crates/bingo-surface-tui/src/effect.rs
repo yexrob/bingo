@@ -25,5 +25,8 @@ pub enum Effect {
     /// Put a selection on the terminal's own clipboard (OSC 52). The loop
     /// says so when the terminal will not take it.
     Copy(String),
+    /// Ask the system clipboard for a picture and, if there is one, put
+    /// `[image N]` in the line for it (ADR-0040). The loop owns the read.
+    PasteImage,
     Exit,
 }

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use bingo_sdk::{
-    Activation, Answer, Event, Exit, Frame, Input, IntentId, IntentOutcome, Interaction,
+    Activation, Answer, Event, Exit, Frame, Image, Input, IntentId, IntentOutcome, Interaction,
     InteractionId, InteractionKind, InterruptScope, ItemBody, KernelError, Origin, SessionHandle,
     SessionState, TurnId, TurnStatus,
 };
@@ -42,7 +42,7 @@ impl Attached<'_> {
     ) -> Result<Exit, KernelError> {
         let mut host = Hosted::new(prompting, self.human());
         if let Some(prompt) = first {
-            host.submit(&self.handle, prompt);
+            host.submit(&self.handle, prompt, Vec::new());
         }
         let mut open = true;
         while open || !host.settled() {
@@ -149,10 +149,17 @@ impl Hosted {
         }
     }
 
-    fn submit(&mut self, handle: &SessionHandle, text: String) {
+    fn submit(&mut self, handle: &SessionHandle, text: String, images: Vec<Image>) {
         let intent = IntentId::mint();
         self.awaiting.push(intent.clone());
-        handle.submit(intent, Input::text(text, Origin::surface(SURFACE_ID)));
+        handle.submit(
+            intent,
+            Input::Text {
+                text,
+                images,
+                origin: Origin::surface(SURFACE_ID),
+            },
+        );
     }
 
     /// Every prompt submitted has had its turn.
@@ -173,8 +180,8 @@ impl Hosted {
         err: &mut (dyn Write + Send),
     ) -> io::Result<()> {
         match line {
-            Line::User { text } => {
-                self.submit(handle, text);
+            Line::User { text, images } => {
+                self.submit(handle, text, images);
                 Ok(())
             }
             // The turn is stopped before the acknowledgement is written, so a

@@ -194,7 +194,7 @@ impl Host {
         }
     }
 
-    fn send(&mut self, line: &Value) {
+    pub(crate) fn send(&mut self, line: &Value) {
         writeln!(self.stdin, "{line}").expect("the run reads stdin");
         self.stdin.flush().expect("the run reads stdin");
     }
