@@ -26,6 +26,10 @@ use crate::tree::{self, Status, Tree};
 
 /// The plugin whose journal a seat is read out of.
 const PLUGIN: &str = "bingo.rooms";
+/// The name a room's roster calls the session the room hangs under: the seat a
+/// post nobody signed came from, and the one word on a roster that is not an
+/// agent's name (`bingo-rooms`' own `parent`).
+pub const HOLDER: &str = "parent";
 /// The kind a room's whole membership is published under (ADR-0011 §2).
 const MEMBERS: &str = "members";
 /// The seats in that payload that listen rather than answer (ADR-0029 §2).

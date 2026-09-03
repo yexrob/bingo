@@ -14,7 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use super::{OUTPUT_ROWS, Rows, bullet_style, kept, plain, returns, speaks, speaks_indent, under};
 use crate::fold::Fold;
 use crate::skill;
-use crate::{commands, theme};
+use crate::{commands, seats, theme};
 
 /// The surfaces whose input is the machinery reporting in rather than
 /// somebody speaking: a background job that ended, a message from another
@@ -55,18 +55,20 @@ pub(crate) fn quiet(origin: &Origin) -> bool {
     QUIET_SURFACES.contains(&origin.surface.as_str())
 }
 
-/// What a `User` item draws, and — in a member's own transcript — what it does
-/// not.
+/// What a `User` item draws, which is a different thing in each of the two
+/// places one is read.
 ///
-/// A room's activity is the room's: a member's transcript, the holder's
-/// included, shows none of it, and a wake just opens a turn (ADR-0034). The two
-/// things a room still puts in a member's journal are the nudge and the reading
-/// its turn folded in; both are dropped here rather than drawn, because the
-/// room's own view is where they are read and it is one keystroke away.
+/// In a room — a session nothing answers — every user item is a post, and the
+/// room is the conversation: they are drawn as one ([`post`]).
 ///
-/// It is the two origins and nothing wider: a peer's message carries a
-/// conversation of its own and still draws, and every other contributor still
-/// speaks.
+/// Everywhere else, a room's activity is the room's: a member's transcript, the
+/// holder's included, shows none of it, and a wake just opens a turn
+/// (ADR-0034). The two things a room still puts in a member's journal are the
+/// nudge and the reading its turn folded in; both are dropped here rather than
+/// drawn, because the room's own view is where they are read and it is one
+/// keystroke away. It is those two origins and nothing wider: a peer's message
+/// carries a conversation of its own and still draws, and every other
+/// contributor still speaks.
 pub fn lines(
     item: &Item,
     parts: &[ContentPart],
@@ -74,13 +76,58 @@ pub fn lines(
     fold: Fold,
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
-    if rows.driver != Driver::Log && rooms_machinery(origin) {
+    if rows.driver == Driver::Log {
+        return post(item, parts, origin.principal.as_deref(), rows);
+    }
+    if rooms_machinery(origin) {
         return Vec::new();
     }
     match quiet(origin) {
         true => notice(item, parts, origin, fold, rows),
         false => user(parts, origin.principal.as_deref(), rows),
     }
+}
+
+/// One post in the room's own transcript: who said it, then the whole of what
+/// they said.
+///
+/// A room is read the way a chat is read, so the name leads and the message
+/// follows it in the text everything said is drawn in — every line of it,
+/// wrapped as prose. Nothing here hangs dim under a `⎿` and nothing folds
+/// away: that is the shape of a subsystem reporting in ([`notice`]), and under
+/// it the body of a message reads as collapsed metadata rather than as what
+/// somebody wrote.
+///
+/// A post nobody signed came from the session the room hangs under — a person
+/// at this composer, or the model that holds it — and every seat reads that one
+/// under the roster's own word for it.
+fn post(
+    item: &Item,
+    parts: &[ContentPart],
+    principal: Option<&str>,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
+    let text = said(parts);
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut body: Vec<Line<'static>> = text
+        .lines()
+        .map(|line| Line::from(Span::styled(line.to_string(), theme::text())))
+        .collect();
+    if let Some(first) = body.first_mut() {
+        first
+            .spans
+            .insert(0, name(principal.unwrap_or(seats::HOLDER)));
+    }
+    speaks(bullet_style(item.status, false), body, rows)
+}
+
+/// Who said it: the one span a post spends on emphasis, so the eye finds the
+/// author before it reads the line.
+fn name(principal: &str) -> Span<'static> {
+    Span::styled(format!("{principal}: "), theme::text().patch(theme::bold()))
 }
 
 /// Whether this is the rooms plugin talking rather than somebody in the room.
@@ -205,4 +252,37 @@ fn bar(line: Line<'static>, width: usize) -> Line<'static> {
     let mut line = Line::from(spans);
     line.style = theme::raised();
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn from(surface: &str) -> Origin {
+        Origin {
+            surface: surface.into(),
+            principal: None,
+            conversation: Some("#design".into()),
+        }
+    }
+
+    /// The two origins a room writes into a member, and the neighbours each of
+    /// them is one character from. What every one of these *draws* is asserted
+    /// where the transcript is rendered whole; this is the boundary itself.
+    #[test]
+    fn only_the_rooms_two_origins_are_its_machinery() {
+        assert!(rooms_machinery(&from(ROOMS)));
+        assert!(rooms_machinery(&from(ROOMS_READING)));
+        for other in [
+            "agent",
+            "bash",
+            "schedule",
+            "tui",
+            "rooms",
+            "contributor:experience:recall",
+            "contributor:rooms:owed",
+        ] {
+            assert!(!rooms_machinery(&from(other)), "{other} is not a room's");
+        }
+    }
 }

@@ -1649,7 +1649,12 @@ mod tests {
     #[test]
     fn a_room_transcript_reads_as_a_chat() {
         let tree = room(vec![
-            posted(2, "itm_1", "reviewer", "the plan is thin on tests"),
+            posted(
+                2,
+                "itm_1",
+                "reviewer",
+                "the plan is thin on tests\nnone of M9's exit criteria name one",
+            ),
             posted(3, "itm_2", "scout", "M9's exit criteria cover them"),
             log_frame(
                 4,
@@ -1661,10 +1666,17 @@ mod tests {
         let (ui, now) = scene();
         let screen = render_tree(&tree, &ui, now);
         assert!(screen.contains("⏺ reviewer: the plan"), "{screen}");
+        assert!(
+            screen.contains("  none of M9's exit criteria name one"),
+            "the rest of a message is prose under the name, not a folded \
+             result: {screen}"
+        );
+        assert!(!screen.contains("⎿"), "{screen}");
         assert!(screen.contains("⏺ scout: M9's"), "{screen}");
         assert!(
-            screen.contains("> then let us ship it"),
-            "and the one line a person typed is the one on a bar: {screen}"
+            screen.contains("⏺ parent: then let us ship it"),
+            "and what the person typed is a post like any other, under the \
+             name the roster reads it by: {screen}"
         );
         assert!(
             !screen.contains("running") && !screen.contains("idle"),

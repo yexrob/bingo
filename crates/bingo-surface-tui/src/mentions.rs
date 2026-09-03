@@ -19,11 +19,6 @@ use bingo_sdk::{Driver, SessionId, SessionState};
 use crate::seats;
 use crate::tree::Tree;
 
-/// The name a room's roster calls the session the room hangs under. That is the
-/// person typing here, and a person does not write to themselves, so it is the
-/// one seat a room's dropdown leaves out (`bingo-rooms`' own `parent`).
-const HOLDER: &str = "parent";
-
 /// The names the `@` dropdown offers beside the paths, in the order the tree
 /// and the roster list them.
 pub fn targets(tree: &Tree) -> Vec<String> {
@@ -35,8 +30,12 @@ pub fn targets(tree: &Tree) -> Vec<String> {
 }
 
 /// The agents this session's own `@name` reaches: the children of it this
-/// attachment carries that answer a model and have a name to be called by. A
-/// room among them is a room, not an agent, and is reached by writing its `#`.
+/// attachment carries that answer a model and have a name to be called by.
+///
+/// A room under the same session is left out. A line addressed to one would
+/// arrive — a room is a child like any other — but a room is somewhere a person
+/// posts rather than somebody they write to, and its own view, where the
+/// composer says so, is one keystroke away.
 fn agents(tree: &Tree, session: &SessionId) -> Vec<String> {
     tree.sessions()
         .filter(|state| child_of(state, session))
@@ -55,12 +54,12 @@ fn child_of(state: &SessionState, session: &SessionId) -> bool {
         .is_some_and(|link| &link.session == session)
 }
 
-/// Who a post in this room may name: the seats on its roster, less the one the
-/// person typing already is.
+/// Who a post in this room may name: the seats on its roster, less the holder,
+/// which is the person typing and not somebody to write to.
 fn roster(room: &SessionState) -> Vec<String> {
     seats::members(room)
         .into_iter()
-        .filter(|name| !name.eq_ignore_ascii_case(HOLDER))
+        .filter(|name| !name.eq_ignore_ascii_case(seats::HOLDER))
         .collect()
 }
 

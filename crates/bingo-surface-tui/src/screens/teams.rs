@@ -12,10 +12,18 @@ use crate::test_support::*;
 use crate::tree::Tree;
 use crate::ui::{Open, Switcher};
 
+/// A room reads as a conversation: the name, then the whole of what was said
+/// under it. A post nobody signed is the holder's, and the roster's word for
+/// that seat is what every member reads it under.
 #[test]
 fn a_room_transcript() {
     let tree = room_tree(vec![
-        posted(2, "itm_1", "reviewer", "the plan is thin on tests"),
+        posted(
+            2,
+            "itm_1",
+            "reviewer",
+            "the plan is thin on tests\nnone of M9's exit criteria name one",
+        ),
         posted(3, "itm_2", "scout", "M9's exit criteria cover them"),
         log_frame(
             4,
@@ -25,6 +33,12 @@ fn a_room_transcript() {
         ),
     ]);
     let (ui, now) = scene();
+    let screen = draw_tree(80, 24, &tree, &ui, now);
+    assert!(
+        !screen.contains("⎿"),
+        "no post is a folded result: {screen}"
+    );
+    assert!(screen.contains("⏺ parent: then let us ship it"), "{screen}");
     both("room_transcript", &tree, &ui, now);
 }
 

@@ -965,14 +965,33 @@ mod tests {
         );
     }
 
-    /// The room's own transcript is where its activity is read, and it is
-    /// unchanged: every post it holds is drawn there.
+    /// The room's own transcript is where its activity is read, and every post
+    /// it holds is drawn there — the name first, then the whole message.
     #[test]
-    fn the_rooms_own_transcript_still_draws_every_post() {
+    fn a_room_reads_as_a_conversation_does() {
         assert_eq!(
-            drawn_in_room(vec![post("itm_1", "scout", "found it")]),
-            vec!["⏺ scout: found it"],
-            "and the name stands alone: the room is the conversation"
+            drawn_in_room(vec![post(
+                "itm_1",
+                "scout",
+                "found it\n\nit was the cursor all along",
+            )]),
+            vec![
+                "⏺ scout: found it".to_string(),
+                String::new(),
+                "  it was the cursor all along".to_string(),
+            ],
+            "no `⎿`, nothing dim, nothing folded: a message is read whole"
+        );
+    }
+
+    /// A post nobody signed came from the session the room hangs under, and it
+    /// is read under the name every seat on the roster reads it under — the
+    /// same row as anybody else's, because in the room it is anybody else's.
+    #[test]
+    fn an_unsigned_post_is_the_holders_and_says_so() {
+        assert_eq!(
+            drawn_in_room(vec![person("itm_1", "then let us ship it")]),
+            vec!["⏺ parent: then let us ship it"],
         );
     }
 
