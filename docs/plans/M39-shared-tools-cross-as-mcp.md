@@ -51,10 +51,10 @@ so it syncs itself when a tool is added later.
    `NOT_A_CHILDS` shape), minus source tools when they are forwarded;
    bootstrap from the catalog minus the same, converging on the first
    request; a changed offer → `tools/list_changed`. Injection at
-   `session/new`: the bridge row (token in env); under `forwardMcp:
-   true` (default false — forwarded rows can carry credentials into a
-   foreign agent, ADR-0036 §4) the `mcp.servers` rows ride verbatim
-   (stdio and http; sse skipped with a notice). Adapter row grows
+   `session/new`: the bridge row (token in env), and the `mcp.servers`
+   rows verbatim (stdio and http; sse skipped with a notice) under
+   `forwardMcp`, default true — `false` keeps the rows home and
+   their tools on the bridge instead (ADR-0036 §4). Adapter row grows
    `tools` (explicit offer, replaces the derived one) and
    `forwardMcp`.
    The preamble names the bridge's tools. `CatalogChanged` →
@@ -89,12 +89,11 @@ cli/acp.rs`, `bingo-provider-acp/tests/`; `scripts/acp-smoke.md`.
   test plugin appears on the bridge with no provider-acp edit; a
   session spawned with a restricted `tools` list offers only the
   restriction — both asserted.
-- [ ] `mcp.servers` stdio and http rows are forwarded verbatim only
-  under `forwardMcp: true`; absent, nothing is forwarded; an sse row
-  is skipped and said.
-- [ ] An MCP-sourced tool rides the bridge (gated, untrusted) by
-  default and leaves the offer under `forwardMcp: true` — nothing is
-  served twice; pinned by a test.
+- [ ] `mcp.servers` stdio and http rows are forwarded verbatim by
+  default and their tools leave the bridge offer — nothing is served
+  twice; under `forwardMcp: false` nothing is forwarded and the
+  sourced tools ride the bridge (gated, untrusted) instead; an sse
+  row is skipped and said. Both pinned by tests.
 - [ ] Every AGENTS.md gate; Windows cross-check for socket/pipe, the
   proxy mode and the child work
   (`cargo check -p bingo-provider-acp --all-targets --target

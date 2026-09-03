@@ -53,17 +53,18 @@ of its sentence — no MCP handover — is repealed for shared tools.
    `{command: <current exe>, args: ["acp-mcp-proxy", …]}` — a hidden
    bin mode that pumps stdio↔socket and owns no logic. `rmcp`'s server
    half speaks MCP on the accepted stream.
-4. **Third-party MCP rides the bridge by default, the wire on
-   request.** A `ToolSource`'s tools sit in the session's list like
-   any other — so they cross the bridge, gated and untrusted as ever
-   (ADR-0009 §2), and their credentials never leave home: bingo holds
-   the dial. `forwardMcp: true` on the adapter row upgrades to one
-   hop: the `mcp.servers` rows ride `session/new.mcpServers` verbatim
-   (stdio and http; an sse row skipped with a notice), and those tools
-   leave the bridge offer so nothing is served twice. Default false: a
-   forwarded row's env and headers may carry credentials into a
-   foreign agent whose logs and model context we do not govern — that
-   crossing is the person's word to give, never a default.
+4. **Third-party MCP crosses on its own wire by default.** The
+   `mcp.servers` rows ride `session/new.mcpServers` verbatim (stdio
+   and http; an sse row is skipped with a notice) — the agent dials
+   them itself: one hop, their own env and auth — and the forwarded
+   tools leave the bridge offer so nothing is served twice.
+   `forwardMcp: false` on the adapter row keeps a person's rows home:
+   then a `ToolSource`'s tools cross the bridge instead, gated and
+   untrusted as ever (ADR-0009 §2), credentials never leaving bingo's
+   hands. Recorded, chosen (the user's word): a forwarded row's env
+   and headers may carry credentials into a foreign agent whose logs
+   and model context we do not govern — the off-switch is the answer
+   for rows that matter.
 5. **The first prompt says so.** The preamble that names the transcript
    now also names the bridge: what can be called, what will not be
    answered. A tool in the hand is no tool if nobody says it is there.
