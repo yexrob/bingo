@@ -581,6 +581,44 @@ fn the_panel_sheet() {
     both("panel_sheet", &tree, &ui, now);
 }
 
+/// Two words this surface has not learned (ADR-0038): one a plugin wrote as
+/// its own element, one from a speaker newer than this binary. Neither is an
+/// error and neither is a record dump — each is the text its author wrote for
+/// the surfaces that cannot draw it, which today is every surface.
+#[test]
+fn the_panel_sheet_reads_a_word_it_has_not_learned() {
+    let state = folded(vec![
+        frame(
+            1,
+            extended(
+                "bingo.demo-ui",
+                "sparkline",
+                json!({
+                    "kind": "custom",
+                    "customKind": "demo.sparkline",
+                    "data": {"points": [3, 5, 8, 13]},
+                    "fold": "3 5 8 13",
+                }),
+            ),
+        ),
+        frame(
+            2,
+            extended(
+                "bingo.charts",
+                "candles",
+                json!({
+                    "kind": "chart.candles",
+                    "series": [1, 2, 3],
+                    "fold": "AAPL 1 2 3",
+                }),
+            ),
+        ),
+    ]);
+    let (mut ui, now) = scene();
+    shown(&mut ui, Open::Panel, now);
+    both("custom_panel", &solo(&state), &ui, now);
+}
+
 #[test]
 fn the_help_sheet() {
     let state = folded(answered());

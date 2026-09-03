@@ -207,6 +207,20 @@ mod tests {
         assert_eq!(text_of(&view_of(&payload)), "[ needs you ]");
     }
 
+    /// A journaled payload whose word this binary predates is read as its
+    /// fold (ADR-0038 §2) — the parse degrades where the unknown word is
+    /// instead of failing, so the row is drawn rather than dropped.
+    #[test]
+    fn a_payload_whose_kind_this_surface_never_learned_is_its_fold() {
+        let payload = json!({"kind": "chart.candles", "series": [1, 2], "fold": "AAPL 1 2"});
+        assert_eq!(text_of(&view_of(&payload)), "AAPL 1 2");
+        assert_eq!(
+            text_of(&view_of(&json!({"kind": "chart.candles"}))),
+            "[chart.candles]",
+            "a node that forgot its fold still says which word it was"
+        );
+    }
+
     #[test]
     fn a_list_of_records_is_a_table_over_the_union_of_their_keys() {
         let view = view_of(&json!([

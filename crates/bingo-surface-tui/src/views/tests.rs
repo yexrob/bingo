@@ -127,6 +127,17 @@ fn named(view: &View) -> &'static str {
         View::Columns { .. } => "columns",
         View::Panel { .. } => "panel",
         View::Actions { .. } => "actions",
+        View::Custom { .. } => "custom",
+    }
+}
+
+/// A word this surface has not learned (ADR-0038): the fold is the whole of
+/// what it draws, and the data it cannot read is carried past it untouched.
+fn custom() -> View {
+    View::Custom {
+        kind: "demo.sparkline".into(),
+        data: serde_json::json!({"points": [3, 5, 8, 13]}),
+        fold: "3 5 8 13".into(),
     }
 }
 
@@ -175,6 +186,7 @@ fn every_node() -> Vec<View> {
             child: Box::new(table()),
         },
         actions(),
+        custom(),
     ]
 }
 
