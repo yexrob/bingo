@@ -11,7 +11,7 @@
 #![allow(clippy::expect_used)]
 
 use bingo_sdk::Image;
-use image::ImageFormat;
+pub use image::ImageFormat;
 
 /// A picture of `width` by `height`, in `format`.
 pub fn drawn(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {

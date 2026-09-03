@@ -72,10 +72,11 @@ struct Cli {
     #[arg(long, value_name = "TOOL")]
     permission_prompt_tool: Option<PromptTool>,
 
-    /// A picture to hand the model beside the `--print` prompt (png, jpg,
-    /// gif, webp); repeat for more than one.
-    #[arg(long, value_name = "PATH")]
-    image: Vec<PathBuf>,
+    /// A picture to hand the model beside the `--print` prompt: a path, or an
+    /// http(s) URL this machine fetches. Any format a decoder reads;
+    /// repeat for more than one.
+    #[arg(long, value_name = "PATH|URL")]
+    image: Vec<String>,
 
     /// The model provider; the settings' `provider`, else the first registered.
     #[arg(long, global = true)]

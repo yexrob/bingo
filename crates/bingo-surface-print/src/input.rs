@@ -169,7 +169,9 @@ fn text_block(block: &Value) -> Option<&str> {
 
 /// An `image` block, in the shape the Anthropic API and Claude Code's host
 /// protocol share: `source: {type: base64, media_type, data}`. Any other
-/// source is a picture this surface cannot carry, and says so.
+/// source is a picture this surface cannot carry, and says so. A type the
+/// provider table refuses is transcoded on the way in (ADR-0041 §2), so a
+/// host may hand over what it has and the journal still holds what replays.
 fn image_block(block: &Value) -> Option<Result<Image, ParseError>> {
     if block.get("type").and_then(Value::as_str) != Some("image") {
         return None;
@@ -186,10 +188,14 @@ fn image_block(block: &Value) -> Option<Result<Image, ParseError>> {
             "an image block with no `source.media_type` or `source.data`",
         )));
     };
-    Some(Ok(Image {
+    let handed = Image {
         media_type: media_type.to_owned(),
         data: data.to_owned(),
-    }))
+    };
+    Some(
+        bingo_pictures::accepted(handed)
+            .map_err(|e| ParseError::new(format!("an image block of type {media_type}: {e}"))),
+    )
 }
 
 fn control_request(value: &Value) -> Result<Line, ParseError> {
@@ -360,6 +366,37 @@ mod tests {
         };
         assert_eq!(text, "");
         assert_eq!(images.len(), 1);
+    }
+
+    /// A host may hand over what it has; the journal keeps what a provider
+    /// takes (ADR-0041 §2), so the transcoding is on the way in.
+    #[test]
+    fn an_image_block_of_a_wider_type_arrives_as_png() {
+        let bmp = bingo_pictures::testing::drawn(4, 2, bingo_pictures::testing::ImageFormat::Bmp);
+        let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bmp);
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": [
+                { "type": "image", "source": {
+                    "type": "base64", "media_type": "image/bmp", "data": data } }
+            ] },
+        })
+        .to_string();
+        let Line::User { images, .. } = parse(&line) else {
+            panic!("a prompt");
+        };
+        assert_eq!(images[0].media_type, "image/png");
+    }
+
+    #[test]
+    fn an_image_block_of_a_type_no_decoder_reads_is_said() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/heic","data":"bm90"}}]}}"#;
+        assert!(
+            error(line).starts_with("an image block of type image/heic: "),
+            "{}",
+            error(line)
+        );
     }
 
     #[test]

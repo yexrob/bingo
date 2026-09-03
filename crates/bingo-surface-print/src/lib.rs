@@ -136,13 +136,14 @@ pub(crate) async fn drive(
 ) -> Result<Exit, KernelError> {
     let SurfaceOptions {
         selector,
+        cwd,
         prompt,
         args,
         ..
     } = opts;
     let mode = Mode::from_args(&args);
     let renderer = Renderer::new(mode, console.human(), tool_names(host).await);
-    let start = start(Format::from_args(&args), prompt, &args, console)?;
+    let start = start(Format::from_args(&args), prompt, &args, &cwd, console).await?;
     let attachment = host
         .open(
             selector,
@@ -183,16 +184,17 @@ enum Start {
     },
 }
 
-fn start(
+async fn start(
     format: Format,
     prompt: Option<String>,
     args: &serde_json::Value,
+    cwd: &std::path::Path,
     console: &mut (dyn Console + Send),
 ) -> Result<Start, KernelError> {
     match format {
         Format::Text => Ok(Start::Once {
             prompt: prompt_from(prompt, console)?,
-            images: images_from(args)?,
+            images: images_from(args, cwd).await?,
         }),
         Format::StreamJson => Ok(Start::Hosted {
             first: prompt,
@@ -359,22 +361,27 @@ fn prompt_from(
     Ok(prompt)
 }
 
-/// `--image`'s paths (`args.images`), read at the edge: a path that does not
-/// read is the run's answer, before a session is opened for it.
-fn images_from(args: &serde_json::Value) -> Result<Vec<Image>, KernelError> {
-    let paths = args
+/// `--image`'s sources (`args.images`), read at the edge: a path off this
+/// machine or a URL this machine fetches (ADR-0041 §3), and one that does not
+/// read is the run's answer, before a session is opened for it. A relative
+/// path is the session's, so `--cwd` moves it with everything else.
+async fn images_from(
+    args: &serde_json::Value,
+    cwd: &std::path::Path,
+) -> Result<Vec<Image>, KernelError> {
+    let words = args
         .get("images")
         .and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    paths
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(|path| {
-            Image::read(std::path::Path::new(path))
-                .map_err(|e| KernelError::new(ErrorCode::InvalidInput, format!("{path}: {e}")))
-        })
-        .collect()
+    let mut images = Vec::with_capacity(words.len());
+    for word in words.iter().filter_map(serde_json::Value::as_str) {
+        let image = bingo_pictures::load(&bingo_pictures::Source::parse(word, cwd))
+            .await
+            .map_err(|e| KernelError::new(ErrorCode::InvalidInput, format!("{word}: {e}")))?;
+        images.push(image);
+    }
+    Ok(images)
 }
 
 fn asks_a_person(event: &Event) -> bool {
@@ -1609,25 +1616,63 @@ pub(crate) mod tests {
         assert!(run.out.is_empty(), "nothing reached stdout");
     }
 
+    /// The pictures one prompt was submitted with.
+    fn submitted_pictures(run: &Run, prompt: &str) -> Vec<Image> {
+        let submitted = run.session.submitted();
+        let [Input::Text { text, images, .. }] = submitted.as_slice() else {
+            panic!("one prompt: {submitted:?}");
+        };
+        assert_eq!(text, prompt);
+        images.clone()
+    }
+
     #[tokio::test]
     async fn an_image_that_reads_goes_beside_the_prompt() {
-        let path =
-            std::env::temp_dir().join(format!("bingo-print-{}-shot.png", std::process::id()));
-        std::fs::write(&path, b"png").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, bingo_pictures::testing::png_bytes(2, 2)).unwrap();
         let run = play(
             vec![completed(1)],
             &mut TestConsole::headless(),
             options(Some("look"), json!({ "images": [path.to_string_lossy()] })),
         )
         .await;
-        let _ = std::fs::remove_file(&path);
-        let submitted = run.session.submitted();
-        let [Input::Text { text, images, .. }] = submitted.as_slice() else {
-            panic!("one prompt: {submitted:?}");
-        };
-        assert_eq!(text, "look");
+        let images = submitted_pictures(&run, "look");
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].media_type, "image/png");
+    }
+
+    /// A format no provider takes is one a `--print` caller still has on
+    /// disk: it is decoded at the edge and journaled as PNG (ADR-0041 §2).
+    #[tokio::test]
+    async fn an_image_of_a_wider_type_is_png_by_the_time_it_is_submitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.bmp");
+        let bmp = bingo_pictures::testing::drawn(4, 3, bingo_pictures::testing::ImageFormat::Bmp);
+        std::fs::write(&path, bmp).unwrap();
+        let run = play(
+            vec![completed(1)],
+            &mut TestConsole::headless(),
+            options(Some("look"), json!({ "images": [path.to_string_lossy()] })),
+        )
+        .await;
+        assert_eq!(submitted_pictures(&run, "look")[0].media_type, "image/png");
+    }
+
+    /// A relative `--image` is the session's, not the process's: `--cwd`
+    /// moves the picture with everything else the run is about.
+    #[tokio::test]
+    async fn a_relative_image_is_read_from_the_sessions_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("shot.png"),
+            bingo_pictures::testing::png_bytes(2, 2),
+        )
+        .unwrap();
+        let mut opts = options(Some("look"), json!({ "images": ["shot.png"] }));
+        opts.cwd = dir.path().to_path_buf();
+        let run = play(vec![completed(1)], &mut TestConsole::headless(), opts).await;
+        assert_eq!(submitted_pictures(&run, "look").len(), 1);
     }
 
     #[tokio::test]

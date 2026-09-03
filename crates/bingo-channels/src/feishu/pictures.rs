@@ -2,10 +2,12 @@
 //!
 //! Parsing hands over keys; this is where they become bytes, through the
 //! message-resource endpoint, and bytes become the one `Image` the journal
-//! keeps. A picture that cannot be fetched — no `im:resource` scope, a type
-//! the table refuses, a size over the cap — is dropped with a warning, and
-//! the words still go: a person who typed a caption is not silenced by the
-//! picture beside it.
+//! keeps. What type that is, is read off the bytes: a chat carries what
+//! phones and screenshot keys produce, so a BMP goes as PNG and only what no
+//! decoder reads is refused (ADR-0041 §2). A picture that cannot be fetched —
+//! no `im:resource` scope, a size over the cap, bytes nothing reads — is
+//! dropped with a warning, and the words still go: a person who typed a
+//! caption is not silenced by the picture beside it.
 
 use bingo_sdk::Image;
 
@@ -32,16 +34,17 @@ pub fn resource_path(picture: &Picture) -> String {
 }
 
 async fn one(api: &Api, picture: &Picture) -> Result<Image, String> {
-    let (media_type, bytes) = api
+    let bytes = api
         .get_bytes(&resource_path(picture))
         .await
         .map_err(|e| e.to_string())?;
-    Image::from_bytes(media_type, &bytes).map_err(|e| e.to_string())
+    bingo_pictures::sniffed(&bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bingo_pictures::testing::ImageFormat;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -74,27 +77,30 @@ mod tests {
             .await;
     }
 
+    /// A picture the endpoint serves, in `format`.
+    fn drawn(format: ImageFormat) -> Vec<u8> {
+        bingo_pictures::testing::drawn(4, 3, format)
+    }
+
+    async fn serving(server: &MockServer, key: &str, bytes: Vec<u8>) {
+        served(
+            server,
+            key,
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png; charset=binary")
+                .set_body_bytes(bytes),
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn pictures_are_fetched_in_order_and_a_refused_one_is_dropped() {
         let server = MockServer::start().await;
         signed_in(&server).await;
-        served(
-            &server,
-            "img_a",
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "image/png; charset=binary")
-                .set_body_bytes(b"png-a".to_vec()),
-        )
-        .await;
+        let png = drawn(ImageFormat::Png);
+        serving(&server, "img_a", png.clone()).await;
         served(&server, "img_gone", ResponseTemplate::new(404)).await;
-        served(
-            &server,
-            "img_b",
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "image/jpeg")
-                .set_body_bytes(b"jpg-b".to_vec()),
-        )
-        .await;
+        serving(&server, "img_b", drawn(ImageFormat::Jpeg)).await;
         let api = Api::new(server.uri(), "cli_1", "secret");
         let images = fetch(
             &api,
@@ -102,23 +108,39 @@ mod tests {
         )
         .await;
         let types: Vec<&str> = images.iter().map(|i| i.media_type.as_str()).collect();
-        assert_eq!(types, ["image/png", "image/jpeg"]);
-        assert_eq!(images[0].data, "cG5nLWE=");
+        assert_eq!(
+            types,
+            ["image/png", "image/jpeg"],
+            "the header said png for both; the bytes did not"
+        );
+        assert_eq!(
+            images[0],
+            Image::from_bytes("image/png", &png).expect("within the cap"),
+            "a type the table takes is the bytes as they came"
+        );
+    }
+
+    /// A screenshot off a Windows phone, a scan, a sticker: a chat carries
+    /// more than the four types a provider takes, and the journal keeps a
+    /// type that replays (ADR-0041 §2).
+    #[tokio::test]
+    async fn a_type_the_table_refuses_arrives_as_png() {
+        let server = MockServer::start().await;
+        signed_in(&server).await;
+        serving(&server, "img_bmp", drawn(ImageFormat::Bmp)).await;
+        serving(&server, "img_tiff", drawn(ImageFormat::Tiff)).await;
+        let api = Api::new(server.uri(), "cli_1", "secret");
+        let images = fetch(&api, &[picture("img_bmp"), picture("img_tiff")]).await;
+        let types: Vec<&str> = images.iter().map(|i| i.media_type.as_str()).collect();
+        assert_eq!(types, ["image/png", "image/png"]);
     }
 
     #[tokio::test]
-    async fn a_type_the_table_refuses_is_dropped_too() {
+    async fn bytes_no_decoder_reads_are_dropped_whatever_the_header_says() {
         let server = MockServer::start().await;
         signed_in(&server).await;
-        served(
-            &server,
-            "img_tiff",
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "image/tiff")
-                .set_body_bytes(b"tiff".to_vec()),
-        )
-        .await;
+        serving(&server, "img_heic", b"not a picture at all".to_vec()).await;
         let api = Api::new(server.uri(), "cli_1", "secret");
-        assert!(fetch(&api, &[picture("img_tiff")]).await.is_empty());
+        assert!(fetch(&api, &[picture("img_heic")]).await.is_empty());
     }
 }

@@ -55,3 +55,5 @@ tempfile.workspace = true
 # Virtual time, so "an idle surface draws nothing in two seconds" is a test
 # that takes no time at all (M11a).
 tokio = { workspace = true, features = ["test-util"] }
+# A picture on the web, served: the `@https://…` mention end to end (M47).
+wiremock.workspace = true
