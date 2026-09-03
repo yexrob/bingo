@@ -142,8 +142,8 @@ $ cargo fmt --all -- --check
 $ cargo clippy --workspace --all-targets --locked -- -D warnings
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.77s
 
-$ cargo test --workspace --locked
-60 suites: 2580 passed; 0 failed
+$ cargo test --workspace --locked   # exit 0
+75 result lines: 3214 passed; 0 failed; no FAILED, no failures:
 
 $ cargo test -p bingo --test cli acp::
 test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out
@@ -158,6 +158,9 @@ $ scripts/budget.sh
 dependencies (unique, normal): 310 (max  310)
 warm cargo check -p bingo-core: 0s (max  20s)
 relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
+target/debug: 11 GB (soft max  5)
+warn: target/debug exceeds the soft limit
+test binaries: 72
 budget ok
 
 $ cargo deny check
@@ -167,12 +170,20 @@ $ cargo check -p bingo-provider-acp --all-targets --target x86_64-pc-windows-msv
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.72s
 
 $ scripts/tui-smoke.sh
-16 scenes, ending "a button on a pinned board fires its command…"
+15 scenes, ending "a button on a pinned board fires its command…"
 tui-smoke ok
 ```
 
 The joint added no dependency: 310 is the number the transport half
-measured, unmoved.
+measured, unmoved. The `target/debug` warn is this worktree's build
+cache, not the tree — it warns on a clean checkout too, and `budget.sh`
+does not fail on it.
+
+`check_discipline.sh` prints its usual pre-existing file-length warns
+(TUI, core, `bingo/tests`); none of them is a file this milestone wrote,
+and the two new test files land under the ceiling that first caught them
+— `bingo/tests/cli/acp.rs` is 666 lines with the bridge scenarios moved
+into `bingo/tests/cli/acp/bridge.rs`.
 
 ### The Windows cross-check of the binary
 
@@ -229,10 +240,16 @@ reads as itself, at both sizes. No rendering change was needed.
    does not know (unit-tested against an sse row in
    `servers::theirs`), and the live path is pinned by the case that *can*
    happen: an http row to an agent whose handshake did not claim http.
-2. **The offer is read through a service, not a second settings key.**
+2. **The rows are read through a service, not a second settings key.**
    The kernel refuses two plugins one key, so `bingo-mcp` registers
    `mcp.servers` (ADR-0031) and answers the rows it holds *now* — a
    `/mcp disable` takes a server out of the answer the same moment it
-   takes it out of bingo's hands. The rows carry a person's own env and
-   headers, which is what ADR-0036 §4 chose; the service has no wire
-   face, so they never leave the process.
+   takes it out of bingo's hands. `bingo-provider-acp` declares no
+   `requires:` on it: a build without `bingo-mcp` forwards nothing and
+   serves the bridge alone.
+   The service opens **no wire face**. A row carries a person's `env`
+   and `headers` — forwarding those to the agent is what ADR-0036 §4
+   chose, and it is a narrow door: the child this session spawned. A
+   wire face is a wide one, reachable by `service/call` from every
+   out-of-process plugin, and nothing asks for it. `wire: None`, pinned
+   by `the_plugin_registers_a_tool_source_a_command_and_the_rows`.
