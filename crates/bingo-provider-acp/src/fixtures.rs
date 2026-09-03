@@ -480,7 +480,7 @@ pub fn request_permission_cancelled() -> Value {
 }
 
 /// What this client sends back to either adapter: the id of the option the
-/// agent itself marked a rejection (ADR-0035 §5).
+/// agent itself marked a rejection (ADR-0039 §3).
 pub fn request_permission_refused() -> Value {
     json!({ "outcome": { "outcome": "selected", "optionId": "reject" } })
 }

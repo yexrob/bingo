@@ -38,10 +38,12 @@
 //! and it is the one name that never crosses; any other is one the agent
 //! declared, and `/model` and `/think` reach it through the options it
 //! offered (ADR-0037). Login is the adapter's own (`claude login`, `codex
-//! login`), and so is permission: what the agent may do is said in *its*
+//! login`), and so is permission: what the agent may do is best said in *its*
 //! words, on its row — the `mode` above, `CODEX_APPROVAL_POLICY` beside it —
-//! because bingo refuses a `session/request_permission` rather than standing a
-//! second gate in front of the agent's own (ADR-0035 §5).
+//! because the row speaks first and an adapter configured this way never asks
+//! bingo anything (ADR-0039 §4). One that asks anyway is not refused on
+//! principle: its question is put to whoever is at the session, in its own
+//! words (ADR-0039 §3, `crate::question`).
 //!
 //! Which door those words go through is the adapter's own too, and not every
 //! adapter has the same ones: codex-acp takes its approval policy from the
