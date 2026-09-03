@@ -5,8 +5,6 @@
 //! bridge that minted it ever sees it — which is why [`Token`] prints as a
 //! blind and never as itself.
 
-use aws_lc_rs::constant_time::verify_slices_are_equal;
-use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -14,6 +12,11 @@ use crate::error::AcpError;
 
 /// 32 random bytes as base64url: 43 characters, urlsafe, no padding — the
 /// same shape the OAuth verifier is minted in (`bingo-auth-oauth::pkce`).
+///
+/// The source is `getrandom` rather than that module's `aws-lc-rs`: this
+/// crate spells a named pipe, and its Windows cross-check has to be runnable
+/// without a Windows C toolchain (AGENTS.md, "Every platform the release
+/// ships"). Random bytes need no C.
 const BYTES: usize = 32;
 
 /// One conversation's secret.
@@ -32,8 +35,7 @@ impl Token {
     /// answer is a reason to stop, not a reason to guess.
     pub fn mint() -> Result<Self, AcpError> {
         let mut bytes = [0u8; BYTES];
-        SystemRandom::new()
-            .fill(&mut bytes)
+        getrandom::fill(&mut bytes)
             .map_err(|_| AcpError::Spawn("the system random source refused".into()))?;
         Ok(Self(URL_SAFE_NO_PAD.encode(bytes)))
     }
@@ -48,10 +50,24 @@ impl Token {
         &self.0
     }
 
-    /// Whether what was offered is this token. Constant time, so a wrong
-    /// token tells the offerer nothing but that it was wrong.
+    /// Whether what was offered is this token.
+    ///
+    /// Constant in the length of the token: a comparison that stopped at the
+    /// first differing byte would tell an offerer how much of its guess was
+    /// right, one byte at a time. The length itself is public — every token
+    /// this bridge mints is the same 43 characters — so only the bytes are
+    /// hidden.
     pub fn matches(&self, offered: &str) -> bool {
-        verify_slices_are_equal(self.0.as_bytes(), offered.as_bytes()).is_ok()
+        let ours = self.0.as_bytes();
+        let theirs = offered.as_bytes();
+        if ours.len() != theirs.len() {
+            return false;
+        }
+        let mut differing = 0u8;
+        for (ours, theirs) in ours.iter().zip(theirs) {
+            differing |= ours ^ theirs;
+        }
+        std::hint::black_box(differing) == 0
     }
 }
 

@@ -108,6 +108,12 @@ rmcp = { version = "3.1", default-features = false }
 # M10 (docs/plans/M10-oauth-codex.md). SHA-256 and the system random source
 # for PKCE; already resolved under rustls, so this is an edge, not a crate.
 aws-lc-rs = "1"
+# M39 (docs/plans/M39-shared-tools-cross-as-mcp.md, ADR-0036 §3). The bridge
+# token's bytes. `aws-lc-rs` is the house's random source, but it builds C:
+# `bingo-provider-acp` spells a named pipe, and its Windows cross-check has to
+# run without a Windows C toolchain. Already resolved under `ulid`'s `rand`,
+# so this is an edge, not a crate.
+getrandom = "0.4"
 # M11e (docs/plans/M11e-content-kinds.md, "Dependencies"). Pure Rust: the
 # `fancy-regex` engine, never `onig` (a C library, banned in deny.toml). No
 # themes are loaded — a scope maps onto the token table (design §4) — so

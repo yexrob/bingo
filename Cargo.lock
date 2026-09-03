@@ -478,10 +478,10 @@ version = "0.4.2"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
- "aws-lc-rs",
  "base64 0.23.1",
  "bingo-sdk",
  "futures",
+ "getrandom 0.4.3",
  "jiff",
  "process-wrap 10.0.0",
  "rmcp",

@@ -200,6 +200,19 @@ pub type DialledStream = Stream;
 #[cfg(windows)]
 pub type DialledStream = tokio::net::windows::named_pipe::NamedPipeClient;
 
+/// Both ends are what their two readers need of them, on both platforms.
+///
+/// The accepted end goes to `rmcp`; the dialled end goes to the proxy's pump,
+/// which lives in the binary — and the binary's Windows cross-check is not
+/// runnable without a Windows C toolchain (`aws-lc-sys`, through
+/// `bingo-auth-oauth`). This crate's is, so the bound is asserted here, where
+/// a named pipe that stopped satisfying it would be caught.
+const _: fn() = || {
+    fn pumpable<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>() {}
+    pumpable::<Stream>();
+    pumpable::<DialledStream>();
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

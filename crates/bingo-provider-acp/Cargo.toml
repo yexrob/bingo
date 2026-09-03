@@ -35,9 +35,10 @@ jiff.workspace = true
 # names beside it.
 rmcp = { workspace = true, features = ["server", "transport-io"] }
 # M39: the bridge token is a secret, so its bytes come from the system random
-# source and are compared in constant time — the same source and the same
-# base64url spelling as `bingo-auth-oauth::pkce`.
-aws-lc-rs.workspace = true
+# source, in the same base64url spelling as `bingo-auth-oauth::pkce`. Not that
+# module's `aws-lc-rs`: it builds C, and this crate's Windows cross-check has
+# a named pipe to check without a Windows C toolchain.
+getrandom.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
