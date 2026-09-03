@@ -26,6 +26,10 @@ use crate::tree::{self, Status, Tree};
 
 /// The plugin whose journal a seat is read out of.
 const PLUGIN: &str = "bingo.rooms";
+/// The name a room's roster calls the session the room hangs under: the seat a
+/// post nobody signed came from, and the one word on a roster that is not an
+/// agent's name (`bingo-rooms`' own `parent`).
+pub const HOLDER: &str = "parent";
 /// The kind a room's whole membership is published under (ADR-0011 §2).
 const MEMBERS: &str = "members";
 /// The seats in that payload that listen rather than answer (ADR-0029 §2).
@@ -119,7 +123,7 @@ pub struct Counts {
 /// tree's own order.
 pub fn seat(tree: &Tree, state: &SessionState) -> Option<Seat> {
     let name = tree::name(state);
-    let room = rooms(tree).find(|room| seats_of(room).iter().any(|held| same(held, &name)))?;
+    let room = rooms(tree).find(|room| members(room).iter().any(|held| same(held, &name)))?;
     Some(Seat {
         room: tree::name(room),
         ear: ear(room, &name),
@@ -168,7 +172,7 @@ pub fn counts(tree: &Tree, room: &SessionState) -> Counts {
         }
     }
     Counts {
-        seats: seats_of(room).len(),
+        seats: members(room).len(),
         owed: debtors.len(),
     }
 }
@@ -181,7 +185,7 @@ fn rooms(tree: &Tree) -> impl Iterator<Item = &SessionState> {
 
 /// Who is in a room, as the room's own journal has it. Anything in the payload
 /// that is not a name is not one.
-fn seats_of(room: &SessionState) -> Vec<String> {
+pub fn members(room: &SessionState) -> Vec<String> {
     published(room, MEMBERS)
         .and_then(|payload| payload.get(MEMBERS).cloned())
         .as_ref()

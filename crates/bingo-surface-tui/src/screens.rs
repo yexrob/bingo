@@ -819,6 +819,33 @@ fn the_at_completion_dropdown() {
     both("at_dropdown", &solo(&state), &ui, now);
 }
 
+/// The same `@`, where the session has agents under it: the names it can reach
+/// lead, the paths follow, and the two runs are told apart by a label the way
+/// the roster tells its own apart (§3).
+#[test]
+fn the_at_completion_dropdown_with_agents_to_reach() {
+    let dir = tempfile::tempdir().expect("a directory");
+    std::fs::create_dir_all(dir.path().join("src")).expect("a source directory");
+    for name in ["reader.rs", "rewind.rs"] {
+        std::fs::write(dir.path().join("src").join(name), "//! it\n").expect("a source");
+    }
+    let mut root = long_transcript(24);
+    root.summary.cwd = dir.path().to_string_lossy().into_owned();
+    let mut tree = Tree::new(root);
+    tree.apply(&child_frame(1, announced("reviewer")));
+    tree.apply(&agent_frame(3, 2, agent_announced(3, "researcher")));
+    let (mut ui, now) = scene();
+    for c in "@re".chars() {
+        crate::input::on_key(&mut ui, &tree, typed(c), now);
+    }
+    let screen = draw_tree(80, 24, &tree, &ui, now);
+    assert!(screen.contains("Agents"), "{screen}");
+    assert!(screen.contains("@reviewer"), "{screen}");
+    assert!(screen.contains("Files"), "{screen}");
+    assert!(screen.contains("@src/reader.rs"), "{screen}");
+    both("at_dropdown_agents", &tree, &ui, now);
+}
+
 /// A long result, open whole: what `⏎` on a focused block and the second
 /// `ctrl+o` both take (design §5).
 #[test]

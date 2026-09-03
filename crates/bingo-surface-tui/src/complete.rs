@@ -1,19 +1,23 @@
-//! `@` in the composer: a path from the session's own directory.
+//! `@` in the composer: a name this session can reach, or a path from its own
+//! directory.
 //!
 //! The walk obeys `.gitignore` — a repository offers its sources and not its
 //! build — and the ranking is `nucleo`'s, the one a person's editor and their
-//! fuzzy finder already use. The rows ride the same dropdown as `/` (design
-//! §4: one dropdown above the input box, whatever it is offering).
+//! fuzzy finder already use, applied to the names and the paths alike. The rows
+//! ride the same dropdown as `/` (design §4: one dropdown above the input box,
+//! whatever it is offering).
 //!
 //! A completed mention keeps its `@`, so the line itself says which of its
-//! words are paths and [`attachments`] is derived from it rather than
-//! remembered beside it.
+//! words are names and which are paths, and [`attachments`] is derived from it
+//! rather than remembered beside it — a name is not a picture.
 
 use std::path::Path;
 
 use ignore::WalkBuilder;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
+
+use crate::commands::{Group, Suggestion};
 
 /// How many paths the dropdown offers (design §4: eight rows).
 pub const ROWS: usize = 8;
@@ -79,6 +83,34 @@ pub fn rank(partial: &str, paths: &[String]) -> Vec<String> {
         .into_iter()
         .take(ROWS)
         .map(|(path, _)| path.clone())
+        .collect()
+}
+
+/// What an `@` offers for what has been typed of it: the names this session can
+/// reach, then the paths under it, at most [`ROWS`] rows in all.
+///
+/// The names come first because there are a handful of them and thousands of
+/// paths: ranked together, the one a person is most likely to mean would never
+/// survive the cut. A bare `@` offers them in the same order.
+pub fn offered(line: &str, partial: &str, names: &[String], paths: &[String]) -> Vec<Suggestion> {
+    let named = rows(line, rank(partial, names), Group::Agents);
+    let mut out = rows(line, rank(partial, paths), Group::Files);
+    out.truncate(ROWS.saturating_sub(named.len()));
+    [named, out].concat()
+}
+
+/// One run of the dropdown. A name and a path complete the same way — the
+/// mention keeps its `@` and the line is what says what it means — so both are
+/// this one row, and only the run they sit in tells them apart.
+fn rows(line: &str, matched: Vec<String>, group: Group) -> Vec<Suggestion> {
+    matched
+        .into_iter()
+        .map(|value| Suggestion {
+            value: completed(line, &value),
+            label: format!("@{value}"),
+            hint: String::new(),
+            group,
+        })
         .collect()
 }
 
@@ -175,6 +207,75 @@ mod tests {
         let paths: Vec<String> = (0..20).map(|i| format!("src/file_{i}.rs")).collect();
         assert_eq!(rank("", &paths).len(), ROWS);
         assert_eq!(rank("file_3", &paths)[0], "src/file_3.rs");
+    }
+
+    // ---- what an `@` offers ----------------------------------------------
+
+    fn names() -> Vec<String> {
+        ["reviewer", "scout", "researcher"]
+            .map(str::to_string)
+            .to_vec()
+    }
+
+    fn offered_rows(partial: &str, names: &[String], paths: &[String]) -> Vec<(String, Group)> {
+        offered(&format!("@{partial}"), partial, names, paths)
+            .into_iter()
+            .map(|row| (row.label, row.group))
+            .collect()
+    }
+
+    #[test]
+    fn the_names_come_first_and_the_paths_after_them() {
+        let dir = tree();
+        assert_eq!(
+            offered_rows("r", &names(), &walk(dir.path())),
+            vec![
+                ("@reviewer".to_string(), Group::Agents),
+                ("@researcher".to_string(), Group::Agents),
+                ("@src/lib.rs".to_string(), Group::Files),
+                ("@Cargo.toml".to_string(), Group::Files),
+            ],
+            "both runs are ranked by the one matcher, and the names lead"
+        );
+    }
+
+    #[test]
+    fn a_bare_mark_offers_the_names_then_what_paths_fit() {
+        let paths: Vec<String> = (0..20).map(|i| format!("src/file_{i}.rs")).collect();
+        let rows = offered_rows("", &names(), &paths);
+        assert_eq!(rows.len(), ROWS, "the cap is over both runs together");
+        assert_eq!(
+            rows.iter().filter(|(_, g)| *g == Group::Agents).count(),
+            names().len(),
+        );
+    }
+
+    /// Every row of one run is still one run: a session with no agents under it
+    /// offers what it always did.
+    #[test]
+    fn a_session_with_no_names_offers_the_paths_alone() {
+        let dir = tree();
+        assert_eq!(
+            offered_rows("Car", &[], &walk(dir.path())),
+            vec![("@Cargo.toml".to_string(), Group::Files)]
+        );
+    }
+
+    /// The names take the cap when there are enough of them: the run that leads
+    /// is the run that survives.
+    #[test]
+    fn names_enough_to_fill_the_rows_leave_no_room_for_a_path() {
+        let many: Vec<String> = (0..10).map(|i| format!("scout-{i}")).collect();
+        let paths = vec!["scout.rs".to_string()];
+        let rows = offered_rows("scout", &many, &paths);
+        assert_eq!(rows.len(), ROWS);
+        assert!(rows.iter().all(|(_, group)| *group == Group::Agents));
+    }
+
+    #[test]
+    fn a_chosen_name_completes_the_line_the_way_a_path_does() {
+        let rows = offered("look at @rev", "rev", &names(), &[]);
+        assert_eq!(rows[0].value, "look at @reviewer ");
     }
 
     #[test]

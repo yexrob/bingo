@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{
-    CommandSpec, ContentPart, DecisionKind, Item, ItemBody, ItemStatus, Origin, SessionState,
+    CommandSpec, ContentPart, DecisionKind, Driver, Item, ItemBody, ItemStatus, SessionState,
     ToolOutput, TurnStatus, View,
 };
 use ratatui::style::Style;
@@ -18,7 +18,13 @@ use crate::clock::{self, Anim, Now};
 use crate::fold::{self, Fold, Folds};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, commands, markdown, paths, theme, views, wrap};
+use crate::{acp, markdown, paths, theme, views, wrap};
+
+/// What was said into a session: a person's line, a subsystem's notice, a
+/// room's conversation.
+mod said;
+
+pub(crate) use said::quiet;
 
 /// How long the comet tail of a block still arriving takes to cool (§6).
 pub const COMET: Duration = Duration::from_millis(180);
@@ -61,6 +67,11 @@ pub struct Rows<'a> {
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
+    /// What answers the session in view. A room answers nobody (ADR-0011 §1),
+    /// and that one fact is what tells a room's own transcript — where its
+    /// conversation is read — from a member's, where none of it belongs
+    /// (ADR-0034).
+    pub driver: Driver,
 }
 
 impl<'a> Rows<'a> {
@@ -81,6 +92,7 @@ impl<'a> Rows<'a> {
             commands,
             now,
             title: state.summary.title.as_deref(),
+            driver: state.summary.driver,
         }
     }
 }
@@ -130,10 +142,7 @@ pub fn item_lines(
     // write, over the start its kind has. One question, asked once, here.
     let fold = fold::fold_of(rows.folds, item);
     match &item.body {
-        ItemBody::User { parts, origin } => match quiet(origin) {
-            true => notice(item, parts, origin, fold, rows),
-            false => user(parts, origin.principal.as_deref(), rows),
-        },
+        ItemBody::User { parts, origin } => said::lines(item, parts, origin, fold, rows),
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
         // An agent that runs its own tools journals each finished call as a
         // reasoning item whose metadata is the whole call (ADR-0035 §4), so
@@ -311,175 +320,6 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 }
 
 // ---- the kinds ----------------------------------------------------------
-
-/// The surfaces whose input is the machinery reporting in rather than
-/// somebody speaking: a background job that ended, a message from another
-/// session, a room's post, a scheduled turn, a command's own prompt. What they
-/// deliver reads as a tool row does, because that is what it is — something
-/// that happened, not something anyone said to you.
-///
-/// `command` is the one a person did set in motion, and it is here anyway: a
-/// `/guide` puts a page of skill body in the journal under a line nobody
-/// typed, and drawn as prose it is a wall of somebody else's words on the
-/// person's own bar. It reads as the machinery it is, and where the command
-/// was a skill the row is the run itself — `❖ Skill(guide) …`, the same row
-/// the model's own way to that body draws ([`skill_row`]).
-///
-/// The set is closed, and this list is the only place it is written down: a
-/// surface nobody has put here is loud. A new subsystem chooses its side by
-/// being added or left out, deliberately, and the cost of each mistake says
-/// which way to lean — a person's own words drawn as machinery is a wrong
-/// nobody can undo by reading harder.
-const QUIET_SURFACES: &[&str] = &["agent", "bash", commands::SURFACE, "room", "schedule"];
-
-/// Whether a delivery is the machinery reporting in. The composer's pending
-/// area asks the same question of what is still queued (ADR-0028), so the set
-/// stays one list read from two places rather than two lists to keep in step.
-pub(crate) fn quiet(origin: &Origin) -> bool {
-    QUIET_SURFACES.contains(&origin.surface.as_str())
-}
-
-/// What a `User` item says, as its parts spell it.
-fn said(parts: &[ContentPart]) -> String {
-    parts
-        .iter()
-        .filter_map(ContentPart::as_text)
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// A subsystem's notice, marked the way a tool row is: the bullet, the one
-/// line that says what happened, and the rest of it hanging under a `⎿` —
-/// dim, folded, subordinate. The text already leads with the outcome, so the
-/// first line is the summary and nothing has to be invented for it.
-fn notice(
-    item: &Item,
-    parts: &[ContentPart],
-    origin: &Origin,
-    fold: Fold,
-    rows: &Rows<'_>,
-) -> Vec<Line<'static>> {
-    let text = said(parts);
-    let text = text.trim();
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let (head, rest) = text.split_once('\n').unwrap_or((text, ""));
-    // A blank line between the headline and the rest is a separator in the
-    // text — a command's prompt puts one there — and under a `⎿` it would be
-    // a row spent on nothing.
-    let rest = rest.trim_start_matches('\n');
-    // A skill is one row however it was asked for, so the typed line gives the
-    // headline up to the run's own signature. The line itself stays in the
-    // item, which is where a rewind reads it back.
-    let style = bullet_style(item.status, false);
-    let mut out = match skill::of(item, rows.commands) {
-        Some(run) => skill_row(run, style, rows),
-        None => speaks(
-            style,
-            vec![headline(
-                head,
-                origin.principal.as_deref(),
-                elsewhere(origin, rows),
-            )],
-            rows,
-        ),
-    };
-    if !rest.trim().is_empty() {
-        out.extend(returns(kept(plain(rest), fold, OUTPUT_ROWS, None), rows));
-    }
-    out
-}
-
-/// The row one skill run wears, whichever door it came through: the model's
-/// `Skill(guide)` call and a person's own `/guide` are the same thing
-/// happening, so this is the only place either is drawn (design §4).
-///
-/// The mark is the skill's own glyph in the bullet's place, in the colour the
-/// bullet would have worn: what kind of row it is and what state it is in are
-/// two facts, and each keeps its own carrier.
-fn skill_row(run: Run<'_>, style: Style, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    marked(theme::skill(), style, vec![asked(run, rows)], rows)
-}
-
-/// `Skill(guide) the wire format`: the call as any tool row spells one, then
-/// the free text the skill was given — outside the parentheses, because it is
-/// what the skill reads and not what it is.
-fn asked(run: Run<'_>, rows: &Rows<'_>) -> Line<'static> {
-    let mut line = signature(skill::TOOL, run.name, rows);
-    if !run.args.is_empty() {
-        line.spans
-            .push(Span::styled(format!(" {}", run.args), theme::text()));
-    }
-    line
-}
-
-/// The conversation a delivery says it came from, where saying it tells a
-/// person something: in a member's own transcript a room post is one of
-/// several conversations arriving, and in the room's own it is the only one.
-fn elsewhere<'a>(origin: &'a Origin, rows: &Rows<'_>) -> Option<&'a str> {
-    origin
-        .conversation
-        .as_deref()
-        .filter(|room| Some(*room) != rows.title)
-}
-
-/// The marked line itself: the sender's name where the origin carries one —
-/// an agent, a room's member — where they said it, and what happened.
-fn headline(head: &str, principal: Option<&str>, conversation: Option<&str>) -> Line<'static> {
-    let mut spans = Vec::new();
-    if let Some(name) = principal {
-        let bold = theme::text().patch(theme::bold());
-        spans.push(Span::styled(name.to_string(), bold));
-        match conversation {
-            // Who is bold, where is furniture: the room is dim so the name
-            // still wins the row (design §2).
-            Some(room) => spans.push(Span::styled(format!(" in {room}: "), theme::dim())),
-            None => spans.push(Span::styled(": ".to_string(), bold)),
-        }
-    }
-    spans.push(Span::styled(head.to_string(), theme::text()));
-    Line::from(spans)
-}
-
-/// A person's own line, on a bar the width of the transcript. An origin that
-/// names a principal is somebody else speaking — a channel's correspondent, a
-/// person writing from elsewhere — so the line says who, as a chat does. Where
-/// they said it is the view one is looking at; saying it again would be noise.
-fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let text = said(parts);
-    if text.trim().is_empty() {
-        return Vec::new();
-    }
-    let mut body: Vec<Line<'static>> = text
-        .lines()
-        .map(|line| Line::from(Span::styled(line.to_string(), theme::text())))
-        .collect();
-    if let Some(name) = principal
-        && let Some(first) = body.first_mut()
-    {
-        first.spans.insert(
-            0,
-            Span::styled(format!("{name}: "), theme::text().patch(theme::bold())),
-        );
-    }
-    let mark = Span::styled(format!("{} ", theme::user()), theme::dim());
-    under(mark, body, speaks_indent(), rows.measure())
-        .into_iter()
-        .map(|line| bar(line, rows.width))
-        .collect()
-}
-
-/// The raised bar behind a `>` line: it runs to the edge of the transcript,
-/// so what you said is a band and not a sentence.
-fn bar(line: Line<'static>, width: usize) -> Line<'static> {
-    let mut spans = line.spans;
-    let used: usize = spans.iter().map(|s| s.content.width()).sum();
-    spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
-    let mut line = Line::from(spans);
-    line.style = theme::raised();
-    line
-}
 
 /// The answer: the brightest text on the screen, after a white `⏺` — and,
 /// while it is still arriving, a comet tail on the cells that just landed.
@@ -665,6 +505,29 @@ struct Call<'a> {
     /// The skill this call is, when it is one: the row is the run's, not the
     /// tool's, and what came back still hangs under it.
     run: Option<Run<'a>>,
+}
+
+/// The row one skill run wears, whichever door it came through: the model's
+/// `Skill(guide)` call and a person's own `/guide` are the same thing
+/// happening, so this is the only place either is drawn (design §4).
+///
+/// The mark is the skill's own glyph in the bullet's place, in the colour the
+/// bullet would have worn: what kind of row it is and what state it is in are
+/// two facts, and each keeps its own carrier.
+fn skill_row(run: Run<'_>, style: Style, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    marked(theme::skill(), style, vec![asked(run, rows)], rows)
+}
+
+/// `Skill(guide) the wire format`: the call as any tool row spells one, then
+/// the free text the skill was given — outside the parentheses, because it is
+/// what the skill reads and not what it is.
+fn asked(run: Run<'_>, rows: &Rows<'_>) -> Line<'static> {
+    let mut line = signature(skill::TOOL, run.name, rows);
+    if !run.args.is_empty() {
+        line.spans
+            .push(Span::styled(format!(" {}", run.args), theme::text()));
+    }
+    line
 }
 
 fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
@@ -984,15 +847,17 @@ mod tests {
     };
     use bingo_sdk::{Event, ItemId};
 
+    /// A member's own transcript: a session a model answers.
     fn drawn(items: Vec<Item>) -> Vec<String> {
-        drawn_in(None, items)
+        rendered(&stated(items))
     }
 
-    /// The same items in a session of that name: a room's own transcript when
-    /// the name is the room's.
-    fn drawn_in(title: Option<&str>, items: Vec<Item>) -> Vec<String> {
+    /// The same items in the room's own transcript: a session nothing answers,
+    /// under the room's name (ADR-0011 §1).
+    fn drawn_in_room(items: Vec<Item>) -> Vec<String> {
         let mut state = stated(items);
-        state.summary.title = title.map(str::to_string);
+        state.summary.title = Some("#design".to_string());
+        state.summary.driver = Driver::Log;
         rendered(&state)
     }
 
@@ -1048,33 +913,85 @@ mod tests {
         rows
     }
 
+    /// The whole of ADR-0034 in one transcript: a room's activity is the
+    /// room's, so a member's own — the holder's included — draws none of it,
+    /// and what the person typed is still a block of their own.
     #[test]
-    fn a_post_says_who_wrote_it_and_a_persons_own_line_does_not() {
+    fn a_members_transcript_draws_none_of_its_rooms_machinery() {
         assert_eq!(
             drawn(vec![
-                post("itm_1", "reviewer", "two nits, otherwise fine"),
-                person("itm_2", "thanks"),
+                delivered(
+                    "itm_1",
+                    "room",
+                    None,
+                    "#design has posts you have not read."
+                ),
+                delivered(
+                    "itm_2",
+                    "contributor:rooms",
+                    None,
+                    "[#design, since you last read]\nscout: found it",
+                ),
+                post("itm_3", "reviewer", "two nits, otherwise fine"),
+                person("itm_4", "thanks"),
             ]),
-            vec![
-                "⏺ reviewer in #design: two nits, otherwise fine".to_string(),
-                String::new(),
-                "> thanks".to_string(),
-            ],
-            "the machinery is marked; what a person typed is a block"
+            vec!["> thanks".to_string()],
+            "the nudge, the reading and a copied post are the room's"
         );
     }
 
-    /// Where a post is read decides whether it says where it came from: a
-    /// member's own transcript carries every conversation it is in, and a
-    /// room's carries one.
+    /// The set is exactly the two origins the rooms plugin writes: a message
+    /// from a peer names a conversation of its own and still draws, and every
+    /// other contributor still speaks.
     #[test]
-    fn a_post_names_its_room_everywhere_but_in_the_room() {
-        let post = || vec![post("itm_1", "scout", "found it")];
-        assert_eq!(drawn(post()), vec!["⏺ scout in #design: found it"]);
+    fn only_the_rooms_own_origins_are_kept_out_of_a_member() {
         assert_eq!(
-            drawn_in(Some("#design"), post()),
-            vec!["⏺ scout: found it"],
-            "in the room's own transcript the name stands alone"
+            drawn(vec![delivered(
+                "itm_1",
+                "agent",
+                Some("scout"),
+                "Two nits, else fine."
+            )]),
+            vec!["⏺ scout: Two nits, else fine.".to_string()],
+        );
+        assert_eq!(
+            drawn(vec![delivered(
+                "itm_2",
+                "contributor:experience:recall",
+                None,
+                "you have seen this before"
+            )]),
+            vec!["> you have seen this before".to_string()],
+        );
+    }
+
+    /// The room's own transcript is where its activity is read, and every post
+    /// it holds is drawn there — the name first, then the whole message.
+    #[test]
+    fn a_room_reads_as_a_conversation_does() {
+        assert_eq!(
+            drawn_in_room(vec![post(
+                "itm_1",
+                "scout",
+                "found it\n\nit was the cursor all along",
+            )]),
+            vec![
+                "⏺ scout: found it".to_string(),
+                String::new(),
+                "  it was the cursor all along".to_string(),
+            ],
+            "no `⎿`, nothing dim, nothing folded: a message is read whole"
+        );
+    }
+
+    /// A post nobody signed came from the session the room hangs under, and it
+    /// is read under the name every seat on the roster reads it under — the
+    /// same row as anybody else's, because in the room it is anybody else's.
+    #[test]
+    fn an_unsigned_post_is_the_holders_and_says_so() {
+        assert_eq!(
+            drawn_in_room(vec![person("itm_1", "then let us ship it")]),
+            vec!["⏺ parent: then let us ship it"],
         );
     }
 
@@ -1088,15 +1005,24 @@ mod tests {
 
     /// The whole of the closed set, read from the list itself, and a handful
     /// of surfaces outside it — the ones that exist and one that never will.
+    /// The room's own is quieter still — it is read in the room and nowhere
+    /// else — so it is the one member of the set that draws no row here.
     #[test]
     fn every_quiet_surface_is_a_marked_line_and_nothing_else_is() {
-        for surface in QUIET_SURFACES {
+        for surface in said::QUIET_SURFACES
+            .iter()
+            .filter(|surface| **surface != said::ROOMS)
+        {
             assert_eq!(
                 drawn(vec![delivered("itm_1", surface, None, "it ended")]),
                 vec!["⏺ it ended".to_string()],
                 "{surface} is quiet"
             );
         }
+        assert!(
+            drawn(vec![delivered("itm_1", said::ROOMS, None, "it ended")]).is_empty(),
+            "and the room's own is not drawn in a member at all"
+        );
         for loud in ["tui", "print", "rpc", "acp", "channels", "brand-new"] {
             assert_eq!(
                 drawn(vec![delivered("itm_1", loud, None, "it ended")]),

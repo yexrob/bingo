@@ -1,5 +1,6 @@
 ---
 source: crates/bingo-surface-tui/src/view.rs
+assertion_line: 1685
 expression: screen
 ---
 "                                                                                "
@@ -14,12 +15,12 @@ expression: screen
 "                                                                                "
 "                                                                                "
 "                                                                                "
-"                                                                                "
 "⏺ reviewer: the plan is thin on tests                                           "
+"  none of M9's exit criteria name one                                           "
 "                                                                                "
 "⏺ scout: M9's exit criteria cover them                                          "
 "                                                                                "
-"> then let us ship it                                                           "
+"⏺ parent: then let us ship it                                                   "
 "                                                                                "
 "                                                                                "
 "╭──────────────────────────────────────────────────────────────────────────────╮"

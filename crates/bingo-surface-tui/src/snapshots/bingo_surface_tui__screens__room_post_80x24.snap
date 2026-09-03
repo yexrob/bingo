@@ -1,8 +1,10 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 24
+assertion_line: 35
 expression: "draw_tree(80, 24, tree, ui, now)"
 ---
+"                                                                                "
+"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -17,8 +19,6 @@ expression: "draw_tree(80, 24, tree, ui, now)"
 "│   /help for help · /login codex to use a subscription                        │"
 "│   cwd: /tmp/project                                                          │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-"                                                                                "
-"⏺ reviewer in #design: the plan is thin on tests                                "
 "                                                                                "
 "⏺ scout: Two nits, else fine.                                                   "
 "                                                                                "
