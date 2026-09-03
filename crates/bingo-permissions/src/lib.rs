@@ -23,7 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{
     Command, ConfigClaim, Contribution, Decision, Merge, PermissionPolicy, Plugin, PluginError,
-    PluginManifest, PolicyInput, Registrar, SessionId, Verdict,
+    PluginManifest, PolicyInput, Registrar, SessionId, Stance, Verdict,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -193,6 +193,12 @@ impl PermissionPolicy for PermissionsPolicy {
 
     async fn decide(&self, input: PolicyInput<'_>) -> Decision {
         decide::decide(&self.request(input), &self.rules_for(input.session))
+    }
+
+    /// A question no tool defines is the mode's alone to answer: no rule
+    /// names a call that is not there (ADR-0039 §2).
+    async fn stance(&self, session: &SessionId) -> Stance {
+        self.mode_for(session).stance()
     }
 
     /// The mode this session runs in and the rules its person accepted, as a
@@ -413,6 +419,21 @@ mod tests {
             ask_about(&policy, &session, "cargo build").await,
             Decision::Ask { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn the_stance_is_the_mode_this_session_chose_and_no_other_session_s() {
+        let policy = policy(json!({}));
+        let mine = SessionId::from_raw("ses_mine");
+        let theirs = SessionId::from_raw("ses_theirs");
+        assert_eq!(policy.stance(&mine).await, Stance::Ask);
+
+        policy.choose_mode(&mine, Mode::BypassPermissions);
+        assert_eq!(policy.stance(&mine).await, Stance::Allow);
+        assert_eq!(policy.stance(&theirs).await, Stance::Ask);
+
+        policy.choose_mode(&mine, Mode::DontAsk);
+        assert_eq!(policy.stance(&mine).await, Stance::Refuse);
     }
 
     #[test]
