@@ -105,16 +105,20 @@ impl Plugin for McpPlugin {
     }
 }
 
-/// The rows, under the key another plugin looks them up by. Both faces are
-/// the one object: the typed lookup is a `ServiceHandle` over the wire face,
-/// which is how a service met by method rather than by type is reached from in
-/// process (ADR-0031 §4).
+/// The rows, under the key another plugin looks them up by. The typed lookup
+/// is a `ServiceHandle` over the wire face, which is how a service met by
+/// method rather than by type is reached from in process (ADR-0031 §4).
+///
+/// No wire face is opened: a row carries a person's `env` and `headers`, so
+/// the answer stays inside this process. Opening one would put those keys
+/// within reach of every out-of-process plugin, and nothing asks for them
+/// there.
 fn service(manager: Arc<Manager>) -> Contribution {
     let wire = Arc::new(Rows::new(manager)) as Arc<dyn WireService>;
     Contribution::Service {
         key: SERVERS.to_string(),
-        value: Arc::new(ServiceHandle::new(Arc::clone(&wire))),
-        wire: Some(wire),
+        value: Arc::new(ServiceHandle::new(wire)),
+        wire: None,
     }
 }
 
@@ -161,7 +165,10 @@ mod tests {
         match &contributions[2] {
             Contribution::Service { key, wire, .. } => {
                 assert_eq!(key, SERVERS);
-                assert!(wire.is_some(), "one object, both faces");
+                assert!(
+                    wire.is_none(),
+                    "a row carries env and headers: no face across a process line"
+                );
             }
             other => panic!("expected the rows service, got {other:?}"),
         }
