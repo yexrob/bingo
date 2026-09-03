@@ -15,6 +15,10 @@ use serde_json::{Value, json};
 
 use super::*;
 
+/// What becomes of a question the agent asks — allowed, refused, or put to a
+/// person (ADR-0039) — is its own story and reads on its own terms.
+mod asking;
+
 /// The tool bridge is its own scenario file: what ADR-0036 added is a
 /// conversation the other way, and it reads on its own terms.
 mod bridge;
@@ -679,53 +683,5 @@ fn the_restore_ladder_climbs_resume_then_load_then_a_file() {
     assert!(
         !transcript.contains("a replayed"),
         "and holds nothing the journal never had: {transcript}"
-    );
-}
-
-/// ADR-0035 §5: permissions are the adapter's own. A question that arrives
-/// anyway is refused with the agent's own reject option, one notice names the
-/// row where the answer belongs, and the turn goes on.
-#[test]
-fn a_permission_question_is_refused_and_one_notice_names_the_row() {
-    let Some(agent) = fake_agent() else { return };
-    let adapter = Scripted::new(
-        agent,
-        json!({
-            "sessionId": "acp-6",
-            "capabilities": { "resume": true },
-            "turns": [{
-                "permission": {
-                    "toolCall": { "toolCallId": "c1", "title": "Edit src/lib.rs", "kind": "edit" },
-                    "options": [
-                        { "optionId": "allow-once", "name": "Yes", "kind": "allow_once" },
-                        { "optionId": "reject", "name": "No", "kind": "reject_once" }
-                    ]
-                },
-                "updates": [chunk("Left it alone.")],
-                "stopReason": "end_turn"
-            }]
-        }),
-    );
-    let out = adapter.turn("edit it");
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert_eq!(
-        said(frames_of(&out)),
-        ["Left it alone."],
-        "the turn went on"
-    );
-
-    let answered = adapter
-        .first("permission/answered")
-        .expect("the agent got an answer");
-    assert_eq!(answered["outcome"]["outcome"], "selected");
-    assert_eq!(answered["outcome"]["optionId"], "reject");
-
-    let all = notices(frames_of(&out));
-    let asked = coded(&all, "ACP_ASKED");
-    assert_eq!(asked.len(), 1, "said once: {all:?}");
-    assert!(
-        asked[0].contains("acp.adapters.scripted"),
-        "the notice names the row: {}",
-        asked[0]
     );
 }
