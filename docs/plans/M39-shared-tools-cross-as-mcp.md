@@ -48,7 +48,9 @@ so it syncs itself when a tool is added later.
    the turn door). Injection at `session/new`: the bridge row (token
    in env) plus forwarded `mcp.servers` rows (stdio and http verbatim,
    sse skipped with a notice). Adapter row grows `tools` (explicit
-   offer, replaces the shared set) and `forwardMcp` (default true).
+   offer, replaces the shared set) and `forwardMcp` (default false —
+   forwarded rows can carry credentials into a foreign agent; the
+   crossing is opt-in, ADR-0036 §4).
    The preamble names the bridge's tools. `CatalogChanged` →
    `tools/list_changed` to live sessions.
 7. Black-box (`bingo/tests/cli/acp.rs`; the scripted fake agent grows
@@ -80,8 +82,11 @@ cli/acp.rs`, `bingo-provider-acp/tests/`; `scripts/acp-smoke.md`.
   `bingo-provider-acp` (checked in review by grep); a tool declared
   `shared` in a test-only plugin appears on the bridge with no
   provider-acp edit — asserted by a contract test.
-- [ ] `mcp.servers` stdio and http rows are forwarded verbatim; an sse
-  row is skipped and said.
+- [ ] `mcp.servers` stdio and http rows are forwarded verbatim only
+  under `forwardMcp: true`; absent, nothing is forwarded; an sse row
+  is skipped and said.
+- [ ] An MCP-sourced tool (a `ToolSource`'s) never enters the bridge
+  offer, whatever its server claims — pinned by a test.
 - [ ] Every AGENTS.md gate; Windows cross-check for socket/pipe, the
   proxy mode and the child work
   (`cargo check -p bingo-provider-acp --all-targets --target
@@ -105,3 +110,9 @@ per-run socket — bingo serves MCP to its own ACP children only.
   recorded in ADR-0036 §4, not cured.
 - rmcp's server features may pull transitive weight; `budget.sh`
   decides, the cap moves only with the measured number.
+- A tool item lands under a turn whose assistant item is still
+  streaming — surfaces must fold that interleaving; a `TestBackend`
+  look before done.
+- The bridge's peer may reconnect (its MCP client respawns a dead
+  proxy): a token is re-usable after its stream closed; only a second
+  concurrent stream is refused.

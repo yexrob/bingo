@@ -54,8 +54,11 @@ of its sentence — no MCP handover — is repealed for shared tools.
    `mcp.servers` rows ride the same `mcpServers` list — stdio and http
    rows verbatim, an sse row skipped with a notice — so the agent
    dials them itself: one hop, their own env and auth. Per adapter
-   row: `forwardMcp`, default true. Recorded, not cured: a server both
-   sides use is dialled twice.
+   row: `forwardMcp`, **default false**: a row's env and headers may
+   carry credentials, and a forwarded row hands them to a foreign
+   agent whose logs and model context we do not govern — that crossing
+   is the person's word to give, never a default. Recorded, not cured:
+   a server both sides use is dialled twice.
 5. **The first prompt says so.** The preamble that names the transcript
    now also names the bridge: what can be called, what will not be
    answered. A tool in the hand is no tool if nobody says it is there.
