@@ -57,10 +57,25 @@ impl Held {
     /// What the line still carries, in token order; a token typed by hand
     /// with nothing held under it is words.
     pub fn carried(&self, line: &str) -> Vec<Image> {
+        self.shown(line)
+            .into_iter()
+            .map(|(_, image)| image.clone())
+            .collect()
+    }
+
+    /// The same, each under the token that names it: what the strip draws,
+    /// which needs the token to know the picture by (M48 brick 3).
+    pub fn shown(&self, line: &str) -> Vec<(u32, &Image)> {
         tokens(line)
             .into_iter()
-            .filter_map(|n| self.by_token.get(&n).cloned())
+            .filter_map(|n| Some((n, self.by_token.get(&n)?)))
             .collect()
+    }
+
+    /// The picture one token names, whatever the line says. What the send
+    /// reads a drawn thumbnail back out of.
+    pub fn under(&self, token: u32) -> Option<&Image> {
+        self.by_token.get(&token)
     }
 
     pub fn clear(&mut self) {
@@ -115,5 +130,21 @@ mod tests {
     fn a_token_typed_by_hand_is_words() {
         let held = Held::default();
         assert!(held.carried("[image 7]").is_empty());
+        assert!(held.shown("[image 7]").is_empty());
+    }
+
+    /// The strip draws what the line carries and needs to know each one's
+    /// token; the send reads one back out by that token alone.
+    #[test]
+    fn what_is_shown_carries_its_token_and_is_read_back_by_it() {
+        let mut held = Held::default();
+        held.hold("", image("a"));
+        held.hold("[image 1]", image("b"));
+        assert_eq!(
+            held.shown("[image 2] and [image 1]"),
+            vec![(2, &image("b")), (1, &image("a"))]
+        );
+        assert_eq!(held.under(1), Some(&image("a")));
+        assert_eq!(held.under(9), None);
     }
 }

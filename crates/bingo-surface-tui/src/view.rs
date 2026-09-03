@@ -15,12 +15,13 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::clock::{self, Now};
 use crate::commands::{Group, Suggestion};
+use crate::composer::strip;
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Listed, Open, Picker, Switcher, Ui};
 use crate::{
-    composer as prompt, dialog, keys, layers, mentions, pager, panel, rail, rewind, roster, search,
-    select, status, theme, transcript, views, window, wrap,
+    composer as prompt, dialog, graphics, keys, layers, mentions, pager, panel, rail, rewind,
+    roster, search, select, status, theme, transcript, views, window, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -81,6 +82,7 @@ fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
     let state = tree.viewed();
     Demand {
         composer: u16::try_from(composer_rows(state, ui, width as usize)).unwrap_or(u16::MAX),
+        strip: strip(state, ui, width).height(),
         // Never fewer than two: the band holds its air and its verb row even
         // while idle, so a turn starting or ending moves nothing — the
         // bottom-anchored transcript used to bounce by two rows at each end
@@ -111,6 +113,20 @@ fn composer_rows(state: &SessionState, ui: &Ui, width: usize) -> usize {
         .lines
         .len()
         .clamp(1, COMPOSER_ROWS)
+}
+
+/// The thumbnails of the pictures the draft is carrying, for a box this wide
+/// (design §4, M48). Asked for twice a frame — once to make room for it and
+/// once to draw it — which costs one walk of the line, the pixels being the
+/// memo's ([`crate::graphics::Decoded`]).
+fn strip(state: &SessionState, ui: &Ui, width: u16) -> strip::Strip {
+    strip::rows(
+        &ui.pictures,
+        ui.composer.text(),
+        graphics::chosen(),
+        &ui.decoded,
+        u16::try_from(inner_width(state, usize::from(width))).unwrap_or(u16::MAX),
+    )
 }
 
 /// The cells inside the box: two border columns, a cell of padding each
@@ -718,8 +734,40 @@ fn render_composer(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect,
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let under = render_strip(ui, frame, inner, strip(state, ui, area.width));
+    render_draft(state, ui, frame, under, area.width);
+}
+
+/// The thumbnails, on the box's own first rows, and the rows left under them
+/// for the draft. The strip is the first thing to go when the box did not get
+/// the rows it asked for: what is being typed matters more than what was
+/// pasted beside it.
+fn render_strip(ui: &Ui, frame: &mut Frame, inner: Rect, strip: strip::Strip) -> Rect {
+    let rows = strip.height();
+    if rows == 0 || rows >= inner.height {
+        ui.painted.borrow_mut().strip.clear();
+        return inner;
+    }
+    frame.render_widget(
+        Paragraph::new(strip.lines),
+        Rect {
+            height: rows,
+            ..inner
+        },
+    );
+    ui.painted.borrow_mut().strip = strip.pictures;
+    Rect {
+        y: inner.y + rows,
+        height: inner.height - rows,
+        ..inner
+    }
+}
+
+/// The draft itself and the caret in it. `width` is the box's, borders and
+/// all, which is what says how wide a row of text may be.
+fn render_draft(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, width: u16) {
     let prompt = prompt::prompt(state);
-    let layout = ui.composer.layout(inner_width(state, area.width as usize));
+    let layout = ui.composer.layout(inner_width(state, usize::from(width)));
     // Scroll only as far as the caret needs: it must stay in the box.
     let start = layout.cursor.0.saturating_sub(COMPOSER_ROWS - 1);
     let placeholder = placeholder(state);
@@ -729,16 +777,16 @@ fn render_composer(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect,
         (start, COMPOSER_ROWS),
         ui.composer.is_empty().then_some(placeholder.as_str()),
     );
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), area);
     frame.set_cursor_position((
-        inner.x
+        area.x
             + u16::try_from(layout.cursor.1 + prompt.width())
                 .unwrap_or(u16::MAX)
-                .min(inner.width.saturating_sub(1)),
-        inner.y
+                .min(area.width.saturating_sub(1)),
+        area.y
             + u16::try_from(layout.cursor.0 - start)
                 .unwrap_or(u16::MAX)
-                .min(inner.height.saturating_sub(1)),
+                .min(area.height.saturating_sub(1)),
     ));
 }
 
@@ -2213,5 +2261,153 @@ mod tests {
             before,
             "the frame beneath is what it was"
         );
+    }
+
+    // ---- M48: the strip of thumbnails inside the box ---------------------
+
+    /// A draft carrying pictures, as a person leaves it: the tokens in the
+    /// line and the pictures held behind them.
+    fn carrying(ui: &mut Ui, pictures: usize) {
+        for _ in 0..pictures {
+            let token = ui
+                .pictures
+                .hold(ui.composer.text(), bingo_pictures::testing::png(100, 200));
+            ui.composer.insert(&crate::pictures::placeholder(token));
+        }
+    }
+
+    /// The rows of the input box, from its top border down: the last box on
+    /// the screen, the welcome box being above it.
+    fn box_rows(screen: &str) -> Vec<String> {
+        let lines: Vec<&str> = screen.lines().collect();
+        let top = lines
+            .iter()
+            .rposition(|line| line.contains('╭'))
+            .unwrap_or_else(|| panic!("no input box:\n{screen}"));
+        lines[top..]
+            .iter()
+            .take_while(|line| !line.contains('╰'))
+            .map(|line| (*line).to_string())
+            .collect()
+    }
+
+    fn placeholder_rows(screen: &str) -> usize {
+        screen
+            .lines()
+            .filter(|line| line.contains(crate::graphics::kitty::PLACEHOLDER))
+            .count()
+    }
+
+    /// A pasted picture is three rows of cells inside the box above the
+    /// prompt, and the box is three rows taller for them.
+    #[test]
+    fn a_carried_picture_puts_a_strip_above_the_prompt() {
+        let state = state();
+        let (mut ui, now) = scene();
+        let plain = render(&state, &ui, now);
+        crate::graphics::with(crate::graphics::drawing(), || {
+            carrying(&mut ui, 1);
+            let screen = render(&state, &ui, now);
+            assert_eq!(
+                box_rows(&screen).len(),
+                box_rows(&plain).len() + usize::from(strip::ROWS),
+                "{screen}"
+            );
+            assert_eq!(
+                placeholder_rows(&screen),
+                usize::from(strip::ROWS),
+                "{screen}"
+            );
+            let rows = box_rows(&screen);
+            let prompt = rows
+                .iter()
+                .position(|row| row.contains("[image 1]"))
+                .expect("the token is still in the words");
+            assert!(
+                rows[1..prompt]
+                    .iter()
+                    .all(|row| row.contains(crate::graphics::kitty::PLACEHOLDER)),
+                "the cells are between the border and the prompt: {rows:?}"
+            );
+        });
+    }
+
+    /// The line is the record: deleting the token takes the strip with it and
+    /// gives the box its rows back.
+    #[test]
+    fn deleting_the_token_takes_the_strip_with_it() {
+        let state = state();
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            let plain = render(&state, &ui, now);
+            carrying(&mut ui, 1);
+            assert_eq!(placeholder_rows(&render(&state, &ui, now)), 3);
+            ui.composer.clear();
+            let after = render(&state, &ui, now);
+            assert_eq!(placeholder_rows(&after), 0, "{after}");
+            assert_eq!(after, plain, "and the box is what it was");
+        });
+    }
+
+    /// Four thumbnails and a count of what would not fit.
+    #[test]
+    fn five_carried_pictures_show_four_and_a_count() {
+        let state = state();
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            carrying(&mut ui, 5);
+            let screen = render(&state, &ui, now);
+            assert!(screen.contains("+1"), "{screen}");
+            assert_eq!(
+                ui.painted.borrow().strip.len(),
+                usize::from(strip::SHOWN as u16),
+                "{screen}"
+            );
+        });
+    }
+
+    /// A terminal that draws no pictures gets no band: the tokens in the line
+    /// already say what is attached.
+    #[test]
+    fn a_terminal_that_draws_no_pictures_gets_no_strip() {
+        let state = state();
+        let (mut ui, now) = scene();
+        carrying(&mut ui, 2);
+        let screen = render(&state, &ui, now);
+        assert_eq!(placeholder_rows(&screen), 0, "{screen}");
+        assert!(screen.contains("[image 1]"), "{screen}");
+        assert!(ui.painted.borrow().strip.is_empty());
+    }
+
+    /// A room is posted into rather than asked, and its prompt keeps its own
+    /// row under the strip.
+    #[test]
+    fn a_rooms_prompt_keeps_its_row_under_the_strip() {
+        let tree = room_tree(Vec::new());
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            carrying(&mut ui, 1);
+            let screen = render_tree(&tree, &ui, now);
+            let rows = box_rows(&screen);
+            let prompt = rows
+                .iter()
+                .position(|row| row.contains("#design >"))
+                .unwrap_or_else(|| panic!("the room's own prompt: {screen}"));
+            assert_eq!(prompt, 1 + usize::from(strip::ROWS), "{rows:?}");
+        });
+    }
+
+    /// The box yields the strip before it yields the row a person is typing
+    /// on: a screen too short for both keeps the prompt.
+    #[test]
+    fn a_screen_too_short_for_both_keeps_the_prompt_and_not_the_strip() {
+        let state = state();
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            carrying(&mut ui, 1);
+            let screen = draw_sized(80, 5, &state, &ui, now);
+            assert_eq!(placeholder_rows(&screen), 0, "{screen}");
+            assert!(screen.contains("[image 1]"), "{screen}");
+        });
     }
 }

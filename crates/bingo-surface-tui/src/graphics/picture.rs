@@ -1,54 +1,93 @@
-//! One picture a frame drew: where in the journal it came from, and how many
-//! cells of the screen it took.
+//! One picture a frame drew: where it came from, and how many cells of the
+//! screen it took.
 //!
-//! It carries no bytes. The picture itself lives in the item the reducer
-//! folded, and this says which one and how big it was drawn — so a frame that
-//! places a picture costs a handful of integers rather than a copy of it.
+//! It carries no bytes. The picture itself lives where it already lived — an
+//! item the reducer folded, or the composer's own held pictures — and this
+//! says which one and how big it was drawn, so a frame that places a picture
+//! costs a handful of integers rather than a copy of it.
 
 use bingo_sdk::{ContentPart, Image, ItemBody, ItemId, SessionState};
 
 use super::Cell;
 use super::kitty::MAX_CELLS;
+use crate::pictures::Held;
 
-/// A picture the transcript placed, and the rectangle its placeholders cover.
+/// Where a picture on the screen came from: the two places this surface has
+/// one to draw.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The journal: which item, and which of its pictures
+    /// ([`pictures_of`]'s order).
+    Journal { item: ItemId, part: usize },
+    /// The draft: a pasted picture behind the composer's line, under the
+    /// `[image N]` that names it (M45).
+    Draft { token: u32 },
+}
+
+/// A picture a frame placed, and the rectangle its placeholders cover.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Picture {
-    pub item: ItemId,
-    /// Which of the item's pictures this is ([`pictures_of`]'s order).
-    pub part: usize,
+    pub source: Source,
     pub cols: u16,
     pub rows: u16,
 }
 
-impl Picture {
+impl Source {
     /// The number the terminal knows this picture by: a stable hash of where
-    /// it sits in the journal, so a redraw asks for the picture already sent
-    /// rather than sending it again. Twenty-four bits, because that is what a
-    /// foreground colour carries, and never zero, which the protocol keeps
-    /// for "no id".
+    /// it is, so a redraw asks for the picture already sent rather than
+    /// sending it again, and neither the row that draws it nor the send that
+    /// follows has to pass the other a number.
+    ///
+    /// Twenty-four bits, because that is what a foreground colour carries;
+    /// never zero, which the protocol keeps for "no id"; and the top of them
+    /// says which kind of picture it is, so a draft's number can never be a
+    /// journal picture's whatever the hash does.
     pub fn id(&self) -> u32 {
-        id_of(&self.item, self.part)
-    }
-
-    /// The picture itself, read back out of the session that was drawn.
-    pub fn image_in<'a>(&self, state: &'a SessionState) -> Option<&'a Image> {
-        let item = state.items.iter().find(|item| item.id == self.item)?;
-        pictures_of(&item.body).get(self.part).copied()
+        match self {
+            Source::Journal { item, part } => hashed(item.as_str().as_bytes(), &part.to_le_bytes()),
+            Source::Draft { token } => DRAFT | hashed(b"draft", &token.to_le_bytes()),
+        }
     }
 }
 
-/// The number the terminal knows a picture by, from where it sits in the
-/// journal alone — so the row that draws it and the send that follows ask
-/// about it under the same name, without either passing the other a number.
-pub fn id_of(item: &ItemId, part: usize) -> u32 {
+impl Picture {
+    pub fn id(&self) -> u32 {
+        self.source.id()
+    }
+
+    /// How many pixels the cells this picture was drawn into hold: the size
+    /// it is worth sending at, since nothing past it reaches the screen.
+    pub fn pixels(&self, cell: Cell) -> (u32, u32) {
+        (
+            u32::from(self.cols) * u32::from(cell.width),
+            u32::from(self.rows) * u32::from(cell.height),
+        )
+    }
+
+    /// The picture itself, read back out of where it came from — one lookup
+    /// that knows both places, so the send needs no second one.
+    pub fn image_in<'a>(&self, state: &'a SessionState, held: &'a Held) -> Option<&'a Image> {
+        match &self.source {
+            Source::Journal { item, part } => {
+                let found = state.items.iter().find(|kept| kept.id == *item)?;
+                pictures_of(&found.body).get(*part).copied()
+            }
+            Source::Draft { token } => held.under(*token),
+        }
+    }
+}
+
+/// The bit that says a number is a draft's, and the bits the hash gets.
+const DRAFT: u32 = 0x80_0000;
+const MASK: u32 = 0x7f_ffff;
+
+/// Twenty-three bits of FNV-1a over a name and a number, never zero.
+fn hashed(name: &[u8], number: &[u8]) -> u32 {
     let mut hash = FNV_OFFSET;
-    for byte in item.as_str().as_bytes() {
+    for byte in name.iter().chain(number.iter()) {
         hash = fold(hash, *byte);
     }
-    for byte in part.to_le_bytes() {
-        hash = fold(hash, byte);
-    }
-    (hash & 0xff_ffff).max(1)
+    (hash & MASK).max(1)
 }
 
 /// The pictures one item carries, in the order they were said: a person's own
@@ -121,8 +160,18 @@ mod tests {
 
     fn picture(item: &str, part: usize) -> Picture {
         Picture {
-            item: ItemId::from_raw(item),
-            part,
+            source: Source::Journal {
+                item: ItemId::from_raw(item),
+                part,
+            },
+            cols: 1,
+            rows: 1,
+        }
+    }
+
+    fn draft(token: u32) -> Picture {
+        Picture {
+            source: Source::Draft { token },
             cols: 1,
             rows: 1,
         }
@@ -149,14 +198,40 @@ mod tests {
             ..picture("itm_1", 0)
         };
         assert_eq!(bigger.id(), picture("itm_1", 0).id());
+        assert_eq!(draft(3).id(), draft(3).id());
+        assert_ne!(draft(3).id(), draft(4).id());
     }
 
     #[test]
     fn an_id_fits_a_colour_and_is_never_the_protocols_none() {
         for i in 0..2000 {
-            let id = picture(&format!("itm_{i}"), i).id();
-            assert!(id > 0 && id <= 0xff_ffff, "{id:#x}");
+            for id in [picture(&format!("itm_{i}"), i).id(), draft(i as u32).id()] {
+                assert!(id > 0 && id <= 0xff_ffff, "{id:#x}");
+            }
         }
+    }
+
+    /// A draft's number cannot be a journal picture's — not because a hash is
+    /// lucky, but because the two halves of the range are disjoint. A number
+    /// that collided would put the wrong picture on the screen.
+    #[test]
+    fn a_drafts_number_is_never_a_journal_pictures() {
+        let journal: std::collections::BTreeSet<u32> = (0..4000)
+            .map(|i| picture(&format!("itm_{i}"), i % 7).id())
+            .collect();
+        for token in 0..4000u32 {
+            assert!(!journal.contains(&draft(token).id()), "{token}");
+        }
+    }
+
+    /// The two places a picture may be, through one lookup.
+    #[test]
+    fn a_draft_is_read_out_of_what_the_composer_is_holding() {
+        let state = crate::test_support::folded(Vec::new());
+        let mut held = Held::default();
+        let token = held.hold("", image("pasted"));
+        assert_eq!(draft(token).image_in(&state, &held), Some(&image("pasted")));
+        assert_eq!(draft(token + 1).image_in(&state, &held), None);
     }
 
     /// Where pictures live: a person's own parts and what a tool answered
@@ -222,9 +297,33 @@ mod tests {
                 origin: Origin::surface("tui"),
             },
         ));
-        assert_eq!(picture("itm_9", 0).image_in(&state), Some(&image("one")));
-        assert_eq!(picture("itm_9", 1).image_in(&state), None, "no second part");
-        assert_eq!(picture("itm_8", 0).image_in(&state), None, "no such item");
+        let held = Held::default();
+        assert_eq!(
+            picture("itm_9", 0).image_in(&state, &held),
+            Some(&image("one"))
+        );
+        assert_eq!(
+            picture("itm_9", 1).image_in(&state, &held),
+            None,
+            "no second part"
+        );
+        assert_eq!(
+            picture("itm_8", 0).image_in(&state, &held),
+            None,
+            "no such item"
+        );
+    }
+
+    /// What a rectangle of cells holds, which is all that is worth sending.
+    #[test]
+    fn a_pictures_pixels_are_the_pixels_of_the_cells_it_covers() {
+        let block = Picture {
+            cols: 40,
+            rows: 12,
+            ..picture("itm_1", 0)
+        };
+        assert_eq!(block.pixels(CELL), (400, 240));
+        assert_eq!(picture("itm_1", 0).pixels(CELL), (10, 20));
     }
 
     const CELL: Cell = Cell {

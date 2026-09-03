@@ -33,11 +33,15 @@ const READS_A_PICTURE: &str = r#"{"responses":[
 
 /// What the terminal at the other end of the pty answers the graphics probe
 /// with. Every terminal answers DA1; only one that speaks the kitty protocol
-/// answers the graphics query, and only some say how big a cell is.
+/// answers the graphics query, only some say how big a cell is, and only the
+/// ones on M48's list draw the placeholder cells a picture is made of.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Answers {
-    /// kitty, WezTerm, Ghostty: `OK`, a cell of 10×20 pixels, then DA1.
+    /// kitty: `OK`, a cell of 10×20 pixels, its own name, then DA1.
     Pictures,
+    /// WezTerm: the same `OK` and the same cell, under a name that is not on
+    /// the list — it would draw tofu and a stray picture at the cursor.
+    Tofu,
     /// iTerm2, Apple Terminal: DA1 and nothing else.
     Da1Only,
 }
@@ -45,7 +49,12 @@ enum Answers {
 impl Answers {
     fn reply(self) -> &'static [u8] {
         match self {
-            Answers::Pictures => b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[?62;c",
+            Answers::Pictures => {
+                b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1bP>|kitty(0.46.2)\x1b\\\x1b[?62;c"
+            }
+            Answers::Tofu => {
+                b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1bP>|WezTerm 20240203-110809-5046fc22\x1b\\\x1b[?65;4;6;18;22c"
+            }
             Answers::Da1Only => b"\x1b[?62;c",
         }
     }
@@ -241,12 +250,9 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
 /// stands in for one everywhere else is not drawn (design §5, M46).
 #[test]
 fn a_terminal_that_answers_the_graphics_probe_is_sent_the_picture() {
+    let file = bingo_pictures::testing::png_bytes(1200, 900);
     let mut terminal = Terminal::opened(&[], READS_A_PICTURE, Answers::Pictures);
-    std::fs::write(
-        terminal.home.path().join("shot.png"),
-        bingo_pictures::testing::png_bytes(100, 200),
-    )
-    .unwrap();
+    std::fs::write(terminal.home.path().join("shot.png"), &file).unwrap();
     terminal.wait_for("? for shortcuts");
     terminal.send(b"look at it\r");
     terminal.wait_for("That is the picture.");
@@ -260,10 +266,66 @@ fn a_terminal_that_answers_the_graphics_probe_is_sent_the_picture() {
         contains(&written, b"U=1"),
         "as a virtual placement the cells stand in for"
     );
+    // M48 brick 2: the bytes are cut to the cells they will cover, so a
+    // picture far bigger than its block costs the block and not itself.
+    let sent = transmitted(&written);
+    let size = bingo_pictures::png_size(&sent).expect("a PNG went out");
+    assert!(
+        size.0 <= 1200 && size.1 < 900,
+        "the block's pixels, not the file's: {size:?}"
+    );
+    assert!(
+        sent.len() * 4 < file.len(),
+        "{} of {} bytes went out",
+        sent.len(),
+        file.len()
+    );
     assert!(
         !terminal.screen().contains("[image:"),
         "and no chip was drawn:\n{}",
         terminal.screen()
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// The PNG of the one `a=T` transmission in `written`, decoded out of the APC
+/// sequence that carried it.
+fn transmitted(written: &[u8]) -> Vec<u8> {
+    use base64::Engine;
+    let at = written
+        .windows(6)
+        .position(|w| w == b"\x1b_Ga=T")
+        .expect("a transmission");
+    let body = &written[at..];
+    let keys = body.iter().position(|b| *b == b';').expect("a payload") + 1;
+    let end = body
+        .windows(2)
+        .position(|w| w == b"\x1b\\")
+        .expect("a terminator");
+    base64::engine::general_purpose::STANDARD
+        .decode(&body[keys..end])
+        .expect("base64")
+}
+
+/// M48 brick 1: a terminal that answers the graphics query and is not known
+/// to draw a placeholder cell gets the chip. It would otherwise paint tofu
+/// where the picture goes and leave a stray copy of it at the cursor
+/// (wezterm#986, bugs.kde.org 523718).
+#[test]
+fn a_terminal_that_says_ok_and_draws_no_placeholder_gets_the_chip() {
+    let mut terminal = Terminal::opened(&[], READS_A_PICTURE, Answers::Tofu);
+    std::fs::write(
+        terminal.home.path().join("shot.png"),
+        bingo_pictures::testing::png_bytes(100, 200),
+    )
+    .unwrap();
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"look at it\r");
+    terminal.wait_for("[image: image/png]");
+    assert!(
+        !contains(&terminal.written(), b"\x1b_Ga=T"),
+        "nothing was transmitted to a terminal that would not draw it"
     );
     terminal.send(&[0x04]);
     terminal.leave();

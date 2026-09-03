@@ -11,6 +11,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{theme, tree};
 
+pub mod strip;
+
 /// Where the editor's text sits on screen once it is folded into a box.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {

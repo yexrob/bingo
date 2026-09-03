@@ -124,9 +124,21 @@ pub struct Painted {
     /// Where each rail card landed, in the rail's own rows: what a click on
     /// the rail is answered against.
     pub rail: Vec<(CardId, std::ops::Range<usize>)>,
+    /// The thumbnails the composer's strip drew, in the line's own order.
+    pub strip: Vec<crate::graphics::Picture>,
 }
 
 impl Painted {
+    /// Every picture this frame put cells on the screen for, oldest first: the
+    /// transcript's, then the composer's own. The strip comes last because
+    /// what falls off the terminal's cap is the oldest, and the picture a
+    /// person is about to send is the newest thing on the screen.
+    pub fn placed(&self) -> Vec<crate::graphics::Picture> {
+        let mut placed = self.blocks.pictures();
+        placed.extend(self.strip.iter().cloned());
+        placed
+    }
+
     /// The blank rows a short transcript leaves above itself: it hangs from
     /// the composer, not from the top of the screen, so those rows are nobody's
     /// lines.

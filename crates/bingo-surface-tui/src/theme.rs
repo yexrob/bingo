@@ -801,6 +801,7 @@ mod tests {
                 "dim",
                 &[
                     "composer.rs",
+                    "composer/strip.rs",
                     "dialog.rs",
                     "keys.rs",
                     "layers.rs",

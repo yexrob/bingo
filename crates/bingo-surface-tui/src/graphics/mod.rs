@@ -6,7 +6,9 @@
 //! a terminal calls itself and not what it can do — the way the background
 //! colour is asked (`theme.rs`).
 //!
-//! - [`probe`] is the question and the reading of the answer, both pure.
+//! - [`probe`] is the questions and the reading of the answers, both pure.
+//! - [`placeholders`] is the list of terminals that draw a placeholder cell,
+//!   which is the one thing no terminal can be asked.
 //! - [`picture`] is one picture a frame drew: where it came from and how many
 //!   cells it took.
 //! - [`kitty`] is the protocol as bytes.
@@ -16,11 +18,13 @@
 pub mod decoded;
 pub mod kitty;
 pub mod picture;
+pub mod placeholders;
 pub mod probe;
 pub mod stored;
 
 pub use decoded::Decoded;
 pub use picture::Picture;
+pub use placeholders::draws_placeholders;
 pub use probe::Probe;
 pub use stored::Stored;
 
@@ -45,10 +49,14 @@ pub enum Graphics {
 }
 
 impl From<Probe> for Graphics {
-    /// Both halves or neither: a terminal that speaks the protocol but will
-    /// not say how big a cell is cannot be drawn into.
+    /// All three or none. A terminal that speaks the protocol but will not
+    /// say how big a cell is cannot be drawn into; one that says `OK` and is
+    /// not known to draw a placeholder cell would draw tofu where the picture
+    /// goes, and a stray copy of it at the cursor besides
+    /// ([`draws_placeholders`]), so it gets the chip.
     fn from(probe: Probe) -> Self {
-        match (probe.kitty, probe.cell) {
+        let drawn = probe.kitty && probe.terminal.as_ref().is_some_and(draws_placeholders);
+        match (drawn, probe.cell) {
             (true, Some(cell)) => Graphics::Kitty { cell },
             _ => Graphics::Off,
         }
@@ -227,33 +235,72 @@ pub fn drawing() -> Graphics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use probe::Named;
+
+    const CELL: Cell = Cell {
+        width: 10,
+        height: 20,
+    };
+
+    fn answered(kitty: bool, cell: Option<Cell>, terminal: Option<(&str, &str)>) -> Probe {
+        Probe {
+            kitty,
+            cell,
+            terminal: terminal.map(|(name, version)| Named {
+                name: name.into(),
+                version: version.into(),
+            }),
+        }
+    }
 
     #[test]
-    fn pictures_are_drawn_only_when_both_halves_of_the_answer_came_back() {
-        let cell = Cell {
-            width: 10,
-            height: 20,
-        };
+    fn pictures_are_drawn_only_when_every_part_of_the_answer_came_back() {
+        let named = Some(("kitty", "0.46.2"));
         assert_eq!(
-            Graphics::from(Probe {
-                kitty: true,
-                cell: Some(cell)
-            }),
-            Graphics::Kitty { cell }
+            Graphics::from(answered(true, Some(CELL), named)),
+            Graphics::Kitty { cell: CELL }
         );
         assert_eq!(
-            Graphics::from(Probe {
-                kitty: true,
-                cell: None
-            }),
+            Graphics::from(answered(true, None, named)),
             Graphics::Off,
             "no cell size is no picture, rather than a guessed one"
         );
         assert_eq!(
-            Graphics::from(Probe {
-                kitty: false,
-                cell: Some(cell)
-            }),
+            Graphics::from(answered(false, Some(CELL), named)),
+            Graphics::Off
+        );
+    }
+
+    /// The terminals of the M48 list, through the whole answer: the two that
+    /// draw the cells, and the three that say `OK` and would draw tofu.
+    #[test]
+    fn a_terminal_that_says_ok_and_draws_no_placeholder_gets_the_chip() {
+        for named in [("kitty", "0.46.2"), ("ghostty", "1.3.1")] {
+            assert_eq!(
+                Graphics::from(answered(true, Some(CELL), Some(named))),
+                Graphics::Kitty { cell: CELL },
+                "{named:?}"
+            );
+        }
+        for named in [
+            ("WezTerm", "20240203-110809-5046fc22"),
+            ("Konsole", "26.08.0"),
+            ("kitty", "0.27.9"),
+        ] {
+            assert_eq!(
+                Graphics::from(answered(true, Some(CELL), Some(named))),
+                Graphics::Off,
+                "{named:?}"
+            );
+        }
+    }
+
+    /// A terminal that says `OK` and will not say what it is says nothing
+    /// about placeholders either, and the chip is what silence gets.
+    #[test]
+    fn a_terminal_that_names_itself_to_nobody_gets_the_chip() {
+        assert_eq!(
+            Graphics::from(answered(true, Some(CELL), None)),
             Graphics::Off
         );
     }
