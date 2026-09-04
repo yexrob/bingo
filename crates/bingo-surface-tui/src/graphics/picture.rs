@@ -10,9 +10,10 @@ use bingo_sdk::{ContentPart, Image, ItemBody, ItemId, SessionState};
 
 use super::Cell;
 use super::kitty::MAX_CELLS;
+use super::linked::Linked;
 use crate::pictures::Held;
 
-/// Where a picture on the screen came from: the two places this surface has
+/// Where a picture on the screen came from: the three places this surface has
 /// one to draw.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -22,6 +23,11 @@ pub enum Source {
     /// The draft: a pasted picture behind the composer's line, under the
     /// `[image N]` that names it (M45).
     Draft { token: u32 },
+    /// The words themselves: a `![what it is](path or URL)` an answer wrote,
+    /// read in once per destination and kept there (M51). Two items that name
+    /// the same picture are one picture, which is why this says nothing about
+    /// which item it was written in.
+    Linked { dest: String },
 }
 
 /// A picture a frame placed, and the rectangle its placeholders cover.
@@ -39,13 +45,14 @@ impl Source {
     /// follows has to pass the other a number.
     ///
     /// Twenty-four bits, because that is what a foreground colour carries;
-    /// never zero, which the protocol keeps for "no id"; and the top of them
-    /// says which kind of picture it is, so a draft's number can never be a
-    /// journal picture's whatever the hash does.
+    /// never zero, which the protocol keeps for "no id"; and the top two of
+    /// them say which kind of picture it is, so no two kinds can name the same
+    /// number whatever the hash does.
     pub fn id(&self) -> u32 {
         match self {
             Source::Journal { item, part } => hashed(item.as_str().as_bytes(), &part.to_le_bytes()),
             Source::Draft { token } => DRAFT | hashed(b"draft", &token.to_le_bytes()),
+            Source::Linked { dest } => LINKED | hashed(b"linked", dest.as_bytes()),
         }
     }
 }
@@ -65,23 +72,32 @@ impl Picture {
     }
 
     /// The picture itself, read back out of where it came from — one lookup
-    /// that knows both places, so the send needs no second one.
-    pub fn image_in<'a>(&self, state: &'a SessionState, held: &'a Held) -> Option<&'a Image> {
+    /// that knows all three places, so the send needs no second one. The
+    /// arguments are the three arms in order.
+    pub fn image_in<'a>(
+        &self,
+        state: &'a SessionState,
+        held: &'a Held,
+        linked: &'a Linked,
+    ) -> Option<&'a Image> {
         match &self.source {
             Source::Journal { item, part } => {
                 let found = state.items.iter().find(|kept| kept.id == *item)?;
                 pictures_of(&found.body).get(*part).copied()
             }
             Source::Draft { token } => held.under(*token),
+            Source::Linked { dest } => linked.image(dest),
         }
     }
 }
 
-/// The bit that says a number is a draft's, and the bits the hash gets.
+/// The two bits that say which kind of picture a number is, and the bits left
+/// for the hash. A journal picture wears neither.
 const DRAFT: u32 = 0x80_0000;
-const MASK: u32 = 0x7f_ffff;
+const LINKED: u32 = 0x40_0000;
+const MASK: u32 = 0x3f_ffff;
 
-/// Twenty-three bits of FNV-1a over a name and a number, never zero.
+/// Twenty-two bits of FNV-1a over a name and a number, never zero.
 fn hashed(name: &[u8], number: &[u8]) -> u32 {
     let mut hash = FNV_OFFSET;
     for byte in name.iter().chain(number.iter()) {
@@ -177,6 +193,14 @@ mod tests {
         }
     }
 
+    fn named(dest: &str) -> Picture {
+        Picture {
+            source: Source::Linked { dest: dest.into() },
+            cols: 1,
+            rows: 1,
+        }
+    }
+
     fn image(data: &str) -> Image {
         Image {
             media_type: "image/png".into(),
@@ -202,25 +226,41 @@ mod tests {
         assert_ne!(draft(3).id(), draft(4).id());
     }
 
+    /// A picture the words named is its destination and nothing else: the
+    /// same path in two answers is one picture, read in once and held once.
+    #[test]
+    fn the_same_destination_is_one_picture_wherever_it_is_named() {
+        assert_eq!(named("docs/x.png").id(), named("docs/x.png").id());
+        assert_ne!(named("docs/x.png").id(), named("docs/y.png").id());
+    }
+
     #[test]
     fn an_id_fits_a_colour_and_is_never_the_protocols_none() {
         for i in 0..2000 {
-            for id in [picture(&format!("itm_{i}"), i).id(), draft(i as u32).id()] {
+            for id in [
+                picture(&format!("itm_{i}"), i).id(),
+                draft(i as u32).id(),
+                named(&format!("{i}.png")).id(),
+            ] {
                 assert!(id > 0 && id <= 0xff_ffff, "{id:#x}");
             }
         }
     }
 
-    /// A draft's number cannot be a journal picture's — not because a hash is
-    /// lucky, but because the two halves of the range are disjoint. A number
-    /// that collided would put the wrong picture on the screen.
+    /// No two kinds of picture can share a number — not because a hash is
+    /// lucky, but because the three quarters of the range they sit in are
+    /// disjoint. A number that collided would put the wrong picture on the
+    /// screen.
     #[test]
-    fn a_drafts_number_is_never_a_journal_pictures() {
-        let journal: std::collections::BTreeSet<u32> = (0..4000)
+    fn the_three_kinds_of_picture_never_share_a_number() {
+        let journal: Vec<u32> = (0..4000)
             .map(|i| picture(&format!("itm_{i}"), i % 7).id())
             .collect();
-        for token in 0..4000u32 {
-            assert!(!journal.contains(&draft(token).id()), "{token}");
+        let drafts: Vec<u32> = (0..4000u32).map(|token| draft(token).id()).collect();
+        let named: Vec<u32> = (0..4000).map(|i| named(&format!("{i}.png")).id()).collect();
+        for (one, two) in [(&journal, &drafts), (&journal, &named), (&drafts, &named)] {
+            let one: std::collections::BTreeSet<u32> = one.iter().copied().collect();
+            assert!(two.iter().all(|id| !one.contains(id)));
         }
     }
 
@@ -230,8 +270,14 @@ mod tests {
         let state = crate::test_support::folded(Vec::new());
         let mut held = Held::default();
         let token = held.hold("", image("pasted"));
-        assert_eq!(draft(token).image_in(&state, &held), Some(&image("pasted")));
-        assert_eq!(draft(token + 1).image_in(&state, &held), None);
+        assert_eq!(
+            draft(token).image_in(&state, &held, &Linked::default()),
+            Some(&image("pasted"))
+        );
+        assert_eq!(
+            draft(token + 1).image_in(&state, &held, &Linked::default()),
+            None
+        );
     }
 
     /// Where pictures live: a person's own parts and what a tool answered
@@ -299,16 +345,16 @@ mod tests {
         ));
         let held = Held::default();
         assert_eq!(
-            picture("itm_9", 0).image_in(&state, &held),
+            picture("itm_9", 0).image_in(&state, &held, &Linked::default()),
             Some(&image("one"))
         );
         assert_eq!(
-            picture("itm_9", 1).image_in(&state, &held),
+            picture("itm_9", 1).image_in(&state, &held, &Linked::default()),
             None,
             "no second part"
         );
         assert_eq!(
-            picture("itm_8", 0).image_in(&state, &held),
+            picture("itm_8", 0).image_in(&state, &held, &Linked::default()),
             None,
             "no such item"
         );

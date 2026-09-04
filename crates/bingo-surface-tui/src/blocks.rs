@@ -48,15 +48,21 @@ struct Revision {
     /// after the first frames are drawn and read again whenever the host
     /// rebuilds it, so a block drawn before it landed has to be drawn again.
     skill: bool,
+    /// How many pictures the words named have been read in so far (M51). A
+    /// block that drew a chip for one is a different block once it has
+    /// arrived, and the arrival is the only thing that says so — it is not in
+    /// the item, which has not changed a byte.
+    linked: u64,
 }
 
-fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold, skill: bool) -> Revision {
+fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold, rows: &Rows<'_>) -> Revision {
     Revision {
         status: item.status,
         size: size(&item.body),
         agent: agent.map(|child| child.seq),
         fold,
-        skill,
+        skill: skill::of(item, rows.commands).is_some(),
+        linked: rows.linked.answers(),
     }
 }
 
@@ -162,6 +168,8 @@ struct Entry {
     /// ever after would otherwise forget, on its second frame, what its own
     /// placeholder cells are placeholders for.
     pictures: Vec<Picture>,
+    /// The destinations these words named (M51), for the same reason.
+    wanted: Vec<String>,
     motion: Motion,
 }
 
@@ -258,12 +266,7 @@ impl Blocks {
     ) -> usize {
         let now = rows.now.instant;
         let agent = agents.get(&item.id).copied();
-        let revision = revision(
-            item,
-            agent,
-            fold::fold_of(rows.folds, item),
-            skill::of(item, rows.commands).is_some(),
-        );
+        let revision = revision(item, agent, fold::fold_of(rows.folds, item), rows);
         let held = self.blocks.get(at).filter(|entry| entry.id == item.id);
         let same = held.is_some_and(|entry| entry.revision == revision);
         // An item that has only just finished is not yet terminal for this
@@ -288,6 +291,7 @@ impl Blocks {
             joins: transcript::joins_the_row_above(item),
             lines: drawn.lines,
             pictures: drawn.pictures,
+            wanted: drawn.wanted,
             motion,
         };
         match self.blocks.get_mut(at) {
@@ -396,6 +400,18 @@ impl Blocks {
             .collect()
     }
 
+    /// Every destination the transcript's own words named (M51), for the run
+    /// to read in the ones this session has not got
+    /// ([`crate::graphics::linked`]). Derived from the blocks for the same
+    /// reason [`Blocks::pictures`] is: a rewind that drops an item stops
+    /// anything being fetched for it.
+    pub fn wanted(&self) -> Vec<String> {
+        self.blocks
+            .iter()
+            .flat_map(|entry| entry.wanted.iter().cloned())
+            .collect()
+    }
+
     /// The last `rows` lines as plain text: what is printed back into the
     /// shell's own screen when the surface leaves (design §3).
     ///
@@ -494,7 +510,8 @@ mod tests {
     fn sync_at(blocks: &mut Blocks, state: &SessionState, width: usize, now: Now) -> usize {
         let folds = crate::fold::Folds::new();
         let pictures = crate::graphics::Decoded::default();
-        let rows = Rows::of(state, width, &folds, &[], &pictures, now);
+        let linked = crate::graphics::Linked::default();
+        let rows = Rows::of(state, width, &folds, &[], &pictures, &linked, now);
         blocks.sync(state, &Agents::new(), &rows, Vec::new())
     }
 
@@ -526,6 +543,39 @@ mod tests {
             5_000,
             "a transcript that did not change is not drawn again"
         );
+    }
+
+    /// A block is drawn once and cloned ever after, so a picture read in
+    /// after its block was drawn would never reach the screen unless the
+    /// answer's arrival were part of what a block is a rendering of (M51).
+    #[test]
+    fn a_picture_read_in_after_its_block_makes_it_draw_again() {
+        let state = many(3);
+        let mut blocks = cache();
+        let folds = crate::fold::Folds::new();
+        let pictures = crate::graphics::Decoded::default();
+        let mut linked = crate::graphics::Linked::default();
+        let now = scene().1;
+        let sync = |blocks: &mut Blocks, linked: &crate::graphics::Linked| {
+            let rows = Rows::of(&state, 80, &folds, &[], &pictures, linked, now);
+            blocks.sync(&state, &Agents::new(), &rows, Vec::new());
+        };
+        sync(&mut blocks, &linked);
+        sync(&mut blocks, &linked);
+        assert_eq!(blocks.renders(), 3, "nothing changed, nothing drawn again");
+
+        assert!(linked.take("x.png"));
+        sync(&mut blocks, &linked);
+        assert_eq!(blocks.renders(), 3, "a read in flight changes no row");
+
+        linked.answered(crate::graphics::linked::Answer {
+            dest: "x.png".into(),
+            result: Err("not found".into()),
+        });
+        sync(&mut blocks, &linked);
+        assert_eq!(blocks.renders(), 6, "the answer landing draws them again");
+        sync(&mut blocks, &linked);
+        assert_eq!(blocks.renders(), 6, "and only once");
     }
 
     #[test]

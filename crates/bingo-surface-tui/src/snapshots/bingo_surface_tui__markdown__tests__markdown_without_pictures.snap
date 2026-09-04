@@ -1,0 +1,26 @@
+---
+source: crates/bingo-surface-tui/src/markdown.rs
+expression: "text(&out.lines).join(\"\\n\")"
+---
+Title
+
+Some prose with `code`, a link (https://x.dev) and a soft break.
+
+• one
+• two
+  • nested
+
+1. first
+2. second
+
+│ quoted on two lines
+
+    rust
+    fn main() {}
+
+crate  tests
+────────────
+sdk       41
+
+────────────────────────────────────────
+last word.

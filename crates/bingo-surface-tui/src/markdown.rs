@@ -17,11 +17,39 @@ const GFM: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TABLES)
 /// Render CommonMark to lines. `width` is used where a construct is defined by
 /// the column count: the thematic break, and a table's columns.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
+    rendered(text, width).lines
+}
+
+/// The same rendering, with the pictures the words named beside it — for the
+/// one caller that can draw them ([`crate::transcript`]). Every other caller
+/// wants the lines alone, and gets the chip that names each picture in them.
+pub fn rendered(text: &str, width: usize) -> Rendered {
     let mut out = Writer::new(width);
     for event in Parser::new_ext(text, GFM) {
         out.event(event);
     }
     out.finish()
+}
+
+/// A document as rows, and the pictures its own words named.
+#[derive(Debug)]
+pub struct Rendered {
+    pub lines: Vec<Line<'static>>,
+    /// In the order they were written.
+    pub images: Vec<Linked>,
+}
+
+/// One `![what it is](path or URL)` the words carried: which line of
+/// [`Rendered::lines`] holds its chip, what it is called, and where it is.
+///
+/// The destination is the word as it was written. Whether it names a file on
+/// this machine or an address to fetch is nobody's business here — that is
+/// read where the picture is ([`crate::graphics::linked`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Linked {
+    pub line: usize,
+    pub alt: String,
+    pub dest: String,
 }
 
 /// A GFM table being read. It holds cells rather than lines because the table
@@ -84,6 +112,27 @@ impl Fence {
     }
 }
 
+/// An image being read: where it is, and the alt text collecting between its
+/// tags.
+#[derive(Debug)]
+struct Alt {
+    dest: String,
+    text: String,
+}
+
+impl Alt {
+    /// What a terminal that draws no picture shows for one: the name in the
+    /// `[image: …]` [`crate::transcript::pictured`] already uses for a picture
+    /// it cannot draw. A picture nobody named is named by where it is.
+    fn chip(&self) -> String {
+        let name = match self.text.trim() {
+            "" => self.dest.as_str(),
+            named => named,
+        };
+        format!("[image: {name}]")
+    }
+}
+
 struct Writer {
     width: usize,
     lines: Vec<Line<'static>>,
@@ -99,6 +148,16 @@ struct Writer {
     table: Option<Table>,
     /// The destination of the link being read, appended when it closes.
     link: Option<CowStr<'static>>,
+    /// The image being read; while there is one, text is its name.
+    image: Option<Alt>,
+    /// The images read since the last line was emitted: a picture stands on a
+    /// line of its own, after the words it was written among.
+    pending: Vec<Alt>,
+    /// Whether anything but the line's own decoration has been written to it.
+    /// A list item whose whole content is a picture has a marker and no
+    /// words, and its chip belongs on the marker's line ([`Writer::chips`]).
+    words: bool,
+    images: Vec<Linked>,
 }
 
 impl Writer {
@@ -113,24 +172,39 @@ impl Writer {
             code: None,
             table: None,
             link: None,
+            image: None,
+            pending: Vec::new(),
+            words: false,
+            images: Vec::new(),
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(mut self) -> Rendered {
         self.flush();
         while self.lines.last().is_some_and(is_blank) {
             self.lines.pop();
         }
-        self.lines
+        // A trailing blank line cannot be a chip's, so nothing dropped above
+        // can leave an image pointing at a line that is no longer there.
+        Rendered {
+            lines: self.lines,
+            images: self.images,
+        }
     }
 
     fn event(&mut self, event: Md<'_>) {
         if self.table.is_some()
-            && let Some(text) = cell_text(&event)
+            && let Some(text) = flat_text(&event)
         {
             if let Some(table) = self.table.as_mut() {
                 table.text(&text);
             }
+            return;
+        }
+        if let Some(image) = self.image.as_mut()
+            && let Some(text) = flat_text(&event)
+        {
+            image.text.push_str(&text);
             return;
         }
         match event {
@@ -166,6 +240,12 @@ impl Writer {
                 self.styles.push(theme::link());
                 self.link = Some(CowStr::from(dest_url.into_string()));
             }
+            Tag::Image { dest_url, .. } => {
+                self.image = Some(Alt {
+                    dest: dest_url.into_string(),
+                    text: String::new(),
+                })
+            }
             Tag::CodeBlock(kind) => self.open_code(&kind),
             Tag::BlockQuote(_) => self
                 .margin
@@ -193,6 +273,7 @@ impl Writer {
                 self.styles.pop();
             }
             TagEnd::CodeBlock => self.end_code(),
+            TagEnd::Image => self.end_image(),
             TagEnd::BlockQuote(_) => {
                 self.margin.0.pop();
             }
@@ -316,7 +397,36 @@ impl Writer {
         if self.spans.is_empty() {
             self.spans = self.margin.spans();
         }
+        self.words = true;
         self.spans.push(Span::styled(text.to_string(), style));
+    }
+
+    /// The image is whole: it waits for the line it was written among to be
+    /// emitted, and takes the one after it ([`Writer::chips`]).
+    fn end_image(&mut self) {
+        if let Some(image) = self.image.take() {
+            self.pending.push(image);
+        }
+    }
+
+    /// One line per image read since the last flush, each carrying the chip
+    /// that names it and each remembered by the line it landed on. A line
+    /// that has only its own decoration on it — the marker of a list item
+    /// whose whole content is the picture — keeps it and takes the chip.
+    fn chips(&mut self) {
+        for image in std::mem::take(&mut self.pending) {
+            self.images.push(Linked {
+                line: self.lines.len(),
+                alt: image.text.trim().to_string(),
+                dest: image.dest.clone(),
+            });
+            let mut spans = match self.spans.is_empty() {
+                true => self.margin.spans(),
+                false => std::mem::take(&mut self.spans),
+            };
+            spans.push(Span::styled(image.chip(), theme::dim()));
+            self.lines.push(Line::from(spans));
+        }
     }
 
     /// Emit one finished line, decorated with the current margin.
@@ -327,11 +437,12 @@ impl Writer {
     }
 
     fn flush(&mut self) {
-        if self.spans.is_empty() {
-            return;
+        if !self.spans.is_empty() && (self.words || self.pending.is_empty()) {
+            let spans = std::mem::take(&mut self.spans);
+            self.lines.push(Line::from(spans));
         }
-        let spans = std::mem::take(&mut self.spans);
-        self.lines.push(Line::from(spans));
+        self.words = false;
+        self.chips();
     }
 
     fn blank(&mut self) {
@@ -345,10 +456,12 @@ fn is_blank(line: &Line<'static>) -> bool {
     line.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
-/// What an event contributes to the cell being read. A table's cells are text:
+/// What an event contributes to a run of prose read as plain text: a table's
+/// cell, and the name between an image's own tags. A table's cells are text —
 /// emphasis inside one changes no column width, and a rule is what says these
-/// rows are one table (design §5).
-fn cell_text(event: &Md<'_>) -> Option<String> {
+/// rows are one table (design §5) — and an alt text is a name, which is the
+/// same thing said of a shorter run.
+fn flat_text(event: &Md<'_>) -> Option<String> {
     match event {
         Md::Text(text) => Some(text.to_string()),
         Md::Code(code) => Some(format!("`{code}`")),
@@ -494,6 +607,113 @@ mod tests {
         for line in render(&wide, 24) {
             assert!(line.to_string().width() <= 24, "{line}");
         }
+    }
+
+    /// The picture the words named stands on a line of its own, after the
+    /// words it was written among — so what replaces its chip hangs under a
+    /// line of its own too.
+    #[test]
+    fn an_image_in_a_paragraph_takes_the_line_after_it() {
+        let out = rendered("look at ![the shot](docs/x.png) here", 40);
+        assert_eq!(text(&out.lines), vec!["look at  here", "[image: the shot]"]);
+        assert_eq!(
+            out.images,
+            vec![Linked {
+                line: 1,
+                alt: "the shot".into(),
+                dest: "docs/x.png".into(),
+            }]
+        );
+        assert_eq!(out.lines[1].spans[0].style, theme::dim(), "the chip is dim");
+    }
+
+    #[test]
+    fn an_image_alone_is_its_own_line_and_nothing_else() {
+        let out = rendered("![shot](x.png)", 40);
+        assert_eq!(text(&out.lines), vec!["[image: shot]"]);
+        assert_eq!(
+            out.images.iter().map(|i| i.line).collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    /// A reference definition and an angled destination are both spellings of
+    /// the same thing, and the destination that comes out is the resolved one
+    /// rather than the label or the brackets.
+    #[test]
+    fn a_reference_and_a_bracketed_destination_resolve_to_the_path() {
+        let out = rendered("![a plan][plan]\n\n[plan]: docs/plan.png", 40);
+        assert_eq!(text(&out.lines)[0], "[image: a plan]");
+        assert_eq!(out.images[0].dest, "docs/plan.png");
+
+        let spaced = rendered("![two words](<my shots/a b.png>)", 40);
+        assert_eq!(spaced.images[0].dest, "my shots/a b.png");
+        assert_eq!(text(&spaced.lines), vec!["[image: two words]"]);
+    }
+
+    /// A picture nobody named is named by where it is: an empty alt would
+    /// otherwise draw `[image: ]` and say nothing at all.
+    #[test]
+    fn a_picture_with_no_name_wears_its_destination() {
+        let out = rendered("![](https://x.dev/a.png)", 40);
+        assert_eq!(text(&out.lines), vec!["[image: https://x.dev/a.png]"]);
+        assert_eq!(out.images[0].alt, "");
+    }
+
+    /// A list item whose whole content is a picture keeps its bullet: the
+    /// chip takes the marker's line rather than leaving it empty.
+    #[test]
+    fn a_bulleted_picture_stands_on_its_bullet() {
+        let out = rendered("- ![one](a.png)\n- ![two](b.png)", 40);
+        assert_eq!(text(&out.lines), vec!["• [image: one]", "• [image: two]"]);
+        assert_eq!(
+            out.images.iter().map(|i| i.line).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            text(&rendered("- see ![one](a.png)", 40).lines),
+            vec!["• see ", "[image: one]"],
+            "and an item with words of its own puts them first"
+        );
+    }
+
+    /// Two pictures in one paragraph are two lines, in the order they were
+    /// written, each knowing which line is its own.
+    #[test]
+    fn two_pictures_in_one_paragraph_keep_their_order() {
+        let out = rendered("![one](a.png) and ![two](b.png)", 40);
+        assert_eq!(
+            text(&out.lines),
+            vec![" and ", "[image: one]", "[image: two]"]
+        );
+        assert_eq!(
+            out.images,
+            vec![
+                Linked {
+                    line: 1,
+                    alt: "one".into(),
+                    dest: "a.png".into()
+                },
+                Linked {
+                    line: 2,
+                    alt: "two".into(),
+                    dest: "b.png".into()
+                },
+            ]
+        );
+    }
+
+    /// Everything a document without a picture renders to, byte for byte:
+    /// this milestone put a branch in the writer's every line, and the one
+    /// thing it must not have done is move a row of somebody's answer.
+    #[test]
+    fn a_document_with_no_picture_renders_exactly_as_it_did() {
+        const DOC: &str = "# Title\n\nSome *prose* with `code`, a [link](https://x.dev) and a \
+soft\nbreak.\n\n- one\n- two\n  - nested\n\n1. first\n2. second\n\n> quoted\n> on two lines\n\n\
+```rust\nfn main() {}\n```\n\n| crate | tests |\n|---|---|\n| sdk | 41 |\n\n---\n\nlast word.";
+        let out = rendered(DOC, 40);
+        assert!(out.images.is_empty());
+        insta::assert_snapshot!("markdown_without_pictures", text(&out.lines).join("\n"));
     }
 
     #[test]

@@ -1,16 +1,19 @@
-//! The picture under the words: design §5's image row, as rows of the
+//! The picture the words carry: design §5's image row, as rows of the
 //! transcript.
 //!
 //! A picture hangs under the block whose item carries it — under the `⎿` when
 //! a tool answered with one, under a person's own line when they handed one
-//! over. On a terminal that draws pictures it is the cells its placeholders
-//! take ([`crate::graphics::kitty`]); on every other terminal it is the chip
-//! that names it, which is the row's degrade and the only thing `--print` and
-//! a chat channel ever had.
+//! over ([`under_the_words`]) — or under its own chip line, where the words of
+//! an answer named it themselves ([`in_the_words`]). On a terminal that draws
+//! pictures it is the cells its placeholders take
+//! ([`crate::graphics::kitty`]); on every other terminal it is the chip that
+//! names it, which is the row's degrade and the only thing `--print` and a
+//! chat channel ever had.
 //!
-//! Nothing here sends a byte. What it answers with is lines and a note of
-//! which pictures those lines stand for; the sending is `run.rs`'s, between
-//! frames.
+//! Nothing here sends a byte, and nothing here reads one. What it answers with
+//! is lines, a note of which pictures those lines stand for, and the
+//! destinations that have still to be read in; the sending and the reading are
+//! both `run.rs`'s, between frames.
 
 use bingo_sdk::{Image, Item, ItemBody};
 use ratatui::text::{Line, Span};
@@ -19,23 +22,14 @@ use super::{Block, Rows, returns, speaks_indent, under};
 use crate::fold::Fold;
 use crate::graphics::picture::{self, Source};
 use crate::graphics::{self as graphics, Graphics, Picture, kitty};
-use crate::theme;
+use crate::{markdown, theme};
 
 /// How many rows of a picture a block that is only peeked at shows — a
 /// glance, not the picture. `ctrl+o` opens it to its whole height (§7).
 const IMAGE_ROWS: u16 = 12;
 
-/// The item's block with its pictures under it.
-pub(super) fn under_the_words(
-    item: &Item,
-    lines: Vec<Line<'static>>,
-    fold: Fold,
-    rows: &Rows<'_>,
-) -> Block {
-    let mut block = Block {
-        lines,
-        pictures: Vec::new(),
-    };
+/// The item's block with the pictures its own parts carry under it.
+pub(super) fn under_the_words(item: &Item, mut block: Block, fold: Fold, rows: &Rows<'_>) -> Block {
     // A shut block shows nothing of what came back, and a picture is what
     // came back.
     if fold == Fold::Shut {
@@ -60,34 +54,92 @@ struct Where<'a> {
 /// One picture: its cells where the terminal can draw it, the chip that names
 /// it where it cannot.
 fn one(block: &mut Block, at: Where<'_>, image: &Image, fold: Fold, rows: &Rows<'_>) {
-    match drawn(at, image, fold, rows) {
-        Some((picture, lines)) => {
-            block.lines.extend(lines);
+    let source = Source::Journal {
+        item: at.item.id.clone(),
+        part: at.part,
+    };
+    match drawn(source, image, at.hangs.room(rows), height(fold), rows) {
+        Some((picture, cells)) => {
+            block.lines.extend(at.hangs.under(cells, rows));
             block.pictures.push(picture);
         }
         None => block.lines.extend(at.hangs.chip(image, rows)),
     }
 }
 
+/// The pictures an answer's own words named (M51): under each chip line the
+/// markdown left, the cells of the one that has been read in — and after the
+/// name, in dim, the reason there is none.
+///
+/// The chip stays where the picture draws. It is the line the picture hangs
+/// from, and it is what a person reads when the fold shuts or the terminal
+/// draws nothing.
+pub(super) fn in_the_words(
+    lines: Vec<Line<'static>>,
+    images: &[markdown::Linked],
+    fold: Fold,
+    rows: &Rows<'_>,
+) -> Block {
+    let mut block = Block {
+        lines,
+        pictures: Vec::new(),
+        wanted: images.iter().map(|image| image.dest.clone()).collect(),
+    };
+    // Backwards: rows put under one chip move every line after it, and a
+    // destination's own line was measured before any of them were.
+    for image in images.iter().rev() {
+        named(&mut block, image, fold, rows);
+    }
+    block.pictures.reverse();
+    block
+}
+
+/// One picture the words named, hanging from the chip that already stands for
+/// it.
+fn named(block: &mut Block, image: &markdown::Linked, fold: Fold, rows: &Rows<'_>) {
+    let Some(read_in) = rows.linked.image(&image.dest) else {
+        return note(block, image, rows);
+    };
+    let source = Source::Linked {
+        dest: image.dest.clone(),
+    };
+    let Some((picture, cells)) = drawn(source, read_in, Hangs::Said.room(rows), height(fold), rows)
+    else {
+        return;
+    };
+    let under = (image.line + 1).min(block.lines.len());
+    block.lines.splice(under..under, cells);
+    block.pictures.push(picture);
+}
+
+/// Why a picture the words named draws none, in dim after its name. Nothing at
+/// all while it is still being read in: a chip that said why the moment it was
+/// written would be wrong for as long as the reading takes.
+fn note(block: &mut Block, image: &markdown::Linked, rows: &Rows<'_>) {
+    let Some(why) = rows.linked.failure(&image.dest) else {
+        return;
+    };
+    if let Some(chip) = block.lines.get_mut(image.line) {
+        chip.spans
+            .push(Span::styled(format!(" ({why})"), theme::dim()));
+    }
+}
+
 /// The cells one picture takes, and the note of which picture they stand for
 /// — where this terminal draws pictures at all and a decoder read this one.
 fn drawn(
-    at: Where<'_>,
+    source: Source,
     image: &Image,
-    fold: Fold,
+    room: u16,
+    tall: u16,
     rows: &Rows<'_>,
 ) -> Option<(Picture, Vec<Line<'static>>)> {
     let Graphics::Kitty { cell, .. } = graphics::chosen() else {
         return None;
     };
-    let source = Source::Journal {
-        item: at.item.id.clone(),
-        part: at.part,
-    };
     let id = source.id();
     let png = rows.pictures.png(id, image)?;
-    let size = (png.width, png.height);
-    let (cols, tall) = picture::fit(size, cell, at.hangs.room(rows), height(fold));
+    let (cols, tall) = picture::fit((png.width, png.height), cell, room, tall);
     let cells = (0..tall)
         .map(|row| kitty::placeholder(id, row, cols))
         .collect();
@@ -96,7 +148,7 @@ fn drawn(
         cols,
         rows: tall,
     };
-    Some((picture, at.hangs.under(cells, rows)))
+    Some((picture, cells))
 }
 
 /// How tall a picture may be: a glance while the block is peeked at, and as
@@ -171,7 +223,8 @@ impl Hangs {
 mod tests {
     use super::*;
     use crate::blocks::Blocks;
-    use crate::graphics::{Decoded, kitty::PLACEHOLDER};
+    use crate::graphics::linked::Answer;
+    use crate::graphics::{Decoded, Linked, kitty::PLACEHOLDER};
     use crate::test_support::{folded, item, scene, solo};
     use crate::tree::Agents;
     use bingo_pictures::testing::{png, unreadable};
@@ -216,6 +269,12 @@ mod tests {
 
     /// One item's block, on a terminal of this kind and at this fold.
     fn block(item: &Item, terminal: Graphics, fold: Fold) -> Block {
+        block_with(item, terminal, fold, &Linked::default())
+    }
+
+    /// The same, with a memo of the pictures its words named already primed —
+    /// which is the state the run leaves between two frames (M51).
+    fn block_with(item: &Item, terminal: Graphics, fold: Fold, linked: &Linked) -> Block {
         let state = folded(Vec::new());
         let pictures = Decoded::default();
         let folds = match fold {
@@ -223,7 +282,7 @@ mod tests {
             other => [(item.id.clone(), other)].into_iter().collect(),
         };
         let now = scene().1;
-        let rows = Rows::of(&state, 60, &folds, &[], &pictures, now);
+        let rows = Rows::of(&state, 60, &folds, &[], &pictures, linked, now);
         let cue = crate::transcript::Cue {
             since: now.instant,
             flip: false,
@@ -231,6 +290,26 @@ mod tests {
         graphics::with(terminal, || {
             super::super::item_block(item, None, &Agents::new(), &rows, cue)
         })
+    }
+
+    /// An answer whose own words name a picture (M51).
+    fn wrote(text: &str) -> Item {
+        item(
+            "itm_1",
+            ItemStatus::Completed,
+            ItemBody::Assistant { text: text.into() },
+        )
+    }
+
+    /// The memo as the run leaves it once a destination has been read in.
+    fn memo(dest: &str, result: Result<bingo_sdk::Image, String>) -> Linked {
+        let mut linked = Linked::default();
+        assert!(linked.take(dest));
+        linked.answered(Answer {
+            dest: dest.into(),
+            result,
+        });
+        linked
     }
 
     /// One finished item, as the frame the reducer folds.
@@ -388,7 +467,8 @@ mod tests {
         let state = folded(vec![said(read(&png(100, 200)))]);
         let pictures = Decoded::default();
         let folds = crate::fold::Folds::new();
-        let rows = Rows::of(&state, 60, &folds, &[], &pictures, scene().1);
+        let linked = Linked::default();
+        let rows = Rows::of(&state, 60, &folds, &[], &pictures, &linked, scene().1);
         let tail = graphics::with(graphics::drawing(), || {
             let mut blocks = Blocks::default();
             let height = blocks.sync(&state, &Agents::new(), &rows, Vec::new());
@@ -413,7 +493,8 @@ mod tests {
         let state = folded(vec![said(read(&png(100, 200)))]);
         let pictures = Decoded::default();
         let folds = crate::fold::Folds::new();
-        let rows = Rows::of(&state, 60, &folds, &[], &pictures, scene().1);
+        let linked = Linked::default();
+        let rows = Rows::of(&state, 60, &folds, &[], &pictures, &linked, scene().1);
         graphics::with(graphics::drawing(), || {
             let mut blocks = Blocks::default();
             blocks.sync(&state, &Agents::new(), &rows, Vec::new());
@@ -422,5 +503,194 @@ mod tests {
             assert_eq!(blocks.renders(), first, "nothing was drawn again");
             assert_eq!(blocks.pictures().len(), 1, "and the picture is still named");
         });
+    }
+
+    // ---- the picture in the words (M51) ---------------------------------
+
+    /// `![shot](docs/x.png)` in an answer draws where the words put it: the
+    /// chip stays as the line the picture hangs from, and the cells go under
+    /// it — inside the answer, not after it.
+    #[test]
+    fn a_picture_an_answer_named_draws_under_its_own_chip() {
+        let linked = memo("docs/x.png", Ok(png(100, 200)));
+        let block = block_with(
+            &wrote("look:\n\n![shot](docs/x.png)\n\nand that is it"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        let drawn = text(&block);
+        assert!(drawn[0].contains("look:"), "{drawn:?}");
+        assert!(drawn[2].contains("[image: shot]"), "the chip: {drawn:?}");
+        assert_eq!(
+            drawn[3].matches(PLACEHOLDER).count(),
+            10,
+            "ten cells under it: {drawn:?}"
+        );
+        assert!(
+            drawn[14].contains("and that is it"),
+            "and the words after it come after the picture: {drawn:?}"
+        );
+        assert_eq!(
+            block.pictures,
+            vec![Picture {
+                source: Source::Linked {
+                    dest: "docs/x.png".into()
+                },
+                cols: 10,
+                rows: 10,
+            }]
+        );
+    }
+
+    /// The degrade of §5: the chip is the whole of it, and no picture is sent.
+    #[test]
+    fn a_terminal_that_draws_no_pictures_draws_the_chip_the_words_carry() {
+        let linked = memo("docs/x.png", Ok(png(100, 200)));
+        let block = block_with(
+            &wrote("![shot](docs/x.png)"),
+            Graphics::Off,
+            Fold::Peek,
+            &linked,
+        );
+        assert_eq!(text(&block), vec!["⏺ [image: shot]"]);
+        assert!(block.pictures.is_empty());
+    }
+
+    /// A destination this session has not read in yet is the chip alone —
+    /// and the block says which destination, so the run can go and get it.
+    #[test]
+    fn a_destination_not_yet_read_in_is_the_chip_and_a_word_to_the_run() {
+        let block = block_with(
+            &wrote("![shot](docs/x.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &Linked::default(),
+        );
+        assert_eq!(text(&block), vec!["⏺ [image: shot]"]);
+        assert!(block.pictures.is_empty(), "nothing to send yet");
+        assert_eq!(block.wanted, vec!["docs/x.png".to_string()]);
+    }
+
+    /// A picture that is not there says so, once, in dim after its name.
+    #[test]
+    fn a_destination_that_failed_says_why_after_the_name() {
+        let linked = memo("docs/x.png", Err("not found".into()));
+        let block = block_with(
+            &wrote("![shot](docs/x.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        assert_eq!(text(&block), vec!["⏺ [image: shot] (not found)"]);
+        let spans = &block.lines[0].spans;
+        assert_eq!(
+            spans.last().map(|s| s.style),
+            Some(theme::dim()),
+            "the note is dim"
+        );
+    }
+
+    /// Two answers that name the same picture are one picture: it is read in
+    /// once and the terminal is asked to hold it once ([`Source::Linked`]).
+    #[test]
+    fn the_same_destination_named_twice_is_one_picture() {
+        let linked = memo("docs/x.png", Ok(png(100, 200)));
+        let one = block_with(
+            &wrote("![a](docs/x.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        let two = block_with(
+            &wrote("![b](docs/x.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        assert_eq!(one.pictures, two.pictures);
+    }
+
+    /// Two pictures in one answer keep their order, each under its own chip.
+    #[test]
+    fn two_pictures_in_one_answer_hang_from_their_own_chips() {
+        let mut linked = memo("a.png", Ok(png(20, 20)));
+        assert!(linked.take("b.png"));
+        linked.answered(Answer {
+            dest: "b.png".into(),
+            result: Ok(png(40, 20)),
+        });
+        let block = block_with(
+            &wrote("![one](a.png)\n\n![two](b.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        assert_eq!(
+            block.pictures.iter().map(|p| p.cols).collect::<Vec<_>>(),
+            vec![2, 4],
+            "in the order the words wrote them"
+        );
+        assert_eq!(block.wanted, vec!["a.png".to_string(), "b.png".to_string()]);
+        let drawn = text(&block);
+        assert!(drawn[0].contains("[image: one]"), "{drawn:?}");
+        assert!(drawn[3].contains("[image: two]"), "{drawn:?}");
+    }
+
+    /// `ctrl+o` opens a picture the words named to its whole height, the way
+    /// it opens one a tool answered with: it is the same fold.
+    #[test]
+    fn the_fold_opens_a_picture_the_words_named() {
+        let linked = memo("tall.png", Ok(png(100, 400)));
+        let peeked = block_with(
+            &wrote("![tall](tall.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        assert_eq!(
+            peeked.pictures.first().map(|p| (p.cols, p.rows)),
+            Some((6, IMAGE_ROWS))
+        );
+        let opened = block_with(
+            &wrote("![tall](tall.png)"),
+            graphics::drawing(),
+            Fold::Open,
+            &linked,
+        );
+        assert_eq!(
+            opened.pictures.first().map(|p| (p.cols, p.rows)),
+            Some((10, 20))
+        );
+    }
+
+    /// The whole way through, on a real buffer: an answer that names a
+    /// picture the session has read in draws its cells on the screen.
+    #[test]
+    fn the_frame_draws_the_cells_of_a_picture_the_words_named() {
+        let state = folded(vec![said(wrote("![shot](docs/x.png)"))]);
+        let (mut ui, now) = scene();
+        ui.linked = memo("docs/x.png", Ok(png(100, 200)));
+        let screen = graphics::with(graphics::drawing(), || {
+            let drawn = crate::test_support::draw_tree(80, 24, &solo(&state), &ui, now);
+            let pictures = ui.painted.borrow().blocks.pictures();
+            (drawn, pictures)
+        });
+        assert!(
+            screen.0.contains(PLACEHOLDER),
+            "the cells are on the screen:\n{}",
+            screen.0
+        );
+        assert_eq!(
+            screen.1,
+            vec![Picture {
+                source: Source::Linked {
+                    dest: "docs/x.png".into()
+                },
+                cols: 10,
+                rows: 10,
+            }],
+            "and the frame knows what to send for them"
+        );
     }
 }

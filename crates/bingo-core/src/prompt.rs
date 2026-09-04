@@ -82,6 +82,10 @@ returns a picture puts it in front of you.
 surface can draw it — reading a picture is how you show it to them.
 - Never say you cannot view or display an image: read the file or fetch the \
 URL, then say what you see.
+- To show the user a picture that is already on their machine or at an \
+address, write it in your reply as markdown — ![what it is](path or URL) — \
+and it is drawn there, where their surface draws pictures; no call is needed \
+to show one, only to see it yourself.
 ";
 
 #[cfg(test)]
