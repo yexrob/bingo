@@ -159,7 +159,15 @@ fn note(error: &PictureError) -> String {
     match error {
         PictureError::Unreadable(io) if io.kind() == std::io::ErrorKind::NotFound => "not found",
         PictureError::Unreadable(_) => "not read",
-        PictureError::Unfetchable(_) => "not fetched",
+        // A server that answered is named by its answer: `HTTP 404` tells a
+        // person the address is wrong where `not fetched` would tell them
+        // to check the network.
+        PictureError::Unfetchable(error) => {
+            return match error.status() {
+                Some(status) => format!("HTTP {}", status.as_u16()),
+                None => "not fetched".to_string(),
+            };
+        }
         PictureError::Refused(_) => "too large",
         _ => "not a picture",
     }
@@ -282,9 +290,32 @@ mod tests {
             })),
             "too large"
         );
-        for word in ["not found", "not read", "not fetched", "too large"] {
+        for word in [
+            "not found",
+            "not read",
+            "not fetched",
+            "too large",
+            "HTTP 404",
+        ] {
             assert!(word.len() <= 12, "{word}");
         }
+    }
+
+    /// A server's status is the one failure a person can act on from the
+    /// note alone — the address is wrong, not the network — so it is spelled.
+    #[tokio::test]
+    async fn a_servers_answer_is_named_by_its_status() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let answer = read(
+            "gone.png".into(),
+            Source::Url(format!("{}/gone.png", server.uri())),
+        )
+        .await;
+        assert_eq!(answer.result.unwrap_err(), "HTTP 404");
     }
 
     /// A frame's whole list at once, which is what the run hands over: the
