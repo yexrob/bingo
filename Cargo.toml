@@ -36,6 +36,7 @@ bingo-auth-oauth = { path = "crates/bingo-auth-oauth" }
 bingo-plugin-rpc = { path = "crates/bingo-plugin-rpc" }
 bingo-experience = { path = "crates/bingo-experience" }
 bingo-channels = { path = "crates/bingo-channels" }
+bingo-checkpoints = { path = "crates/bingo-checkpoints" }
 bingo-schedule = { path = "crates/bingo-schedule" }
 bingo-provider-acp = { path = "crates/bingo-provider-acp" }
 bingo-pictures = { path = "crates/bingo-pictures" }

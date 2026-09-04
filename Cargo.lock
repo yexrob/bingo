@@ -231,6 +231,7 @@ dependencies = [
  "bingo-agents",
  "bingo-auth-oauth",
  "bingo-channels",
+ "bingo-checkpoints",
  "bingo-context",
  "bingo-core",
  "bingo-demo-ui",
@@ -332,6 +333,20 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "bingo-checkpoints"
+version = "0.4.2"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "futures",
+ "jiff",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
