@@ -555,6 +555,14 @@ impl Ui {
         self.notices.first()
     }
 
+    /// Take a notice back. What the opening had to say about the terminal can
+    /// turn out to be wrong — a passthrough that answered after the probe gave
+    /// up (M60 brick 2) — and a wrong word left standing is worse than none.
+    /// Whichever is waiting behind it takes the slot on the next `expire`.
+    pub fn withdraw(&mut self, text: &str) {
+        self.notices.retain(|notice| notice.text != text);
+    }
+
     /// Drop what has run out and start what was waiting for it: a notice past
     /// its window, a layer that has finished leaving. Drawing never mutates,
     /// so the loop calls this.
@@ -761,6 +769,28 @@ mod tests {
             Some(0.0),
             "and it arrives from the beginning of its own life"
         );
+    }
+
+    /// M60 brick 2: a word the opening said and the terminal then disproved is
+    /// taken back, and whatever was waiting behind it takes the slot.
+    #[test]
+    fn a_notice_the_terminal_disproved_is_withdrawn() {
+        let (mut ui, now) = scene();
+        ui.notify(Level::Info, "the passthrough is off", now.instant);
+        ui.notify(Level::Warn, "second", now.instant);
+        ui.withdraw("the passthrough is off");
+        assert_eq!(
+            ui.notice().map(|n| n.text.clone()).as_deref(),
+            Some("second")
+        );
+        ui.expire(now);
+        assert_eq!(
+            ui.notices[0].strength(now),
+            Some(0.0),
+            "and it arrives from the beginning of its own life"
+        );
+        ui.withdraw("nobody said that");
+        assert_eq!(ui.notices.len(), 1, "and only what was said is taken back");
     }
 
     #[test]

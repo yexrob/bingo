@@ -292,6 +292,24 @@ pub fn detect() {}
 #[cfg(not(test))]
 pub(crate) const PROBE: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// How long the graphics probe is given when tmux is carrying the questions
+/// and the answers, and tmux has said it carries them ([`crate::graphics`],
+/// M60 brick 3).
+///
+/// Three legs where a bare terminal has one: the question crosses to tmux's
+/// server, waits there for the flush that hands it to the client's terminal,
+/// and the answer comes back the same way through the server into this pane —
+/// each leg waiting on tmux's own event loop rather than on the terminal's.
+/// [`PROBE`] is one leg's worth, and the box this was reported from (tmux
+/// 3.6b under Ghostty) took longer than one; three is the same clock read
+/// three times rather than a second number to keep in step.
+///
+/// It is public because the pty harness's late scene has to outlast it, and a
+/// window the test spells for itself is a window that drifts.
+#[cfg(not(test))]
+pub const PROBE_THROUGH: std::time::Duration =
+    std::time::Duration::from_millis(3 * PROBE.as_millis() as u64);
+
 #[cfg(not(test))]
 fn asked() -> Ask {
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());

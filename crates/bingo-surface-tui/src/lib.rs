@@ -67,6 +67,8 @@ mod highlight;
 mod history;
 mod input;
 mod keys;
+/// An answer that came back after the probe that asked for it gave up (M60).
+mod late;
 mod layers;
 mod markdown;
 mod matching;
@@ -109,6 +111,11 @@ use bingo_sdk::{
     Exit, HostHandle, KernelError, Plugin, PluginError, PluginManifest, Registrar, Surface,
     SurfaceKind, SurfaceOptions,
 };
+
+/// How long the graphics probe waits for an answer that has tmux to cross, so
+/// the pty harness's late scene can outlast the same window the surface uses.
+#[cfg(not(test))]
+pub use theme::PROBE_THROUGH;
 
 /// The surface id, and the origin every input it submits carries.
 pub const SURFACE_ID: &str = "tui";
