@@ -590,6 +590,7 @@ impl Question {
             .find(|option| option.role == Some(role))?;
         Some(Answer::Choice {
             ids: vec![option.id.clone()],
+            other: None,
         })
     }
 }
@@ -663,8 +664,16 @@ pub enum Answer {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feedback: Option<String>,
     },
+    /// The options ticked and, beside them, the words a person typed of their
+    /// own (M59): a question may be answered both ways at once, and dropping
+    /// either half loses what they said. An old frame carries no `other` and
+    /// reads as the ticks alone. Words with nothing ticked are
+    /// [`Answer::Text`], which is what a question answered in words alone has
+    /// always been.
     Choice {
         ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        other: Option<String>,
     },
     Text {
         text: String,
@@ -1174,11 +1183,29 @@ mod tests {
                         answers: vec![
                             Answer::Choice {
                                 ids: vec!["0".into()],
+                                other: None,
                             },
                             Answer::Cancel,
                         ],
                     },
                     by: ResolvedBy::Kernel,
+                },
+            ),
+            // A question ticked and typed on at once: both halves travel (M59).
+            frame(
+                28,
+                Event::InteractionResolved {
+                    id: InteractionId::from_raw("int_3"),
+                    answer: Answer::Form {
+                        answers: vec![Answer::Choice {
+                            ids: vec!["0".into(), "1".into()],
+                            other: Some("and a place of my own".into()),
+                        }],
+                    },
+                    by: ResolvedBy::Client {
+                        name: "tui-1".into(),
+                        surface: "tui".into(),
+                    },
                 },
             ),
         ];
@@ -1257,13 +1284,15 @@ mod tests {
         assert_eq!(
             kind.answer_for(AnswerRole::Allowing),
             Some(Answer::Choice {
-                ids: vec!["yes".into()]
+                ids: vec!["yes".into()],
+                other: None,
             })
         );
         assert_eq!(
             kind.answer_for(AnswerRole::Refusing),
             Some(Answer::Choice {
-                ids: vec!["no".into()]
+                ids: vec!["no".into()],
+                other: None,
             })
         );
     }
@@ -1300,10 +1329,12 @@ mod tests {
             Some(Answer::Form {
                 answers: vec![
                     Answer::Choice {
-                        ids: vec!["yes".into()]
+                        ids: vec!["yes".into()],
+                        other: None,
                     },
                     Answer::Choice {
-                        ids: vec!["go".into()]
+                        ids: vec!["go".into()],
+                        other: None,
                     },
                 ]
             })
@@ -1313,10 +1344,12 @@ mod tests {
             Some(Answer::Form {
                 answers: vec![
                     Answer::Choice {
-                        ids: vec!["no".into()]
+                        ids: vec!["no".into()],
+                        other: None,
                     },
                     Answer::Choice {
-                        ids: vec!["stop".into()]
+                        ids: vec!["stop".into()],
+                        other: None,
                     },
                 ]
             })
@@ -1367,6 +1400,45 @@ mod tests {
             })
         );
         assert_eq!(serde_json::to_value(&kind).expect("json"), json);
+    }
+
+    /// A choice carries the words a person typed beside their ticks, and a
+    /// frame written before there was a field for them reads as the ticks
+    /// alone (M59).
+    #[test]
+    fn a_choice_carries_the_words_typed_beside_the_ticks() {
+        let bare = serde_json::json!({ "kind": "choice", "ids": ["0", "1"] });
+        assert_eq!(
+            serde_json::from_value::<Answer>(bare.clone()).expect("an old choice"),
+            Answer::Choice {
+                ids: vec!["0".into(), "1".into()],
+                other: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(Answer::Choice {
+                ids: vec!["0".into(), "1".into()],
+                other: None,
+            })
+            .expect("json"),
+            bare,
+            "a choice with no words of its own is on the wire as it always was"
+        );
+        let both = serde_json::json!({
+            "kind": "choice",
+            "ids": ["0", "1"],
+            "other": "and a place of my own"
+        });
+        let answer = Answer::Choice {
+            ids: vec!["0".into(), "1".into()],
+            other: Some("and a place of my own".into()),
+        };
+        assert_eq!(
+            serde_json::from_value::<Answer>(both.clone()).expect("a choice with words"),
+            answer
+        );
+        assert_eq!(serde_json::to_value(&answer).expect("json"), both);
+        assert_eq!(answer.spec(), AnswerSpec::Choice);
     }
 
     #[test]

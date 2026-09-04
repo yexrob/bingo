@@ -100,6 +100,12 @@
                 "type": "string"
               }
             },
+            "other": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "kind": {
               "type": "string",
               "const": "choice"
@@ -108,7 +114,8 @@
           "required": [
             "kind",
             "ids"
-          ]
+          ],
+          "description": "The options ticked and, beside them, the words a person typed of their\nown (M59): a question may be answered both ways at once, and dropping\neither half loses what they said. An old frame carries no `other` and\nreads as the ticks alone. Words with nothing ticked are\n[`Answer::Text`], which is what a question answered in words alone has\nalways been."
         },
         {
           "type": "object",

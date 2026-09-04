@@ -1,5 +1,6 @@
 ---
 source: crates/bingo-sdk/src/event.rs
+assertion_line: 1212
 expression: frames
 ---
 [
@@ -496,6 +497,33 @@ expression: frames
       },
       "by": {
         "kind": "kernel"
+      }
+    }
+  },
+  {
+    "seq": 28,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "interactionResolved",
+      "id": "int_3",
+      "answer": {
+        "kind": "form",
+        "answers": [
+          {
+            "kind": "choice",
+            "ids": [
+              "0",
+              "1"
+            ],
+            "other": "and a place of my own"
+          }
+        ]
+      },
+      "by": {
+        "kind": "client",
+        "name": "tui-1",
+        "surface": "tui"
       }
     }
   }
