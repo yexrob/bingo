@@ -133,15 +133,15 @@ Truecolor is the native look, chosen after the terminal's background is read (OS
 
 | token | ANSI | truecolor (dark) | where, and only where |
 |---|---|---|---|
-| `text` | default | `#ece7df` | answers, what you type, option labels — warm off-white; and the bright end of the opening's own ramp (§11) |
-| `dim` | DIM | `#8a847a` | results under `⎿`, thinking, hints, the status line, everything behind a card; and the faint end of that ramp |
+| `text` | default | `#ece7df` | answers, what you type, option labels — warm off-white; and what a row of the opening settles into behind its beam (§11) |
+| `dim` | DIM | `#8a847a` | results under `⎿`, thinking, hints, the status line, everything behind a card; and the hairline a border rests as, which is where the opening's own ramp begins and ends (§11) |
 | `raised` | none | `#211d17` (bg + one step) | the bar behind a `>` line, rail cards, the surface of a sheet; never text |
-| `presence` | yellow | `#d97757`, glow `#f2a07c` | bingo's own colour: the `✻` sparkle, a live `⏺`, the glowing input border, the welcome mark, progress fills, **and every cell of the opening the block's light reaches (§11)** — the one warm colour, and the only one that moves |
+| `presence` | yellow | `#d97757`, glow `#f2a07c` | bingo's own colour: the `✻` sparkle, a live `⏺`, the glowing input border, the welcome mark, progress fills, **and the one light that draws the welcome box at the start of a session (§11)** — the one warm colour, and the only one that moves |
 | `good` / `bad` | green / red | `#8fcf8a` / `#e0655a` | a finished `⏺` and a failed one; a failed turn's line; diff tints |
 | `mode` | blue | `#8fb4de` | the `⏵⏵` on the status line and links — the one cool colour |
 | `bold` | BOLD | — | tool names in `⏺ Read(…)`, card titles, markdown headings; the model's own `⏺` is bold white |
 
-Gradients exist in two places only: a progress bar's fill (`presence` → its glow) and the comet tail of streaming text (§6). Diff lines sit on translucent `good`/`bad` tints. Colour never carries a fact alone: every state has a glyph, so `NO_COLOR` and a monochrome terminal lose nothing.
+Gradients exist in two places only: a progress bar's fill (`presence` → its glow) and the comet tail of streaming text (§6) — and, for the two and a half seconds it lasts, the light that draws the welcome box (§11). Diff lines sit on translucent `good`/`bad` tints. Colour never carries a fact alone: every state has a glyph, so `NO_COLOR` and a monochrome terminal lose nothing.
 
 ### The look that follows (M71)
 
@@ -360,71 +360,76 @@ What a change is checked against, in this order: `TestBackend` snapshots for eve
 
 - **2026-09-04, later still** — **The box opens** (M70, at the user's call after M69's storyboard: 在欢迎框里播放、更高分辨率、更有立体感). Three changes to what M69 built, each of them a picture the previous one could not draw. *The piece plays inside the welcome box*, twelve rows while it runs and the box's own height when it lands — so the entrance is where the transcript begins rather than over the whole screen, and it settles into the box a person has always had rather than into a copy of one. *A cell is two pixels*: `▀` with its foreground the top half and its background the bottom, which is what a terminal has for pictures without a graphics protocol, and it makes a pixel square where a cell is not. *`theme::lit` reaches the ground*: it used to bottom out at `dim`, a mid grey, because the glyph ramp carried the brightness and the colour only said where the light came from — with the ramp gone the colour is all there is, and a world whose darkest ink is a mid grey has a grey wash over it and no night in it. It now runs ground → `dim` → `text` and ground → `presence` → `glow`, with `raised` as the ground, the one token that steps towards the terminal's own background in both palettes. Three shots replace five: a ruled floor to a vanishing point, an orbit through a field of dark blocks with her at the end of it, and the box opening out of the corner the block came down to. At the twenty-four pixel rows the box gives her she is a hooded, cat-eared head in profile — a figure, not a face; the same finding as M69's, at the same size, and the reason the ears survive at all is that her reduction keeps the brightest pixel under each sample.
 
+- **2026-09-05** — **The line that draws itself** (M72, at the user's call after M70: redraw the opening from nothing, no 3D asked for, "make it what you think is beautiful and in the product's own key"). The world, the camera and the pixels are gone; what is left is the box's own furniture arriving in the product's own motion vocabulary. One point of warm light runs the perimeter with a comet tail, the mark ignites through the sparkle's four frames where the light comes home, the rows arrive under a beam that crosses each of them left to right, and the border takes one breath and rests — two and four tenths of a second, at the box's **resting height**, so nothing on the screen moves but the box's own cells and the composer never jumps. Three things fall out of that. A frame is now cheap enough to draw *in the draw*, so the off-thread render, the held frame and the width it was rendered at all go, and nothing can go stale. The piece is made of the tokens §4 and §6 already had, so `theme::lit` and `theme::half` — the ray-marcher's own ramp — go with the marcher, and the one token added, `theme::hairline`, is the ramp a *border* with light on it runs (the hairline it rests as → `presence` → glow), because `comet` cools to `text`, which is what streaming words rest as and not what a border does. And the last frame is not a picture of the welcome box: `opening::frame` rewrites the box `welcome::lines` drew, cell by cell, so the piece cannot drift from the thing it lands on. Two numbers were settled by looking at the frames rather than by the plan: the lap runs at an even speed, because cubic ease-in-out draws four fifths of the perimeter in the middle third of the beat and leaves the rest of it still; and the tail is a *share* of the perimeter, because at 120 columns the head travels eleven cells between two frames and a fixed twelve-cell tail is one frame long, which reads as a strobe rather than as one light moving.
+
 ## 11. The opening
 
-> M69 built the brick and the storyboard; **M70, 2026-09-04**, is the piece as
-> it ships, at the user's call: it plays **inside the welcome box**, at a
-> higher resolution than one glyph per cell, with real depth. The one
-> deliberate exception to `docs/design/effects-research.md`'s refusals — that
-> list is about the *transcript*, which is a record a person reads, searches
-> and copies. This is an **entrance**: it happens once, before there is a
-> transcript at all, it says what bingo is, and it is over in four seconds.
-> It spends only the tokens of §4, and it does not play at all where
-> `NO_COLOR`, ANSI, `BINGO_ASCII` or `BINGO_MOTION=off` would take something
-> away from it.
+> M69 built a ray-marched storyboard and **M70** played it inside the welcome
+> box. **M72, 2026-09-05**, is the piece as it ships, at the user's call:
+> redrawn from nothing, with no world, no camera and no pixels — the box's own
+> furniture arriving in the product's own motion vocabulary. The one deliberate
+> exception to `docs/design/effects-research.md`'s refusals — that list is about
+> the *transcript*, which is a record a person reads, searches and copies. This
+> is an **entrance**: it happens once, before there is a transcript at all, it
+> says what bingo is, and it is over in two and a half seconds. It spends only
+> the tokens of §4, and it does not play at all where `NO_COLOR`, ANSI,
+> `BINGO_ASCII` or `BINGO_MOTION=off` would take something away from it.
 
-A four-second story told in **cuts**, in a three-dimensional world drawn as
-**half-block pixels**, playing in the welcome box and landing on it.
+The welcome box draws itself: one point of warm light runs its border, the mark
+ignites, the words come in on a beam, the border breathes once, and it is the
+box. **2.4 seconds, at the box's resting height** — nothing on the screen moves
+but the box's own cells, so the transcript never reflows and the composer never
+jumps (§3, *nothing jumps*).
 
-**The resolution is rows.** A cell is `▀` with its foreground the pixel in the
-top half and its background the one in the bottom, so a box of `w × h` cells is
-a picture of `w × 2h` truecolor samples — and a pixel is *square*, where a cell
-is twice as tall as it is wide. The box is **twelve rows** while the piece
-plays (the most a composer and a status line can give up on a screen of
-sixteen) and settles to its own height on the last cut. A pixel with no light
-in it is left unpainted, so the terminal's own ground is the night.
+**Made of what the product already does.** §4: one warm colour, and it is the
+only one that moves; §6: every motion reports a state change, stillness is the
+default, and when motion stops the words remain. The piece is made of exactly
+the four motions the surface already has, so it looks like bingo and not like a
+demo — the **comet** (the tail on streaming text), the **beam** (the light
+across a landed name and bingo's working word), the **breath** (the input box's
+border while a turn runs) and the **sparkle** (`✻ ✢ ✶ ✽`).
 
-**The ink runs to the ground.** `theme::lit` spends three stops and no new
-token: from `raised` — the one token that steps towards the terminal's own
-background in both palettes — through `dim` to `text` for what the world's own
-light reaches, and through `presence` to `glow` for what the block reached. It
-*has* to reach the ground: in a picture drawn out of half blocks the colour is
-the only thing carrying the brightness, and a world whose darkest ink is `dim`
-is a world with a grey wash over it.
+### The beats
 
-**Depth, four ways, all in the scenes.** A floor with a perspective grid that
-runs away to a vanishing point; a camera that moves — a dolly, then an orbit;
-near things large and fast, far things small and slow; and the shadow the block
-throws across the floor. Fog alone is not depth. The floor's rules are drawn a
-constant width *on the screen* rather than in the world, because a rule of a
-fixed world width is a stipple at any distance, and a stipple is not a line.
+Times in seconds from `started`. The beats overlap on purpose — the first row
+arrives while the mark is still sparkling — and every one of them is a pure
+function of the second the frame is for.
 
-### The shots
-
-| from | to | shot | what is on screen |
+| from | to | beat | what is on screen |
 |---|---|---|---|
-| 0.0 | 1.4 | **The floor** | A dark room. A ruled floor runs away to a vanishing point; the emissive block — the cursor, a caret six times as tall as it is broad — hangs just clear of it, turning slowly, with its shadow across the rules and a halo in the fog. Dust rises through its light. The camera dollies in and comes down. |
-| 1.4 | 2.8 | **The field** | Cut. The camera orbits the block half a turn, from behind it to nearly square on, coming down as it goes. A field of dark blocks floats around it at two depths — the near ones sweep past, the far ones barely move — and the block is the **only** light in this world, so what a person reads is which faces caught it. She comes into view as the turn ends: the mascot on a billboard, her own picture's pixels, cropped to the head, with the block hanging before her face. |
-| 2.8 | 4.0 | **The hand-off** | Cut. The camera settles square on and the world goes out. The block walks down out of the air to the box's own corner and becomes its `✻`; the border walks out of that corner along both edges and closes at the far one; the greeting, the help line and the cwd light in the order they are read; the box settles from twelve rows to its own. |
+| 0.0 | 0.9 | **The line** | The box's border does not exist yet. A point of light leaves the top-left corner and runs the perimeter clockwise; behind it a tail fades `glow` → `presence` → the hairline it rests as (`theme::hairline`), and behind the tail the border stands as that hairline. The inside of the box is empty. The head runs a tail's length past home, so the border is at rest by the end of the beat. |
+| 0.9 | 1.5 | **The mark** | Where the head stopped — one cell inside the corner, on the greeting row — the mark ignites: `✻ ✢ ✶ ✽` at the surface's own 150 ms, one whole turn, so it ends on the resting `✻`; and the light the head spent on it cools `glow` → `presence`. One light on the screen at every instant, never two. |
+| 1.1 | 2.0 | **The words** | The greeting, the help line and the cwd — each arrives under a beam that sweeps left to right across *its own* glyphs: ahead of the beam the row is blank, under it the glyphs wear the glow, and behind it they settle into the row's own weight (`text`, `dim`). Rows arrive 150 ms apart; the M63 update row, when there is one, arrives last the same way, and the rows close the gap rather than run past the beat. |
+| 2.0 | 2.35 | **The breath** | The border warms to `presence` and comes back to the hairline. Then it rests: the last two frames are the box, so the piece does not finish on a step of colour. |
 
-The cuts are hard — there is no dissolve anywhere in the piece. Four seconds
-has no time to spend on one, and a cut is what says *elsewhere* in the language
-a person already reads films in. Every frame is a pure function of one number,
-the second of the piece it is for, so a frame that arrives late is **skipped**
-and never played slowly.
+There are no cuts and no dissolve: it is one continuous take of one box. A frame
+is a pure function of one number — the second of the piece it is for — so a
+frame that arrives late is **skipped** and never played slowly, and the same
+second is the same picture on a fast machine and a slow one.
+
+**Two numbers were settled by looking at the frames.** The light runs at an
+even speed rather than through `clock::ease_in_out`: cubic ease-in-out puts
+three times the average speed in the middle of the beat, which draws four fifths
+of the perimeter in its middle third and leaves the rest of the beat with
+nothing moving. And the tail is a **share** of the perimeter rather than a count
+of cells: the light crosses a box of 120 columns in the same nine tenths of a
+second it crosses one of 80, so at the wider size the head travels eleven cells
+between two frames — and a tail shorter than that reads as a strobe rather than
+as one light moving.
 
 ### How it is wired
 
 The welcome box is derived at render time from `SessionState`; the opening is a
-**`Ui` fact** — when it started, and the newest frame rendered for it — read by
-that box in the static box's place. Frames are rendered **off the draw thread**,
-one in flight at a time, and the draw takes whichever it has: the first frame
-is the black the piece opens on, and a frame rendered for a width the screen no
-longer has is dropped rather than drawn at the wrong shape.
+**`Ui` fact** and the whole of it is *when it started*. A frame costs
+microseconds, so it is drawn **in the draw**: the transcript's rows carry the
+second, and the box is derived from it like everything else — nothing is
+rendered off the loop's thread, nothing is held, and nothing can be stale at a
+width the screen no longer has.
 
-The moment the piece has run out the fact is taken away, so what lands is the
-box the transcript has always had — there is no last frame that merely looks
-like one, and nothing to keep in step.
+`opening::frame` does not draw a picture of the welcome box. It takes the box
+`welcome::lines` drew and says, cell by cell, what the light has done to that
+cell yet — so the resting frame *is* the box, and the piece cannot drift from
+the thing it lands on. The moment the piece has run out the fact is taken away.
 
 ### When it plays, and when it does not
 
@@ -439,6 +444,6 @@ run* rather than about the piece:
 - `BINGO_MOTION` is not `off`.
 
 **Any key skips it**, and is spent on nothing else: the `/` that cut the piece
-short does not also open the dropdown. It never plays under `--print`, which
-has no screen to enter. The box's M63 update row is drawn on the end state as
-it always was.
+short does not also open the dropdown. It never plays under `--print`, which has
+no screen to enter. The box's M63 update row is drawn on the end state as it
+always was.
