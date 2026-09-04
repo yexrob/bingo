@@ -185,3 +185,42 @@ fn the_status_line_spends_no_colour_but_the_mode() {
         "the mode is the one thing the line is allowed to colour"
     );
 }
+
+/// The line the person typed is on their own bar, under a `$`; the code a
+/// failing line came to is the one cell of the block a colour is spent on.
+#[test]
+fn the_line_is_the_persons_own_and_only_a_bad_exit_is_coloured() {
+    let (ui, now) = scene();
+    let drawn = painted(80, 24, &solo(&super::ran::session()), &ui, now);
+    assert_row_styled(
+        &drawn,
+        "git status --short",
+        &[
+            ("$ ", crate::theme::dim()),
+            ("git status --short", crate::theme::text()),
+        ],
+    );
+    assert_eq!(drawn.coloured("[exit 1]"), vec!["[exit 1]".to_string()]);
+    assert!(
+        drawn.coloured("+fn a() {}").is_empty(),
+        "the output itself spends none"
+    );
+}
+
+/// A line you typed is a band whichever prompt it wears: the `$` row sits on
+/// the same raised ground the `>` row does (§4).
+#[test]
+fn a_shell_line_sits_on_the_bar_your_own_words_sit_on() {
+    let (ui, now) = scene();
+    let tree = solo(&super::ran::session());
+    crate::theme::with(truecolor(), || {
+        let row = painted(80, 24, &tree, &ui, now).row("git status --short");
+        let width: usize = row.iter().map(|(text, _)| text.width()).sum();
+        assert_eq!(width, 80, "the bar runs to the edge: {row:#?}");
+        let ground = crate::theme::as_drawn(crate::theme::raised()).bg;
+        assert!(
+            row.iter().all(|(_, style)| style.bg == ground),
+            "every cell of it is on the raised ground: {row:#?}"
+        );
+    });
+}

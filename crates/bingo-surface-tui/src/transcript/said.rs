@@ -244,10 +244,16 @@ fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<
         );
     }
     let mark = Span::styled(format!("{} ", theme::user()), theme::dim());
-    under(mark, body, speaks_indent(), rows.measure())
-        .into_iter()
-        .map(|line| bar(line, rows.width))
-        .collect()
+    barred(
+        under(mark, body, speaks_indent(), rows.measure()),
+        rows.width,
+    )
+}
+
+/// Every row of a block on the raised bar. A shell line the person ran is on
+/// the same bar for the same reason ([`super::ran`]): it is theirs.
+pub(super) fn barred(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    lines.into_iter().map(|line| bar(line, width)).collect()
 }
 
 /// The raised bar behind a `>` line: it runs to the edge of the transcript,

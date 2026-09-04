@@ -27,6 +27,8 @@ mod colours;
 mod forms;
 /// A question alone (M43).
 mod questions;
+/// The screens a shell line the person ran is read through (§5).
+mod ran;
 /// The screens one skill run is read through (§4's skill row).
 mod skills;
 /// The screens a team is read through (§3 "Teams").
