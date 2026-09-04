@@ -18,9 +18,8 @@ use crate::{keys, permission, theme, wake};
 
 /// Cells between two slots.
 const GAP: usize = 2;
-/// The context notice appears at this share of the compaction trigger…
-const CONTEXT_FROM: u64 = 70;
-/// …starts warming towards `bad` here…
+/// The context count starts warming towards `bad` at this share of the
+/// compaction trigger…
 const CONTEXT_WARM: u64 = 80;
 /// …and says the way out from here, where it is `bad` outright.
 const CONTEXT_BAD: u64 = 90;
@@ -68,7 +67,6 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
         parts.push(Span::styled(format!("{running} running"), theme::dim()));
     }
     parts.extend(waking(tree.viewed(), now));
-    parts.extend(context(tree.viewed()));
     parts.extend(notice(ui, now));
     if parts.is_empty() && ui.composer.is_empty() {
         parts.push(Span::styled(HINT, theme::dim()));
@@ -116,28 +114,42 @@ fn waking(state: &SessionState, now: Now) -> Vec<Span<'static>> {
     )]
 }
 
-/// How full the context is, from [`CONTEXT_FROM`] % of the trigger; it warms
-/// from there towards `bad` as the window fills, and the way out joins it once
-/// it is nearly there (§6).
-fn context(state: &SessionState) -> Vec<Span<'static>> {
-    let Some(context) = state.context.filter(|c| c.trigger > 0) else {
-        return Vec::new();
-    };
-    let share = context.used * 100 / context.trigger;
-    if share < CONTEXT_FROM {
-        return Vec::new();
-    }
+/// What the next request carries against the model's window — `41k/200k`,
+/// used over the whole — before the model it goes to. Always there once a
+/// turn has run, because how much room is left is a fact a person wants
+/// without asking; it warms from `dim` towards `bad` across the last fifth of
+/// the compaction trigger and, past [`CONTEXT_BAD`], says the way out.
+fn usage(state: &SessionState) -> Option<Span<'static>> {
+    let context = state.context.filter(|c| c.window > 0)?;
+    let share = context
+        .used
+        .saturating_mul(100)
+        .checked_div(context.trigger)
+        .unwrap_or(0);
     let tail = match share >= CONTEXT_BAD {
         true => " · /compact",
         false => "",
     };
-    vec![Span::styled(
-        format!("context {}%{tail}", context.percent()),
+    Some(Span::styled(
+        format!(
+            "{}/{}{tail}",
+            thousands(context.used),
+            thousands(context.window)
+        ),
         theme::warming(warmth(share)),
-    )]
+    ))
 }
 
-/// How far the context notice has warmed: nothing until [`CONTEXT_WARM`] % of
+/// Tokens as a person counts them: `41k`, and the bare number under a
+/// thousand.
+fn thousands(tokens: u64) -> String {
+    match tokens {
+        t if t < 1000 => t.to_string(),
+        t => format!("{}k", t / 1000),
+    }
+}
+
+/// How far the context count has warmed: nothing until [`CONTEXT_WARM`] % of
 /// the trigger, all the way at the trigger itself.
 fn warmth(share: u64) -> f32 {
     let span = (100 - CONTEXT_WARM) as f32;
@@ -172,8 +184,9 @@ fn notice(ui: &Ui, now: Now) -> Vec<Span<'static>> {
     spans
 }
 
-/// Where you are and what answers you: who serves the model, which model,
-/// and how hard it is asked to think — the model alone at the root.
+/// Where you are, how much of the window is spent, and what answers you: who
+/// serves the model, which model, and how hard it is asked to think — the
+/// model alone at the root.
 ///
 /// All three are read from the frames that carry them: the summary, which the
 /// kernel stamps from the choice a turn will actually run on, and the config
@@ -181,19 +194,19 @@ fn notice(ui: &Ui, now: Now) -> Vec<Span<'static>> {
 /// (ADR-0008 §4). Nothing here is a second copy of either.
 fn right(tree: &Tree) -> Vec<Span<'static>> {
     let state = tree.viewed();
-    let parts: Vec<String> = [
+    let mut parts: Vec<Span<'static>> = Vec::new();
+    parts.extend(
         tree.viewing()
-            .map(|child| format!("in {}", tree::name(child))),
-        answering(state),
-        effort(state),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if parts.is_empty() {
-        return Vec::new();
-    }
-    vec![Span::styled(parts.join(" · "), theme::dim())]
+            .map(|child| dimmed(format!("in {}", tree::name(child)))),
+    );
+    parts.extend(usage(state));
+    parts.extend(answering(state).map(dimmed));
+    parts.extend(effort(state).map(dimmed));
+    join(parts)
+}
+
+fn dimmed(text: String) -> Span<'static> {
+    Span::styled(text, theme::dim())
 }
 
 /// `provider/model`, or the model alone where no provider is named — an
@@ -434,24 +447,31 @@ mod tests {
         insta::assert_snapshot!("wake_pending", at(&tree, &ui, 80, now));
     }
 
+    /// The count is always there once a turn has run, used over the whole
+    /// window, and sits before the model on the right.
     #[test]
-    fn the_context_notice_appears_at_seventy_percent_of_the_trigger() {
+    fn the_context_count_sits_before_the_model_and_says_the_way_out_late() {
         let (ui, _) = scene();
-        assert!(!text(&with_context(41_000), &ui, 80).contains("context"));
-        let warm = text(&with_context(70_000), &ui, 80);
-        assert!(warm.contains("context 35%"), "{warm}");
-        assert!(!warm.contains("/compact"), "{warm}");
+        let early = text(&with_context(41_000), &ui, 80);
+        assert!(early.contains("41k/200k"), "{early}");
+        assert!(!early.contains("/compact"), "{early}");
         let bad = text(&with_context(90_000), &ui, 80);
-        assert!(bad.contains("context 45% · /compact"), "{bad}");
+        assert!(bad.contains("90k/200k · /compact"), "{bad}");
+        assert!(
+            !text(&solo(&folded(vec![])), &ui, 80).contains("/200k"),
+            "no turn has run, so there is nothing to count"
+        );
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(41_900), "41k");
     }
 
     #[test]
-    fn the_context_notice_is_dim_until_it_is_bad() {
+    fn the_context_count_is_dim_until_it_is_bad() {
         let (ui, _) = scene();
         let style = |used| {
             styles(&line(&with_context(used), &ui, 80, scene().1))
                 .into_iter()
-                .find(|(text, _)| text.starts_with("context"))
+                .find(|(text, _)| text.contains("/200k"))
                 .map(|(_, style)| style)
         };
         assert_eq!(style(70_000), Some(theme::dim()));

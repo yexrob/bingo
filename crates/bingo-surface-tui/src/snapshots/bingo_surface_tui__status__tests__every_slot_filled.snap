@@ -2,5 +2,5 @@
 source: crates/bingo-surface-tui/src/status.rs
 expression: "filled.join(\"\\n\")"
 ---
-⏵⏵ acceptEdits (shift+tab to cycle)  1 needs you (ct…  in reviewer · fake/fake-1
-⏵⏵ acceptEdits (shift+tab to cycle)  1 needs you (ctrl+g) · 1 running · context 75% · estima…  in reviewer · fake/fake-1
+⏵⏵ acceptEdits (shift+tab to cycle)  1 n…  in reviewer · 150k/200k · fake/fake-1
+⏵⏵ acceptEdits (shift+tab to cycle)  1 needs you (ctrl+g) · 1 running · estimati…  in reviewer · 150k/200k · fake/fake-1

@@ -747,14 +747,14 @@ fn context(share: u64) -> Tree {
 }
 
 #[test]
-fn the_context_notice_appears_at_seventy_and_warms_across_the_last_fifth() {
+fn the_context_count_is_always_there_and_warms_across_the_last_fifth() {
     let (ui, now) = scene();
     assert!(
-        !screen(&context(69), &ui, now).contains("context"),
-        "nothing at all below 70 %"
+        screen(&context(41), &ui, now).contains("41k/200k"),
+        "the count is on the line as soon as a turn has run"
     );
     crate::theme::with(crate::painted::truecolor(), || {
-        let at = |share| style_of(&context(share), &ui, now, "context");
+        let at = |share| style_of(&context(share), &ui, now, "/200k");
         assert_eq!(at(79), theme::as_drawn(theme::warming(0.0)), "dim to 80 %");
         let between = at(90);
         assert_ne!(between, theme::as_drawn(theme::warming(0.0)));
