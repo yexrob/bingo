@@ -17,4 +17,7 @@ pub enum LoopbackError {
     Malformed(String),
     #[error("the body is {0} bytes, over the {MAX_BODY} byte limit")]
     TooLarge(usize),
+    /// The page posted something, and it is not what the script posts.
+    #[error("the answer is not the JSON a page posts: {0}")]
+    Answer(String),
 }

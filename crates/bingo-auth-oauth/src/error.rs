@@ -45,7 +45,7 @@ impl From<bingo_loopback::LoopbackError> for AuthError {
             LoopbackError::NoPort(_) | LoopbackError::Io(_) => {
                 AuthError::Transport(error.to_string())
             }
-            LoopbackError::Malformed(_) | LoopbackError::TooLarge(_) => {
+            LoopbackError::Malformed(_) | LoopbackError::TooLarge(_) | LoopbackError::Answer(_) => {
                 AuthError::Invalid(error.to_string())
             }
         }
