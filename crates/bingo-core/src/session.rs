@@ -184,6 +184,7 @@ impl Actor {
             Msg::Invoke { call, reply } => self.invoke(call, reply).await,
             Msg::CallAllowed { item, input } => self.call_allowed(&item, input).await,
             Msg::CallFinished { outcome } => self.call_finished(outcome).await,
+            Msg::Rewind { to_turn, reply } => drop(reply.send(self.rewind(&to_turn).await)),
             Msg::Compact {
                 instructions,
                 reply,
@@ -386,6 +387,45 @@ impl Actor {
         let summary = self.restated();
         self.publish(Event::SessionUpdated { summary }, None).await;
         self.refresh_config().await;
+    }
+
+    /// Undo a turn and everything after it (ADR-0045 §1): the item that says
+    /// so is appended, and `Event::Rewound` takes the items out of every
+    /// fold — the model's (`ContextView::items`) and every client's
+    /// (`SessionState::apply`). The journal itself is never rewritten.
+    ///
+    /// Refused while a turn runs, whatever the turn is doing: an item the
+    /// running turn is still writing is not one this can take back, and a
+    /// child agent runs inside its parent's turn.
+    async fn rewind(&mut self, to_turn: &TurnId) -> Result<u32, KernelError> {
+        if self.running.is_some() {
+            return Err(KernelError::new(ErrorCode::NotReady, "a turn is running"));
+        }
+        let dropped = crate::rewind::dropped(&self.state.items, to_turn).ok_or_else(|| {
+            KernelError::new(
+                ErrorCode::InvalidInput,
+                format!("this session has no turn {to_turn}"),
+            )
+        })?;
+        let count = dropped.len() as u32;
+        self.record(ItemBody::Rewind {
+            to_turn: to_turn.clone(),
+            dropped: count,
+        })
+        .await;
+        self.publish(
+            Event::Rewound {
+                generation: self.state.history_generation + 1,
+                to_turn: to_turn.clone(),
+                dropped,
+                // The kernel restores no file, so it names none; whoever put
+                // them back says so in its own reply (ADR-0045 §3).
+                files_restored: Vec::new(),
+            },
+            None,
+        )
+        .await;
+        Ok(count)
     }
 
     /// A turn that only compacts (ADR-0008 §4): refused while one runs, so

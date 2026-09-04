@@ -398,6 +398,32 @@ pub trait HostApi: Send + Sync {
         ))
     }
 
+    /// Undo a turn and everything after it (ADR-0045 §1). The kernel appends
+    /// `ItemBody::Rewind { to_turn, dropped }` as its own item and publishes
+    /// `Event::Rewound`, so the items from that turn's first onward leave the
+    /// model's view (`ContextView::items`) and every client's fold
+    /// (`SessionState::apply`) at once. The journal is never rewritten: what
+    /// happened stays, and the item that undid it is the record of the undoing
+    /// (ADR-0002 §3).
+    ///
+    /// Answers how many items were dropped. Refused while a turn is running —
+    /// a rewind under a turn would cut the ground from under it, and a child
+    /// agent runs inside its parent's turn — and refused for a turn this
+    /// session does not have.
+    ///
+    /// The files a turn wrote are nobody's here: the kernel snapshots nothing
+    /// and restores nothing, which is why the verb takes no paths. Whoever put
+    /// the files back says so in its own reply.
+    ///
+    /// It does not join the JSON-RPC wire: a client rewinds by submitting the
+    /// command that owns the snapshots.
+    async fn rewind(&self, _session: &SessionId, _to_turn: &TurnId) -> Result<u32, KernelError> {
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            "this host keeps no journal",
+        ))
+    }
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 
     /// Say one line to the person, wherever they are: a transcript notice on

@@ -793,6 +793,15 @@ impl HostApi for Host {
         Ok(())
     }
 
+    /// Reopened first, like `extend`: a session that is only stored still has
+    /// a journal to take a turn back out of.
+    async fn rewind(&self, session: &SessionId, to_turn: &TurnId) -> Result<u32, KernelError> {
+        self.mailbox_of(session)
+            .await?
+            .rewind(to_turn.clone())
+            .await
+    }
+
     /// The session must be live and running a turn: one that is only stored
     /// is answering nobody, and reopening it would open a session with no
     /// turn to serve the call anyway (ADR-0036 §2).

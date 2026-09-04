@@ -13,6 +13,7 @@ mod models;
 mod policy;
 mod providers;
 mod resume;
+mod rewind;
 mod services;
 mod tree;
 mod views;
