@@ -1,0 +1,42 @@
+{
+  "comment": "The enum, boolean and integer schemas of the 2025-06-18 Supported Schema Types section, and the 2025-11-25 oneOf const/title enum, in one flat object.",
+  "method": "elicitation/create",
+  "params": {
+    "mode": "form",
+    "message": "How should the release be built?",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "title": "Channel",
+          "description": "Which channel to publish to",
+          "enum": ["stable", "beta", "nightly"],
+          "enumNames": ["Stable", "Beta", "Nightly"]
+        },
+        "colour": {
+          "type": "string",
+          "title": "Colour Selection",
+          "oneOf": [
+            { "const": "#FF0000", "title": "Red" },
+            { "const": "#00FF00", "title": "Green" }
+          ],
+          "default": "#FF0000"
+        },
+        "sign": {
+          "type": "boolean",
+          "title": "Sign the artifacts",
+          "description": "Description text",
+          "default": false
+        },
+        "jobs": {
+          "type": "integer",
+          "title": "Jobs",
+          "minimum": 1,
+          "maximum": 64
+        }
+      },
+      "required": ["channel", "jobs"]
+    }
+  }
+}

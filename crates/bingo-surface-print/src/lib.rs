@@ -22,13 +22,12 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bingo_sdk::QuestionOption;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
     ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId, IntentOutcome,
     Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin, PluginError,
-    PluginManifest, Registrar, SessionHandle, SessionId, SessionState, Surface, SurfaceKind,
-    SurfaceOptions, TurnStatus,
+    PluginManifest, Question, Registrar, SessionHandle, SessionId, SessionState, Surface,
+    SurfaceKind, SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -504,19 +503,8 @@ fn decide(
             session_scope,
             ..
         } => ask_permission(tool, summary, session_scope.as_deref(), console, err)?,
-        InteractionKind::Question {
-            question,
-            header,
-            options,
-            ..
-        } => ask_question(
-            interaction,
-            question,
-            header.as_deref(),
-            options,
-            console,
-            err,
-        )?,
+        InteractionKind::Question(question) => ask_question(interaction, question, console, err)?,
+        InteractionKind::Form { questions, .. } => ask_form(questions, console, err)?,
         _ => refuse(interaction, "this surface cannot answer that"),
     };
     Ok((answer, Activation::Keyboard))
@@ -550,26 +538,60 @@ fn ask_permission(
 
 fn ask_question(
     interaction: &Interaction,
-    question: &str,
-    header: Option<&str>,
-    options: &[QuestionOption],
+    question: &Question,
     console: &mut (dyn Console + Send),
     err: &mut (dyn Write + Send),
 ) -> io::Result<Answer> {
-    match header {
-        Some(header) => writeln!(err, "[question] {header}: {question}")?,
-        None => writeln!(err, "[question] {question}")?,
-    }
-    for option in options {
-        writeln!(err, "  {} — {}", option.id, option.label)?;
-    }
-    err.flush()?;
-    let chosen = console.read_line()?.trim().to_string();
-    Ok(if options.iter().any(|o| o.id == chosen) {
+    let chosen = put(question, console, err)?;
+    Ok(if question.options.iter().any(|o| o.id == chosen) {
         Answer::Choice { ids: vec![chosen] }
     } else {
         refuse(interaction, "no such option")
     })
+}
+
+/// A form is asked one question at a time, in the order they were asked, and
+/// answered once: the same shape a person at a pipe already knows, N times.
+fn ask_form(
+    questions: &[Question],
+    console: &mut (dyn Console + Send),
+    err: &mut (dyn Write + Send),
+) -> io::Result<Answer> {
+    let mut answers = Vec::new();
+    for question in questions {
+        let line = put(question, console, err)?;
+        answers.push(slot(question, line));
+    }
+    Ok(Answer::Form { answers })
+}
+
+/// One question written out, and the line that came back.
+fn put(
+    question: &Question,
+    console: &mut (dyn Console + Send),
+    err: &mut (dyn Write + Send),
+) -> io::Result<String> {
+    match &question.header {
+        Some(header) => writeln!(err, "[question] {header}: {}", question.question)?,
+        None => writeln!(err, "[question] {}", question.question)?,
+    }
+    for option in &question.options {
+        writeln!(err, "  {} — {}", option.id, option.label)?;
+    }
+    err.flush()?;
+    Ok(console.read_line()?.trim().to_string())
+}
+
+/// What one line means to one question of a form: the option it names, else
+/// words of their own where the question takes them, else a question skipped.
+fn slot(question: &Question, line: String) -> Answer {
+    if question.options.iter().any(|o| o.id == line) {
+        return Answer::Choice { ids: vec![line] };
+    }
+    match question.free_text && !line.is_empty() {
+        true => Answer::Text { text: line },
+        false => Answer::Cancel,
+    }
 }
 
 /// The narrowest refusal the interaction will accept.
@@ -728,7 +750,7 @@ pub(crate) mod tests {
 
     pub(crate) fn question(options: &[(&str, &str)]) -> Interaction {
         Interaction {
-            kind: InteractionKind::Question {
+            kind: InteractionKind::Question(Question {
                 question: "Which file?".into(),
                 header: None,
                 options: options
@@ -738,11 +760,12 @@ pub(crate) mod tests {
                         label: (*label).into(),
                         description: None,
                         role: None,
+                        preview: None,
                     })
                     .collect(),
                 free_text: false,
                 multi: false,
-            },
+            }),
             answers: vec![AnswerSpec::Choice, AnswerSpec::Cancel],
             ..permission(None)
         }
@@ -1163,12 +1186,48 @@ pub(crate) mod tests {
     }
 
     async fn answering(frames: Vec<Frame>, typed: &str) -> Run {
+        typing(frames, &[typed]).await
+    }
+
+    /// A run that answers one line per question, in order.
+    async fn typing(frames: Vec<Frame>, lines: &[&str]) -> Run {
         play(
             frames,
-            &mut TestConsole::typing(&[typed]),
+            &mut TestConsole::typing(lines),
             options(Some("hi"), json!({})),
         )
         .await
+    }
+
+    /// The two questions one `AskUserQuestion` call opens (M53).
+    pub(crate) fn form() -> Interaction {
+        let asked = |header: &str, options: &[(&str, &str)]| Question {
+            question: format!("Which {header}?"),
+            header: Some(header.into()),
+            options: options
+                .iter()
+                .map(|(id, label)| QuestionOption {
+                    id: (*id).into(),
+                    label: (*label).into(),
+                    description: None,
+                    role: None,
+                    preview: None,
+                })
+                .collect(),
+            free_text: true,
+            multi: false,
+        };
+        Interaction {
+            kind: InteractionKind::Form {
+                title: None,
+                questions: vec![
+                    asked("store", &[("0", "Postgres"), ("1", "SQLite")]),
+                    asked("runtime", &[("0", "tokio"), ("1", "smol")]),
+                ],
+            },
+            answers: vec![AnswerSpec::Form, AnswerSpec::Cancel],
+            ..permission(None)
+        }
     }
 
     fn opened(interaction: Interaction) -> Vec<Frame> {
@@ -1537,6 +1596,53 @@ pub(crate) mod tests {
         );
         assert!(run.err.contains("[question] Which file?"));
         assert!(run.err.contains("b — README.md"));
+    }
+
+    /// Every question of a form is put in turn and answered once (M53): an
+    /// option's id where it names one, the words where it does not, and a
+    /// blank line for a question skipped.
+    #[tokio::test]
+    async fn a_form_is_put_one_question_at_a_time_and_answered_once() {
+        let run = typing(opened(form()), &["1", "async-std"]).await;
+        assert_eq!(
+            run.session.answers()[0].1,
+            Answer::Form {
+                answers: vec![
+                    Answer::Choice {
+                        ids: vec!["1".into()]
+                    },
+                    Answer::Text {
+                        text: "async-std".into()
+                    },
+                ]
+            }
+        );
+        assert!(
+            run.err.contains("[question] store: Which store?"),
+            "{}",
+            run.err
+        );
+        assert!(
+            run.err.contains("[question] runtime: Which runtime?"),
+            "{}",
+            run.err
+        );
+    }
+
+    #[tokio::test]
+    async fn a_question_of_a_form_left_blank_is_skipped_and_the_rest_still_land() {
+        let run = typing(opened(form()), &["", "0"]).await;
+        assert_eq!(
+            run.session.answers()[0].1,
+            Answer::Form {
+                answers: vec![
+                    Answer::Cancel,
+                    Answer::Choice {
+                        ids: vec!["0".into()]
+                    },
+                ]
+            }
+        );
     }
 
     #[tokio::test]

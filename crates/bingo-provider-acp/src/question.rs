@@ -17,12 +17,12 @@ use agent_client_protocol_schema::v1::{
     PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome,
 };
-use bingo_sdk::{Answer, AnswerRole, AnswerSpec, InteractionKind, QuestionOption};
+use bingo_sdk::{Answer, AnswerRole, AnswerSpec, InteractionKind, Question, QuestionOption};
 
 /// What a person is asked, in the agent's own words.
 pub fn asked(adapter: &str, request: &RequestPermissionRequest) -> InteractionKind {
     let (yes, no) = (allowing(request), refusing(request));
-    InteractionKind::Question {
+    InteractionKind::Question(Question {
         question: about(request),
         // The adapter's name, so a person reading the prompt knows which agent
         // is asking before they read what it wants.
@@ -35,11 +35,12 @@ pub fn asked(adapter: &str, request: &RequestPermissionRequest) -> InteractionKi
                 label: option.name.clone(),
                 description: None,
                 role: role_of(&option.option_id, yes.as_ref(), no.as_ref()),
+                preview: None,
             })
             .collect(),
         free_text: false,
         multi: false,
-    }
+    })
 }
 
 /// The answers the kernel will take. `Cancel` is offered because a surface with
@@ -134,13 +135,13 @@ mod tests {
     }
 
     fn question(recorded: Value) -> (String, Option<String>, Vec<QuestionOption>) {
-        let InteractionKind::Question {
+        let InteractionKind::Question(Question {
             question,
             header,
             options,
             free_text,
             multi,
-        } = asked("scripted", &request(recorded))
+        }) = asked("scripted", &request(recorded))
         else {
             panic!("a permission request is a question");
         };

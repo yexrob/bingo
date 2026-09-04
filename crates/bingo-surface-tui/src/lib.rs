@@ -60,6 +60,7 @@ mod composer;
 mod dialog;
 mod effect;
 mod fold;
+mod form;
 mod frame;
 mod graphics;
 mod highlight;

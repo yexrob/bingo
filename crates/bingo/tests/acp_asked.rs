@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use bingo_sdk::{
     Activation, Answer, AnswerRole, Attachment, Event, Frame, HostApi, Input, IntentId,
-    Interaction, InteractionKind, ItemBody, OpenOptions, Origin, QuestionOption, SessionSelector,
-    SessionSpec,
+    Interaction, InteractionKind, ItemBody, OpenOptions, Origin, Question, QuestionOption,
+    SessionSelector, SessionSpec,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -166,7 +166,7 @@ async fn until_asked(attachment: &mut Attachment) -> Interaction {
 
 fn options(kind: &InteractionKind) -> Vec<QuestionOption> {
     match kind {
-        InteractionKind::Question { options, .. } => options.clone(),
+        InteractionKind::Question(Question { options, .. }) => options.clone(),
         other => panic!("a permission request is a question: {other:?}"),
     }
 }
@@ -211,9 +211,9 @@ async fn a_person_answers_the_agents_question_and_the_agent_gets_their_choice() 
     );
 
     let asked = until_asked(&mut attachment).await;
-    let InteractionKind::Question {
+    let InteractionKind::Question(Question {
         question, header, ..
-    } = &asked.kind
+    }) = &asked.kind
     else {
         panic!("a permission request is a question: {:?}", asked.kind);
     };

@@ -1,0 +1,21 @@
+{
+  "comment": "Not a shape the spec allows: elicitation schemas are flat objects of primitive properties, so a nested object and an array of them are refused whole.",
+  "method": "elicitation/create",
+  "params": {
+    "message": "Please describe the deployment",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "object",
+          "properties": { "host": { "type": "string" } }
+        },
+        "colours": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["Red", "Green"] }
+        }
+      },
+      "required": ["target"]
+    }
+  }
+}

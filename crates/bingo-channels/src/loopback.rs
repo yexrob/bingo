@@ -571,6 +571,7 @@ mod tests {
                 answer: bingo_sdk::Answer::AllowOnce,
             }],
             free_text: false,
+            rest: None,
         };
         insta::assert_json_snapshot!(
             "loopback-wire",

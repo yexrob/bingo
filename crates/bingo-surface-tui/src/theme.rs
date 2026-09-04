@@ -816,6 +816,9 @@ mod tests {
                 &[
                     "composer.rs",
                     "dialog.rs",
+                    // The question a form is on, and the option under its
+                    // cursor: the same weight the dialog's rows wear.
+                    "form.rs",
                     "markdown.rs",
                     "pager.rs",
                     "panel.rs",
@@ -850,6 +853,9 @@ mod tests {
                     "composer.rs",
                     "composer/strip.rs",
                     "dialog.rs",
+                    // A form's tabs it is not on, the descriptions, and the
+                    // preview pane — a mockup is read past, so it is dim.
+                    "form.rs",
                     "keys.rs",
                     "layers.rs",
                     "markdown.rs",
@@ -898,7 +904,9 @@ mod tests {
             (
                 "presence",
                 &[
-                    "dialog.rs",
+                    // Which session asked, named after a card's own title —
+                    // every card's head is written in one place (ADR-0010 §3).
+                    "form.rs",
                     "panel.rs",
                     "search.rs",
                     "select.rs",

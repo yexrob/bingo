@@ -30,7 +30,9 @@
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use bingo_sdk::{Answer, AnswerSpec, InteractionKind, Level, ServiceError, ToolHost, WireService};
+use bingo_sdk::{
+    Answer, AnswerSpec, InteractionKind, Level, Question, ServiceError, ToolHost, WireService,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -240,7 +242,7 @@ fn unknown(method: &str) -> ServiceError {
 /// what comes back from one of them is a verdict. The verdict plane is not a
 /// door (ADR-0033 Consequences).
 fn only_a_question(question: InteractionKind) -> Result<InteractionKind, ServiceError> {
-    if matches!(question, InteractionKind::Question { .. }) {
+    if matches!(question, InteractionKind::Question(Question { .. })) {
         return Ok(question);
     }
     Err(refused(
@@ -253,9 +255,9 @@ fn only_a_question(question: InteractionKind) -> Result<InteractionKind, Service
 /// `freeText` asks for words. A question that offers neither is answerable in
 /// words anyway — one with no way out is not a question.
 fn answers(question: &InteractionKind) -> Vec<AnswerSpec> {
-    let InteractionKind::Question {
+    let InteractionKind::Question(Question {
         options, free_text, ..
-    } = question
+    }) = question
     else {
         return vec![AnswerSpec::Cancel];
     };
@@ -506,7 +508,7 @@ mod tests {
     fn an_ask_carries_the_running_call_and_the_sdk_s_own_question() {
         let params = AskParams {
             call: "call_1".into(),
-            question: InteractionKind::Question {
+            question: InteractionKind::Question(Question {
                 question: "Which branch?".into(),
                 header: Some("Release".into()),
                 options: vec![QuestionOption {
@@ -514,10 +516,11 @@ mod tests {
                     label: "main".into(),
                     description: None,
                     role: None,
+                    preview: None,
                 }],
                 free_text: true,
                 multi: false,
-            },
+            }),
         };
         let wire = serde_json::to_value(&params).expect("an ask serialises");
         assert_eq!(wire["call"], json!("call_1"));
@@ -621,11 +624,12 @@ mod tests {
             serde_json::from_value(question(&["main"])).expect("a question");
         assert!(matches!(
             parsed,
-            InteractionKind::Question { ref options, .. } if options == &[QuestionOption {
+            InteractionKind::Question(Question { ref options, .. }) if options == &[QuestionOption {
                 id: "0".into(),
                 label: "main".into(),
                 description: None,
                 role: None,
+                preview: None,
             }]
         ));
     }

@@ -319,6 +319,7 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         interaction,
         agent.as_deref(),
         &owner.summary.cwd,
+        width,
     )
     .into_iter()
     .flat_map(|(line, option)| {

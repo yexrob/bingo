@@ -1,0 +1,10 @@
+{
+  "comment": "modelcontextprotocol.io/specification/draft/client/elicitation — URL Mode, Request Sensitive Data, params quoted verbatim plus the elicitationId rmcp requires.",
+  "method": "elicitation/create",
+  "params": {
+    "mode": "url",
+    "url": "https://mcp.example.com/ui/set_api_key",
+    "message": "Please provide your API key to continue.",
+    "elicitationId": "e-1"
+  }
+}

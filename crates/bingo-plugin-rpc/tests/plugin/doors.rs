@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use bingo_plugin_rpc::Manager;
-use bingo_sdk::{Answer, CancellationToken, InteractionKind, Level, ServiceHandle, Tool};
+use bingo_sdk::{Answer, CancellationToken, InteractionKind, Level, Question, ServiceHandle, Tool};
 use serde_json::{Value, json};
 
 use crate::harness::{
@@ -76,7 +76,7 @@ async fn a_tool_s_mid_call_question_comes_back_as_the_person_answered() {
     let asked = recorder.asked();
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert!(
-        matches!(&asked[0], InteractionKind::Question { question, .. } if question == "Which branch?"),
+        matches!(&asked[0], InteractionKind::Question(Question { question, .. }) if question == "Which branch?"),
         "the person was asked the process's own question: {asked:?}"
     );
     started.manager.shutdown().await;

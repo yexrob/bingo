@@ -11,7 +11,7 @@
 //! prompt, the frames that came out, and the log the agent wrote of the answer
 //! it was actually sent.
 
-use bingo_sdk::{AnswerRole, InteractionKind};
+use bingo_sdk::{AnswerRole, InteractionKind, Question};
 
 use super::*;
 
@@ -129,12 +129,12 @@ fn a_headless_run_puts_the_question_and_falls_closed_when_nobody_answers() {
 
     let asked = interactions(frames_of(&out));
     let [
-        InteractionKind::Question {
+        InteractionKind::Question(Question {
             question,
             header,
             options,
             ..
-        },
+        }),
     ] = asked.as_slice()
     else {
         panic!("one question, and it is the agent's: {asked:?}");

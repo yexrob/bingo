@@ -8,7 +8,7 @@
 
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Interaction, InteractionId, InteractionKind, LoginFlow,
-    Preview, QuestionOption,
+    Preview, Question, QuestionOption,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -16,6 +16,7 @@ use ratatui::text::{Line, Span};
 use crate::clock::Now;
 use crate::composer::Composer;
 use crate::effect::Effect;
+use crate::form::{self, Form};
 use crate::{preview, theme};
 
 /// What one row of the dialog does when it is chosen.
@@ -48,6 +49,10 @@ pub struct Dialog {
     pub chosen: Vec<String>,
     /// Answered, waiting for the frame that closes it.
     pub answered: bool,
+    /// A form's own state: which question is on screen, and what each of the
+    /// others was left on. `focus` is still the cursor of the one on screen,
+    /// so every key, click and window here works on a form unchanged.
+    pub form: Form,
 }
 
 impl Dialog {
@@ -72,6 +77,10 @@ impl Dialog {
         }
         if key.code == KeyCode::Esc {
             return self.send(interaction, cancel(interaction));
+        }
+        if let InteractionKind::Form { questions, .. } = &interaction.kind {
+            let answer = form::on_key(&mut self.form, &mut self.focus, questions, key);
+            return self.send(interaction, answer);
         }
         if self.words.is_some() {
             let done = self
@@ -241,9 +250,12 @@ pub fn options(interaction: &Interaction) -> Vec<Opt> {
         InteractionKind::Permission { session_scope, .. } => {
             permission_options(interaction, session_scope.as_deref())
         }
-        InteractionKind::Question { options, multi, .. } => {
+        InteractionKind::Question(Question { options, multi, .. }) => {
             question_options(interaction, options, *multi)
         }
+        // The form has a card of its own (M53); the dialog answers no key of
+        // it, so `esc` is the only way out of one drawn here.
+        InteractionKind::Form { .. } => Vec::new(),
         InteractionKind::Confirm { .. } => interaction
             .answers
             .iter()
@@ -341,8 +353,23 @@ pub fn rows(
     interaction: &Interaction,
     agent: Option<&str>,
     cwd: &str,
+    width: usize,
 ) -> Vec<(Line<'static>, Option<usize>)> {
-    let mut out = vec![(title(interaction, agent), None)];
+    if let InteractionKind::Form { questions, title } = &interaction.kind {
+        let mut out = form::rows(
+            &dialog.form,
+            dialog.focus,
+            questions,
+            form::Head {
+                title: title.as_deref(),
+                agent,
+                width,
+            },
+        );
+        out.extend(answering(dialog));
+        return out;
+    }
+    let mut out = vec![(title(dialog, interaction, agent), None)];
     out.extend(
         body(dialog, interaction)
             .into_iter()
@@ -359,33 +386,41 @@ pub fn rows(
                 .map(|line| (line, Some(index))),
         );
     }
-    if dialog.answered {
-        out.push((
-            Line::from(Span::styled(
-                format!("  {} waiting for the kernel", theme::ellipsis()),
-                theme::dim(),
-            )),
-            None,
-        ));
-    }
+    out.extend(answering(dialog));
     out
 }
 
-/// What kind of card this is, in one word a person reads first.
-fn title(interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
-    let name = match &interaction.kind {
+/// The mark of an answer already sent: it stays on screen until the frame that
+/// closes the card arrives.
+fn answering(dialog: &Dialog) -> Vec<(Line<'static>, Option<usize>)> {
+    if !dialog.answered {
+        return Vec::new();
+    }
+    vec![(
+        Line::from(Span::styled(
+            format!("  {} waiting for the kernel", theme::ellipsis()),
+            theme::dim(),
+        )),
+        None,
+    )]
+}
+
+/// What kind of card this is, in one word a person reads first. A form draws
+/// its own head, which is the tab row (see [`form::rows`]).
+fn title(_dialog: &Dialog, interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
+    Line::from(form::head(&named(interaction), agent))
+}
+
+fn named(interaction: &Interaction) -> String {
+    match &interaction.kind {
         InteractionKind::Permission { tool, .. } => tool.clone(),
-        InteractionKind::Question { header, .. } => {
+        InteractionKind::Question(Question { header, .. }) => {
             header.clone().unwrap_or_else(|| "Question".to_string())
         }
         InteractionKind::Confirm { title, .. } => title.clone(),
         InteractionKind::Login { provider, .. } => format!("Sign in to {provider}"),
-    };
-    let mut spans = vec![Span::styled(name, theme::bold())];
-    if let Some(agent) = agent {
-        spans.push(Span::styled(format!(" · {agent}"), theme::presence()));
+        InteractionKind::Form { .. } => "Questions".to_string(),
     }
-    Line::from(spans)
 }
 
 /// The one line that asks. A permission asks about the call the kernel
@@ -395,7 +430,8 @@ fn question(interaction: &Interaction, cwd: &str) -> Option<Line<'static>> {
         InteractionKind::Permission { summary, .. } => {
             format!("Do you want to {}?", opening(&shorten(summary, cwd)))
         }
-        InteractionKind::Question { question, .. } => question.clone(),
+        InteractionKind::Question(Question { question, .. }) => question.clone(),
+        InteractionKind::Form { .. } => return None,
         InteractionKind::Confirm { detail, .. } => detail.clone(),
         InteractionKind::Login { .. } => return None,
     };

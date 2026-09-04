@@ -179,7 +179,7 @@ async fn ask_person(
             let gate = denied_by_user(feedback.as_deref());
             (gate, DecisionKind::Deny, feedback)
         }
-        Answer::Cancel | Answer::Choice { .. } | Answer::Text { .. } => (
+        Answer::Cancel | Answer::Choice { .. } | Answer::Text { .. } | Answer::Form { .. } => (
             Gate::Denied {
                 message: "Permission request cancelled".into(),
             },
