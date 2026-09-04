@@ -103,13 +103,37 @@ fn named(block: &mut Block, image: &markdown::Linked, fold: Fold, rows: &Rows<'_
     let source = Source::Linked {
         dest: image.dest.clone(),
     };
-    let Some((picture, cells)) = drawn(source, read_in, Hangs::Said.room(rows), height(fold), rows)
+    // The chip's own column, so the picture stands where the words it belongs
+    // to stand rather than at the block's edge (M56).
+    let hangs = Hangs::Said {
+        indent: image.indent,
+    };
+    let Some((picture, cells)) = drawn(source, read_in, hangs.room(rows), height(fold), rows)
     else {
         return;
     };
     let under = (image.line + 1).min(block.lines.len());
-    block.lines.splice(under..under, cells);
+    block
+        .lines
+        .splice(under..under, at_column(cells, image.indent));
     block.pictures.push(picture);
+}
+
+/// The same rows, moved right by `indent` columns — a picture among an
+/// answer's words, whose lines are put in before the block is marked and
+/// indented under its `⏺` ([`in_the_words`]).
+fn at_column(cells: Vec<Line<'static>>, indent: usize) -> Vec<Line<'static>> {
+    if indent == 0 {
+        return cells;
+    }
+    cells
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::raw(" ".repeat(indent))];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// Why a picture the words named draws none, in dim after its name. Nothing at
@@ -160,28 +184,34 @@ fn height(fold: Fold) -> u16 {
     }
 }
 
-/// Which mark a picture hangs from — the two places one can be.
+/// Which mark a picture hangs from, and the column it stands in past that
+/// mark — the two places one can be.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hangs {
-    /// Under a `⎿`: a tool answered with it.
+    /// Under a `⎿`: a tool answered with it, in the gutter's own column.
     Returned,
-    /// Under a person's own line: they handed it over.
-    Said,
+    /// Under the `⏺` indent, `indent` columns further in: the indent of the
+    /// markdown construct an answer wrote it in — a list item's marker, a
+    /// quote's bar — and nothing at all for a picture a person handed over,
+    /// which stands where their words do (M56).
+    Said { indent: usize },
 }
 
 impl Hangs {
     fn of(item: &Item) -> Self {
         match item.body {
             ItemBody::ToolCall { .. } => Hangs::Returned,
-            _ => Hangs::Said,
+            _ => Hangs::Said { indent: 0 },
         }
     }
 
-    /// How many columns the picture has to draw in.
+    /// How many columns the picture has to draw in: what is left of the
+    /// measure once the mark and the column have taken theirs, so a picture is
+    /// fitted to the room it has and never pushed past the right margin.
     fn room(self, rows: &Rows<'_>) -> u16 {
         let room = match self {
             Hangs::Returned => rows.result_width(),
-            Hangs::Said => rows.measure().saturating_sub(speaks_indent()),
+            Hangs::Said { indent } => rows.measure().saturating_sub(speaks_indent() + indent),
         };
         u16::try_from(room).unwrap_or(u16::MAX).max(1)
     }
@@ -192,12 +222,10 @@ impl Hangs {
             Hangs::Returned => returns(cells, rows),
             // No glyph: the line above it is the person's own, and the
             // picture is part of what they said rather than an answer to it.
-            Hangs::Said => under(
-                Span::raw(" ".repeat(speaks_indent())),
-                cells,
-                speaks_indent(),
-                rows.measure(),
-            ),
+            Hangs::Said { indent } => {
+                let lead = speaks_indent() + indent;
+                under(Span::raw(" ".repeat(lead)), cells, lead, rows.measure())
+            }
         }
     }
 
@@ -207,7 +235,7 @@ impl Hangs {
     /// under it; a tool's answer has no such word, and says what was there.
     fn chip(self, image: &Image, rows: &Rows<'_>) -> Vec<Line<'static>> {
         match self {
-            Hangs::Said => Vec::new(),
+            Hangs::Said { .. } => Vec::new(),
             Hangs::Returned => returns(
                 vec![Line::from(Span::styled(
                     format!("[image: {}]", image.media_type),
@@ -230,6 +258,7 @@ mod tests {
     use bingo_pictures::testing::{png, unreadable};
     use bingo_sdk::{ContentPart, ItemStatus, Origin, ToolOutput};
     use ratatui::style::{Color, Style};
+    use unicode_width::UnicodeWidthStr;
 
     /// A `Read` that answered with a picture and nothing else, which is what
     /// the fs tool does (ADR-0040 §1).
@@ -527,6 +556,11 @@ mod tests {
             10,
             "ten cells under it: {drawn:?}"
         );
+        assert_eq!(
+            cells_at(&drawn[3]),
+            Some(speaks_indent()),
+            "at the words' own column: {drawn:?}"
+        );
         assert!(
             drawn[14].contains("and that is it"),
             "and the words after it come after the picture: {drawn:?}"
@@ -541,6 +575,80 @@ mod tests {
                 rows: 10,
             }]
         );
+    }
+
+    /// A picture in a plain paragraph stands at the words' own column, which is
+    /// the `⏺` indent and nothing more (M56).
+    #[test]
+    fn a_picture_in_a_paragraph_stands_at_the_words_column() {
+        let linked = memo("docs/x.png", Ok(png(100, 200)));
+        let block = block_with(
+            &wrote("![shot](docs/x.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        let drawn = text(&block);
+        assert_eq!(cells_at(&drawn[1]), Some(speaks_indent()), "{drawn:?}");
+        assert_eq!(block.pictures[0].cols, 10, "and it has the whole measure");
+    }
+
+    /// A picture in a bulleted answer stands at the bullet's *text* column, not
+    /// at the block's own edge (M56): the marker's width past the `⏺` indent,
+    /// which is where its chip stands too — and the room it is fitted to is
+    /// what is left of the measure, so it is never pushed past the margin.
+    #[test]
+    fn a_picture_in_a_bullet_stands_at_the_bullets_text_column() {
+        let linked = memo("docs/x.png", Ok(png(1000, 100)));
+        let block = block_with(
+            &wrote("- ![shot](docs/x.png)"),
+            graphics::drawing(),
+            Fold::Peek,
+            &linked,
+        );
+        let drawn = text(&block);
+        assert!(drawn[0].contains("[image: shot]"), "the chip: {drawn:?}");
+        assert_eq!(
+            cells_at(&drawn[1]),
+            Some(speaks_indent() + 2),
+            "past the bullet: {drawn:?}"
+        );
+        // 60 columns of measure, less the `⏺` indent and the marker: 56.
+        assert_eq!(block.pictures[0].cols, 56, "fitted to the room it has");
+        assert!(
+            drawn.iter().all(|line| line.width() <= 60),
+            "and nothing past the margin: {drawn:?}"
+        );
+    }
+
+    /// One indent further in a nested item, and past the bar in a quote: the
+    /// column is the markdown's, whatever the construct.
+    #[test]
+    fn a_nested_item_and_a_quote_stand_one_construct_further_in() {
+        let linked = memo("docs/x.png", Ok(png(100, 200)));
+        let drawn = |text: &str| {
+            let block = block_with(&wrote(text), graphics::drawing(), Fold::Peek, &linked);
+            self::text(&block)
+        };
+        let nested = drawn("- one\n  - ![shot](docs/x.png)");
+        assert_eq!(
+            cells_at(&nested[2]),
+            Some(speaks_indent() + 4),
+            "{nested:?}"
+        );
+        let quoted = drawn("> ![shot](docs/x.png)");
+        assert_eq!(
+            cells_at(&quoted[1]),
+            Some(speaks_indent() + 2),
+            "{quoted:?}"
+        );
+    }
+
+    /// Which column a row of placeholder cells starts in, or `None` when the
+    /// row carries none.
+    fn cells_at(line: &str) -> Option<usize> {
+        let cells = line.find(PLACEHOLDER)?;
+        Some(line[..cells].width())
     }
 
     /// The degrade of §5: the chip is the whole of it, and no picture is sent.

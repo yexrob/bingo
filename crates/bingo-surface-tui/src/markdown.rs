@@ -7,6 +7,7 @@
 use pulldown_cmark::{CodeBlockKind, CowStr, Event as Md, Options, Parser, Tag, TagEnd};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{theme, views};
 
@@ -40,7 +41,8 @@ pub struct Rendered {
 }
 
 /// One `![what it is](path or URL)` the words carried: which line of
-/// [`Rendered::lines`] holds its chip, what it is called, and where it is.
+/// [`Rendered::lines`] holds its chip, what column that chip stands in, what
+/// it is called, and where it is.
 ///
 /// The destination is the word as it was written. Whether it names a file on
 /// this machine or an address to fetch is nobody's business here — that is
@@ -48,6 +50,11 @@ pub struct Rendered {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Linked {
     pub line: usize,
+    /// The columns of decoration before the chip: a list item's marker, a
+    /// quote's bar, the two together. It is the column the picture under the
+    /// chip stands in, so a picture sits where the words it belongs to sit
+    /// rather than at the block's own edge (M56).
+    pub indent: usize,
     pub alt: String,
     pub dest: String,
 }
@@ -277,9 +284,7 @@ impl Writer {
             TagEnd::BlockQuote(_) => {
                 self.margin.0.pop();
             }
-            TagEnd::Item => {
-                self.margin.0.pop();
-            }
+            TagEnd::Item => self.end_item(),
             TagEnd::List(_) => {
                 self.lists.pop();
             }
@@ -292,7 +297,7 @@ impl Writer {
         }
         if matches!(
             tag,
-            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item
+            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock
         ) {
             self.flush();
         }
@@ -306,6 +311,15 @@ impl Writer {
         ) {
             self.blank();
         }
+    }
+
+    /// The item is over. Its rows are emitted while its own indent is still
+    /// the margin, so a picture written after the item's words stands in the
+    /// item's column rather than dropping to the block's edge (M56); the
+    /// indent goes with the item afterwards.
+    fn end_item(&mut self) {
+        self.flush();
+        self.margin.0.pop();
     }
 
     fn heading(&mut self) {
@@ -415,15 +429,16 @@ impl Writer {
     /// whose whole content is the picture — keeps it and takes the chip.
     fn chips(&mut self) {
         for image in std::mem::take(&mut self.pending) {
-            self.images.push(Linked {
-                line: self.lines.len(),
-                alt: image.text.trim().to_string(),
-                dest: image.dest.clone(),
-            });
             let mut spans = match self.spans.is_empty() {
                 true => self.margin.spans(),
                 false => std::mem::take(&mut self.spans),
             };
+            self.images.push(Linked {
+                line: self.lines.len(),
+                indent: decoration(&spans),
+                alt: image.text.trim().to_string(),
+                dest: image.dest.clone(),
+            });
             spans.push(Span::styled(image.chip(), theme::dim()));
             self.lines.push(Line::from(spans));
         }
@@ -450,6 +465,13 @@ impl Writer {
             self.lines.push(Line::default());
         }
     }
+}
+
+/// How many columns a line's own decoration takes: the quote bars and list
+/// markers standing before anything was written on it. A picture written there
+/// stands in that column ([`Linked::indent`]).
+fn decoration(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|span| span.content.width()).sum()
 }
 
 fn is_blank(line: &Line<'static>) -> bool {
@@ -620,6 +642,7 @@ mod tests {
             out.images,
             vec![Linked {
                 line: 1,
+                indent: 0,
                 alt: "the shot".into(),
                 dest: "docs/x.png".into(),
             }]
@@ -672,8 +695,38 @@ mod tests {
         );
         assert_eq!(
             text(&rendered("- see ![one](a.png)", 40).lines),
-            vec!["• see ", "[image: one]"],
-            "and an item with words of its own puts them first"
+            vec!["• see ", "  [image: one]"],
+            "and an item with words of its own puts them first, the chip \
+             standing in the item's own column (M56)"
+        );
+    }
+
+    /// The column a picture stands in is the column of the words it was
+    /// written among (M56): nothing in a plain paragraph, the bullet's text
+    /// column in a list item, one indent further in a nested one, past the bar
+    /// in a quote. It is a fact about the line, measured where the chip is
+    /// written and read where the picture is drawn.
+    #[test]
+    fn a_pictures_column_is_the_column_of_the_words_it_was_written_among() {
+        let indents = |text: &str| {
+            rendered(text, 40)
+                .images
+                .iter()
+                .map(|image| image.indent)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indents("![a](x.png)"), vec![0], "a paragraph of its own");
+        assert_eq!(indents("look ![a](x.png)"), vec![0], "and one with words");
+        assert_eq!(indents("- ![a](x.png)"), vec![2], "past the bullet");
+        assert_eq!(indents("- see ![a](x.png)"), vec![2], "and past its words");
+        assert_eq!(indents("1. ![a](x.png)"), vec![3], "past a wider marker");
+        assert_eq!(indents("- one\n  - ![a](x.png)"), vec![4], "nested");
+        assert_eq!(indents("> ![a](x.png)"), vec![2], "past the quote's bar");
+        assert_eq!(indents("> - ![a](x.png)"), vec![4], "past both");
+        assert_eq!(
+            indents("- ![a](a.png)\n- ![b](b.png)"),
+            vec![2, 2],
+            "and every item of a list stands in its own column"
         );
     }
 
@@ -691,11 +744,13 @@ mod tests {
             vec![
                 Linked {
                     line: 1,
+                    indent: 0,
                     alt: "one".into(),
                     dest: "a.png".into()
                 },
                 Linked {
                     line: 2,
+                    indent: 0,
                     alt: "two".into(),
                     dest: "b.png".into()
                 },
