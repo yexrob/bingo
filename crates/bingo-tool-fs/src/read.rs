@@ -21,11 +21,27 @@ use crate::path::resolve;
 /// different things and happen to differ.
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-const DESCRIPTION: &str = "\
-Read a file from the filesystem. Give an absolute path, or one relative to the \
-session's working directory. Text is returned with line numbers, starting at \
-line 1; use `offset` and `limit` to read a window of a long file. Images are \
-returned as images. Long results are truncated, and say so on the last line.";
+/// What the tool tells the model it does. The picture extensions are read off
+/// the sdk's table rather than spelled again here: a format added there is in
+/// this sentence the same day.
+fn description() -> String {
+    format!(
+        "Read a file from the filesystem. Give an absolute path, or one relative to the \
+session's working directory. Text is returned with line numbers, starting at line 1; use \
+`offset` and `limit` to read a window of a long file. A picture ({}) comes back as the \
+picture itself: you see it, and it is placed in the user's transcript beside this call, \
+where their surface can draw it. Long results are truncated, and say so on the last line.",
+        extensions()
+    )
+}
+
+/// The extensions a picture may arrive under, as the description spells them.
+fn extensions() -> String {
+    Image::extensions()
+        .map(|ext| format!(".{ext}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadArgs {
@@ -71,7 +87,7 @@ impl Tool for ReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Read".into(),
-            description: DESCRIPTION.into(),
+            description: description(),
             input_schema: input_schema::<ReadArgs>(),
             meta: Default::default(),
         }
@@ -165,6 +181,19 @@ mod tests {
         assert!(ReadTool.traits(&Value::Null).read_only);
         assert!(ReadTool.preview(&Value::Null, Path::new("/")).is_none());
         assert!(ReadTool.confirm(&Value::Null).is_none());
+    }
+
+    /// The one table and this sentence cannot drift: every extension a picture
+    /// may arrive under is named, and none of them is a second list.
+    #[test]
+    fn the_description_names_every_extension_a_picture_may_arrive_under() {
+        let description = ReadTool.spec().description;
+        for ext in Image::extensions() {
+            assert!(
+                description.contains(&format!(".{ext}")),
+                ".{ext} is missing from {description}"
+            );
+        }
     }
 
     #[tokio::test]
