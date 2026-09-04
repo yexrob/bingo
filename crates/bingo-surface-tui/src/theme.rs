@@ -264,7 +264,7 @@ thread_local! {
 /// The look under test: the ANSI table unless a test asked for another, so a
 /// snapshot never depends on the terminal that ran it.
 #[cfg(test)]
-fn current() -> Theme {
+pub fn current() -> Theme {
     OVERRIDE.with(std::cell::Cell::get).unwrap_or(Theme {
         colors: Colors::Ansi,
         glyphs: &UNICODE,
@@ -307,8 +307,11 @@ fn number(ground: Option<bool>) -> u8 {
     }
 }
 
+/// The look this frame is drawn in. Read on every span, and read again by the
+/// two memos of a drawing — the transcript's blocks and the highlighter's rows
+/// — which a change of look throws away.
 #[cfg(not(test))]
-fn current() -> Theme {
+pub fn current() -> Theme {
     let said = GROUND.load(std::sync::atomic::Ordering::Relaxed);
     choose(*ASK.get_or_init(asked), ground(said))
 }

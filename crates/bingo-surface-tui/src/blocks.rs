@@ -2,8 +2,9 @@
 //! frames.
 //!
 //! The reducer is still the only history — a block is a *memo* of
-//! [`crate::transcript`]'s rendering of one item at one width, thrown away the
-//! moment either changes, never a second copy of what the item says. An item
+//! [`crate::transcript`]'s rendering of one item at one width in one look,
+//! thrown away the moment any of the three changes, never a second copy of
+//! what the item says. An item
 //! that has finished is drawn once and then only cloned; the one that is still
 //! arriving is the only one that is drawn again, because it is the only one
 //! that can differ. A call that spawned a session is drawn again whenever the
@@ -50,6 +51,13 @@ struct Revision {
     /// arrived, and the arrival is the only thing that says so — it is not in
     /// the item, which has not changed a byte.
     linked: u64,
+    /// The look it was drawn in. A style is baked into a `Line`, and the
+    /// terminal may change which palette a token is worth under a running
+    /// surface (M71): the lines are then a memo of a drawing nobody would make
+    /// again. It is here rather than beside the width because a look changes
+    /// what a block *says* about itself and not what it is — the entry, and the
+    /// landing it is in the middle of, are kept and only drawn again.
+    look: crate::theme::Theme,
 }
 
 fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold, rows: &Rows<'_>) -> Revision {
@@ -60,6 +68,7 @@ fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold, rows: &Rows<'
         fold,
         skill: skill::of(item, rows.commands).is_some(),
         linked: rows.linked.answers(),
+        look: crate::theme::current(),
     }
 }
 
