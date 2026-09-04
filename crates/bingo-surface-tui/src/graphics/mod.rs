@@ -34,7 +34,7 @@ pub mod probe;
 pub mod stored;
 pub mod tmux;
 
-pub use decoded::Decoded;
+pub use decoded::{Decoded, Pixels};
 pub use linked::Linked;
 pub use picture::Picture;
 pub use placed::Placed;

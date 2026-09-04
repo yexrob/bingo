@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use bingo_pictures::{PictureError, Source};
+use bingo_pictures::{Cache, PictureError, Source};
 use bingo_sdk::Image;
 
 /// How many destinations one session reads in. It is a bound as much as a
@@ -143,10 +143,14 @@ pub fn source(dest: &str, cwd: &Path, home: Option<&str>) -> Source {
     Source::parse(&crate::paths::expand(dest, home), cwd)
 }
 
-/// The picture at a destination, off the loop's own thread.
-pub async fn read(dest: String, source: Source) -> Answer {
+/// The picture at a destination, off the loop's own thread. A fetched one is
+/// kept on disk where the run has a cache, so the same address across sessions
+/// is one fetch (M61).
+pub async fn read(dest: String, source: Source, cache: Option<Cache>) -> Answer {
     Answer {
-        result: bingo_pictures::load(&source).await.map_err(|e| note(&e)),
+        result: bingo_pictures::load(&source, cache.as_ref())
+            .await
+            .map_err(|e| note(&e)),
         dest,
     }
 }
@@ -313,6 +317,7 @@ mod tests {
         let answer = read(
             "gone.png".into(),
             Source::Url(format!("{}/gone.png", server.uri())),
+            None,
         )
         .await;
         assert_eq!(answer.result.unwrap_err(), "HTTP 404");
@@ -351,7 +356,12 @@ mod tests {
         let file = dir.path().join("shot.png");
         std::fs::write(&file, bingo_pictures::testing::png_bytes(4, 3)).expect("a picture on disk");
 
-        let read_in = read("shot.png".into(), source("shot.png", dir.path(), None)).await;
+        let read_in = read(
+            "shot.png".into(),
+            source("shot.png", dir.path(), None),
+            None,
+        )
+        .await;
         assert_eq!(read_in.dest, "shot.png");
         assert_eq!(
             read_in.result.as_ref().map(|i| i.media_type.as_str()),
@@ -367,7 +377,12 @@ mod tests {
             "and the memo holds it"
         );
 
-        let missing = read("gone.png".into(), source("gone.png", dir.path(), None)).await;
+        let missing = read(
+            "gone.png".into(),
+            source("gone.png", dir.path(), None),
+            None,
+        )
+        .await;
         assert_eq!(missing.result.err(), Some("not found".into()));
     }
 }

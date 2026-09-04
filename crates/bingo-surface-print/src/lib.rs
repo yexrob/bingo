@@ -375,7 +375,9 @@ async fn images_from(
         .unwrap_or(&[]);
     let mut images = Vec::with_capacity(words.len());
     for word in words.iter().filter_map(serde_json::Value::as_str) {
-        let image = bingo_pictures::load(&bingo_pictures::Source::parse(word, cwd))
+        // Nothing is kept: a run that prints once and ends has nothing to
+        // read a second time (M61).
+        let image = bingo_pictures::load(&bingo_pictures::Source::parse(word, cwd), None)
             .await
             .map_err(|e| KernelError::new(ErrorCode::InvalidInput, format!("{word}: {e}")))?;
         images.push(image);

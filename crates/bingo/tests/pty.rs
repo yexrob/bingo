@@ -452,6 +452,9 @@ fn a_terminal_that_answers_the_graphics_probe_is_sent_the_picture() {
     terminal.wait_for("? for shortcuts");
     terminal.send(b"look at it\r");
     terminal.wait_for("That is the picture.");
+    // The cells are on the screen a frame before the pixels are: fitting a
+    // picture to them is a decode, and the run does it off the loop (M61).
+    terminal.wait_written(b"\x1b_Ga=T,f=100");
     let written = terminal.written();
     assert_eq!(
         count(&written, b"\x1b_Ga=T,f=100"),
@@ -603,6 +606,7 @@ fn a_picture_under_tmux_travels_in_the_passthrough_envelope() {
     terminal.wait_for("? for shortcuts");
     terminal.send(b"look at it\r");
     terminal.wait_for("That is the picture.");
+    terminal.wait_written(WRAPPED_TRANSMIT);
     let written = terminal.written();
     assert!(
         contains(&written, WRAPPED_QUERY),
@@ -679,6 +683,7 @@ fn an_answer_that_lands_after_the_probe_is_eaten_and_still_counted() {
     }
     terminal.send(b"\r");
     terminal.wait_for("That is the picture.");
+    terminal.wait_written(WRAPPED_TRANSMIT);
     let written = terminal.written();
     assert_eq!(
         count(&written, WRAPPED_TRANSMIT),

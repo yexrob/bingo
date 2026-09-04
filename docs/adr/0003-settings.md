@@ -8,6 +8,13 @@ Users edit settings by hand and hosts generate them; the format is consumed inde
 
 1. Layers, lowest priority first: `<config_dir>/settings.json` (user), `<cwd>/.bingo/settings.json` (project), `<cwd>/.bingo/settings.local.json` (local), `--settings <file>`, then command-line flags as a synthetic `cli` layer. JSONC (comments, trailing commas). A missing file is skipped; a non-object root is an error.
 2. The kernel owns four top-level keys: `provider`, `model`, `thinking`, `maxTokens`. Every other top-level key belongs to the plugin whose `PluginManifest.config` claims it, as dotted paths with a merge rule: `Replace` (default), `Accumulate` (lists concatenate lowest first, first copy of a repeat kept), `ByName` (lists of objects keyed by `name` or `id`, a higher entry replaces the lower in place). Two plugins claiming the same root, or a plugin claiming a kernel key, is a build error.
+   *(Amended 2026-09-04, M61: the kernel's keys are six. `pictures` is
+   the sixth and the kernel reads none of it — `bingo-pictures` keeps
+   the cache and a surface builds it — but it is a kernel key so that no
+   plugin may claim it and nobody who sets it is told it is unknown.
+   `settings::picture_cache_days` is its one reading, off the layers
+   rather than out of `Merged`, because the process that hands the
+   number to a surface composes those layers before a host exists.)*
 3. Objects merge field by field at every depth; the rule applies to leaves. An explicit `null` in a higher layer clears the value from every layer below it — the tri-state the old project lacked.
 4. `bingo_core::settings::merge(layers, claims)` is a pure function returning the kernel settings, one object slice per plugin holding only its roots, and the unclaimed keys with the layer that set them; the host reports those as notices, never silently.
 5. Runtime changes (`AllowSession` rules, `/model`) are events, never written back. Writing settings is a command's job and always targets one named layer.

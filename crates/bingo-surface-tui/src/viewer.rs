@@ -26,8 +26,9 @@ use crate::graphics::linked;
 use crate::graphics::picture::Source;
 
 /// Where the bytes that have no name of their own are written, under the data
-/// directory.
-pub const DIR: &str = "pictures";
+/// directory — the same directory the fetched ones are cached in, one spelling
+/// of it for both (M61).
+pub const DIR: &str = bingo_pictures::cache::DIR;
 
 /// Who opens it: this system's own viewer, or a test's recorder — the one seam
 /// a test reaches through, as `ShowPage`'s opener is (ADR-0042 §4).

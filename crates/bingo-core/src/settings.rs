@@ -15,8 +15,23 @@ use crate::models::Declared;
 
 pub use merge::merge;
 
-/// The keys the kernel reads itself.
-pub const KERNEL_KEYS: &[&str] = &["provider", "model", "thinking", "maxTokens", "models"];
+/// The keys the kernel owns. It reads all but the last itself: `pictures` is
+/// read by whoever builds a picture loader ([`picture_cache_days`]), and is a
+/// kernel key so that no plugin may claim it and nobody who sets it is told it
+/// is unknown (ADR-0003 §2).
+pub const KERNEL_KEYS: &[&str] = &[
+    "provider",
+    "model",
+    "thinking",
+    "maxTokens",
+    "models",
+    "pictures",
+];
+
+/// The one key under `pictures`: the spelling every other kernel key uses, and
+/// the spelling the ask was written in. Both are read, so neither is a silent
+/// no-op; the first is the one messages name.
+const CACHE_DAYS: [&str; 2] = ["cacheDays", "cache_days"];
 
 /// One settings source, lowest priority first when listed.
 #[derive(Clone, Debug, PartialEq)]
@@ -118,6 +133,66 @@ pub enum SettingsError {
         layer: String,
         message: String,
     },
+}
+
+/// How many days a picture fetched from the web is kept on this machine
+/// (`pictures.cacheDays`, ADR-0041, M61). `None` where no layer says: the
+/// default belongs to the cache that keeps the pictures, not to the file that
+/// configures it, and `0` means never keep one.
+///
+/// The highest layer that names `pictures` speaks for it, which is what the
+/// merge would have produced for a single scalar (ADR-0003 §3) — and a `null`
+/// or an empty object there clears what the layers below said, as a `null`
+/// does everywhere else. It is read off the layers rather than out of
+/// [`Merged`] because the process that hands the number to a surface composes
+/// those layers before a host, and so before any claim, exists.
+pub fn picture_cache_days(layers: &[Layer]) -> Result<Option<u64>, SettingsError> {
+    let mut days = None;
+    for layer in layers {
+        if let Some(pictures) = layer.value.get("pictures") {
+            days = said(layer, pictures)?;
+        }
+    }
+    Ok(days)
+}
+
+/// What one layer's `pictures` says about the cache's life. An unrecognised
+/// member of it is a typo said out loud: the unknown-key notice only ever sees
+/// top-level keys (ADR-0003 §4), so nothing else would catch one.
+fn said(layer: &Layer, pictures: &Value) -> Result<Option<u64>, SettingsError> {
+    if pictures.is_null() {
+        return Ok(None);
+    }
+    let object = pictures
+        .as_object()
+        .ok_or_else(|| wrong(layer, "pictures", "expected an object"))?;
+    let mut days = None;
+    for (key, value) in object {
+        if !CACHE_DAYS.contains(&key.as_str()) {
+            let known = CACHE_DAYS[0];
+            let key = format!("pictures.{key}");
+            return Err(wrong(
+                layer,
+                &key,
+                &format!("no such setting; `{known}` is the one"),
+            ));
+        }
+        if !value.is_null() {
+            days = Some(value.as_u64().ok_or_else(|| {
+                let message = "expected a whole number of days, `0` for never";
+                wrong(layer, &format!("pictures.{key}"), message)
+            })?);
+        }
+    }
+    Ok(days)
+}
+
+fn wrong(layer: &Layer, key: &str, message: &str) -> SettingsError {
+    SettingsError::Type {
+        key: key.to_string(),
+        layer: layer.source.clone(),
+        message: message.to_string(),
+    }
 }
 
 /// The user layer: the lowest of the three, the one that is about the person
@@ -322,6 +397,83 @@ mod tests {
                 .starts_with("// mine"),
             "the file a person wrote is left alone"
         );
+    }
+
+    fn layer(source: &str, value: Value) -> Layer {
+        let Value::Object(map) = value else {
+            panic!("a layer is an object")
+        };
+        Layer::new(source, map)
+    }
+
+    /// The highest layer that names `pictures` decides, in either spelling,
+    /// and where none does the cache's own default is left to the cache.
+    #[test]
+    fn the_cache_life_comes_from_the_highest_layer_that_names_it() {
+        assert_eq!(picture_cache_days(&[]).unwrap(), None);
+        assert_eq!(
+            picture_cache_days(&[layer("user", json!({ "model": "m" }))]).unwrap(),
+            None,
+            "a layer that says nothing about pictures says nothing"
+        );
+        let layers = [
+            layer("user", json!({ "pictures": { "cacheDays": 30 } })),
+            layer("project", json!({ "pictures": { "cache_days": 3 } })),
+        ];
+        assert_eq!(
+            picture_cache_days(&layers).unwrap(),
+            Some(3),
+            "the ask's own spelling reads too, and the higher layer wins"
+        );
+        assert_eq!(
+            picture_cache_days(&layers[..1]).unwrap(),
+            Some(30),
+            "and so does the settled one"
+        );
+    }
+
+    #[test]
+    fn never_caching_is_a_number_like_any_other() {
+        let layers = [layer("user", json!({ "pictures": { "cacheDays": 0 } }))];
+        assert_eq!(picture_cache_days(&layers).unwrap(), Some(0));
+    }
+
+    /// A `null` clears what the layers below said, as it does everywhere else.
+    #[test]
+    fn a_null_over_a_life_gives_the_default_back() {
+        for higher in [json!(null), json!({}), json!({ "cacheDays": null })] {
+            let layers = [
+                layer("user", json!({ "pictures": { "cacheDays": 30 } })),
+                layer("project", json!({ "pictures": higher.clone() })),
+            ];
+            assert_eq!(picture_cache_days(&layers).unwrap(), None, "{higher}");
+        }
+    }
+
+    /// A typo inside `pictures` is not a top-level key, so nothing else would
+    /// ever catch it: it is a startup failure that names the layer.
+    #[test]
+    fn a_key_no_one_knows_under_pictures_is_said_out_loud() {
+        let layers = [layer("user", json!({ "pictures": { "cacheDaze": 3 } }))];
+        let error = picture_cache_days(&layers).expect_err("a typo");
+        assert!(error.to_string().contains("pictures.cacheDaze"), "{error}");
+        assert!(error.to_string().contains("cacheDays"), "{error}");
+        assert!(error.to_string().contains("user"), "{error}");
+    }
+
+    #[test]
+    fn a_life_that_is_not_a_number_of_days_is_refused() {
+        for bad in [json!("forever"), json!(-1), json!(1.5), json!([14])] {
+            let layers = [layer("user", json!({ "pictures": { "cacheDays": bad } }))];
+            let error = picture_cache_days(&layers).expect_err("{bad}");
+            assert!(
+                error.to_string().contains("whole number of days"),
+                "{error}"
+            );
+        }
+        let layers = [layer("user", json!({ "pictures": 14 }))];
+        let error = picture_cache_days(&layers).expect_err("not an object");
+        assert!(error.to_string().contains("expected an object"), "{error}");
     }
 
     #[test]
