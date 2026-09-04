@@ -27,17 +27,30 @@ pub enum Script {
 pub struct ScriptedProvider {
     responses: Mutex<VecDeque<Script>>,
     requests: Mutex<Vec<ModelRequest>>,
+    /// What it answers to; `scripted` unless a test needs two of them.
+    id: String,
     /// The catalogue shelf its models are filed under; its own id by default,
     /// as the sdk trait does.
     family: Option<String>,
     /// What its endpoint answers `models()` with: a list, or the message a
     /// broken endpoint fails with. Empty, as the sdk's default is.
     serves: Mutex<Result<Vec<ModelInfo>, String>>,
+    /// Its credentials; `NotApplicable`, as the sdk's default is.
+    auth: Mutex<AuthStatus>,
 }
 
 impl ScriptedProvider {
     pub fn new(responses: Vec<Script>) -> Arc<Self> {
         Self::filed(None, responses)
+    }
+
+    /// A second provider in the same host, which needs a name of its own.
+    pub fn named(id: &str, responses: Vec<Script>) -> Arc<Self> {
+        let provider = Self::filed(None, responses);
+        Arc::new(Self {
+            id: id.to_string(),
+            ..Arc::into_inner(provider).expect("just minted")
+        })
     }
 
     /// A named instance serving another shape's models (ADR-0017), which is
@@ -50,9 +63,27 @@ impl ScriptedProvider {
         Arc::new(Self {
             responses: Mutex::new(responses.into()),
             requests: Mutex::new(vec![]),
+            id: "scripted".to_string(),
             family,
             serves: Mutex::new(Ok(Vec::new())),
+            auth: Mutex::new(AuthStatus::NotApplicable),
         })
+    }
+
+    /// A provider nobody has signed in to.
+    pub fn missing(self: Arc<Self>, hint: &str) -> Arc<Self> {
+        *self.auth.lock().unwrap() = AuthStatus::Missing {
+            hint: hint.to_string(),
+        };
+        self
+    }
+
+    /// A provider whose credentials have run out.
+    pub fn expired(self: Arc<Self>, hint: &str) -> Arc<Self> {
+        *self.auth.lock().unwrap() = AuthStatus::Expired {
+            hint: hint.to_string(),
+        };
+        self
     }
 
     /// What its endpoint lists from now on.
@@ -79,10 +110,13 @@ impl ScriptedProvider {
 #[async_trait]
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
-        "scripted"
+        &self.id
     }
     fn family(&self) -> &str {
         self.family.as_deref().unwrap_or_else(|| self.id())
+    }
+    fn auth(&self) -> AuthStatus {
+        self.auth.lock().unwrap().clone()
     }
     fn endpoint(&self, _: &str) -> EndpointCapabilities {
         EndpointCapabilities::default()

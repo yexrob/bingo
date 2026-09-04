@@ -39,6 +39,29 @@ pub struct ModelChoice {
     pub learned: Arc<Learned>,
 }
 
+impl std::fmt::Debug for ModelChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelChoice")
+            .field("provider", &self.provider.id())
+            .field("id", &self.id)
+            .field("reasoning", &self.reasoning)
+            .field("max_tokens", &self.max_tokens)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A summary saying what the session runs on. The choice is the fact; the
+/// summary's `provider` and `model` are its shadow, stamped here and nowhere
+/// else — a summary read back from a journal names the model of the process
+/// that wrote it, which is not necessarily the one that answers now.
+pub fn runs_on(summary: SessionSummary, choice: Option<&ModelChoice>) -> SessionSummary {
+    SessionSummary {
+        model: choice.map(|c| c.id.clone()),
+        provider: choice.map(|c| c.provider.id().to_string()),
+        ..summary
+    }
+}
+
 /// Compactions the kernel discarded in a row, per session (ADR-0006). At
 /// `TRIP` the breaker is tripped: no more summaries are paid for until one
 /// shrinks something.

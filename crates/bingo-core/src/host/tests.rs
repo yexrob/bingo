@@ -111,11 +111,21 @@ async fn one_turn(attachment: &mut Attachment, prompt: &str) -> Seq {
     panic!("the turn never completed");
 }
 
+/// A scratch home for the whole binary: a host writes learned windows, served
+/// models and — since `/model` remembers — settings, and none of that belongs
+/// in a shared `/tmp` or a developer's own config. A test that reads back what
+/// it wrote takes a directory of its own with [`env_in`].
 fn env() -> Env {
+    static DIR: std::sync::LazyLock<tempfile::TempDir> =
+        std::sync::LazyLock::new(|| tempfile::tempdir().expect("a scratch home"));
+    env_in(DIR.path())
+}
+
+fn env_in(dir: &std::path::Path) -> Env {
     Env {
-        home: "/tmp".into(),
-        config_dir: "/tmp".into(),
-        data_dir: "/tmp".into(),
+        home: dir.to_path_buf(),
+        config_dir: dir.join("config"),
+        data_dir: dir.join("data"),
     }
 }
 

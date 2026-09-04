@@ -59,7 +59,7 @@ pub(super) async fn now(host: &Arc<Host>) -> Vec<Refreshed> {
 fn usable(providers: &[Arc<dyn Provider>]) -> Vec<Arc<dyn Provider>> {
     providers
         .iter()
-        .filter(|p| super::check_auth(p.as_ref()).is_ok())
+        .filter(|p| super::auth::signed_in(p.as_ref()))
         .cloned()
         .collect()
 }

@@ -1,6 +1,7 @@
 //! The kernel's own commands through a real host (ADR-0008 §4).
 
 use super::*;
+use crate::settings;
 
 static CONTEXT: PluginManifest = PluginManifest {
     id: "test.context",
@@ -136,6 +137,13 @@ async fn model_and_think_change_the_next_turn_and_are_announced() {
     assert_eq!(message(&ack), "thinking: high");
     assert_eq!(client.state.config.kernel, json!({ "thinking": "high" }));
 
+    let (ack, _) = client.ack("/model").await;
+    assert_eq!(
+        shown(&ack),
+        "model: scripted/m2\nthinking: high\nusage: /model [<provider>/]<model>",
+        "bare /model says who serves it, which model, and how hard it thinks"
+    );
+
     client.ack("hello").await;
     client.until_turn_completed().await;
     let request = &provider.requests()[0];
@@ -159,14 +167,10 @@ async fn model_and_think_change_the_next_turn_and_are_announced() {
     );
 
     let (ack, _) = client.ack("/model").await;
-    let IntentOutcome::Applied { result } = ack else {
-        panic!("a view");
-    };
-    assert!(
-        result["view"]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("model: scripted/m2")
+    assert_eq!(
+        shown(&ack),
+        "model: scripted/m2\nusage: /model [<provider>/]<model>",
+        "a turn that asks for no effort reports none"
     );
 }
 
@@ -340,4 +344,56 @@ async fn status_answers_with_the_session_s_facts() {
     assert_eq!(row("context"), "not measured yet");
     assert_eq!(row("provider"), "scripted");
     assert_eq!(row("tokens"), "0 in · 0 out");
+}
+
+/// `/model` outlives the session it was typed in: the next start opens on it
+/// (user-reported: "应该是记住上次设置的"). It is written into the user layer,
+/// which is the file the loader reads first — so a project layer or a
+/// `--model` on the command line still wins over it.
+#[tokio::test]
+async fn model_is_remembered_in_the_user_settings() {
+    let home = tempfile::tempdir().expect("a home");
+    let host = host_in(home.path(), None).await;
+    let mut client = Client::open(&host).await;
+
+    let (ack, _) = client.ack("/model m2").await;
+    assert_eq!(message(&ack), "model: scripted/m2");
+
+    let written = std::fs::read_to_string(settings::user_path(&env_in(home.path())))
+        .expect("the user settings were written");
+    let document: Value = serde_json::from_str(&written).expect("plain JSON");
+    assert_eq!(document["model"], json!("m2"));
+    assert_eq!(document["provider"], json!("scripted"));
+
+    let next = host_in(home.path(), Some("m2")).await;
+    let opened = Client::open(&next).await;
+    assert_eq!(opened.state.summary.model.as_deref(), Some("m2"));
+    assert_eq!(opened.state.summary.provider.as_deref(), Some("scripted"));
+}
+
+/// A host reading the settings under `home`. `remembered` is what the user
+/// layer is expected to hold by then: the settings are merged once at build,
+/// so the second host must be built after the first one has written.
+async fn host_in(home: &std::path::Path, remembered: Option<&str>) -> Arc<Host> {
+    let env = env_in(home);
+    let layers = crate::settings::load(&env, home, None).expect("readable settings");
+    assert_eq!(
+        layers
+            .first()
+            .and_then(|l| l.value.get("model"))
+            .and_then(Value::as_str),
+        remembered,
+        "the user layer holds what the last run left there"
+    );
+    let plugins = vec![TestPlugin::boxed(
+        &PROVIDER,
+        vec![Contribution::Provider(ScriptedProvider::new(vec![]))],
+    )];
+    let mut config = HostConfig::new(env);
+    config.layers = layers;
+    let config = match remembered {
+        Some(_) => config,
+        None => config.with_layer("cli", json!({ "model": "m" })),
+    };
+    Host::build(plugins, config).await.expect("a host")
 }

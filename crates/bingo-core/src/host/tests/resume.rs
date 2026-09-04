@@ -678,3 +678,63 @@ async fn a_resumed_session_keeps_its_system_prompt_and_tool_set() {
         "the resumed turn is held to the tool set"
     );
 }
+
+/// A session that was moved to another model with `/model` comes back on
+/// that model, and says so (user-reported: "resume 后模型展示和实际使用的模型
+/// 不对"). Two halves of one fact: the spec a resume rebuilds is what the
+/// session *last* was, not what it first was — the journal's first frame
+/// predates the `/model` that rewrote it (ADR-0008 §4) — and the head of the
+/// new segment is stamped from the choice that was actually resolved, so no
+/// surface can be shown a model that is not the one answering.
+#[tokio::test]
+async fn a_resumed_session_comes_back_on_the_model_it_was_moved_to() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let host_a = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    let mut a = host_a
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(a.snapshot.summary.model.as_deref(), Some("m"));
+    let id = a.session.clone();
+
+    a.handle.submit(
+        IntentId::mint(),
+        Input::text("/model m2", Origin::surface("test")),
+    );
+    while let Some(frame) = a.events.next().await {
+        a.snapshot.apply(&frame);
+        if matches!(frame.event, Event::IntentAck { .. }) {
+            break;
+        }
+    }
+    assert_eq!(a.snapshot.summary.model.as_deref(), Some("m2"));
+
+    let answers = ScriptedProvider::new(vec![Script::Events(text("back"))]);
+    let host_b = host_on(store.clone(), answers.clone()).await;
+    let mut b = host_b
+        .open(
+            SessionSelector::ById { id: id.clone() },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        b.snapshot.summary.model.as_deref(),
+        Some("m2"),
+        "the resumed session says the model it was left on"
+    );
+
+    one_turn(&mut b, "hello").await;
+    assert_eq!(
+        answers.requests()[0].model,
+        "m2",
+        "and it is the model the turn asked for"
+    );
+}

@@ -98,6 +98,12 @@ pub enum SettingsError {
     },
     #[error("parsing {path}: {message}")]
     Parse { path: PathBuf, message: String },
+    #[error("writing {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{layer}: settings must be a JSON object")]
     NotAnObject { layer: String },
     #[error("settings key {key} is claimed by both {first} and {second}")]
@@ -114,13 +120,84 @@ pub enum SettingsError {
     },
 }
 
+/// The user layer: the lowest of the three, the one that is about the person
+/// rather than the project, and the only one a command writes back to.
+pub fn user_path(env: &Env) -> PathBuf {
+    env.config_dir.join("settings.json")
+}
+
 /// The three on-disk layers, lowest priority first.
 pub fn layer_paths(env: &Env, cwd: &Path) -> [PathBuf; 3] {
     [
-        env.config_dir.join("settings.json"),
+        user_path(env),
         cwd.join(".bingo").join("settings.json"),
         cwd.join(".bingo").join("settings.local.json"),
     ]
+}
+
+/// Set top-level keys in one layer, leaving every neighbour where it is
+/// (ADR-0003 §5: writing settings targets one named layer).
+pub fn remember(path: &Path, keys: &[(&str, Value)]) -> Result<(), SettingsError> {
+    let mut document = read_document(path)?;
+    for (key, value) in keys {
+        document.insert((*key).to_string(), value.clone());
+    }
+    write(path, &document)
+}
+
+/// One layer as JSON, in the order it was written (`serde_json/preserve_order`);
+/// a file that is not there is an empty document. This is the read half of a
+/// round trip, so unlike [`read_layer`] it refuses JSONC: rewriting a file
+/// with comments in it would drop them.
+pub fn read_document(path: &Path) -> Result<Map<String, Value>, SettingsError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(source) => {
+            return Err(SettingsError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if text.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    match serde_json::from_str(&text) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Err(SettingsError::NotAnObject {
+            layer: path.display().to_string(),
+        }),
+        Err(e) => Err(SettingsError::Parse {
+            path: path.to_path_buf(),
+            message: format!(
+                "not plain JSON ({e}); a file with comments is read at startup \
+                 but never rewritten — change it by hand"
+            ),
+        }),
+    }
+}
+
+/// Through a temporary file and a rename: a settings file a person wrote is
+/// not something to lose half of.
+pub fn write(path: &Path, document: &Map<String, Value>) -> Result<(), SettingsError> {
+    let directory = path.parent().unwrap_or(Path::new("."));
+    let failed = |source| SettingsError::Write {
+        path: path.to_path_buf(),
+        source,
+    };
+    std::fs::create_dir_all(directory).map_err(failed)?;
+    let json = serde_json::to_string_pretty(document).map_err(|e| SettingsError::Parse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    // Named for this write and no other: two processes — or two tests —
+    // saving at once must not rename each other's half-written file away.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = directory.join(format!("settings.json.{}.{n}.tmp", std::process::id()));
+    std::fs::write(&temporary, format!("{json}\n")).map_err(failed)?;
+    std::fs::rename(&temporary, path).map_err(failed)
 }
 
 /// Read the on-disk layers plus an optional explicit file, skipping the
@@ -204,6 +281,47 @@ mod tests {
         let models: Vec<_> = layers.iter().map(|l| l.value["model"].clone()).collect();
         assert_eq!(models, vec![json!("user"), json!("local"), json!("extra")]);
         assert!(layers[0].source.ends_with("config/settings.json"));
+    }
+
+    #[test]
+    fn remember_sets_its_keys_and_leaves_every_neighbour_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config").join("settings.json");
+        write(
+            &path,
+            "{\n  \"model\": \"old\",\n  \"permissions\": { \"allow\": [\"Read\"] }\n}",
+        );
+
+        super::remember(
+            &path,
+            &[("provider", json!("openai")), ("model", json!("gpt-5"))],
+        )
+        .unwrap();
+
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["model"], json!("gpt-5"));
+        assert_eq!(after["provider"], json!("openai"));
+        assert_eq!(after["permissions"]["allow"], json!(["Read"]));
+    }
+
+    #[test]
+    fn a_file_with_comments_is_read_but_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write(&path, "// mine\n{ \"model\": \"m\" }");
+        assert!(
+            read_layer(&path).unwrap().is_some(),
+            "the layers read JSONC"
+        );
+
+        let refused = super::remember(&path, &[("model", json!("m2"))]).unwrap_err();
+        assert!(refused.to_string().contains("not plain JSON"), "{refused}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("// mine"),
+            "the file a person wrote is left alone"
+        );
     }
 
     #[test]

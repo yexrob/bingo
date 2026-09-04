@@ -4,7 +4,9 @@
 //! a map of session actors. It knows no plugin by name.
 
 mod ask;
+mod auth;
 mod catalog;
+mod choose;
 mod refresh;
 mod registry;
 mod resume;
@@ -28,13 +30,12 @@ use tool_host::SessionToolHost;
 use unavailable::Unavailable;
 
 use crate::gate::DefaultPolicy;
-use crate::models::{self, Learned, ModelCatalog, ServedModels};
+use crate::models::{Learned, ServedModels};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
 use crate::turn::{
-    CompactorSet, ContributorSet, HookSet, ModelChoice, ProviderSet, ToolSet, TurnBudget,
-    TurnConfig,
+    self, CompactorSet, ContributorSet, HookSet, ModelChoice, ToolSet, TurnBudget, TurnConfig,
 };
 
 /// Gateway events buffered per subscriber before the oldest is dropped.
@@ -404,72 +405,6 @@ impl Host {
         Ok(Arc::new(SessionToolHost { mailbox }))
     }
 
-    /// Every provider this host can choose from, resolved at the one point
-    /// they are resolved (ADR-0030 §2): the registered ones and whatever the
-    /// sources answer with now. `provider`, the catalogue and `/model`'s
-    /// reading of `<provider>/<model>` all read this and nothing else.
-    pub async fn providers(&self) -> Vec<Arc<dyn Provider>> {
-        ProviderSet {
-            fixed: self.registry.providers.clone(),
-            sources: self.registry.sources.providers.clone(),
-        }
-        .gather()
-        .await
-    }
-
-    /// The provider `id` names; with none, the settings' provider, else the
-    /// first registered.
-    pub async fn provider(&self, id: Option<&str>) -> Result<Arc<dyn Provider>, KernelError> {
-        let providers = self.providers().await;
-        let wanted = id
-            .map(str::to_string)
-            .or_else(|| self.settings.kernel.provider.clone())
-            .or_else(|| providers.first().map(|p| p.id().to_string()))
-            .ok_or_else(|| {
-                KernelError::new(
-                    ErrorCode::ProviderUnavailable,
-                    "No model provider is registered in this build.",
-                )
-            })?;
-        providers
-            .iter()
-            .find(|p| p.id() == wanted)
-            .cloned()
-            .ok_or_else(|| {
-                let known: Vec<&str> = providers.iter().map(|p| p.id()).collect();
-                KernelError::new(
-                    ErrorCode::ProviderUnavailable,
-                    format!(
-                        "No provider called `{wanted}`. Registered: {}.",
-                        known.join(", ")
-                    ),
-                )
-            })
-    }
-
-    async fn model(
-        &self,
-        provider: &dyn Provider,
-        wanted: Option<&str>,
-    ) -> Result<String, KernelError> {
-        if let Some(model) = wanted
-            .map(str::to_string)
-            .or_else(|| self.settings.kernel.model.clone())
-        {
-            return Ok(model);
-        }
-        let models = provider
-            .models()
-            .await
-            .map_err(|e| KernelError::new(ErrorCode::ProviderUnavailable, e.to_string()))?;
-        models.first().map(|m| m.id.clone()).ok_or_else(|| {
-            KernelError::new(
-                ErrorCode::InvalidInput,
-                format!("no model configured for provider {}", provider.id()),
-            )
-        })
-    }
-
     /// A sub-session may go neither deeper nor wider than the host allows.
     fn check_parent_limits(&self, parent: &SessionId) -> Result<(), KernelError> {
         self.live(parent)?;
@@ -508,50 +443,9 @@ impl Host {
         Ok(())
     }
 
-    /// The model a spec runs on: none for a `Log` session (ADR-0011 §1),
-    /// which resolves no provider and calls none.
-    async fn model_for(
-        &self,
-        spec: &SessionSpec,
-        thinking: Option<Effort>,
-    ) -> Result<Option<ModelChoice>, KernelError> {
-        match spec.driver {
-            Driver::Model => Ok(Some(self.choose_model(spec, thinking).await?)),
-            Driver::Log => Ok(None),
-        }
-    }
-
-    async fn choose_model(
-        &self,
-        spec: &SessionSpec,
-        thinking: Option<Effort>,
-    ) -> Result<ModelChoice, KernelError> {
-        let provider = self.provider(spec.provider.as_deref()).await?;
-        check_auth(provider.as_ref())?;
-        let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
-        let capabilities = self.resolve_model(provider.as_ref(), &model);
-        Ok(ModelChoice {
-            max_tokens: models::max_tokens(&capabilities, self.settings.kernel.max_tokens),
-            reasoning: thinking.filter(|_| capabilities.reasoning),
-            learned: self.learned.clone(),
-            provider,
-            id: model,
-            capabilities,
-        })
-    }
-
-    /// The four owners of a model's facts, read once per session (ADR-0004).
-    fn resolve_model(&self, provider: &dyn Provider, model: &str) -> ModelCapabilities {
-        let key = models::declared::key(provider.id(), model);
-        models::resolve(
-            self.settings.kernel.models.get(&key),
-            self.learned.window(provider.id(), model),
-            ModelCatalog::embedded().facts_for(provider.family(), provider.id(), model),
-            provider.endpoint(model),
-        )
-    }
-
-    fn summarize(&self, spec: &SessionSpec, choice: Option<&ModelChoice>) -> SessionSummary {
+    /// A session's identity, as its spec gives it. What answers it is not
+    /// here: [`turn::runs_on`] stamps that from the resolved choice.
+    fn summarize(&self, spec: &SessionSpec) -> SessionSummary {
         let now = Timestamp::now();
         SessionSummary {
             driver: spec.driver,
@@ -560,8 +454,8 @@ impl Host {
             title: spec.title.clone(),
             cwd: spec.cwd.display().to_string(),
             parent: spec.parent.clone(),
-            model: choice.map(|c| c.id.clone()),
-            provider: choice.map(|c| c.provider.id().to_string()),
+            model: None,
+            provider: None,
             system_extra: spec.system_extra.clone(),
             tools: spec.tools.clone(),
             created_at: now,
@@ -656,7 +550,7 @@ impl Host {
         self.check_key_free(spec.key.as_deref())?;
         let thinking = self.settings.kernel.thinking;
         let choice = self.model_for(&spec, thinking).await?;
-        let summary = self.summarize(&spec, choice.as_ref());
+        let summary = turn::runs_on(self.summarize(&spec), choice.as_ref());
         if let Some(store) = &self.registry.store {
             store.create(&summary).await?;
             store.acquire(&summary.id).await?;
@@ -676,12 +570,14 @@ impl Host {
     }
 
     /// Re-choose the model for a live session and hand the actor the config
-    /// its next turn runs on (ADR-0008 §4). Returns the summary as it now is.
+    /// its next turn runs on (ADR-0008 §4). Returns that choice: the provider,
+    /// the model and the effort in force are read from it and from nothing
+    /// else, and the actor publishes the `SessionUpdated` that says so.
     pub async fn reconfigure(
         &self,
         id: &SessionId,
         change: Change,
-    ) -> Result<SessionSummary, KernelError> {
+    ) -> Result<ModelChoice, KernelError> {
         let live = self.live(id)?;
         if live.spec.driver == Driver::Log {
             return Err(KernelError::new(
@@ -692,16 +588,15 @@ impl Host {
         let (mut spec, mut thinking) = (live.spec.clone(), live.thinking);
         change.apply(&mut spec, &mut thinking);
         let choice = self.choose_model(&spec, thinking).await?;
-        let mut summary = live.mailbox.summary().await?;
-        summary.model = Some(choice.id.clone());
-        summary.provider = Some(choice.provider.id().to_string());
-        let config = Arc::new(self.turn_config(&spec, &summary, Some(choice), &live.mailbox));
+        let summary = turn::runs_on(live.mailbox.summary().await?, Some(&choice));
+        let config =
+            Arc::new(self.turn_config(&spec, &summary, Some(choice.clone()), &live.mailbox));
         if let Some(entry) = self.lock().get_mut(id) {
             entry.spec = spec;
             entry.thinking = thinking;
         }
         live.mailbox.reconfigure(config);
-        Ok(summary)
+        Ok(choice)
     }
 
     /// Open a turn on a live session that only compacts.
@@ -711,6 +606,12 @@ impl Host {
         instructions: Option<String>,
     ) -> Result<(), KernelError> {
         self.live(id)?.mailbox.compact(instructions).await
+    }
+
+    /// The directories this process runs in; what a command that writes a
+    /// settings file needs to find one (ADR-0008 §8).
+    pub fn env(&self) -> &Env {
+        &self.config.env
     }
 
     pub fn session_thinking(&self, id: &SessionId) -> Result<Option<Effort>, KernelError> {
@@ -762,22 +663,6 @@ impl Host {
                     .map(|l| l.mailbox.clone())
             }
         }
-    }
-}
-
-/// A provider that cannot authenticate is refused before any turn is spent on it.
-fn check_auth(provider: &dyn Provider) -> Result<(), KernelError> {
-    let refuse = |message: String| Err(KernelError::new(ErrorCode::AuthRequired, message));
-    match provider.auth() {
-        AuthStatus::Ready | AuthStatus::NotApplicable => Ok(()),
-        AuthStatus::Missing { hint } => refuse(format!(
-            "The {} provider has no credentials. {hint}",
-            provider.id()
-        )),
-        AuthStatus::Expired { hint } => refuse(format!(
-            "The {} provider's credentials have expired. {hint}",
-            provider.id()
-        )),
     }
 }
 

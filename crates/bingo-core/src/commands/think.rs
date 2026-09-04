@@ -9,15 +9,6 @@ use crate::host::{Change, Host};
 use crate::models;
 use crate::turn::ModelChoice;
 
-const LEVELS: &[(&str, Effort)] = &[
-    ("minimal", Effort::Minimal),
-    ("low", Effort::Low),
-    ("medium", Effort::Medium),
-    ("high", Effort::High),
-    ("xhigh", Effort::XHigh),
-    ("max", Effort::Max),
-];
-
 pub(super) struct ThinkCommand {
     pub(super) host: Weak<Host>,
 }
@@ -27,7 +18,7 @@ impl Command for ThinkCommand {
     fn spec(&self) -> CommandSpec {
         super::spec(
             "think",
-            "<minimal|low|medium|high|xhigh|max|off>",
+            &levels(),
             ArgSpec::Free {
                 hint: "level, or off".into(),
             },
@@ -51,9 +42,9 @@ async fn report(host: &Arc<Host>, cx: &CommandContext) -> Result<CommandOutcome,
     Ok(CommandOutcome::View {
         view: View::Text {
             text: format!(
-                "{}\nusage: /think <{}|off>",
+                "{}\nusage: /think {}",
                 said(level, running_on(host, cx).await.as_ref()),
-                LEVELS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join("|")
+                levels()
             ),
         },
     })
@@ -71,10 +62,11 @@ async fn set(
             format!("unknown thinking level: {wanted}"),
         )
     })?;
-    host.reconfigure(&cx.session, Change::Thinking(level))
+    let choice = host
+        .reconfigure(&cx.session, Change::Thinking(level))
         .await?;
     Ok(CommandOutcome::Applied {
-        message: Some(said(level, running_on(host, cx).await.as_ref())),
+        message: Some(said(level, Some(&choice))),
     })
 }
 
@@ -103,22 +95,22 @@ fn said(level: Option<Effort>, on: Option<&ModelChoice>) -> String {
     )
 }
 
+/// The ladder as a person says it, from the sdk's one list of levels.
+fn levels() -> String {
+    let names: Vec<&str> = Effort::ALL.iter().map(|e| e.name()).collect();
+    format!("<{}|off>", names.join("|"))
+}
+
 /// `Some(None)` is off; `None` is not a level.
 fn parse(text: &str) -> Option<Option<Effort>> {
-    let lower = text.to_ascii_lowercase();
-    if lower == "off" {
+    if text.eq_ignore_ascii_case("off") {
         return Some(None);
     }
-    LEVELS
-        .iter()
-        .find(|(n, _)| *n == lower)
-        .map(|(_, e)| Some(*e))
+    Effort::parse(text).map(Some)
 }
 
 fn name(level: Option<Effort>) -> &'static str {
-    level
-        .and_then(|l| LEVELS.iter().find(|(_, e)| *e == l))
-        .map_or("off", |(n, _)| n)
+    level.map_or("off", Effort::name)
 }
 
 #[cfg(test)]
