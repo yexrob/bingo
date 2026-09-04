@@ -129,7 +129,7 @@ What it still does not do: show a room's roster without being asked for (sketch 
 
 ## 4. Tokens
 
-Truecolor is the native look, chosen after the terminal's background is read (OSC 10/11) and derived for light and dark alike; the eight ANSI colours are the fallback and every rule below holds in both. The body background is never painted — the terminal's stays — but cards, sheets and the rail sit on a **raised tint** one step from it, which is what gives the frame depth.
+Truecolor is the native look, chosen after the terminal's background is read (OSC 10/11) and derived for light and dark alike; the eight ANSI colours are the fallback and every rule below holds in both. The palette is not chosen once: the terminal is asked again while the run lasts, so a terminal that follows the system's appearance is followed in turn (**the look that follows**, below). The body background is never painted — the terminal's stays — but cards, sheets and the rail sit on a **raised tint** one step from it, which is what gives the frame depth.
 
 | token | ANSI | truecolor (dark) | where, and only where |
 |---|---|---|---|
@@ -142,6 +142,28 @@ Truecolor is the native look, chosen after the terminal's background is read (OS
 | `bold` | BOLD | — | tool names in `⏺ Read(…)`, card titles, markdown headings; the model's own `⏺` is bold white |
 
 Gradients exist in two places only: a progress bar's fill (`presence` → its glow) and the comet tail of streaming text (§6). Diff lines sit on translucent `good`/`bad` tints. Colour never carries a fact alone: every state has a glyph, so `NO_COLOR` and a monochrome terminal lose nothing.
+
+### The look that follows (M71)
+
+Which of the two palettes is the terminal's own to say, and a terminal set to follow the system's appearance says something different an hour later. So the ground is one fact read at render time and **may change**: the environment settles everything else once, the ground sits in a slot, and every frame after a new answer wears the other palette. `BINGO_THEME=light|dark` pins the look and turns the following off — a person who named one is not asked again — and so do `NO_COLOR` and a terminal of eight colours, which have no ground to follow.
+
+Two doors lead in, and one of them is nailed shut.
+
+- **The terminal says so** (mode 2031: `CSI ? 2031 h`, and the terminal reports `CSI ? 997 ; 1 n` dark / `; 2 n` light whenever its scheme changes) — **shut**. crossterm 0.29 neither passes that report on nor drops it: `parse_csi` answers `Ok(None)` for every `CSI ?` sequence whose final byte is neither `u` nor `c`, its parser reads that as an unfinished sequence, and the report sits in the buffer with every key struck after it until one of them ends a sequence it can name. A terminal asked to report its scheme would cost a person their keyboard, so bingo never sets the mode. Measured in `crates/bingo/tests/pty.rs`; the door reopens if crossterm ever learns the sequence.
+- **bingo asks** (`OSC 11`, the same question the probe puts before the first frame) — **open**. It goes out at the two moments a change is likely and the cost is nothing: when the window regains focus (a person who flipped their system theme did it in another window), and on a thirty-second clock while the run is idle and no turn is drawing anyway. The answer lands in crossterm's key stream, where the late ear (M60) hears an `OSC` reply whole and hands it over instead of typing it into the composer, and the light/dark decision is `terminal_colorsaurus`'s own perceived lightness, so the first answer and every later one agree about the same colour.
+
+A swap that changes nothing is nothing. A swap that changes the look announces itself only by the screen: ratatui diffs styles, so every cell whose token is now worth another colour is rewritten on the next frame — and the two memos of a *drawing* (the transcript's blocks, the highlighter's warm code) key on the look, because a `Line` carries its styles and a memo drawn in the other palette is not the drawing anyone would make now.
+
+What is measured, and what is not:
+
+| terminal | reports 2031 | answers `OSC 11` again | how known |
+|---|---|---|---|
+| the pty harness's own fake terminal | — | yes | measured (`crates/bingo/tests/pty.rs`) |
+| crossterm 0.29, given a `CSI ? 997` report | holds it, and the keys after it | — | measured, in that pty |
+| kitty, foot, Ghostty, WezTerm, iTerm2 ≥ 3.5, Contour | documented to | documented to answer `OSC 11` | **not measured** — measuring it means driving a real terminal emulator, which this milestone did not do |
+| tmux | — | answers for its own pane, from the ground it believes the outer terminal has; no passthrough needed | **not measured** |
+
+The second row is the load-bearing one, and it is the one that is measured: whatever a terminal reports, bingo does not listen for it.
 
 ### Glyphs and words
 
@@ -334,6 +356,8 @@ What a change is checked against, in this order: `TestBackend` snapshots for eve
 
 - **2026-09-04, later still** — **A wake wears its own word** (M66, ADR-0019 §8, user-directed: the model may now hand work to a later turn of the same conversation). Two rows of furniture and one rule. The note a turn left itself arrives as a person-role line, so it is drawn on the person's own bar — but under the word `wake` where the `>` would be, and the indent every line beneath it takes is that word's width rather than the mark's, so a wrapped note reads as its own block. It is not one of §5's quiet surfaces: a scheduled turn is the machinery reporting in and is drawn as a tool row, and this is the model's own words, written in a turn the person watched. The one thing a person must never have to work out is which of the two lines on that bar they typed, and a word in the gutter answers it before the eye reaches the text. The status line gains `wake in 4m` in the middle slot, dim like every other count there — the only span on that line the *model* set in motion — read at render time from the kind the schedules plugin publishes and put into words by `clock::span`, the same one every other duration on the screen is said in; a moment already past says nothing rather than a negative. Nothing here holds a wake, a timer or a countdown of its own: `/wake off` takes the kind back and the slot is empty on the next frame.
 - **2026-09-04, evening** — **The countdown counts** (user-reported: `wake in 10s` stood still). The status line reads the wake at render time, as §6 asks, but nothing asked for a render: the frame clock runs while something on screen moves, and a number that changes once a second had no place in that list. `wake::counting` — a wake stands and has not come — now sits beside the other reasons the clock runs, so the words move without an event to move them, and a wake already past stops the clock as it already emptied the slot. The wake itself moved out of the schedules store into the process running the session (ADR-0019 §8, amended); the surface did not notice, which is what reading a published kind rather than a file is for.
+- **2026-09-04, night** — **The look follows the terminal** (M71, user-reported with a screenshot: a dark terminal, and bingo drawing its *light* palette on it — near-black body text on a near-black ground, only the bold rows readable). The look was chosen once, before the first frame, and never again: a terminal that follows the system's appearance changed its ground under a running bingo and bingo kept the ink it chose an hour earlier. Now the environment settles what it settles once and **the ground is a slot** a later answer replaces (§4, "the look that follows"): `OSC 11` goes out again when the window regains focus and on a thirty-second clock while the run is idle, the reply is heard by M60's late ear rather than typed into the composer, and the light/dark decision is `terminal_colorsaurus`'s own lightness so the first answer and every later one agree. Three things worth keeping. The report the *terminal* could send instead (mode 2031) is refused, and measured to be refused for cause: crossterm 0.29 holds `CSI ? 997 ; 1 n` in its parse buffer along with every key struck after it, so asking a terminal to report its scheme would cost a person their keyboard — the pty harness pins that, and the day crossterm learns the sequence the door reopens. The swap arranges **no redraw**: ratatui diffs styles, so every cell whose token is worth another colour is rewritten on the next frame — but the two memos of a *drawing* (the transcript's blocks, the highlighter's warm code) had to learn the look, because a `Line` carries its styles and neither cache had any idea a palette could change; the block's look sits in its `Revision` so a landing in the middle of its six frames goes on landing. And nothing announces it: the screen itself is the message, and a swap that changes nothing is nothing.
+
 ## 11. The opening
 
 > M69, 2026-09-04. The brick and the storyboard; M70 wires it. The one
