@@ -15,7 +15,6 @@ use ratatui::text::Line;
 
 use super::{Reply, Run};
 use crate::clock::Now;
-use crate::terminal::Screen;
 use crate::welcome;
 
 /// One frame of the piece, back from the thread that drew it.
@@ -29,13 +28,13 @@ pub(super) struct Rendered {
 /// Whether this run opens with the piece, asked once when the surface has its
 /// session and its screen. The rule itself is [`welcome::opens`]; this is only
 /// the reading of the world it takes.
-pub(super) fn plays(run: &Run, screen: &dyn Screen, asked: bool, now: Now) -> bool {
+pub(super) fn plays(run: &Run, screen: (u16, u16), asked: bool, now: Now) -> bool {
     let state = run.session.tree.root();
     welcome::opens(welcome::Opens {
         ours: welcome::wanted(state),
         fresh: state.items.is_empty(),
         asked,
-        screen: screen.size(),
+        screen,
         colour: crate::theme::full_colour(),
         glyphs: crate::theme::glyphs() != &crate::theme::ASCII,
         motion: now.motion,
@@ -43,7 +42,7 @@ pub(super) fn plays(run: &Run, screen: &dyn Screen, asked: bool, now: Now) -> bo
 }
 
 /// Start it, where this run is one that opens with it.
-pub(super) fn begin(run: &mut Run, screen: &dyn Screen, asked: bool, now: Now) {
+pub(super) fn begin(run: &mut Run, screen: (u16, u16), asked: bool, now: Now) {
     if plays(run, screen, asked, now) {
         run.ui.intro = Some(crate::intro::Playing::from(now.instant));
     }
@@ -118,38 +117,8 @@ mod tests {
     use bingo_sdk::{Event, ItemStatus};
     use tokio::sync::mpsc;
 
-    /// A screen of a chosen size, which is the one thing about a terminal the
-    /// opening asks after that a [`Recorder`] does not already answer.
-    struct Sized(u16, u16);
-
-    impl crate::terminal::Screen for Sized {
-        fn draw(
-            &mut self,
-            _: &crate::tree::Tree,
-            _: &crate::ui::Ui,
-            _: Now,
-        ) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn title(&mut self, _: &str) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn bell(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn notify(&mut self, _: &[u8]) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn copy(&mut self, _: &[u8]) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn place(&mut self, _: &[u8]) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn size(&self) -> (u16, u16) {
-            (self.0, self.1)
-        }
-    }
+    /// A terminal with room for the piece in it.
+    const SCREEN: (u16, u16) = (80, 24);
 
     /// The reading of the world the rule is given. The rule's own table is
     /// [`welcome::opens`]'s; these are the four facts this run reads off the
@@ -159,23 +128,18 @@ mod tests {
         let (_, now) = scene();
         crate::theme::with(truecolor(), || {
             let run = idle(now.instant);
-            assert!(plays(&run, &Recorder::default(), false, now));
+            assert!(plays(&run, SCREEN, false, now));
             assert!(
-                !plays(&run, &Recorder::default(), true, now),
+                !plays(&run, SCREEN, true, now),
                 "a run given work on the command line goes and does it"
             );
             assert!(
-                !plays(&run, &Sized(79, 24), false, now),
+                !plays(&run, (79, 24), false, now),
                 "and a narrow terminal has no room for a world"
             );
-            assert!(!plays(&run, &Sized(80, 15), false, now), "nor a short one");
+            assert!(!plays(&run, (80, 15), false, now), "nor a short one");
             assert!(
-                !plays(
-                    &run,
-                    &Recorder::default(),
-                    false,
-                    crate::test_support::still(now)
-                ),
+                !plays(&run, SCREEN, false, crate::test_support::still(now)),
                 "and a still run draws no frames at all"
             );
         });
@@ -196,7 +160,7 @@ mod tests {
                 std::sync::Arc::new(crate::doubles::TestSession::default()),
                 now.instant,
             );
-            assert!(!plays(&run, &Recorder::default(), false, now));
+            assert!(!plays(&run, SCREEN, false, now));
         });
     }
 
@@ -206,7 +170,7 @@ mod tests {
         for look in [crate::painted::ascii(), crate::painted::no_colour()] {
             crate::theme::with(look, || {
                 let mut run = idle(now.instant);
-                begin(&mut run, &Recorder::default(), false, now);
+                begin(&mut run, SCREEN, false, now);
                 assert!(run.ui.intro.is_none());
             });
         }

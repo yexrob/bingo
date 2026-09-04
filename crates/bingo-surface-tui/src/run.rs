@@ -198,14 +198,7 @@ pub(crate) async fn drive(
     mut keys: Keys,
 ) -> Result<Farewell, KernelError> {
     let (tx, mut replies) = mpsc::channel(16);
-    // A run given work on the command line goes and does it, so what the
-    // opening is decided from is read before the prompt is spent.
-    let asked = opts.prompt.is_some();
-    let (mut run, mut events) = attach(host, opts, tx).await?;
-    opening::begin(&mut run, screen, asked, Now::real());
-    // The host's own stream, beside the session's: what changed for the whole
-    // process rather than for this conversation (ADR-0026 §4).
-    let mut gateway = Some(host.gateway_events());
+    let (mut run, mut events, mut gateway) = standing(host, opts, screen.size(), tx).await?;
     loop {
         // `biased`, keys first: a person outranks the machine, and a
         // keystroke is never continuously ready, so checking it first
@@ -254,6 +247,24 @@ pub(crate) async fn drive(
         }
         run.paint(screen, wake, now)?;
     }
+}
+
+/// Everything the loop stands on before its first pass: the run, the session's
+/// frames, and the host's own stream beside them — what changed for the whole
+/// process rather than for this conversation (ADR-0026 §4). A run that opens
+/// with the piece starts it here, before a frame has been drawn (M70).
+async fn standing(
+    host: &HostHandle,
+    opts: SurfaceOptions,
+    screen: (u16, u16),
+    replies: mpsc::Sender<Reply>,
+) -> Result<(Run, Option<FrameStream>, Option<GatewayStream>), KernelError> {
+    // A run given work on the command line goes and does it, so what the
+    // opening is decided from is read before the prompt is spent.
+    let asked = opts.prompt.is_some();
+    let (mut run, events) = attach(host, opts, replies).await?;
+    opening::begin(&mut run, screen, asked, Now::real());
+    Ok((run, events, Some(host.gateway_events())))
 }
 
 /// Open the session the options name and take everything the loop holds with

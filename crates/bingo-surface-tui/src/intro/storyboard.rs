@@ -68,6 +68,8 @@ fn the_seven_frames_of_the_storyboard() {
 fn a_frame_of_a_wide_terminal_stays_inside_its_march_budget() {
     let mut worst = (0.0f32, 0u64);
     let mut slowest = Duration::ZERO;
+    let mut spent = Duration::ZERO;
+    let mut frames = 0u32;
     let resting = u16::try_from(boxed(LARGE).len()).expect("a short box");
     for step in 0..=40 {
         let t = step as f32 / 10.0;
@@ -75,15 +77,19 @@ fn a_frame_of_a_wide_terminal_stays_inside_its_march_budget() {
         let steps = crate::theme::with(truecolor(), || cost(t, LARGE, resting));
         let took = started.elapsed();
         slowest = slowest.max(took);
+        spent += took;
+        frames += 1;
         if steps > worst.1 {
             worst = (t, steps);
         }
     }
     println!(
-        "intro: worst frame at {LARGE}x{} is t={:.1}s, {} march steps, slowest wall time {:?}",
+        "intro: {LARGE}x{} — worst frame t={:.1}s at {} march steps; \
+         {:?} a frame over {frames}, slowest {:?}",
         super::ROWS,
         worst.0,
         worst.1,
+        spent / frames.max(1),
         slowest
     );
     assert!(
