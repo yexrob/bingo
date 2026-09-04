@@ -25,7 +25,9 @@ use tokio::sync::mpsc;
 
 /// The look, following the terminal for as long as the run lasts (M71).
 mod look;
-/// The opening shot: whether it plays, and its frames (M70).
+/// What the run has to say the moment it opens.
+mod notices;
+/// The opening: whether it plays, and when it started (M70, M72).
 mod opening;
 /// The pictures a frame drew, on their way to the terminal.
 mod showing;
@@ -300,7 +302,7 @@ async fn attach(
     };
     run.fetch_catalogs();
     run.ask_for_updates(&opts.args);
-    crate::opening::notices(&mut run.ui, Instant::now());
+    notices::raise(&mut run.ui, Instant::now());
     if let Some(prompt) = opts.prompt {
         run.effect(Effect::Submit(bingo_sdk::Input::text(
             prompt,

@@ -5,6 +5,9 @@
 //! reach a person somehow. They are raised here, once, from the one place
 //! that opens a run — never from a draw, which would raise them again on
 //! every frame.
+//!
+//! These are functions over the run rather than more of its methods: `Run`'s
+//! own `impl` is spread as far as it may be (`scripts/check_discipline.sh` §5).
 
 use std::time::Instant;
 
@@ -16,7 +19,7 @@ use crate::ui::Ui;
 /// when the pictures could not reach the terminal behind it (M49 brick 3);
 /// a terminal that simply draws none says nothing, because there is nothing
 /// a person could do about it.
-pub fn notices(ui: &mut Ui, now: Instant) {
+pub(super) fn raise(ui: &mut Ui, now: Instant) {
     if let Some(text) = crate::graphics::notice() {
         ui.notify(Level::Info, text, now);
     }
@@ -36,7 +39,7 @@ mod tests {
     #[test]
     fn what_the_probe_found_is_said_once_when_the_run_opens() {
         let ui = graphics::saying(graphics::PASSTHROUGH_UNHEARD, || {
-            opened(|ui| notices(ui, Instant::now()))
+            opened(|ui| raise(ui, Instant::now()))
         });
         let said = ui.notice().expect("a notice");
         assert_eq!(said.text, graphics::PASSTHROUGH_UNHEARD);
@@ -46,7 +49,7 @@ mod tests {
     #[test]
     fn a_run_with_nothing_to_report_opens_in_silence() {
         let ui = graphics::with(graphics::drawing(), || {
-            opened(|ui| notices(ui, Instant::now()))
+            opened(|ui| raise(ui, Instant::now()))
         });
         assert!(ui.notice().is_none());
     }

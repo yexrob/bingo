@@ -76,7 +76,6 @@ mod layers;
 mod markdown;
 mod matching;
 mod mentions;
-mod opening;
 mod pager;
 mod panel;
 mod paths;
