@@ -125,6 +125,65 @@ impl Answers {
     }
 }
 
+/// What the terminal at the other end says about its own ground, which is what
+/// decides the palette bingo draws in (M71). Every scene but this milestone's
+/// leaves `COLORTERM` unset: a terminal of eight colours has no palette to
+/// follow, so nothing is asked and nothing has to be answered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ground {
+    /// Eight colours, and no question ever put.
+    Eight,
+    /// Twenty-four bits and a ground the terminal will say: dark to begin
+    /// with, and light from the moment the test turns it.
+    Answered,
+    /// Twenty-four bits and `BINGO_THEME=dark` — a look a person named, which
+    /// the terminal is not asked about, then or ever.
+    Named,
+}
+
+impl Ground {
+    /// Whether this scene's terminal answers the colour question at all.
+    fn answers(self) -> bool {
+        self == Ground::Answered
+    }
+
+    fn env(self, command: &mut CommandBuilder) {
+        match self {
+            Ground::Eight => command.env_remove("COLORTERM"),
+            Ground::Answered => command.env("COLORTERM", "truecolor"),
+            Ground::Named => {
+                command.env("COLORTERM", "truecolor");
+                command.env("BINGO_THEME", "dark");
+            }
+        }
+    }
+}
+
+/// The colour question, as it appears in the child's output: the probe's own
+/// (`terminal_colorsaurus` asks for the ink, the ground and DA1 in one write)
+/// and every one the run puts afterwards (M71).
+const GROUND_QUERY: &[u8] = b"\x1b]11;?";
+
+/// What a terminal answers it with: the ink and the ground of one look, and —
+/// for the probe, which asks for both and reads until DA1 — the DA1 that ends
+/// that read. A later question asks only for the ground, so only the ground is
+/// answered: everything else would land in the key stream for nothing.
+fn ground_reply(light: bool, probe: bool) -> Vec<u8> {
+    let (ink, ground) = match light {
+        true => ("2424/2020/1a1a", "fdfd/f6f6/e3e3"),
+        false => ("ecec/e7e7/dfdf", "1e1e/1e1e/2e2e"),
+    };
+    let mut out = Vec::new();
+    if probe {
+        out.extend_from_slice(format!("\x1b]10;rgb:{ink}\x1b\\").as_bytes());
+    }
+    out.extend_from_slice(format!("\x1b]11;rgb:{ground}\x1b\\").as_bytes());
+    if probe {
+        out.extend_from_slice(b"\x1b[?62;c");
+    }
+    out
+}
+
 /// How long after the question a late answer arrives: the window the surface
 /// itself waits under tmux, and a margin on top of it. Driven from the
 /// surface's own constant so the two cannot drift apart.
@@ -161,6 +220,10 @@ struct Terminal {
     /// Set once the scene's late answer has gone down the wire, so a test
     /// waits on the write itself and never on a clock of its own.
     answered_late: Arc<AtomicBool>,
+    /// Whether the ground this terminal answers with is the light one. A test
+    /// turns it under the running child, the way a system's appearance turns
+    /// under a terminal that follows it (M71).
+    light: Arc<AtomicBool>,
     home: tempfile::TempDir,
 }
 
@@ -170,6 +233,10 @@ impl Terminal {
     }
 
     fn opened(extra: &[&str], script_text: &str, answers: Answers) -> Terminal {
+        Terminal::under(extra, script_text, answers, Ground::Eight)
+    }
+
+    fn under(extra: &[&str], script_text: &str, answers: Answers, ground: Ground) -> Terminal {
         let home = tempfile::tempdir().unwrap();
         let script = home.path().join("script.json");
         std::fs::write(&script, script_text).unwrap();
@@ -199,14 +266,13 @@ impl Terminal {
         command.env("TERM", "xterm-256color");
         stub_tmux(&mut command, home.path(), answers.passthrough());
         // The terminal under test is this pty and nothing the suite happens
-        // to be running inside: a truecolor claim would send the theme probe
-        // looking for an answer nobody here gives, and whether there is a
-        // multiplexer is the scene's to say and not the suite's.
+        // to be running inside: what colour it has is the scene's to say, and
+        // so is whether there is a multiplexer.
         match answers.multiplexed() {
             true => command.env("TMUX", "/tmp/tmux-1000/default,4242,0"),
             false => command.env_remove("TMUX"),
         };
-        command.env_remove("COLORTERM");
+        ground.env(&mut command);
         command.env_remove("NO_COLOR");
         command.cwd(home.path());
         let child = pty.slave.spawn_command(command).unwrap();
@@ -216,14 +282,17 @@ impl Terminal {
         let written = Arc::new(Mutex::new(Vec::new()));
         let writer = Arc::new(Mutex::new(pty.master.take_writer().unwrap()));
         let answered_late = Arc::new(AtomicBool::new(answers.late().is_none()));
+        let light = Arc::new(AtomicBool::new(false));
         let mut reader = pty.master.try_clone_reader().unwrap();
         let sink = Arc::clone(&parser);
         let log = Arc::clone(&written);
         let back = Arc::clone(&writer);
         let done = Arc::clone(&answered_late);
+        let ground_now = Arc::clone(&light);
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             let mut asked = false;
+            let mut grounds = 0;
             while let Ok(read) = reader.read(&mut buffer) {
                 if read == 0 {
                     break;
@@ -246,6 +315,15 @@ impl Terminal {
                         answer_late(Arc::clone(&back), Arc::clone(&done), rest);
                     }
                 }
+                // The colour question, answered every time it is put, with the
+                // ground the scene is in now (M71).
+                while ground.answers() && grounds < counted(&log, GROUND_QUERY) {
+                    let reply = ground_reply(ground_now.load(Ordering::SeqCst), grounds == 0);
+                    grounds += 1;
+                    let mut out = back.lock().unwrap();
+                    out.write_all(&reply).unwrap();
+                    out.flush().unwrap();
+                }
             }
         });
         Terminal {
@@ -254,6 +332,7 @@ impl Terminal {
             parser,
             written,
             answered_late,
+            light,
             home,
         }
     }
@@ -284,6 +363,51 @@ impl Terminal {
     /// Everything on the screen the terminal is showing right now.
     fn screen(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
+    }
+
+    /// The system's appearance has turned: from the next question on, this
+    /// terminal says its ground is the light one (M71).
+    fn turn_light(&self) {
+        self.light.store(true, Ordering::SeqCst);
+    }
+
+    /// The colour the row carrying `needle` ends in, as the terminal at the
+    /// other end has it. The end of that row is the answer's own last word, so
+    /// what it is drawn in is the palette's plain text ink and not a bullet or
+    /// a band.
+    fn ink(&self, needle: &str) -> Option<(u8, u8, u8)> {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let row = (0..ROWS).find(|y| row_text(screen, *y).contains(needle))?;
+        (0..COLS)
+            .rev()
+            .filter_map(|x| screen.cell(row, x))
+            .filter(|cell| !cell.contents().trim().is_empty())
+            .find_map(|cell| match cell.fgcolor() {
+                vt100::Color::Rgb(red, green, blue) => Some((red, green, blue)),
+                _ => None,
+            })
+    }
+
+    /// Wait until that row is drawn in ink of the wanted kind: pale, which is
+    /// what a dark ground is written on, or near-black, which is what a light
+    /// one is.
+    fn wait_ink(&self, needle: &str, pale: bool) {
+        let deadline = Instant::now() + LIMIT;
+        while Instant::now() < deadline {
+            if self.ink(needle).is_some_and(|ink| bright(ink) == pale) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {needle:?} to be drawn in {} ink; it is {:?}",
+            match pale {
+                true => "pale",
+                false => "near-black",
+            },
+            self.ink(needle)
+        );
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -488,6 +612,97 @@ fn esc_twice_rewinds_the_turn_and_the_file_it_wrote() {
     terminal.leave();
 }
 
+// ---- the look that follows the terminal (M71) ---------------------------
+
+/// A person comes back to the window, which is one of the two moments the run
+/// asks the terminal what ground it has.
+const FOCUS_GAINED: &[u8] = b"\x1b[I";
+
+/// The look follows the terminal for as long as the run lasts. This terminal
+/// says its ground is dark, so the answer is written in pale ink; then its
+/// ground turns light under the running surface, and the question a person's
+/// return to the window puts brings the other palette back with it.
+#[test]
+fn a_terminal_whose_ground_turns_light_is_followed_within_one_focus() {
+    let mut terminal = Terminal::under(&[], SCRIPT, Answers::Da1Only, Ground::Answered);
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"say hello\r");
+    terminal.wait_for("Hello from the pty.");
+    terminal.wait_ink("Hello from the pty.", true);
+
+    terminal.turn_light();
+    terminal.send(FOCUS_GAINED);
+    terminal.wait_ink("Hello from the pty.", false);
+    assert!(
+        counted(&terminal.written(), GROUND_QUERY) > 1,
+        "the question was put again"
+    );
+
+    // And back: the same window, the same run, the ground dark again.
+    terminal.light.store(false, Ordering::SeqCst);
+    terminal.send(FOCUS_GAINED);
+    terminal.wait_ink("Hello from the pty.", true);
+
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// A person who named a look is not asked about it — not at start, where the
+/// probe would otherwise spend its milliseconds, and not on any focus after.
+#[test]
+fn a_named_look_is_never_asked_what_ground_the_terminal_has() {
+    let mut terminal = Terminal::under(&[], SCRIPT, Answers::Da1Only, Ground::Named);
+    terminal.wait_for("? for shortcuts");
+    terminal.send(FOCUS_GAINED);
+    terminal.send(b"say hello\r");
+    terminal.wait_for("Hello from the pty.");
+    assert_eq!(
+        counted(&terminal.written(), GROUND_QUERY),
+        0,
+        "nothing was asked"
+    );
+    assert!(
+        terminal.ink("Hello from the pty.").is_some_and(bright),
+        "and the look a person named is the one it drew in"
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// What crossterm 0.29 makes of a mode-2031 report, measured — because the
+/// answer is what shuts that door (M71). `CSI ? 997 ; 1 n` is neither passed
+/// on nor dropped: `parse_csi` answers `Ok(None)` for it, which its parser
+/// reads as an unfinished sequence, so the report and every key struck after
+/// it sit in the buffer until one of them makes a sequence it can call a DA1
+/// reply — and the whole lot goes with it. A terminal that was asked to report
+/// its scheme would cost a person their keyboard, so bingo never asks.
+#[test]
+fn a_theme_report_holds_crossterms_parser_and_swallows_what_follows() {
+    let mut terminal = Terminal::open(&[]);
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"\x1b[?997;1n");
+    std::thread::sleep(BETWEEN_KEYS);
+    terminal.send(b"held");
+    std::thread::sleep(BETWEEN_KEYS);
+    // `c` is a final byte its parser has a rule for: the buffer parses as a
+    // DA1 reply, which is crossterm's own to keep, and empties.
+    terminal.send(b"c");
+    std::thread::sleep(BETWEEN_KEYS);
+    terminal.send(b"typed");
+    terminal.wait_for("typed");
+    let screen = terminal.screen();
+    assert!(
+        !screen.contains("held"),
+        "everything between the report and the byte that ended it is gone:\n{screen}"
+    );
+
+    for _ in 0..b"typed".len() {
+        terminal.send(&[0x7f]);
+    }
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
 /// Answer the rest of it after [`LATE`], from a thread of its own.
 fn answer_late(
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -518,6 +733,31 @@ fn stub_tmux(command: &mut CommandBuilder, home: &std::path::Path, says: Option<
     std::fs::set_permissions(&tmux, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let path = std::env::var("PATH").unwrap_or_default();
     command.env("PATH", format!("{}:{path}", bin.display()));
+}
+
+/// One row of the terminal's screen, as text.
+fn row_text(screen: &vt100::Screen, row: u16) -> String {
+    (0..COLS)
+        .filter_map(|x| screen.cell(row, x))
+        .map(|cell| cell.contents().to_string())
+        .collect()
+}
+
+/// Whether ink of this colour is the pale kind. The two palettes are a warm
+/// off-white over a dark ground and a warm near-black over a light one
+/// (`docs/design/tui.md` §4), so which side of the middle the ink falls on is
+/// the whole of what a test has to know — and it stays true through any later
+/// tuning of the eight.
+fn bright((red, green, blue): (u8, u8, u8)) -> bool {
+    u16::from(red) + u16::from(green) + u16::from(blue) > 3 * 128
+}
+
+/// How many times `needle` occurs in `haystack`.
+fn counted(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

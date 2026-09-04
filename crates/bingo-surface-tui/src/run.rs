@@ -23,6 +23,8 @@ use futures::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+/// The look, following the terminal for as long as the run lasts (M71).
+mod look;
 /// The pictures a frame drew, on their way to the terminal.
 mod showing;
 /// A line on its way out of the composer, and the pictures it named.
@@ -162,6 +164,8 @@ struct Run {
     /// The ear on the key stream, before any binding: a probe's answer that
     /// came back after the probe gave up is a reply, not a keystroke (M60).
     ear: late::Late,
+    /// What the terminal is owed about the look it is drawn in (M71).
+    look: look::Owed,
     /// When the last frame was painted, and whether anything has happened
     /// since that has not been.
     painted: Instant,
@@ -236,6 +240,12 @@ pub(crate) async fn drive(
                 Wake::Event
             },
             () = tick(run.animating(Now::real()), run.painted + TICK) => Wake::Frame,
+            // Last, and slowest by a thousand: the terminal is asked what
+            // ground it has now, while nothing else is going on.
+            () = look::wait(look::asking(&run), run.look.due()) => {
+                look::ask(&mut run);
+                Wake::Event
+            },
         };
         let now = Now::real();
         run.ui.expire(now);
@@ -271,6 +281,7 @@ async fn attach(
         stored: Stored::default(),
         cache: Cache::under(&opts.env.data_dir, showing::cache_days(&opts.args)),
         ear: late::Late::default(),
+        look: look::Owed::default(),
         behind: false,
         sluggish: false,
         exit: None,
@@ -410,6 +421,7 @@ impl Run {
         self.behind = false;
         self.painted = now.instant;
         self.hand_over(screen)?;
+        look::pay(self, screen).map_err(stdio)?;
         screen.title(&title(&self.session.tree)).map_err(stdio)?;
         let began = Instant::now();
         screen
@@ -562,11 +574,13 @@ impl Run {
     }
 
     /// What a late answer changes: the pictures it turns on for the next
-    /// frame, and the notice it has just made wrong.
+    /// frame, the notice it has just made wrong, and the palette the next
+    /// frame is drawn in (M71).
     fn answered_late(&mut self, reply: &[u8]) {
         if let Some(wrong) = crate::graphics::late(reply) {
             self.ui.withdraw(wrong);
         }
+        look::answered(reply);
     }
 
     fn terminal_event(&mut self, event: Term) {
@@ -583,8 +597,13 @@ impl Run {
             }
             Term::Paste(text) => input::on_paste(&mut self.ui, &text),
             // A window nobody is looking at is the one that may interrupt a
-            // person somewhere else on their desktop.
-            Term::FocusGained => self.ui.focused = true,
+            // person somewhere else on their desktop — and a person who has
+            // just come back to this one may have been away turning their
+            // system light or dark (M71).
+            Term::FocusGained => {
+                self.ui.focused = true;
+                look::ask(self);
+            }
             Term::FocusLost => self.ui.focused = false,
             _ => {}
         }
@@ -1645,6 +1664,7 @@ mod tests {
             stored: Stored::default(),
             cache: None,
             ear: late::Late::default(),
+            look: look::Owed::default(),
             host: TestHost::with(vec![]).0,
             data_dir: std::path::PathBuf::new(),
             session: Attached::new(state, SessionHandle(session)),
@@ -2506,5 +2526,89 @@ mod tests {
         let said = slow_draw(SLOW_DRAW, false).expect("several frames is worth a word");
         assert!(said.contains("ms"), "{said}");
         assert_eq!(slow_draw(Duration::from_secs(1), true), None, "said once");
+    }
+
+    // ---- the look that follows the terminal (M71) ------------------------
+
+    /// A person coming back to the window is one of the two moments the
+    /// terminal is asked what ground it has now, and the question goes out
+    /// between frames where the title and the clipboard go.
+    #[test]
+    fn a_window_a_person_came_back_to_asks_what_ground_the_terminal_has() {
+        let now = crate::test_support::scene().1;
+        let mut run = idle(now.instant);
+        let mut recorder = Recorder::default();
+        crate::theme::with(crate::painted::truecolor(), || {
+            run.terminal_event(Term::FocusGained);
+            run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
+            assert_eq!(
+                recorder.asks,
+                vec![crate::theme::QUESTION.to_vec()],
+                "once, out of band"
+            );
+            run.paint(&mut recorder, Wake::Frame, now).expect("another");
+            assert_eq!(recorder.asks.len(), 1, "and not again until it is owed");
+        });
+    }
+
+    /// A terminal with no palette to follow is not asked at all — the look
+    /// under test is the eight every terminal is sure of, which is one of the
+    /// three cases `theme::follows` says no to.
+    #[test]
+    fn a_look_with_no_ground_to_follow_asks_the_terminal_nothing() {
+        let now = crate::test_support::scene().1;
+        let mut run = idle(now.instant);
+        let mut recorder = Recorder::default();
+        run.terminal_event(Term::FocusGained);
+        run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
+        assert!(recorder.asks.is_empty(), "{:?}", recorder.asks);
+    }
+
+    /// The other moment is a slow clock, which only runs while the run is
+    /// idle: a person watching a turn is not the one who just turned their
+    /// system light, and the screen is busy anyway.
+    #[test]
+    fn the_slow_clock_runs_while_the_run_is_idle_and_stops_while_a_turn_does() {
+        let now = crate::test_support::scene().1;
+        let mut run = idle(now.instant);
+        crate::theme::with(crate::painted::truecolor(), || {
+            assert!(look::asking(&run), "idle, and the look is the terminal's");
+            look::ask(&mut run);
+            assert!(!look::asking(&run), "and nothing is asked twice over");
+        });
+        let turning = idle_in(
+            folded(vec![frame(1, started("trn_1"))]),
+            std::sync::Arc::new(TestSession::default()),
+            now.instant,
+        );
+        crate::theme::with(crate::painted::truecolor(), || {
+            assert!(!look::asking(&turning), "a turn is running");
+        });
+        assert!(
+            !look::asking(&run),
+            "and a look with no ground to follow is never on the clock"
+        );
+    }
+
+    /// The answer, whenever it comes back: an `OSC 11` reply through the ear
+    /// swaps the look, and the frame after it is drawn in the other palette.
+    #[test]
+    fn an_answer_in_the_key_stream_swaps_the_look_for_the_next_frame() {
+        let now = crate::test_support::scene().1;
+        let mut run = idle(now.instant);
+        crate::theme::with(crate::painted::truecolor(), || {
+            run.answered_late(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\");
+            assert_eq!(
+                crate::theme::current().colors,
+                crate::theme::Colors::True(crate::theme::LIGHT),
+                "the ground turned light"
+            );
+            run.answered_late(b"\x1b_Gi=31;OK\x1b\\");
+            assert_eq!(
+                crate::theme::current().colors,
+                crate::theme::Colors::True(crate::theme::LIGHT),
+                "and another probe's reply is not an answer to this question"
+            );
+        });
     }
 }

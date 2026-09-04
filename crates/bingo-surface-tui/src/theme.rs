@@ -498,7 +498,7 @@ fn scale(digits: &str) -> Option<u16> {
 /// of each channel rather than a scale: `#3a7` is `#3000a0007000`.
 fn shifted(digits: &str) -> Option<(u16, u16, u16)> {
     let width = digits.len() / 3;
-    if digits.len() % 3 != 0 || !(1..=4).contains(&width) {
+    if !digits.len().is_multiple_of(3) || !(1..=4).contains(&width) {
         return None;
     }
     let channel = |n: usize| {
