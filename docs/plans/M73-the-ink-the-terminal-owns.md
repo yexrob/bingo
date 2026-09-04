@@ -102,3 +102,102 @@ across terminals (some lighten, some grey); Codex ships on it 600
 times over, and bingo already does in ANSI mode. The snapshot churn is
 large and mechanical: every `text`/`dim` span changes style; the
 worker must read a sample of each screen rather than accept blindly.
+
+## Verified
+
+Exit criteria:
+
+- [x] `theme::text()` and `theme::dim()` carry no palette colour in any mode.
+      `text()` is `Style::new().fg(Color::Reset)` and `dim()` is
+      `Style::new().add_modifier(DIM)` unconditionally — no `current()` read
+      at all — and `theme::tests::the_ink_and_the_dim_are_the_terminals_own_in_every_look`
+      asserts both in `Plain`, `Ansi`, `True(DARK)` and `True(LIGHT)`.
+      `Palette` has no `text` and no `dim` field; the palette snapshot lost
+      its two rows.
+- [x] No screen span's fg is a palette Rgb outside the accents.
+      `screens::colours::no_screen_paints_prose_in_a_colour_of_its_own`
+      draws seven scenes (an answered question, a turn at work, a card over
+      a diff, a form with a mockup, the switcher, a shell line, a channel's
+      report) at 80×24 and 120×40 in **both** palettes and asserts every
+      foreground is `Reset` or a member of `theme::spendable()`.
+      `spendable()` is the closure of §4's own table — the five accents and
+      every point the sanctioned ramps reach between them, sampled at
+      1/1000 — derived from the token functions rather than from the
+      palette, so a ramp added to the table is in it without anyone
+      remembering, and a colour no token can produce fails.
+- [x] Every former `dim`-as-colour site reads right in both palettes. Each
+      was read off a `TestBackend` frame as a per-cell style map, in both
+      palettes; the list and what each became is in `904cf871`'s body. **One
+      deviation**: the comet's tail ends on the terminal's ink, not on
+      `raised`. `theme::comet` is spent on streaming *prose* and on the
+      working word (`transcript`, `view::beamed`); §4 says `raised` is never
+      text, and a tail landing one step from the terminal's own background
+      would leave aged prose unreadable. It runs `glow` → `presence` over
+      the warm half of the tail and hands to `text()` at `SETTLES`, which is
+      the design's own "cools to `text`" with the ink where the ink now
+      lives.
+- [x] All gates below. `scripts/tui-smoke.sh` was not run (the brief forbade
+      it) and no terminal emulator was launched. **Hands-on by the user is
+      not done**: flipping the system theme with bingo open is the one
+      measure a worker cannot take.
+
+Not in the plan, and done anyway:
+
+- `fading`, `warming`, `landing` and `cooling` also passed through the grey
+  or ended in the ink. Each now takes its two ends in every look, which is
+  what the eight colours always drew them as, and §4 sanctions gradients in
+  two places only (the progress fill and the comet) — so this is the table
+  being obeyed rather than a loss. `warming` lands `bad` at exactly 90 %,
+  where `· /compact` joins it, so hue and words say one thing.
+- `theme::picture` keeps the opening's two neutral greys, private to
+  `theme.rs` and used only by `lit`: a half-block picture carries its
+  brightness in its colour and has no ink to borrow. `intro/` was not
+  touched otherwise and its snapshots did not move — the piece and these
+  greys go together in M72.
+- `storyboard::ground` decided a preview's ground by asking whether the ink
+  was pale. It cannot ask that any more; it reads the tint instead.
+
+What the plan expected and did not happen: **the snapshots did not change
+wholesale.** The suite fixes the look to the ANSI table, where `text` was
+already `Reset` and `dim` already `DIM`, so not one screen's bytes moved.
+The only snapshot that changed is the palette table itself. The styles were
+read by hand instead, in both palettes, screen family by screen family, and
+only styles changed.
+
+```
+$ cargo fmt --all -- --check
+FMT OK
+
+$ cargo check --workspace --all-targets --locked -j 2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 06s
+
+$ cargo clippy --workspace --all-targets --locked -j 2 -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.79s
+
+$ cargo test --workspace --locked -j 2 --no-fail-fast
+passed 4208 failed 0 ignored 4   (85 suites)
+
+$ cargo test -p bingo --test pty --locked -j 2
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ scripts/check_discipline.sh
+kernel names no tool
+cohesion ok
+warn crates/bingo-core/src/session.rs:129 fn handle is 72 lines (>60)
+discipline ok
+
+$ scripts/budget.sh
+dependencies (unique, normal): 334 (max  334)
+relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
+warn: target/debug exceeds the soft limit
+budget ok
+
+$ cargo deny check
+advisories ok, bans ok, licenses ok, sources ok
+```
+
+Not verified: Windows (`cargo check --target x86_64-pc-windows-msvc` still
+fails in `aws-lc-sys`'s C build on this box, as M71 recorded — nothing here
+is platform-shaped: no process, path, signal or clock is touched); a real
+terminal's own rendering of SGR 2, which is the one thing `DIM` rests on and
+which differs between terminals by design.
