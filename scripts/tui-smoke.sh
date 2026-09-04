@@ -278,7 +278,7 @@ finish
 # the row this script can prove on a real terminal: the words are right and no
 # escape of a protocol the terminal never agreed to reaches the screen. The
 # other half — a terminal that answers the probe and is sent the picture — is
-# driven by `crates/bingo/tests/pty.rs`, which can answer it.
+# driven by `crates/bingo/tests/pty/`, which can answer it.
 step 'a picture is named where the terminal does not draw pictures'
 picture
 start '{"responses":[

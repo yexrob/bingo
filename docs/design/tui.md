@@ -149,7 +149,7 @@ Which of the two palettes is the terminal's own to say, and a terminal set to fo
 
 Two doors lead in, and one of them is nailed shut.
 
-- **The terminal says so** (mode 2031: `CSI ? 2031 h`, and the terminal reports `CSI ? 997 ; 1 n` dark / `; 2 n` light whenever its scheme changes) — **shut**. crossterm 0.29 neither passes that report on nor drops it: `parse_csi` answers `Ok(None)` for every `CSI ?` sequence whose final byte is neither `u` nor `c`, its parser reads that as an unfinished sequence, and the report sits in the buffer with every key struck after it until one of them ends a sequence it can name. A terminal asked to report its scheme would cost a person their keyboard, so bingo never sets the mode. Measured in `crates/bingo/tests/pty.rs`; the door reopens if crossterm ever learns the sequence.
+- **The terminal says so** (mode 2031: `CSI ? 2031 h`, and the terminal reports `CSI ? 997 ; 1 n` dark / `; 2 n` light whenever its scheme changes) — **shut**. crossterm 0.29 neither passes that report on nor drops it: `parse_csi` answers `Ok(None)` for every `CSI ?` sequence whose final byte is neither `u` nor `c`, its parser reads that as an unfinished sequence, and the report sits in the buffer with every key struck after it until one of them ends a sequence it can name. A terminal asked to report its scheme would cost a person their keyboard, so bingo never sets the mode. Measured in `crates/bingo/tests/pty/look.rs`; the door reopens if crossterm ever learns the sequence.
 - **bingo asks** (`OSC 11`, the same question the probe puts before the first frame) — **open**. It goes out at the two moments a change is likely and the cost is nothing: when the window regains focus (a person who flipped their system theme did it in another window), and on a thirty-second clock while the run is idle and no turn is drawing anyway. The answer lands in crossterm's key stream, where the late ear (M60) hears an `OSC` reply whole and hands it over instead of typing it into the composer, and the light/dark decision is `terminal_colorsaurus`'s own perceived lightness, so the first answer and every later one agree about the same colour.
 
 A swap that changes nothing is nothing. A swap that changes the look announces itself only by the screen: ratatui diffs styles, so every cell whose token is now worth another colour is rewritten on the next frame — and the two memos of a *drawing* (the transcript's blocks, the highlighter's warm code) key on the look, because a `Line` carries its styles and a memo drawn in the other palette is not the drawing anyone would make now.
@@ -158,7 +158,7 @@ What is measured, and what is not:
 
 | terminal | reports 2031 | answers `OSC 11` again | how known |
 |---|---|---|---|
-| the pty harness's own fake terminal | — | yes | measured (`crates/bingo/tests/pty.rs`) |
+| the pty harness's own fake terminal | — | yes | measured (`crates/bingo/tests/pty/look.rs`) |
 | crossterm 0.29, given a `CSI ? 997` report | holds it, and the keys after it | — | measured, in that pty |
 | kitty, foot, Ghostty, WezTerm, iTerm2 ≥ 3.5, Contour | documented to | documented to answer `OSC 11` | **not measured** — measuring it means driving a real terminal emulator, which this milestone did not do |
 | tmux | — | answers for its own pane, from the ground it believes the outer terminal has; no passthrough needed | **not measured** |

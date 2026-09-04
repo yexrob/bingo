@@ -18,7 +18,7 @@
 //! byte a person types afterwards is appended to a sequence that can never
 //! parse, until one of them happens to be a `c` or a `u` and the whole lot is
 //! thrown away as an error. A report would cost a person their keyboard, so
-//! bingo never sets the mode (`crates/bingo/tests/pty.rs` measures it).
+//! bingo never sets the mode (`crates/bingo/tests/pty/look.rs` measures it).
 //!
 //! **`OSC 11`**, where bingo asks, is the open one — the same question the
 //! probe asks before the first frame ([`theme::QUESTION`]), put again on

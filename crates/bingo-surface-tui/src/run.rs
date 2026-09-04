@@ -210,17 +210,8 @@ pub(crate) async fn drive(
         // animation could shut the stream out while draws run long.
         let wake = tokio::select! {
             biased;
-            key = keys.next() => {
-                match key {
-                    Some(event) => run.heard(event),
-                    None => run.exit = Some(Exit { code: 0 }),
-                }
-                Wake::Event
-            },
-            Some(reply) = replies.recv() => {
-                run.reply(reply, &mut events);
-                Wake::Event
-            },
+            key = keys.next() => run.keyed(key),
+            Some(reply) = replies.recv() => run.replied(reply, &mut events),
             // A handful an hour at most, so it is read before the frames and
             // starves nothing — and a catalogue rebuilt during a frame storm
             // does not wait for the storm to end.
@@ -556,6 +547,22 @@ impl Run {
         {
             self.ui.block = Some(view);
         }
+    }
+
+    /// One event off the terminal, or the end of the stream, which is a
+    /// hangup and so a way out.
+    fn keyed(&mut self, key: Option<Term>) -> Wake {
+        match key {
+            Some(event) => self.heard(event),
+            None => self.exit = Some(Exit { code: 0 }),
+        }
+        Wake::Event
+    }
+
+    /// One answer to a host call this run spawned.
+    fn replied(&mut self, reply: Reply, events: &mut Option<FrameStream>) -> Wake {
+        self.reply(reply, events);
+        Wake::Event
     }
 
     /// One event off the terminal, once the ear has had it: a reply to a probe
