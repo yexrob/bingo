@@ -73,6 +73,11 @@ fn transcript_style(tree: &Tree, now: Now, needle: &str) -> Style {
         .unwrap_or_else(|| panic!("no span carries {needle:?}"))
 }
 
+/// What a block does as it lands: it takes its own room and nothing more, one
+/// light crosses the name of a call that came back, and one that came back
+/// wrong cools out of `bad`.
+mod landing;
+
 // ---- presence: the sparkle and the breath -------------------------------
 
 /// A turn that has been running long enough to have a row of its own.
@@ -381,94 +386,6 @@ fn a_live_bullet_pulses_between_presence_and_its_glow() {
         assert_ne!(start, half, "it is somewhere else half a pulse in");
         assert_eq!(start, whole, "and back where it began after 1.2 s");
     });
-}
-
-#[test]
-fn a_completion_flashes_bold_for_exactly_one_frame() {
-    let (ui, now) = mid_turn();
-    let mut state = folded(running_bash());
-    let running = solo(&state);
-    crate::painted::painted(80, 24, &running, &ui, now);
-
-    state.apply(&frame(
-        3,
-        Event::ItemCompleted {
-            item: tool(
-                "itm_1",
-                "Bash",
-                serde_json::json!({"command": "cargo test"}),
-                Some(bingo_sdk::ToolOutput::text("ok")),
-                ItemStatus::Completed,
-            ),
-        },
-    ));
-    let done = solo(&state);
-    let flash = style_of(&done, &ui, now, "⏺");
-    assert_eq!(
-        flash,
-        theme::as_drawn(theme::good().patch(theme::bold())),
-        "one bold frame in `good`"
-    );
-    let settled = style_of(&done, &ui, later(now, FRAME.as_millis() as i64), "⏺");
-    assert_eq!(
-        settled,
-        theme::as_drawn(theme::good()),
-        "and it settles on the very next frame"
-    );
-}
-
-// ---- a block arriving ---------------------------------------------------
-
-/// Which row of a screen carries `needle`.
-fn row_of(screen: &str, needle: &str) -> usize {
-    screen
-        .lines()
-        .position(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("no row carries {needle:?}"))
-}
-
-/// §3's "nothing jumps" outranks §6's cue: a block arriving takes exactly its
-/// own room and the screen holds still from the frame it lands on. The rise
-/// was withdrawn on 2026-09-02 (§10) — it put its two blank rows under the
-/// newest block, which a bottom-anchored viewport turns into the whole
-/// transcript jumping up two rows and walking back over three frames, once
-/// per block.
-#[test]
-fn a_new_block_takes_its_own_room_and_walks_nowhere_after_it() {
-    let (ui, now) = mid_turn();
-    let mut state = folded(vec![frame(
-        1,
-        Event::ItemCompleted {
-            item: user("itm_1", "first"),
-        },
-    )]);
-    // The cache is warm after this draw, so the next block is one a person
-    // watches arrive.
-    let settled = screen(&solo(&state), &ui, now);
-    let was = row_of(&settled, "first");
-
-    state.apply(&frame(
-        2,
-        Event::ItemCompleted {
-            item: assistant("itm_2", "second", ItemStatus::Completed),
-        },
-    ));
-    let arriving = solo(&state);
-    let frames: Vec<String> = [0i64, 33, 66, 99]
-        .iter()
-        .map(|ms| screen(&arriving, &ui, later(now, *ms)))
-        .collect();
-    assert_eq!(
-        row_of(&frames[0], "first"),
-        was - 2,
-        "the row above moves up by the new block and its blank row, no further"
-    );
-    for (at, drawn) in frames.iter().enumerate().skip(1) {
-        assert_eq!(
-            drawn, &frames[0],
-            "frame {at} of the arrival draws the same screen"
-        );
-    }
 }
 
 // ---- the activity row ---------------------------------------------------

@@ -470,6 +470,32 @@ pub fn fading(level: bingo_sdk::Level, t: f32) -> Style {
     }
 }
 
+/// The light that crosses a tool's name as its answer lands: `good` at the
+/// crest and the row's own weight where it has passed. The bullet is what
+/// says the call finished; this says only how fresh that is (§6), so a name
+/// the light has left carries no colour of its own.
+pub fn landing(level: f32) -> Style {
+    if level <= 0.0 {
+        return bold();
+    }
+    match current().colors {
+        Colors::Plain => bold(),
+        Colors::Ansi => two_ways(level, bold(), good().patch(bold())),
+        Colors::True(palette) => bold().fg(mix(palette.text, palette.good, level)),
+    }
+}
+
+/// A failure cooling into the words behind it: `bad` where it lands and
+/// `text` once it has settled. The bullet stays `bad`, so what cools is how
+/// fresh the failure is and never whether there was one (§4).
+pub fn cooling(t: f32) -> Style {
+    match current().colors {
+        Colors::Plain => Style::new(),
+        Colors::Ansi => two_ways(t, bad(), text()),
+        Colors::True(palette) => Style::new().fg(mix(palette.bad, palette.text, t)),
+    }
+}
+
 /// The context notice warming from `dim` towards `bad` as the window fills.
 pub fn warming(t: f32) -> Style {
     match current().colors {
@@ -726,6 +752,7 @@ mod tests {
                         // that has to spell one.
                         | "graphics/kitty.rs"
                         | "motion.rs"
+                        | "motion/landing.rs"
                         | "painted.rs"
                         | "screens.rs"
                         | "screens/colours.rs"
@@ -871,6 +898,8 @@ mod tests {
             // gradient, wherever §4 sanctions one.
             ("pulse", &["transcript.rs", "view.rs", "views/progress.rs"]),
             ("comet", &["transcript.rs"]),
+            ("landing", &["transcript.rs"]),
+            ("cooling", &["transcript.rs"]),
             ("fading", &["status.rs"]),
             ("warming", &["status.rs"]),
             (
