@@ -15,6 +15,7 @@ mod fetch;
 mod hits;
 mod html_text;
 mod output;
+mod picture;
 mod readable;
 mod search;
 

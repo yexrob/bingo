@@ -18,21 +18,26 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::body::Content;
 use crate::cache::Cache;
 use crate::canonical::Canonical;
-use crate::{approved, body, output};
+use crate::{approved, body, output, picture};
 
 /// A body past this is not a document the turn wanted.
 const MAX_BYTES: usize = 10 * 1024 * 1024;
 
-/// What the request will take, in the order it prefers to be answered.
-const ACCEPT: &str = "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.8";
+/// What the request will take, in the order it prefers to be answered:
+/// documents first, then pictures, which the tool reads as pictures.
+const ACCEPT: &str = "text/html,application/xhtml+xml,text/plain,\
+application/json;q=0.9,image/*;q=0.8,*/*;q=0.7";
 
 const DESCRIPTION: &str = "\
 Fetch a URL and return the page as markdown. `http` URLs are upgraded to \
 `https`. An HTML page comes back as its article — navigation, scripts and page \
 chrome are dropped — rewritten as markdown; text and JSON documents come back \
-as they are; any other content type is refused by name. The same URL fetched \
+as they are; a picture comes back as the picture itself, which you see and \
+which is placed in the user's transcript beside this call, where their surface \
+can draw it; any other content type is refused by name. The same page fetched \
 again within fifteen minutes is answered from an in-process cache. Long pages \
 are truncated, and say so on the last line. For GitHub URLs prefer the `gh` \
 CLI through Bash.";
@@ -63,21 +68,31 @@ impl WebFetchTool {
         Canonical::parse(&args.url).ok()
     }
 
-    /// The page, from the cache when it is still fresh and from the network
-    /// otherwise. Only what the model will actually see is stored.
-    async fn retrieve(&self, url: &Canonical) -> Result<String, ToolError> {
+    /// What the URL holds, from the cache when it is still fresh and from the
+    /// network otherwise.
+    async fn retrieve(&self, url: &Canonical) -> Result<ToolOutput, ToolError> {
         if let Some(cached) = self.cache.get(url.as_str()) {
-            return Ok(cached);
+            return Ok(ToolOutput::text(cached));
         }
         let response = self.get(url).await?;
         let content_type = content_type(&response);
         let bytes = read_capped(response).await?;
-        let text = String::from_utf8_lossy(&bytes);
-        let markdown = body::render(&content_type, &text, url.as_str())
-            .map_err(|e| ToolError::Failed(e.to_string()))?;
-        let page = output::cap(&markdown);
+        match body::render(&content_type, &bytes, url.as_str())
+            .map_err(|e| ToolError::Failed(e.to_string()))?
+        {
+            Content::Page(markdown) => Ok(ToolOutput::text(self.kept(url, &markdown))),
+            Content::Picture(image) => Ok(picture::output(image)),
+        }
+    }
+
+    /// The page as the model will read it, kept for the next quarter hour.
+    /// Only text is kept: a picture is already bounded by the journal's cap,
+    /// and a second copy of it in this process costs more than fetching it
+    /// again.
+    fn kept(&self, url: &Canonical, markdown: &str) -> String {
+        let page = output::cap(markdown);
         self.cache.put(url.as_str(), &page);
-        Ok(page)
+        page
     }
 
     async fn get(&self, url: &Canonical) -> Result<Response, ToolError> {
@@ -170,13 +185,15 @@ impl Tool for WebFetchTool {
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         let url = Canonical::parse(&args.url)
             .map_err(|e| ToolError::InvalidInput(format!("invalid url: {e}")))?;
-        Ok(ToolOutput::text(self.retrieve(&url).await?))
+        self.retrieve(&url).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bingo_sdk::{ContentPart, Image};
+
     use crate::tests::context;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -312,6 +329,59 @@ mod tests {
             "got {error:?}"
         );
         assert_eq!(tool.cache.get(&url), None);
+    }
+
+    /// The request says it takes pictures, and says so after the types it
+    /// would rather have.
+    #[test]
+    fn the_request_asks_for_pictures_after_the_documents() {
+        let documents = ACCEPT.find("text/html").expect("html is asked for");
+        let pictures = ACCEPT.find("image/*").expect("pictures are asked for");
+        assert!(documents < pictures, "{ACCEPT}");
+    }
+
+    /// A picture URL reaches the model as the picture, and nothing of it is
+    /// kept: the second call goes to the server again, which is why the mock
+    /// expects two.
+    #[tokio::test]
+    async fn a_picture_comes_back_as_the_picture_and_is_never_cached() {
+        let server = MockServer::start().await;
+        let bytes = bingo_pictures::testing::png_bytes(6, 4);
+        let png = ResponseTemplate::new(200).set_body_raw(bytes.clone(), "image/png");
+        serve(&server, png, 2).await;
+        let tool = tool();
+        let url = format!("{}/page", server.uri());
+
+        let out = tool.call(args(&url), &context()).await.expect("fetch");
+        assert_eq!(
+            out.parts,
+            vec![ContentPart::Image(
+                Image::from_bytes("image/png", &bytes).expect("within the cap")
+            )]
+        );
+        assert!(!out.is_error);
+        assert_eq!(tool.cache.get(&url), None, "a picture is not cached");
+        tool.call(args(&url), &context())
+            .await
+            .expect("a second fetch reaches the server");
+    }
+
+    /// The `Content-Type` is a claim and the bytes are the evidence: a page
+    /// served as a PNG is refused rather than journaled as a picture.
+    #[tokio::test]
+    async fn a_body_served_as_a_picture_that_is_not_one_is_refused() {
+        let server = MockServer::start().await;
+        let lie = ResponseTemplate::new(200).set_body_raw(PAGE, "image/png");
+        serve(&server, lie, 1).await;
+
+        let error = tool()
+            .call(args(&format!("{}/page", server.uri())), &context())
+            .await
+            .err();
+        assert!(
+            matches!(&error, Some(ToolError::Failed(m)) if m.contains("not a picture")),
+            "got {error:?}"
+        );
     }
 
     #[tokio::test]
