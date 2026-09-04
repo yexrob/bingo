@@ -53,6 +53,9 @@ the sixel quantiser; `image` alone with ten decoders measures +20.
 - The sdk does not depend on `image`: the sdk's `Image::read` stays
   the table-only path reader, and the loader is where formats widen.
 - The budget comment line in `scripts/budget.toml` cites this record.
+- *2026-09-04, M50:* the web tool reads a picture behind a URL through
+  this crate: an `image/*` body is sniffed here, so a URL and a path
+  widen by the same rules and no second decoder is spelled anywhere.
 - *2026-09-04, M47:* `reqwest` in the library pulls `aws-lc-sys` into
   every crate above it, and that build script wants `windows.h`, so the
   local Windows cross-check no longer runs for `bingo-surface-tui` or
