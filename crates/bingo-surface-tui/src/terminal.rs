@@ -73,6 +73,11 @@ pub(crate) trait Screen: Send {
     /// Hand the terminal a selection for its own clipboard.
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()>;
 
+    /// Ask the terminal something. Out of band like the rest: a question
+    /// paints no cell, and the answer comes back through the key stream where
+    /// [`crate::late`] hears it whole ([`crate::run::look`], M71).
+    fn ask(&mut self, bytes: &[u8]) -> io::Result<()>;
+
     /// Hand the terminal the pictures the frame just drew placeholders for
     /// (design §5). Out of band, as the title and the clipboard are: they
     /// paint no cell of their own — the cells are already on the screen, and
@@ -170,6 +175,10 @@ impl Screen for Tui {
     }
 
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()> {
+        out_of_band(bytes)
+    }
+
+    fn ask(&mut self, bytes: &[u8]) -> io::Result<()> {
         out_of_band(bytes)
     }
 

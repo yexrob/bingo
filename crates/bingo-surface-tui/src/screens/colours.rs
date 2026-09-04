@@ -224,3 +224,41 @@ fn a_shell_line_sits_on_the_bar_your_own_words_sit_on() {
         );
     });
 }
+
+/// The look follows the terminal for as long as the run lasts (M71). The same
+/// screen, already folded and drawn on a dark terminal, wears the light
+/// palette from the frame after the terminal says its ground has turned — the
+/// blocks drawn in the old look are a memo of a drawing nobody would make
+/// again, and they go with it.
+#[test]
+fn a_terminal_that_turns_light_under_a_drawn_screen_is_followed() {
+    let (ui, now) = scene();
+    let tree = solo(&folded(answered()));
+    crate::theme::with(truecolor(), || {
+        let inks = |painted: &crate::painted::Painted| {
+            painted
+                .row("All 33 pass.")
+                .into_iter()
+                .filter_map(|(_, style)| style.fg)
+                .collect::<Vec<_>>()
+        };
+        let before = inks(&painted(80, 24, &tree, &ui, now));
+        assert!(
+            before.contains(&crate::theme::DARK.text),
+            "the answer is drawn in the dark palette's ink: {before:?}"
+        );
+        assert!(
+            crate::theme::swap(true),
+            "and then the terminal says its ground has turned"
+        );
+        let after = inks(&painted(80, 24, &tree, &ui, now));
+        assert!(
+            after.contains(&crate::theme::LIGHT.text),
+            "the next frame wears the light one: {after:?}"
+        );
+        assert!(
+            !after.contains(&crate::theme::DARK.text),
+            "and nothing on the row kept yesterday's ink: {after:?}"
+        );
+    });
+}

@@ -14,12 +14,20 @@
 //! | `ESC ] 11;rgb:… ESC \` | `alt+]`, `1 1 ; r g b …`, `alt+\` |
 //! | `CSI 6;34;17t` | nothing: its parser drops it |
 //! | `CSI ?62;22c` | nothing: it keeps DA1 to itself |
+//! | `CSI ?997;1n` | nothing — and every key struck after it is held with it |
 //!
-//! So the two `CSI` replies need no eating and cannot be read back either —
+//! So the three `CSI` replies need no eating and cannot be read back either —
 //! the cell a picture is sized by is the one part of an answer a late one
 //! cannot carry (M60 Verified). The other three are what this hears, before
 //! any binding does: events in, and either the events the run is to handle or
 //! the bytes of one whole reply.
+//!
+//! The last row is why a terminal is never asked to *report* its colour scheme
+//! (mode 2031, M71): `parse_csi` answers `Ok(None)` for every `CSI ?` sequence
+//! whose final byte is neither `u` nor `c`, and its parser reads that as an
+//! unfinished sequence and keeps the buffer — so the report and everything
+//! typed after it wait there for a byte that ends a sequence it can name, and
+//! go when it comes. Measured in `crates/bingo/tests/pty/`.
 //!
 //! It gives up the moment a sequence stops looking like one of the three, so
 //! a person who types `alt+_` and then a word keeps both.

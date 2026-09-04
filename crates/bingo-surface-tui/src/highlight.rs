@@ -88,6 +88,10 @@ thread_local! {
 /// One code block, highlighted, with the parser as its last whole line left it.
 struct Block {
     lang: String,
+    /// The look its rows were drawn in: a token is baked into a `Line`, and the
+    /// terminal may change which palette that token is worth under a running
+    /// surface (M71), so a memo drawn in the other look is not this one.
+    look: theme::Theme,
     /// The whole lines already highlighted, verbatim.
     source: String,
     rows: Vec<Line<'static>>,
@@ -99,6 +103,7 @@ impl Block {
     fn new(lang: &str) -> Self {
         Self {
             lang: lang.to_string(),
+            look: theme::current(),
             source: String::new(),
             rows: Vec::new(),
             parse: ParseState::new(syntax(lang)),
@@ -107,9 +112,10 @@ impl Block {
     }
 
     /// Whether this block is the one being asked about and has been asked
-    /// about before: same language, and what it holds opens what is asked.
+    /// about before: same language, same look, and what it holds opens what is
+    /// asked.
     fn resumes(&self, lang: &str, whole: &str) -> bool {
-        self.lang == lang && whole.starts_with(&self.source)
+        self.look == theme::current() && self.lang == lang && whole.starts_with(&self.source)
     }
 
     /// Parse whatever is new, and keep the parser where it stopped.
@@ -199,6 +205,22 @@ mod tests {
     /// Nothing kept from another test: the memo is this thread's.
     fn fresh() {
         BLOCKS.with_borrow_mut(Vec::clear);
+    }
+
+    /// The memo is of a drawing, and a drawing is in one look: a terminal that
+    /// turns light under a running surface (M71) leaves every warm block in the
+    /// wrong ink, so the look is part of what a block resumes on.
+    #[test]
+    fn a_block_kept_warm_is_drawn_again_when_the_look_changes() {
+        fresh();
+        theme::with(crate::painted::truecolor(), || {
+            let dark = lines("rust", "let x = 1;\n");
+            assert_eq!(lines("rust", "let x = 1;\n"), dark, "and again is the memo");
+            assert!(theme::swap(true), "the terminal says its ground has turned");
+            let light = lines("rust", "let x = 1;\n");
+            assert_eq!(text(&light), text(&dark), "the same row of code");
+            assert_ne!(runs(&light[0]), runs(&dark[0]), "in the other palette");
+        });
     }
 
     #[test]
