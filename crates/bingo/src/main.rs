@@ -354,7 +354,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let host = Host::build(plugins(demo)?, config)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
-    report(&host);
+    report_notices(&host);
     if let Some(code) = credentials(&host, &cli).await {
         return code;
     }
@@ -398,7 +398,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
 
 /// What a built host has to say for itself: a plugin that could not be
 /// registered, a setting nobody claimed. On stderr, as every diagnostic is.
-fn report(host: &Host) {
+fn report_notices(host: &Host) {
     for (code, text) in host.notices() {
         let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
         eprintln!("{}", notice_report(&code, &text, human));
