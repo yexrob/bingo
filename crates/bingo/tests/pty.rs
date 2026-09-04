@@ -12,6 +12,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -56,12 +57,23 @@ enum Answers {
     /// own pane before it has forwarded anything (`input.c`) — and the outer
     /// terminal's four answers come out of the envelope behind it.
     ThroughTmux,
-    /// The same tmux with the passthrough off: the envelope is dropped whole,
-    /// so its own name is all there is and no DA1 reply ever lands.
+    /// The same tmux, with the passthrough on and nothing behind it answering
+    /// inside the window: its own name is all the probe hears, and no DA1
+    /// reply ever lands.
     TmuxAlone,
+    /// The same tmux, with `allow-passthrough` off. Nothing is asked at all,
+    /// so nothing is answered either — the stub `tmux` on the child's `PATH`
+    /// is the whole of this scene.
+    TmuxPassthroughOff,
+    /// tmux 3.6b, passthrough on, and an outer Ghostty whose last two answers
+    /// come out of the envelope after the probe's window has run out (M60).
+    /// tmux's own name, the kitty `OK` and the cell arrive in time; the name
+    /// and DA1 land in crossterm's key stream instead.
+    ThroughTmuxLate,
 }
 
 impl Answers {
+    /// What the terminal answers the moment it sees the question.
     fn reply(self) -> &'static [u8] {
         match self {
             Answers::Pictures => {
@@ -74,16 +86,44 @@ impl Answers {
             Answers::ThroughTmux => {
                 b"\x1bP>|tmux 3.6b\x1b\\\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1bP>|ghostty 1.3.1\x1b\\\x1b[?62;22c"
             }
-            Answers::TmuxAlone => b"\x1bP>|tmux 3.6b\x1b\\",
+            Answers::TmuxAlone | Answers::TmuxPassthroughOff => b"\x1bP>|tmux 3.6b\x1b\\",
+            Answers::ThroughTmuxLate => b"\x1bP>|tmux 3.6b\x1b\\\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t",
+        }
+    }
+
+    /// What it answers only after the probe has given up — the reply that
+    /// lands in the key stream rather than in the probe's own read.
+    fn late(self) -> Option<&'static [u8]> {
+        match self {
+            Answers::ThroughTmuxLate => Some(b"\x1bP>|ghostty 1.3.1\x1b\\\x1b[?62;22c"),
+            _ => None,
         }
     }
 
     /// Whether the child is to believe it is inside tmux. `TMUX` is what a
     /// real one sets, and it is what decides the envelope.
     fn multiplexed(self) -> bool {
-        matches!(self, Answers::ThroughTmux | Answers::TmuxAlone)
+        self.passthrough().is_some()
+    }
+
+    /// What the stub `tmux` on the child's `PATH` says about
+    /// `allow-passthrough`, or `None` for a scene with no tmux in it. The stub
+    /// is what makes the answer the scene's rather than the machine's: a real
+    /// tmux on the box would be asked about a socket that is not there.
+    fn passthrough(self) -> Option<&'static str> {
+        match self {
+            Answers::ThroughTmux | Answers::TmuxAlone | Answers::ThroughTmuxLate => Some("on"),
+            Answers::TmuxPassthroughOff => Some("off"),
+            Answers::Pictures | Answers::Tofu | Answers::Da1Only => None,
+        }
     }
 }
+
+/// How long after the question a late answer arrives: the window the surface
+/// itself waits under tmux, and a margin on top of it. Driven from the
+/// surface's own constant so the two cannot drift apart.
+const LATE: Duration =
+    Duration::from_millis(bingo_surface_tui::PROBE_THROUGH.as_millis() as u64 + 400);
 
 /// What the graphics probe asks, as it appears in the child's output: seeing
 /// it is what tells the fake terminal to answer. Wrapped or bare, the query
@@ -105,6 +145,9 @@ struct Terminal {
     /// Every byte the child wrote, for an assertion about a sequence that
     /// paints no cell and so leaves no mark on the screen.
     written: Arc<Mutex<Vec<u8>>>,
+    /// Set once the scene's late answer has gone down the wire, so a test
+    /// waits on the write itself and never on a clock of its own.
+    answered_late: Arc<AtomicBool>,
     #[allow(dead_code)]
     home: tempfile::TempDir,
 }
@@ -133,6 +176,7 @@ impl Terminal {
         command.env("HOME", home.path());
         command.env("BINGO_FAKE_SCRIPT", &script);
         command.env("TERM", "xterm-256color");
+        stub_tmux(&mut command, home.path(), answers.passthrough());
         // The terminal under test is this pty and nothing the suite happens
         // to be running inside: a truecolor claim would send the theme probe
         // looking for an answer nobody here gives, and whether there is a
@@ -150,10 +194,12 @@ impl Terminal {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(ROWS, COLS, 0)));
         let written = Arc::new(Mutex::new(Vec::new()));
         let writer = Arc::new(Mutex::new(pty.master.take_writer().unwrap()));
+        let answered_late = Arc::new(AtomicBool::new(answers.late().is_none()));
         let mut reader = pty.master.try_clone_reader().unwrap();
         let sink = Arc::clone(&parser);
         let log = Arc::clone(&written);
         let back = Arc::clone(&writer);
+        let done = Arc::clone(&answered_late);
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             let mut asked = false;
@@ -168,9 +214,16 @@ impl Terminal {
                 // is the only ordering a real terminal ever promises.
                 if !asked && contains(&log, GRAPHICS_QUERY) {
                     asked = true;
-                    let mut back = back.lock().unwrap();
-                    back.write_all(answers.reply()).unwrap();
-                    back.flush().unwrap();
+                    let mut out = back.lock().unwrap();
+                    out.write_all(answers.reply()).unwrap();
+                    out.flush().unwrap();
+                    drop(out);
+                    // The rest of it, once the window has run out — on a
+                    // thread of its own, so the child's output keeps being
+                    // read while the wait runs.
+                    if let Some(rest) = answers.late() {
+                        answer_late(Arc::clone(&back), Arc::clone(&done), rest);
+                    }
                 }
             }
         });
@@ -179,8 +232,21 @@ impl Terminal {
             writer,
             parser,
             written,
+            answered_late,
             home,
         }
+    }
+
+    /// Wait until the scene's late answer has been written, or say so.
+    fn wait_late(&self) {
+        let deadline = Instant::now() + LIMIT;
+        while Instant::now() < deadline {
+            if self.answered_late.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the late answer was never written");
     }
 
     /// Everything the child has written, escapes and all.
@@ -330,6 +396,38 @@ fn every_frame_is_written_inside_a_synchronized_update() {
     assert_eq!(count(&under_tmux, END), 0);
     through.send(&[0x04]);
     through.leave();
+}
+
+/// Answer the rest of it after [`LATE`], from a thread of its own.
+fn answer_late(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    done: Arc<AtomicBool>,
+    rest: &'static [u8],
+) {
+    std::thread::spawn(move || {
+        std::thread::sleep(LATE);
+        let mut out = writer.lock().unwrap();
+        out.write_all(rest).unwrap();
+        out.flush().unwrap();
+        done.store(true, Ordering::SeqCst);
+    });
+}
+
+/// Put a `tmux` on the child's `PATH` that answers one word about
+/// `allow-passthrough`, so the scene decides what the surface is told rather
+/// than whatever tmux the machine happens to carry.
+fn stub_tmux(command: &mut CommandBuilder, home: &std::path::Path, says: Option<&str>) {
+    let Some(says) = says else {
+        return;
+    };
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tmux = bin.join("tmux");
+    std::fs::write(&tmux, format!("#!/bin/sh\nprintf '{says}\\n'\n")).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&tmux, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    command.env("PATH", format!("{}:{path}", bin.display()));
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -545,6 +643,87 @@ fn a_tmux_that_carries_nothing_through_gets_the_chip() {
     assert!(
         !contains(&written, b"\x1b_Ga=T"),
         "and nothing was transmitted to a terminal that never answered"
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// M60 bricks 1, 2 and 4: the outer terminal finishes answering after the
+/// probe's window has run out. Its reply lands in crossterm's key stream —
+/// `alt+P`, `>`, `|`, the name, `alt+\` — where before it was typed into the
+/// composer and made the box grow a row. Nothing of it reaches the composer
+/// now, and the answer it carries turns the pictures on for the next frame.
+#[test]
+fn an_answer_that_lands_after_the_probe_is_eaten_and_still_counted() {
+    let mut terminal = Terminal::opened(&[], READS_A_PICTURE, Answers::ThroughTmuxLate);
+    std::fs::write(
+        terminal.home.path().join("shot.png"),
+        bingo_pictures::testing::png_bytes(1200, 900),
+    )
+    .unwrap();
+    terminal.wait_for("? for shortcuts");
+    terminal.wait_late();
+    // A keystroke behind the late answer, and the screen that shows it: the
+    // pty keeps its order, so a composer holding this and nothing else is a
+    // composer the reply never reached. The box is where the bug showed —
+    // `> Gi=31;OK>|ghostty 1.3.1`, and a second row of it once the words
+    // outgrew the width, which is the layout jump (M60 Verified).
+    terminal.send(b"look at it");
+    terminal.wait_for("look at it");
+    let composer = terminal.screen();
+    for typed in ["Gi=31", ">|ghostty", "OK>"] {
+        assert!(
+            !composer.contains(typed),
+            "{typed:?} was typed into the composer:\n{composer}"
+        );
+    }
+    terminal.send(b"\r");
+    terminal.wait_for("That is the picture.");
+    let written = terminal.written();
+    assert_eq!(
+        count(&written, WRAPPED_TRANSMIT),
+        1,
+        "the picture the late answer paid for went out, once, in an envelope"
+    );
+    assert!(
+        !terminal.screen().contains("[image:"),
+        "and no chip was drawn:\n{}",
+        terminal.screen()
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// M60 bricks 3 and 4: tmux says `allow-passthrough` is off, so the question
+/// is not asked at all. Nothing wrapped is written, no window is spent waiting
+/// for an answer that was promised not to come, and the chip is what a picture
+/// draws as.
+#[test]
+fn a_passthrough_tmux_says_is_off_is_never_asked_through() {
+    let mut terminal = Terminal::opened(&[], READS_A_PICTURE, Answers::TmuxPassthroughOff);
+    std::fs::write(
+        terminal.home.path().join("shot.png"),
+        bingo_pictures::testing::png_bytes(100, 200),
+    )
+    .unwrap();
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"look at it\r");
+    terminal.wait_for("[image: image/png]");
+    let written = terminal.written();
+    assert!(
+        !contains(&written, WRAPPED_QUERY),
+        "no envelope was sent into a passthrough that drops it"
+    );
+    assert!(
+        !contains(&written, GRAPHICS_QUERY),
+        "and the question was not asked bare either"
+    );
+    // The wait that is not spent is the question that is not asked: there is
+    // no window to time, because nothing was ever waited for. A wall-clock
+    // bound here would pin this machine instead (AGENTS.md).
+    assert!(
+        !contains(&written, b"\x1b_Ga=T"),
+        "and nothing was transmitted to a terminal that was never reached"
     );
     terminal.send(&[0x04]);
     terminal.leave();
