@@ -98,6 +98,34 @@ fn the_first_words_open_a_message_and_the_gate_holds_the_rest() {
     );
 }
 
+/// A `!` line runs no turn and asks the model for nothing, so a chat is told
+/// about it beside the answer rather than inside one (M65).
+#[test]
+fn a_shell_line_the_person_ran_lands_beside_the_answer() {
+    let mut chat = Chat::new();
+    let ran = |seq, id, command, output, exit| {
+        frame(
+            seq,
+            Event::ItemCompleted {
+                item: shell(id, command, output, exit),
+            },
+        )
+    };
+    assert_eq!(
+        chat.feed(ran(1, "itm_1", "echo hi", "hi\n", Some(0))),
+        [Op::Status {
+            text: "$ echo hi\n```\nhi\n```".into()
+        }]
+    );
+    assert_eq!(
+        chat.feed(ran(2, "itm_2", "false", "", Some(3))),
+        [Op::Status {
+            text: "$ false\n[exit 3]".into()
+        }],
+        "a line that failed says so"
+    );
+}
+
 #[test]
 fn enough_new_characters_open_the_gate_without_a_boundary() {
     let mut chat = Chat::new();

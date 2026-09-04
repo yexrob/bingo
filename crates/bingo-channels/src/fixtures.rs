@@ -64,6 +64,27 @@ pub fn assistant(id: &str, text: &str, status: ItemStatus) -> Item {
     }
 }
 
+/// A shell line the person ran themselves (M65): outside every turn, as the
+/// kernel journals one.
+pub fn shell(id: &str, command: &str, output: &str, exit: Option<i32>) -> Item {
+    Item {
+        id: ItemId::from_raw(id),
+        turn: None,
+        round: 0,
+        status: ItemStatus::Completed,
+        started_at: ts(),
+        completed_at: Some(ts()),
+        intent: None,
+        body: ItemBody::Shell {
+            command: command.into(),
+            output: output.into(),
+            exit,
+            cwd: "/tmp/p".into(),
+        },
+        meta: Default::default(),
+    }
+}
+
 pub fn turn_started(seq: u64) -> Frame {
     frame(
         seq,
