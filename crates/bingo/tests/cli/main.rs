@@ -666,6 +666,7 @@ mod acp;
 mod agents;
 mod batch;
 mod board;
+mod checkpoints;
 mod context;
 mod experience;
 mod gateway;

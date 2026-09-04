@@ -11,6 +11,7 @@ pub mod host;
 pub mod journal;
 pub mod models;
 pub mod prompt;
+pub mod rewind;
 pub mod session;
 pub mod settings;
 pub mod turn;

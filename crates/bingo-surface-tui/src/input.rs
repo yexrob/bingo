@@ -909,14 +909,16 @@ mod tests {
         ];
         (
             state,
+            // The spec `bingo-checkpoints` registers (ADR-0045 §3): a
+            // surface offers what the catalogue says is there.
             vec![bingo_sdk::CommandSpec {
                 name: "rewind".into(),
                 aliases: Vec::new(),
-                hint: "go back to a turn".into(),
+                hint: "go back to a turn: its files and the conversation".into(),
                 args: bingo_sdk::ArgSpec::Free {
                     hint: "<turn>".into(),
                 },
-                instant: true,
+                instant: false,
                 family: "session".into(),
             }],
         )
@@ -964,8 +966,9 @@ mod tests {
         assert!(!ui.layer.showing(), "and a half-typed line is not empty");
     }
 
-    /// The picker is offered only where the session has a `/rewind` to run;
-    /// as of M11e nothing registers one.
+    /// The picker is offered only where the session has a `/rewind` to run.
+    /// Since M67 the checkpoints plugin registers one, so this is a host
+    /// built without it rather than the empty catalogue of the day.
     #[test]
     fn nothing_opens_where_the_session_cannot_rewind() {
         let (state, _) = rewindable();

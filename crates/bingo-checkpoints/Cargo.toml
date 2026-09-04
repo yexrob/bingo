@@ -1,0 +1,29 @@
+[package]
+name = "bingo-checkpoints"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Checkpoints plugin for bingo: a file's bytes before the turn that changed them, and /rewind"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+# A tool call's input is JSON; the field that names the file is read out of it.
+serde_json.workspace = true
+# A snapshot that could not be taken is a log line, never a refused edit.
+tracing.workspace = true
+
+[dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
+# The host double a command is run against hands back an empty frame stream.
+futures.workspace = true
+# An `Item` carries timestamps; a fixture transcript has to mint them.
+jiff.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true }

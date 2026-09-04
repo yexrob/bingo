@@ -66,6 +66,11 @@
 # have cost this crate the Windows cross-check its rename dance needs
 # (ADR-0041's note; ADR-0043 §3). The fetch is the caller's, so `reqwest`
 # stays out of the library as it does out of `bingo-loopback`.
-max_dependencies = 333
+# M67 (docs/plans/M67-the-turn-that-can-be-undone.md, ADR-0045) raises
+# 333 → 334 by the one member `bingo-checkpoints`. It brings no crate of its
+# own: a snapshot is `std::fs`, the index is a line of text, the tool call's
+# path is read out of `serde_json`, and a snapshot that failed is a `tracing`
+# line — all already in the tree.
+max_dependencies = 334
 max_core_check_seconds = 20
 max_target_gb = 5

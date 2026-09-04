@@ -109,6 +109,11 @@ pub(crate) enum Msg {
     CallFinished {
         outcome: ToolOutcome,
     },
+    /// Undo a turn and everything after it (ADR-0045 §1).
+    Rewind {
+        to_turn: TurnId,
+        reply: oneshot::Sender<Result<u32, KernelError>>,
+    },
     /// A turn that only compacts (ADR-0008 §4).
     Compact {
         instructions: Option<String>,
@@ -306,6 +311,13 @@ impl Mailbox {
 
     pub(super) fn call_finished(&self, outcome: ToolOutcome) {
         self.send(Msg::CallFinished { outcome });
+    }
+
+    /// Undo a turn and everything after it, answering how many items went
+    /// (ADR-0045 §1). Refused while a turn runs, and for a turn this session
+    /// does not have.
+    pub async fn rewind(&self, to_turn: TurnId) -> Result<u32, KernelError> {
+        self.call(|reply| Msg::Rewind { to_turn, reply }).await?
     }
 
     /// Open a turn that only compacts; refused while a turn runs.

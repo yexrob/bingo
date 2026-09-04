@@ -36,6 +36,7 @@ bingo-rooms.workspace = true
 bingo-tasks.workspace = true
 bingo-experience.workspace = true
 bingo-schedule.workspace = true
+bingo-checkpoints.workspace = true
 bingo-demo-ui.workspace = true
 bingo-channels.workspace = true
 # `bingo provider add` writes a pasted key to the one credential store

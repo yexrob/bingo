@@ -28,3 +28,4 @@ first record; 0036 §2 answered it before it was named).
 - [0042 — The page that answers back](0042-the-page-that-answers-back.md)
 - [0043 — The binary that replaces itself](0043-the-binary-that-replaces-itself.md)
 - [0044 — One fact, one file](0044-one-fact-one-file.md)
+- [0045 — The turn that can be undone: one kernel verb, the files a plugin's](0045-the-turn-that-can-be-undone.md)

@@ -61,15 +61,15 @@ dated line (the chord is live).
 
 ## Exit criteria
 
-- [ ] `host.rewind` appends the item, the fold drops the items, the
+- [x] `host.rewind` appends the item, the fold drops the items, the
       context builder sends none of them; refused mid-turn.
-- [ ] A Write and an Edit in one turn snapshot the file once; a file
+- [x] A Write and an Edit in one turn snapshot the file once; a file
       created in the turn is `absent` and removed on rewind.
-- [ ] `/rewind <turn>` restores files across two turns and drops both
+- [x] `/rewind <turn>` restores files across two turns and drops both
       turns' items (integration test on the fake provider).
-- [ ] The TUI `esc esc` picker now opens and its `⏎` rewinds
+- [x] The TUI `esc esc` picker now opens and its `⏎` rewinds
       (existing picker tests re-aimed; one pty scene).
-- [ ] All gates; Windows cross-check for the new crate (paths).
+- [x] All gates; Windows cross-check for the new crate (paths).
 - [ ] Hands-on: appended by the parent.
 
 ## Non-goals
@@ -85,3 +85,80 @@ session's own turn. A path outside cwd (the tool allows it): snapshot
 it all the same — the fact is the file, not where it is. Two edits of
 one file in one turn by two concurrent tools: the hook runs before
 each, the first wins, which is the pre-turn state either way.
+
+## Verified — 2026-09-04
+
+Every gate green, by exit code, on `m67-checkpoints` (from `dev` at
+`d601a6f2`):
+
+```
+cargo fmt --all -- --check                                        0
+cargo check --workspace --all-targets --locked -j 2               0
+cargo clippy --workspace --all-targets --locked -j 2 -D warnings  0
+cargo test --workspace --locked -j 2 --no-fail-fast               0  85 binaries, 3968 passed, 0 failed
+scripts/check_discipline.sh                                       0  discipline ok
+scripts/budget.sh                                                 0  dependencies (unique, normal): 334 (max 334)
+cargo deny check                                                  0  advisories ok, bans ok, licenses ok, sources ok
+cargo test -p bingo --test pty --locked -j 2                      0  12 passed
+cargo check -p bingo-checkpoints -p bingo-sdk -p bingo-core \
+  --all-targets --locked -j 2 --target x86_64-pc-windows-msvc     0
+```
+
+### The bricks, and where each is proved
+
+1. **`HostApi::rewind(session, to_turn) -> Result<u32, KernelError>`**, one
+   method with a default body, so no `HostApi` double breaks and the wire is
+   unchanged. The actor records `ItemBody::Rewind { to_turn, dropped }` and
+   publishes `Event::Rewound`; the cut is `bingo_core::rewind::dropped`, pure.
+   `NOT_READY` under a running turn (`self.running.is_some()`, as `/compact`
+   reads it), `INVALID_INPUT` for a turn the session never had. No new error
+   code. `crates/bingo-core/src/host/tests/rewind.rs` drives a real host: the
+   item is appended, the client's fold loses the turn, and the *next* turn's
+   provider request carries the first answer and neither line of the rewound
+   one.
+2. **`bingo-checkpoints`**, six modules — `store` (the directory), `hook` (the
+   tool-to-field table and `BeforeTool`), `turns` (a transcript's turns, pure),
+   `restore` (the plan and its application), `command` (`/rewind`), `lib` (the
+   plugin). The plan named five; `turns` is the sixth because listing turns and
+   running a command are two jobs. `<data_dir>/checkpoints/<session>/<turn>/`
+   holds `<n>.snap` and one `index` line per file — `<n>
+   <present|absent|skipped> <path>`, **path last**, because a path may hold a
+   space and a state may not. One snapshot per file per turn; over 8 MiB (or
+   not a file) is `skipped`; a path that is not UTF-8 is not kept at all,
+   because `Display` would not write it back byte for byte.
+3. **`/rewind`**, registered, not `instant`. Bare: a `View::Table` of turns
+   newest first — id, what was asked, the files touched. With a turn: the files
+   of it and every later one go back (oldest snapshot per file wins, `absent` →
+   removed), then `host.rewind`. Every snapshot is read before a byte is
+   written, and a failure returns before the journal is touched —
+   `command::tests::a_restore_that_cannot_be_read_leaves_the_journal_alone`
+   proves the transcript is untouched. `crates/bingo/tests/cli/checkpoints.rs`
+   is the same across four real processes on the fake provider.
+4. **Collection** at `start`, where the store's own GC runs: a checkpoint
+   directory whose session the host no longer lists is removed. An empty
+   listing is an answer; only an `Err` is "cannot tell".
+
+The TUI changed only in its tests' words and one fixture field: the picker has
+always been offered exactly when a `rewind` spec is in the catalogue.
+
+### What was not done, or not cured
+
+- **A shell line's changes are not snapshotted** — the plan's non-goal, said in
+  the reply's own words rather than passed over in silence.
+- **`Event::Rewound.files_restored` stays empty.** The verb takes no paths, as
+  the plan wrote it, and the plugin's reply names the files. The field now has
+  no producer at all, which is a subtraction for whoever next touches that
+  enum.
+- **A session deleted while the process runs** keeps its snapshots until the
+  next start.
+- **The turns of a transcript are derived twice** — the TUI's card and the
+  plugin's table. The cure is one brick in the sdk, not taken while this
+  milestone's sdk change is one verb.
+- `scripts/tui-smoke.sh` was not run (out of scope by the brief).
+- `crates/bingo-core/src/session.rs`'s `fn handle` warned at 66 lines before
+  this branch and warns at 67 after it: the one-line `Msg::Rewind` arm joined
+  the dispatch table it belongs to rather than splitting somebody else's
+  function.
+- `scripts/budget.sh` warns that `target/debug` is 11 GB, which is this
+  worktree holding a host build, a Windows cross-check and every test binary at
+  once; it is a soft limit and not this change's.
