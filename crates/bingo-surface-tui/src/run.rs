@@ -33,7 +33,7 @@ use crate::graphics::{Cell, Graphics, Picture, Stored, Transport, linked};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
-use crate::{SURFACE_ID, clipboard, commands, history, input, pictures, pointer, viewer};
+use crate::{SURFACE_ID, clipboard, commands, history, input, late, pictures, pointer, viewer};
 
 /// How often a frame is redrawn *while something is moving*: thirty a second
 /// (§6). Nothing moves when nothing is happening, and then there is no tick at
@@ -139,6 +139,9 @@ struct Run {
     /// keep in step (design §5). Empty on every run: a terminal taken afresh
     /// holds nothing this surface put there.
     stored: Stored,
+    /// The ear on the key stream, before any binding: a probe's answer that
+    /// came back after the probe gave up is a reply, not a keystroke (M60).
+    ear: late::Late,
     /// When the last frame was painted, and whether anything has happened
     /// since that has not been.
     painted: Instant,
@@ -185,7 +188,7 @@ pub(crate) async fn drive(
             biased;
             key = keys.next() => {
                 match key {
-                    Some(event) => run.terminal_event(event),
+                    Some(event) => run.heard(event),
                     None => run.exit = Some(Exit { code: 0 }),
                 }
                 Wake::Event
@@ -246,6 +249,7 @@ async fn attach(
         // that happens is drawn.
         painted: older_than_a_frame(),
         stored: Stored::default(),
+        ear: late::Late::default(),
         behind: false,
         sluggish: false,
         exit: None,
@@ -589,6 +593,29 @@ impl Run {
             .and_then(|v| serde_json::from_value::<View>(v.clone()).ok())
         {
             self.ui.block = Some(view);
+        }
+    }
+
+    /// One event off the terminal, once the ear has had it: a reply to a probe
+    /// that gave up is swallowed and settled, and everything else is the
+    /// person's (M60 bricks 1 and 2).
+    fn heard(&mut self, event: Term) {
+        match self.ear.hear(event) {
+            late::Heard::More => {}
+            late::Heard::Keys(events) => {
+                for event in events {
+                    self.terminal_event(event);
+                }
+            }
+            late::Heard::Answer(reply) => self.answered_late(&reply),
+        }
+    }
+
+    /// What a late answer changes: the pictures it turns on for the next
+    /// frame, and the notice it has just made wrong.
+    fn answered_late(&mut self, reply: &[u8]) {
+        if let Some(wrong) = crate::graphics::late(reply) {
+            self.ui.withdraw(wrong);
         }
     }
 
@@ -1673,6 +1700,7 @@ mod tests {
     fn idle_in(state: SessionState, session: std::sync::Arc<TestSession>, at: Instant) -> Run {
         Run {
             stored: Stored::default(),
+            ear: late::Late::default(),
             host: TestHost::with(vec![]).0,
             data_dir: std::path::PathBuf::new(),
             session: Attached::new(state, SessionHandle(session)),

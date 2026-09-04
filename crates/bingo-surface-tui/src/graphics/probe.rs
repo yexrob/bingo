@@ -76,6 +76,28 @@ pub struct Probe {
     pub terminals: Vec<Named>,
 }
 
+impl Probe {
+    /// One answer on top of another: a reply that came in after the read
+    /// ended is still a reply, and what it says joins what the read heard
+    /// ([`crate::late`], M60 brick 2). Nothing is ever unsaid — a terminal
+    /// that answered `OK` does not stop having answered — so merging is
+    /// monotone, and a second late reply that says nothing new changes
+    /// nothing at all.
+    ///
+    /// A name already in the list is not added twice: the same terminal
+    /// answering again is the same terminal.
+    pub fn and(mut self, later: Probe) -> Probe {
+        self.kitty |= later.kitty;
+        self.cell = self.cell.or(later.cell);
+        for named in later.terminals {
+            if !self.terminals.contains(&named) {
+                self.terminals.push(named);
+            }
+        }
+        self
+    }
+}
+
 /// What a terminal calls itself, as XTVERSION spells it: `kitty(0.46.2)` and
 /// `ghostty 1.3.1` are the two shapes in the wild, so both are read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -471,6 +493,44 @@ mod tests {
         assert_eq!(read("1.x.3"), Some([1, 0, 0]));
         assert_eq!(read("20240203-110809-5046fc22"), Some([20240203, 0, 0]));
         assert_eq!(read("v0.2026.06"), None);
+    }
+
+    /// M60 brick 2: a reply that came in after the read ended joins the
+    /// answer that was heard in time, and nothing already said is unsaid.
+    #[test]
+    fn a_late_reply_joins_the_answer_and_takes_nothing_back() {
+        let heard = parse(TMUX_ALONE);
+        let joined = heard
+            .clone()
+            .and(parse(b"\x1b_Gi=31;OK\x1b\\\x1bP>|ghostty 1.3.1\x1b\\"));
+        assert!(joined.kitty, "the late `OK` is an `OK`");
+        assert_eq!(
+            joined.terminals,
+            vec![
+                Named {
+                    name: "tmux".into(),
+                    version: "3.6b".into()
+                },
+                Named {
+                    name: "ghostty".into(),
+                    version: "1.3.1".into()
+                },
+            ]
+        );
+        assert_eq!(
+            joined.cell, None,
+            "and the cell reply leaves no event to hear, so it is never late"
+        );
+        assert_eq!(
+            joined.clone().and(parse(TMUX_ALONE)),
+            joined,
+            "the same name twice is the same terminal once"
+        );
+        assert_eq!(
+            parse(KITTY).and(Probe::default()),
+            parse(KITTY),
+            "and nothing joined to an answer changes nothing"
+        );
     }
 
     /// Brick 4: tmux answers `CSI 16 t` itself (`input.c` `case 16:`), so if
