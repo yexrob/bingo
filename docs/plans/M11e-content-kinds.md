@@ -87,6 +87,11 @@ binary. Nothing from the network, a session or a person's file reaches it.
   only when a `rewind` spec is in the session's catalogue, so today `esc esc` is
   silent.
 
+  **Landed 2026-09-04, M67** (`docs/plans/M67-the-turn-that-can-be-undone.md`,
+  ADR-0045): `bingo-checkpoints` registers `/rewind`, so the chord is live —
+  and the surface did not change for it, which is what brick 8's data-driven
+  offer was for.
+
 ### Observed, not caused
 
 `cargo test --workspace` hung once, in
