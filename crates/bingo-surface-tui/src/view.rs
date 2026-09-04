@@ -575,14 +575,15 @@ fn working(state: &SessionState, ui: &Ui, now: Now) -> Option<Line<'static>> {
         true => (STOPPING, ""),
         false => (verb(&turn.id), "esc to interrupt · "),
     };
-    let mut spans = vec![
-        Span::styled(format!("{} ", sparkle(now)), breathing(state, now)),
-        Span::styled(format!("{verb}{}", theme::ellipsis()), theme::text()),
-        Span::styled(
-            format!(" ({hint}{}s{})", elapsed.as_secs(), spent(turn)),
-            theme::dim(),
-        ),
-    ];
+    let mut spans = vec![Span::styled(
+        format!("{} ", sparkle(now)),
+        breathing(state, now),
+    )];
+    spans.extend(beamed(format!("{verb}{}", theme::ellipsis()), now));
+    spans.push(Span::styled(
+        format!(" ({hint}{}s{})", elapsed.as_secs(), spent(turn)),
+        theme::dim(),
+    ));
     if let Some(retry) = turn.retrying {
         spans.push(Span::styled(
             format!(" retrying {}/{}", retry.attempt, retry.max),
@@ -590,6 +591,29 @@ fn working(state: &SessionState, ui: &Ui, now: Now) -> Option<Line<'static>> {
         ));
     }
     Some(Line::from(spans))
+}
+
+/// How long one light takes to cross the working word and come round again.
+/// Slower than the sparkle's breath, so the two are read as two things.
+const BEAM: std::time::Duration = std::time::Duration::from_millis(2400);
+
+/// bingo's word with one light walking across it while the turn runs (user,
+/// 2026-09-05: the word wanted the beam the border and a landed call have).
+/// The crest wears the glow and the rest of the word is `text`, so a frame
+/// with no motion is the word alone.
+fn beamed(word: String, now: Now) -> Vec<Span<'static>> {
+    if !now.motion {
+        return vec![Span::styled(word, theme::text())];
+    }
+    let t = clock::phase(now, BEAM);
+    let width = word.chars().count();
+    word.chars()
+        .enumerate()
+        .map(|(at, c)| {
+            let lit = clock::sweep(t, at, width);
+            Span::styled(c.to_string(), theme::comet(1.0 - lit))
+        })
+        .collect()
 }
 
 /// What the turn has said so far, in the thousands §6 writes it in — and
@@ -2341,6 +2365,28 @@ mod tests {
             before,
             "the frame beneath is what it was"
         );
+    }
+
+    /// The working word carries one light across itself while the turn runs:
+    /// two frames apart, different cells are lit; with motion off it is the
+    /// word in `text` and nothing else.
+    #[test]
+    fn the_working_word_is_beamed_while_the_turn_runs_and_plain_when_still() {
+        let (_, now) = crate::test_support::scene();
+        let moving = beamed("Rummaging".to_string(), now);
+        assert_eq!(moving.len(), 9, "one span per character");
+        let later = beamed(
+            "Rummaging".to_string(),
+            crate::test_support::later(now, 600),
+        );
+        assert_ne!(
+            moving.iter().map(|s| s.style).collect::<Vec<_>>(),
+            later.iter().map(|s| s.style).collect::<Vec<_>>(),
+            "the light has moved"
+        );
+        let still = beamed("Rummaging".to_string(), crate::test_support::still(now));
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].style, theme::text());
     }
 
     // ---- M48: the strip of thumbnails standing on the box -----------

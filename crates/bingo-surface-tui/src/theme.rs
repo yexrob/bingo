@@ -953,7 +953,7 @@ mod tests {
             // and the light a sent line runs along the box's border — one
             // gradient, wherever §4 sanctions one.
             ("pulse", &["transcript.rs", "view.rs", "views/progress.rs"]),
-            ("comet", &["transcript.rs"]),
+            ("comet", &["transcript.rs", "view.rs"]),
             ("landing", &["transcript.rs"]),
             ("cooling", &["transcript.rs"]),
             ("fading", &["status.rs"]),
