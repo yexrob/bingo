@@ -1,7 +1,6 @@
 //! What the turn leaves behind: a working turn is asked, once, for the facts
 //! worth keeping.
 
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,7 +10,9 @@ use bingo_sdk::{
     Message, ModelRequest, Phase, ProviderMetadata, Role, SystemBlock, TurnId,
 };
 
-use crate::{memory, root, stream, tail, transcript};
+use crate::memory::file::{self, Kind, Memory};
+use crate::memory::{dir, migrate, store};
+use crate::{root, stream, tail, transcript};
 
 const EXTRACT: &str = "\
 You are a memory extractor. Extract project facts worth remembering long-term from the agent \
@@ -34,6 +35,11 @@ const MAX_CHARS: u64 = 60_000;
 /// turn's outcome is returned, so the model gets one bounded chance.
 const DEADLINE: Duration = Duration::from_secs(30);
 
+/// What a fact's description may spend. A fact the extractor found is one
+/// line, so the line is its own description; a long one is cut, and the whole
+/// of it stays in the file.
+const DESCRIPTION_CHARS: usize = 120;
+
 /// Asks the model, at the end of a turn that used a tool, what this project
 /// taught it.
 #[derive(Debug, Clone)]
@@ -51,9 +57,12 @@ impl MemoryHook {
             return;
         };
         let root = root::of(&cx.cwd).await;
-        let path = memory::path(&self.data_dir, &root);
-        if let Err(error) = append(&path, &facts).await {
-            tracing::warn!(%error, path = %path.display(), "memory: nothing was written");
+        migrate::once(&self.data_dir, &root).await;
+        let scope = dir::project(&self.data_dir, &root);
+        for fact in facts.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if let Err(error) = keep(&scope, fact).await {
+                tracing::warn!(%error, path = %scope.display(), "memory: a fact was not written");
+            }
         }
     }
 }
@@ -139,30 +148,41 @@ fn body(items: &[Item]) -> String {
     lines[dropped..].join("\n")
 }
 
-/// The whole file, replaced in one rename: a memory half-written by a turn
-/// that was interrupted is worse than a memory one turn out of date.
-async fn append(path: &Path, facts: &str) -> std::io::Result<()> {
-    let existing = match tokio::fs::read_to_string(path).await {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-    let Some(next) = memory::merged(&existing, facts) else {
+/// One fact as one file, named after its first words. A name the scope
+/// already holds is left alone: whoever wrote that file knew more than a
+/// line, and a lost extraction is the cheap side of the collision.
+async fn keep(scope: &Path, fact: &str) -> std::io::Result<()> {
+    let Some(name) = file::slug(fact) else {
         return Ok(());
     };
-    let Some(dir) = path.parent() else {
+    if store::holds(scope, &name).await {
         return Ok(());
-    };
-    tokio::fs::create_dir_all(dir).await?;
-    let tmp = path.with_extension("md.tmp");
-    tokio::fs::write(&tmp, next).await?;
-    tokio::fs::rename(&tmp, path).await
+    }
+    store::save(scope, &remembered(name, fact)).await
+}
+
+fn remembered(name: String, fact: &str) -> Memory {
+    Memory {
+        name,
+        description: cut(fact, DESCRIPTION_CHARS),
+        kind: Kind::Project,
+        body: format!("{fact}\n"),
+    }
+}
+
+/// The first `chars` characters, and an ellipsis when there were more.
+fn cut(text: &str, chars: usize) -> String {
+    if text.chars().count() <= chars {
+        return text.to_string();
+    }
+    text.chars().take(chars).collect::<String>() + "…"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixtures::{tool, user};
+    use crate::memory::index;
     use crate::scripted::Scripted;
     use bingo_sdk::{Provider, ProviderError, SessionId};
     use std::sync::Arc;
@@ -195,19 +215,21 @@ mod tests {
             }
         }
 
-        fn path(&self) -> PathBuf {
+        fn scope(&self) -> PathBuf {
             let root = self.cwd.path().canonicalize().unwrap_or_default();
-            memory::path(self.data.path(), &root)
+            dir::project(self.data.path(), &root)
         }
 
-        fn memory(&self) -> String {
-            std::fs::read_to_string(self.path()).unwrap_or_default()
+        async fn memories(&self) -> Vec<Memory> {
+            store::list(&self.scope()).await
         }
 
-        fn write(&self, text: &str) {
-            let path = self.path();
-            std::fs::create_dir_all(path.parent().expect("a parent")).expect("the memory dir");
-            std::fs::write(path, text).expect("the memory");
+        async fn index(&self) -> String {
+            store::index_text(&self.scope()).await
+        }
+
+        async fn write(&self, memory: &Memory) {
+            store::save(&self.scope(), memory).await.expect("a memory");
         }
     }
 
@@ -243,11 +265,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_working_turn_leaves_its_facts_behind() {
+    async fn a_working_turn_leaves_one_file_per_fact_and_one_line_each() {
         let session = Session::new();
-        let provider = Arc::new(Scripted::saying("the tests run with cargo test\n"));
+        let provider = Arc::new(Scripted::saying(
+            "the tests run with cargo test\nthe kernel imports no plugin\n",
+        ));
         end(&session, &working_turn(), Some(provider.clone())).await;
-        assert_eq!(session.memory(), "the tests run with cargo test\n");
+
+        let memories = session.memories().await;
+        assert_eq!(
+            memories.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            [
+                "the-kernel-imports-no-plugin",
+                "the-tests-run-with-cargo-test"
+            ]
+        );
+        assert!(memories.iter().all(|m| m.kind == Kind::Project));
+        assert_eq!(memories[1].description, "the tests run with cargo test");
+        assert_eq!(memories[1].body, "the tests run with cargo test\n");
+        assert_eq!(
+            session
+                .index()
+                .await
+                .lines()
+                .filter_map(index::parse)
+                .map(|entry| entry.slug)
+                .collect::<Vec<_>>(),
+            [
+                "the-tests-run-with-cargo-test",
+                "the-kernel-imports-no-plugin"
+            ],
+        );
+
         let request = provider.requests().remove(0);
         assert!(
             request.system[0]
@@ -258,24 +307,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fact_the_file_already_holds_is_not_written_twice() {
+    async fn a_name_the_scope_already_holds_is_left_exactly_as_it_was() {
         let session = Session::new();
-        session.write("the tests run with cargo test\n");
+        let written = Memory {
+            name: "the-tests-run-with-cargo-test".into(),
+            description: "how this project is tested".into(),
+            kind: Kind::Project,
+            body: "run it from the workspace root, always with --locked\n".into(),
+        };
+        session.write(&written).await;
         let provider = Arc::new(Scripted::saying("the tests run with cargo test"));
         end(&session, &working_turn(), Some(provider)).await;
-        assert_eq!(session.memory(), "the tests run with cargo test\n");
+        assert_eq!(session.memories().await, [written]);
+        assert_eq!(session.index().await.lines().count(), 1);
     }
 
     #[tokio::test]
-    async fn the_oldest_facts_are_evicted_past_the_cap() {
+    async fn a_fact_no_file_name_can_be_made_of_is_dropped() {
         let session = Session::new();
-        session.write(&(1..=300).map(|i| format!("fact {i}\n")).collect::<String>());
-        let provider = Arc::new(Scripted::saying("fact 301"));
+        let provider = Arc::new(Scripted::saying("!!! ???\n***"));
         end(&session, &working_turn(), Some(provider)).await;
-        let memory = session.memory();
-        assert_eq!(memory.lines().count(), memory::MAX_LINES);
-        assert_eq!(memory.lines().next(), Some("fact 2"));
-        assert_eq!(memory.lines().last(), Some("fact 301"));
+        assert!(session.memories().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_long_fact_keeps_its_whole_self_in_the_file() {
+        let session = Session::new();
+        let fact = "the build ".repeat(40);
+        let provider = Arc::new(Scripted::saying(&fact));
+        end(&session, &working_turn(), Some(provider)).await;
+        let memories = session.memories().await;
+        assert_eq!(memories[0].body, format!("{}\n", fact.trim()));
+        assert_eq!(
+            memories[0].description.chars().count(),
+            DESCRIPTION_CHARS + 1
+        );
+        assert!(memories[0].description.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn the_old_single_file_is_migrated_before_a_fact_is_added() {
+        let session = Session::new();
+        let root = session.cwd.path().canonicalize().expect("a real path");
+        let old = dir::legacy(session.data.path(), &root);
+        std::fs::create_dir_all(old.parent().expect("a parent")).expect("the memory dir");
+        std::fs::write(&old, "an older fact\n").expect("the old file");
+
+        let provider = Arc::new(Scripted::saying("the tests run with cargo test"));
+        end(&session, &working_turn(), Some(provider)).await;
+        let names: Vec<String> = session
+            .memories()
+            .await
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(names, ["imported", "the-tests-run-with-cargo-test"]);
+        assert!(!old.exists());
     }
 
     #[tokio::test]
@@ -284,25 +371,24 @@ mod tests {
         let provider = Arc::new(Scripted::saying("a fact"));
         end(&session, &[user("u", "hello")], Some(provider.clone())).await;
         assert!(provider.requests().is_empty());
-        assert!(session.memory().is_empty());
+        assert!(session.memories().await.is_empty());
     }
 
     #[tokio::test]
     async fn a_session_without_a_provider_writes_nothing() {
         let session = Session::new();
         end(&session, &working_turn(), None).await;
-        assert!(session.memory().is_empty());
+        assert!(session.memories().await.is_empty());
     }
 
     #[tokio::test]
-    async fn a_provider_that_refuses_leaves_the_file_alone() {
+    async fn a_provider_that_refuses_leaves_the_scope_alone() {
         let session = Session::new();
-        session.write("the tests run with cargo test\n");
         let provider = Arc::new(Scripted::failing(ProviderError::Auth {
             message: "no key".into(),
         }));
         end(&session, &working_turn(), Some(provider)).await;
-        assert_eq!(session.memory(), "the tests run with cargo test\n");
+        assert!(session.memories().await.is_empty());
     }
 
     #[tokio::test]
@@ -310,7 +396,7 @@ mod tests {
         let session = Session::new();
         let provider = Arc::new(Scripted::saying("  \n "));
         end(&session, &working_turn(), Some(provider)).await;
-        assert!(session.memory().is_empty());
+        assert!(session.memories().await.is_empty());
     }
 
     #[tokio::test]

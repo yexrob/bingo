@@ -58,7 +58,12 @@ async fn block(path: &Path) -> Option<ContextPiece> {
         return None;
     }
     let heading = format!("# Instructions from {}", path.display());
-    Some(ContextPiece::System(files::block(&heading, &text, true)))
+    Some(ContextPiece::System(files::block(
+        &heading,
+        &text,
+        true,
+        files::MAX_LINES,
+    )))
 }
 
 #[async_trait]

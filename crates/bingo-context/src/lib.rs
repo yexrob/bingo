@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ConfigClaim, ContextContributor, Contribution, Hook, Merge, Plugin, PluginError,
+    Command, ConfigClaim, ContextContributor, Contribution, Hook, Merge, Plugin, PluginError,
     PluginManifest, Registrar,
 };
 use schemars::JsonSchema;
@@ -41,7 +41,7 @@ use serde::Deserialize;
 pub use compact::SummaryCompactor;
 pub use hook::MemoryHook;
 pub use instructions::InstructionsContributor;
-pub use memory::MemoryContributor;
+pub use memory::{MemoryCommand, MemoryContributor};
 
 static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.context",
@@ -51,6 +51,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "compactor:summary",
         "context:instructions",
         "context:memory",
+        "command:memory",
     ],
     requires: &[],
     config: Some(ConfigClaim {
@@ -92,8 +93,8 @@ fn on() -> bool {
     true
 }
 
-/// Registers the summary compactor, the instruction files, the project memory
-/// and the hook that writes to it.
+/// Registers the summary compactor, the instruction files, the two memory
+/// scopes, the command that lists them and the hook that writes to them.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ContextPlugin;
 
@@ -113,6 +114,9 @@ impl Plugin for ContextPlugin {
         ));
         registrar.add(Contribution::Context(
             Arc::new(MemoryContributor::new(data_dir.clone())) as Arc<dyn ContextContributor>,
+        ));
+        registrar.add(Contribution::Command(
+            Arc::new(MemoryCommand::new(data_dir.clone())) as Arc<dyn Command>,
         ));
         if settings.context.memory {
             registrar.add(Contribution::Hook(
@@ -143,7 +147,8 @@ mod tests {
             [
                 "compactor:summary",
                 "context:instructions",
-                "context:memory"
+                "context:memory",
+                "command:memory"
             ]
         );
         let claim = MANIFEST.config.expect("a config claim");
@@ -166,19 +171,20 @@ mod tests {
     }
 
     #[test]
-    fn the_plugin_registers_a_compactor_two_contributors_and_the_hook() {
+    fn the_plugin_registers_a_compactor_two_contributors_the_command_and_the_hook() {
         let contributions = contributions(json!({}));
-        assert_eq!(contributions.len(), 4);
+        assert_eq!(contributions.len(), 5);
         assert!(matches!(contributions[0], Contribution::Compactor(_)));
         assert!(matches!(contributions[1], Contribution::Context(_)));
         assert!(matches!(contributions[2], Contribution::Context(_)));
-        assert!(matches!(contributions[3], Contribution::Hook(_)));
+        assert!(matches!(contributions[3], Contribution::Command(_)));
+        assert!(matches!(contributions[4], Contribution::Hook(_)));
     }
 
     #[test]
     fn memory_turned_off_registers_no_hook_and_still_contributes() {
         let contributions = contributions(json!({ "context": { "memory": false } }));
-        assert_eq!(contributions.len(), 3);
+        assert_eq!(contributions.len(), 4);
         assert!(
             !contributions
                 .iter()

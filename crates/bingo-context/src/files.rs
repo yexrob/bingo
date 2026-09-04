@@ -5,7 +5,8 @@ use bingo_sdk::SystemBlock;
 use crate::tail;
 
 /// Lines a contributed file may spend. Past this it is a document, and the
-/// newest lines of a document are the ones still true.
+/// newest lines of a document are the ones still true. What a caller spends
+/// is the caller's: an index is not a file, and says so with a smaller cap.
 pub const MAX_LINES: usize = 300;
 
 /// Bytes a contributed file may spend, for a file whose lines are long.
@@ -25,8 +26,8 @@ pub fn capped(text: &str, max_lines: usize, max_bytes: usize) -> (String, usize)
 }
 
 /// One file as a system block: what it is, what was left out, and the rest.
-pub fn block(heading: &str, text: &str, cache: bool) -> SystemBlock {
-    let (kept, dropped) = capped(text, MAX_LINES, MAX_BYTES);
+pub fn block(heading: &str, text: &str, cache: bool, max_lines: usize) -> SystemBlock {
+    let (kept, dropped) = capped(text, max_lines, MAX_BYTES);
     let mut body = String::new();
     if dropped > 0 {
         body.push_str(&omitted(dropped));
@@ -82,7 +83,7 @@ mod tests {
 
     #[test]
     fn a_block_says_how_many_lines_it_left_out() {
-        let block = block("# Project memory", &numbered(400), false);
+        let block = block("# Project memory", &numbered(400), false, MAX_LINES);
         assert!(
             block
                 .text
@@ -93,7 +94,12 @@ mod tests {
 
     #[test]
     fn a_block_that_left_nothing_out_says_nothing() {
-        let block = block("# Instructions from /a/AGENTS.md", "be brief\n", true);
+        let block = block(
+            "# Instructions from /a/AGENTS.md",
+            "be brief\n",
+            true,
+            MAX_LINES,
+        );
         assert_eq!(block.text, "# Instructions from /a/AGENTS.md\n\nbe brief\n");
         assert!(block.cache);
     }
