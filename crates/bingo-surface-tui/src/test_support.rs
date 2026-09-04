@@ -654,6 +654,25 @@ pub fn plugin_view(plugin: &str, value: Value) -> Event {
     }
 }
 
+/// What the schedules plugin publishes for a session that has a wake
+/// standing on it (ADR-0019 §8): when it comes, and what it will say.
+pub fn pending_wake(at: &str) -> Event {
+    Event::Extension {
+        plugin: "bingo.schedule".into(),
+        kind: "wake".into(),
+        payload: json!({ "at": at, "note": "look at the build again" }),
+    }
+}
+
+/// The same kind, taken back: what a wake that fired or was ended leaves.
+pub fn wake_taken_back() -> Event {
+    Event::Extension {
+        plugin: "bingo.schedule".into(),
+        kind: "wake".into(),
+        payload: Value::Null,
+    }
+}
+
 /// What the permission policy publishes for a session: the mode, the list
 /// it may be cycled through, the rules it accepted.
 pub fn permission_view(mode: &str) -> Event {

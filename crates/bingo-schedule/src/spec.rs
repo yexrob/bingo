@@ -102,28 +102,37 @@ impl FromStr for Spec {
     }
 }
 
-/// `every 45s`, `every 30m`, `every 2h`. Days are not a unit here: a day is
-/// a civil thing that DST makes longer or shorter, and `daily at` is where
-/// that belongs.
+/// `every 45s`, `every 30m`, `every 2h`.
 fn every(rest: &str) -> Result<Spec, SpecError> {
+    duration(rest).map(Spec::Every).map_err(SpecError::new)
+}
+
+/// A written length of time: `45s`, `30m`, `2h`. Days are not a unit here: a
+/// day is a civil thing that DST makes longer or shorter, and `daily at` is
+/// where that belongs.
+///
+/// `every` and a wake's `after` are the same words, so they are one parse.
+/// The reason comes back bare: each caller says what it was reading.
+pub fn duration(written: &str) -> Result<SignedDuration, String> {
+    let rest = written.trim();
     let digits = rest.chars().take_while(char::is_ascii_digit).count();
     let (count, unit) = rest.split_at(digits);
     let seconds = match unit.trim() {
         "s" => 1,
         "m" => 60,
         "h" => 3600,
-        other => return Err(SpecError::new(format!("`{other}` is not a unit of time"))),
+        other => return Err(format!("`{other}` is not a unit of time")),
     };
     let count: i64 = count
         .parse()
-        .map_err(|_| SpecError::new(format!("`{rest}` has no count")))?;
+        .map_err(|_| format!("`{rest}` has no count"))?;
     if count < 1 {
-        return Err(SpecError::new("an interval of nothing never comes round"));
+        return Err("an interval of nothing never comes round".to_string());
     }
     let total = count
         .checked_mul(seconds)
-        .ok_or_else(|| SpecError::new(format!("`{rest}` is longer than a clock can hold")))?;
-    Ok(Spec::Every(SignedDuration::from_secs(total)))
+        .ok_or_else(|| format!("`{rest}` is longer than a clock can hold"))?;
+    Ok(SignedDuration::from_secs(total))
 }
 
 /// `daily at 09:00`, in the zone the machine is in when it fires.
@@ -268,6 +277,22 @@ mod tests {
         let error = "every 2d".parse::<Spec>().expect_err("no days").to_string();
         assert!(error.contains("`d` is not a unit of time"), "{error}");
         assert!(error.contains("daily at"), "{error}");
+    }
+
+    /// The one parse `every` and a wake's `after` share, read bare.
+    #[test]
+    fn a_written_length_of_time_is_the_seconds_it_names() {
+        for (written, seconds) in [("45s", 45), ("30m", 1800), ("2h", 7200), (" 1h ", 3600)] {
+            assert_eq!(duration(written), Ok(SignedDuration::from_secs(seconds)));
+        }
+        for wrong in ["", "5", "2d", "0s", "-1m", "many hours"] {
+            assert!(duration(wrong).is_err(), "{wrong}");
+        }
+        assert_eq!(
+            duration("2d"),
+            Err("`d` is not a unit of time".to_string()),
+            "the reason is bare: the caller says what it was reading"
+        );
     }
 
     #[test]

@@ -69,6 +69,8 @@ impl Create {
                 .map_err(|e: crate::SpecError| e.to_string())?,
             text,
             cwd: self.cwd.unwrap_or_else(|| cwd.to_path_buf()),
+            // A schedule of a person's own fires on a session of its own.
+            session: None,
             permission_mode: self.permission_mode,
             enabled: true,
             created: now,

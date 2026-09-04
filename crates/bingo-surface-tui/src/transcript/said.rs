@@ -11,7 +11,7 @@ use bingo_sdk::{ContentPart, Driver, Item, Origin};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{OUTPUT_ROWS, Rows, bullet_style, kept, plain, returns, speaks, speaks_indent, under};
+use super::{OUTPUT_ROWS, Rows, bullet_style, kept, plain, returns, speaks, under};
 use crate::fold::Fold;
 use crate::skill;
 use crate::{commands, seats, theme};
@@ -53,6 +53,15 @@ pub(super) const ROOMS: &str = "room";
 /// §4).
 const ROOMS_READING: &str = "contributor:rooms";
 
+/// The wake a model set itself (ADR-0019 §8). Deliberately outside
+/// [`QUIET_SURFACES`]: a scheduled turn is the machinery reporting in, and
+/// this is the model's own words to itself, written in a turn a person
+/// watched and read in the turn that follows. It is a line somebody said, so
+/// it is drawn as one — on the same bar, under the word `wake` where the `>`
+/// would be, because the one thing a person must not have to guess is which
+/// of those two lines they wrote.
+pub(super) const WAKE: &str = "wake";
+
 /// Whether a delivery is the machinery reporting in. The composer's pending
 /// area asks the same question of what is still queued (ADR-0028), so the set
 /// stays one list read from two places rather than two lists to keep in step.
@@ -89,7 +98,7 @@ pub fn lines(
     }
     match quiet(origin) {
         true => notice(item, parts, origin, fold, rows),
-        false => user(parts, origin.principal.as_deref(), rows),
+        false => user(parts, origin, rows),
     }
 }
 
@@ -226,7 +235,10 @@ fn headline(head: &str, principal: Option<&str>, conversation: Option<&str>) -> 
 /// names a principal is somebody else speaking — a channel's correspondent, a
 /// person writing from elsewhere — so the line says who, as a chat does. Where
 /// they said it is the view one is looking at; saying it again would be noise.
-fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+///
+/// A wake is on the bar too and wears its own word instead of the `>`: it
+/// opened this turn the way typing does, and it is not what anybody typed.
+fn user(parts: &[ContentPart], origin: &Origin, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let text = said(parts);
     if text.trim().is_empty() {
         return Vec::new();
@@ -235,7 +247,7 @@ fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<
         .lines()
         .map(|line| Line::from(Span::styled(line.to_string(), theme::text())))
         .collect();
-    if let Some(name) = principal
+    if let Some(name) = origin.principal.as_deref()
         && let Some(first) = body.first_mut()
     {
         first.spans.insert(
@@ -243,17 +255,26 @@ fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<
             Span::styled(format!("{name}: "), theme::text().patch(theme::bold())),
         );
     }
-    let mark = Span::styled(format!("{} ", theme::user()), theme::dim());
-    barred(
-        under(mark, body, speaks_indent(), rows.measure()),
-        rows.width,
-    )
+    let mark = mark(origin);
+    let indent = mark.content.width();
+    barred(under(mark, body, indent, rows.measure()), rows.width)
 }
 
 /// Every row of a block on the raised bar. A shell line the person ran is on
 /// the same bar for the same reason ([`super::ran`]): it is theirs.
 pub(super) fn barred(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     lines.into_iter().map(|line| bar(line, width)).collect()
+}
+
+/// What stands in the gutter of a line on the bar: the theme's own `>` for
+/// what a person typed, the word `wake` for the note a turn left itself. Its
+/// width is the indent every line under it takes, so the two forms wrap alike.
+fn mark(origin: &Origin) -> Span<'static> {
+    let word = match origin.surface == WAKE {
+        true => WAKE,
+        false => theme::user(),
+    };
+    Span::styled(format!("{word} "), theme::dim())
 }
 
 /// The raised bar behind a `>` line: it runs to the edge of the transcript,
@@ -277,6 +298,15 @@ mod tests {
             principal: None,
             conversation: Some("#design".into()),
         }
+    }
+
+    /// The gutter tells the two lines on the bar apart, in both glyph tables:
+    /// what a person typed, and what a turn left for the next one.
+    #[test]
+    fn a_wake_wears_its_own_word_where_the_person_s_mark_would_be() {
+        assert_eq!(mark(&from(WAKE)).content, "wake ");
+        assert_eq!(mark(&from("tui")).content, "> ");
+        assert!(!quiet(&from(WAKE)), "a wake is read, not reported");
     }
 
     /// The two origins a room writes into a member, and the neighbours each of

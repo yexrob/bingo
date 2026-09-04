@@ -1,14 +1,16 @@
-//! The three tools over the store (ADR-0019 §6), and what they share: the
+//! The tools over the store (ADR-0019 §6, §8), and what they share: the
 //! id prefix every one of them accepts, and the errors a model reads and
 //! acts on rather than a call that failed.
 
 mod create;
 mod forget;
 mod list;
+mod wake;
 
 pub use create::ScheduleCreateTool;
 pub use forget::ScheduleForgetTool;
 pub use list::ScheduleListTool;
+pub use wake::WakeTool;
 
 use bingo_sdk::ToolError;
 
