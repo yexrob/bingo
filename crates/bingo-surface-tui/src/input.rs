@@ -1887,6 +1887,24 @@ mod tests {
 
     // ---- one list, two doors --------------------------------------------
 
+    /// `↓` means two things and a query changes neither: on an empty composer
+    /// it opens the list, and inside it it walks — the rows the query left.
+    #[test]
+    fn down_opens_the_list_and_then_walks_what_the_query_left() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        // `o` is in `project` and in `scout` and in neither's way.
+        typing(&mut ui, &tree, "o", now);
+        assert_eq!(selected(&ui), at(0), "the root is still the row in view");
+        assert_eq!(
+            walked_to(&mut ui, &tree, key(KeyCode::Down), now),
+            Some(agent_id(3)),
+            "and the step goes to the next row the query left, not the tree's"
+        );
+        assert_eq!(selected(&ui), at(1));
+    }
+
     /// `↓` on an empty composer opens the same list `ctrl+g` does, and asks
     /// the store the same question: they are one gesture with two keys, so
     /// what they leave behind is one state.
