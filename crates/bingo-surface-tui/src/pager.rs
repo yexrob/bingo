@@ -102,6 +102,7 @@ pub fn lines(item: &Item, width: usize) -> Vec<Line<'static>> {
             output: Some(output),
             ..
         } => transcript::whole(output, width),
+        ItemBody::Shell { output, exit, .. } => transcript::shell_whole(output, *exit),
         _ => Vec::new(),
     };
     wrap::wrap_all(&body, width)
@@ -134,6 +135,7 @@ pub fn title(item: &Item) -> String {
         ItemBody::ToolCall { name, input, .. } => {
             format!("{name}({})", transcript::summarize(input))
         }
+        ItemBody::Shell { command, .. } => format!("$ {command}"),
         _ => String::new(),
     }
 }

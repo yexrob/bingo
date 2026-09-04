@@ -268,6 +268,12 @@ impl Renderer {
                 duration_ms,
                 ..
             } => self.tool_done(item, name, output.as_ref(), *duration_ms, err)?,
+            ItemBody::Shell {
+                command,
+                output,
+                exit,
+                ..
+            } => self.shell(command, output, *exit, err)?,
             ItemBody::Notice { code, text, .. } => {
                 self.diagnostic(&format!("[notice] {code} {text}"), err)?;
             }
@@ -308,6 +314,27 @@ impl Renderer {
             }
         }
         Ok(())
+    }
+
+    /// A shell line the person ran themselves (M65): the line under the prompt
+    /// it was typed at, what it wrote indented under that, and the code when
+    /// it was not a clean exit. It goes where a tool call's report goes —
+    /// stdout is the model's answer, and nobody asked the model for this.
+    fn shell(
+        &mut self,
+        command: &str,
+        output: &str,
+        exit: Option<i32>,
+        err: &mut (impl Write + ?Sized),
+    ) -> io::Result<()> {
+        self.diagnostic(&format!("$ {command}"), err)?;
+        for line in output.trim_end().lines() {
+            self.diagnostic(&format!("  {line}"), err)?;
+        }
+        match exit.filter(|code| *code != 0) {
+            Some(code) => self.diagnostic(&format!("[exit {code}]"), err),
+            None => Ok(()),
+        }
     }
 
     /// The one error line, in both modes, for a turn that failed.
@@ -518,6 +545,37 @@ pub(crate) mod tests {
             ),
         ];
         assert_eq!(play(Mode::Text, &frames).out(), "silent\n");
+    }
+
+    /// A shell line the person ran is not the model's answer, so it reports
+    /// beside one: the line, what it wrote indented under it, and the code
+    /// only when it was not a clean exit (M65).
+    #[test]
+    fn a_shell_line_reports_beside_the_answer_and_never_in_it() {
+        let frames = vec![
+            frame(
+                1,
+                Event::ItemCompleted {
+                    item: crate::tests::shell("itm_1", "echo hi", "hi\n", Some(0)),
+                },
+            ),
+            frame(
+                2,
+                Event::ItemCompleted {
+                    item: crate::tests::shell("itm_2", "cat missing", "no such file\n", Some(1)),
+                },
+            ),
+        ];
+        let sinks = play(Mode::Text, &frames);
+        assert_eq!(
+            sinks.out(),
+            "",
+            "stdout carries the answer and nothing else"
+        );
+        assert_eq!(
+            sinks.err(),
+            "$ echo hi\n  hi\n$ cat missing\n  no such file\n[exit 1]\n"
+        );
     }
 
     #[test]

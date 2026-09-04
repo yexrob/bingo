@@ -29,9 +29,12 @@ mod said;
 mod output;
 /// The picture under the words, where the terminal draws one (§5).
 mod pictured;
+/// A shell line the person ran themselves (`!<command>`).
+mod ran;
 
 pub use output::whole;
 use output::{folded, kept, plain, tail};
+pub use ran::whole as shell_whole;
 
 pub(crate) use said::quiet;
 
@@ -283,19 +286,17 @@ fn item_lines(
         }
         .into(),
         ItemBody::ToolCall { .. } => called(item, agents, fold, rows, cue).into(),
+        ItemBody::Shell {
+            command,
+            output,
+            exit,
+            ..
+        } => ran::lines(command, output, *exit, fold, rows).into(),
         ItemBody::Action { name, args, result } => {
             action(item.status, name, args, result.as_ref(), fold, rows, cue).into()
         }
-        ItemBody::Compaction { before, after, .. } => vec![rule(
-            &format!("context compacted ({before} → {after} tokens)"),
-            rows.width,
-        )]
-        .into(),
-        ItemBody::Rewind { dropped, .. } => vec![rule(
-            &format!("rewound, {dropped} items dropped"),
-            rows.width,
-        )]
-        .into(),
+        ItemBody::Compaction { before, after, .. } => compacted(*before, *after, rows).into(),
+        ItemBody::Rewind { dropped, .. } => rewound(*dropped, rows).into(),
         ItemBody::Interruption { marker } => {
             vec![Line::from(Span::styled(marker.clone(), theme::dim()))].into()
         }
@@ -317,6 +318,22 @@ fn item_lines(
         ))]
         .into(),
     }
+}
+
+/// The seam a compaction left, across the width of the transcript.
+fn compacted(before: u64, after: u64, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    vec![rule(
+        &format!("context compacted ({before} → {after} tokens)"),
+        rows.width,
+    )]
+}
+
+/// The seam a rewind left.
+fn rewound(dropped: u32, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    vec![rule(
+        &format!("rewound, {dropped} items dropped"),
+        rows.width,
+    )]
 }
 
 /// A call that started a session is that session's row; every other call is

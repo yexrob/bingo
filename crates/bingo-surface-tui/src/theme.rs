@@ -848,6 +848,8 @@ mod tests {
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
+                    // The line of a shell command a person ran themselves.
+                    "transcript/ran.rs",
                     // What was said into a session, and who by: the name a
                     // post carries and the words after it.
                     "transcript/said.rs",
@@ -892,6 +894,8 @@ mod tests {
                     // The chip that names a picture a terminal cannot draw
                     // (§5's image row).
                     "transcript/pictured.rs",
+                    // The `$` a shell line the person ran is written under.
+                    "transcript/ran.rs",
                     "transcript/said.rs",
                     "tree.rs",
                     "view.rs",
@@ -939,7 +943,10 @@ mod tests {
             ),
             ("glow", &[]),
             ("good", &["transcript.rs", "tree.rs", "views/badge.rs"]),
-            ("bad", &["transcript.rs", "views/badge.rs"]),
+            (
+                "bad",
+                &["transcript.rs", "transcript/ran.rs", "views/badge.rs"],
+            ),
             ("mode", &["status.rs"]),
             ("breath", &["view.rs"]),
             // The ramp `presence` → glow: a live bullet, the fill of a bar,

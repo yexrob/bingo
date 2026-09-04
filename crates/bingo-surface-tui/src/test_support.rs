@@ -334,6 +334,24 @@ pub fn post(id: &str, principal: &str, text: &str) -> Item {
     )
 }
 
+/// A shell line the person ran themselves (`!<command>`, M65): outside every
+/// turn, as the kernel journals one.
+pub fn shell(id: &str, command: &str, output: &str, exit: Option<i32>) -> Item {
+    Item {
+        turn: None,
+        ..item(
+            id,
+            ItemStatus::Completed,
+            ItemBody::Shell {
+                command: command.into(),
+                output: output.into(),
+                exit,
+                cwd: "/tmp/p".into(),
+            },
+        )
+    }
+}
+
 pub fn assistant(id: &str, text: &str, status: ItemStatus) -> Item {
     item(id, status, ItemBody::Assistant { text: text.into() })
 }

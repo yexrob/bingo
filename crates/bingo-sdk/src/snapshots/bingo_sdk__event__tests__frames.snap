@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-sdk/src/event.rs
-assertion_line: 1212
 expression: frames
 ---
 [
@@ -524,6 +523,28 @@ expression: frames
         "kind": "client",
         "name": "tui-1",
         "surface": "tui"
+      }
+    }
+  },
+  {
+    "seq": 29,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "itemCompleted",
+      "item": {
+        "id": "itm_5",
+        "round": 0,
+        "status": "completed",
+        "startedAt": "2023-11-14T22:13:20Z",
+        "completedAt": "2023-11-14T22:13:20Z",
+        "body": {
+          "kind": "shell",
+          "command": "git status --short",
+          "output": " M src/lib.rs\n",
+          "exit": 0,
+          "cwd": "/tmp/p"
+        }
       }
     }
   }

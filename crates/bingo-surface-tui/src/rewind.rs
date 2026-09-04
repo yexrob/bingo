@@ -227,6 +227,33 @@ mod tests {
         assert_eq!(turns(&state)[0].label(), "/guide the wire format");
     }
 
+    /// A shell line runs beside a turn without opening one, so the row a
+    /// rewind offers is still the prose that opened it (M65). A `!` in the
+    /// middle of a turn is not the prompt the model answered.
+    #[test]
+    fn a_shell_line_is_not_the_prompt_a_turn_answered() {
+        let mut state = state();
+        state.items = vec![
+            in_turn("itm_1", "trn_1", user("itm_1", "why is the build red?")),
+            in_turn(
+                "itm_2",
+                "trn_1",
+                shell("itm_2", "cargo build", "error[E0004]\n", Some(101)),
+            ),
+        ];
+        let turns = turns(&state);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].label(), "why is the build red?");
+    }
+
+    /// One outside every turn is not a turn at all: nothing to go back to.
+    #[test]
+    fn a_shell_line_between_turns_opens_no_row_of_its_own() {
+        let mut state = state();
+        state.items = vec![shell("itm_1", "ls", "a\nb\n", Some(0))];
+        assert!(turns(&state).is_empty());
+    }
+
     #[test]
     fn a_turn_nobody_opened_by_typing_is_named_by_its_own_id() {
         let mut state = state();

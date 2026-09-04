@@ -469,3 +469,59 @@ async fn session_and_journal_hooks_observe_without_delaying_anything() {
     );
     assert!(closed > durable[durable.len() - 1]);
 }
+
+/// A shell line runs a program on this machine with no gate in front of it,
+/// so the person the session works for is the only one who may write one
+/// (M65). An agent's post that starts with `!` is refused, and the command
+/// behind it is never asked to run.
+#[tokio::test]
+async fn a_shell_line_from_anyone_but_the_person_is_refused() {
+    let provider = ScriptedProvider::new(vec![]);
+    let shell = ScriptedCommand::new(
+        "!",
+        true,
+        Ok(CommandOutcome::Applied {
+            message: Some("ran".into()),
+        }),
+    );
+    let mailbox = with_commands(provider, vec![shell.clone()]);
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    let intent = IntentId::mint();
+    mailbox.submit(intent.clone(), peer("!rm -rf /", "scout"));
+    let frames = collect(
+        &mut events,
+        &mut state,
+        |f| matches!(&f.event, Event::IntentAck { intent: i, .. } if i == &intent),
+    )
+    .await;
+    let Some(IntentOutcome::Rejected { error }) = ack_of(&frames, &intent) else {
+        panic!("a signed shell line is refused: {frames:?}");
+    };
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    assert!(shell.calls().is_empty(), "nothing ran");
+}
+
+/// The shell a bang line runs in is a plugin's; a host without it has none,
+/// and the refusal says that rather than calling the line a typo.
+#[tokio::test]
+async fn a_shell_line_with_no_shell_registered_says_so() {
+    let provider = ScriptedProvider::new(vec![]);
+    let mailbox = with_commands(provider, vec![]);
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    let intent = IntentId::mint();
+    mailbox.submit(
+        intent.clone(),
+        Input::text("!echo hi", Origin::surface("test")),
+    );
+    let frames = collect(
+        &mut events,
+        &mut state,
+        |f| matches!(&f.event, Event::IntentAck { intent: i, .. } if i == &intent),
+    )
+    .await;
+    let Some(IntentOutcome::Rejected { error }) = ack_of(&frames, &intent) else {
+        panic!("a shell line with no shell is refused: {frames:?}");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert!(error.message.contains("shell"), "{}", error.message);
+}

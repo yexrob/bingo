@@ -30,6 +30,12 @@ fn line(item: &Item) -> Option<String> {
             output,
             ..
         } => Some(call(name, input, output.as_ref())),
+        ItemBody::Shell {
+            command,
+            output,
+            exit,
+            ..
+        } => Some(shell(command, output, *exit)),
         ItemBody::Compaction { summary, .. } => labelled("earlier summary", summary),
         _ => None,
     }
@@ -52,6 +58,20 @@ fn call(name: &str, input: &Value, output: Option<&ToolOutput>) -> String {
             format!("{head}\n{label}: {body}")
         }
     }
+}
+
+/// A shell line the person ran themselves, and what it wrote. Nothing asked
+/// for it, so it is labelled by the prompt it was typed at rather than by a
+/// caller; the code comes with the result when it was not a clean exit.
+fn shell(command: &str, output: &str, exit: Option<i32>) -> String {
+    let mut result = one_line(output.trim_end(), RESULT_CHARS);
+    if let Some(code) = exit.filter(|code| *code != 0) {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(&format!("[exit {code}]"));
+    }
+    format!("shell $ {command}\nresult: {result}")
 }
 
 fn text_of(parts: &[ContentPart]) -> String {
@@ -128,6 +148,35 @@ mod tests {
             lines(&[call])
                 .concat()
                 .ends_with("[the call did not complete]")
+        );
+    }
+
+    /// A line the person ran themselves reads back as what they typed and
+    /// what came of it (M65).
+    #[test]
+    fn a_shell_line_renders_as_the_prompt_and_its_output() {
+        let ran = |command: &str, output: &str, exit| {
+            at(
+                "s",
+                ItemBody::Shell {
+                    command: command.into(),
+                    output: output.into(),
+                    exit,
+                    cwd: "/tmp/p".into(),
+                },
+            )
+        };
+        assert_eq!(
+            lines(&[
+                ran("echo hi", "hi\n", Some(0)),
+                ran("false", "", Some(1)),
+                ran("cat a b", "a\nno such file\n", Some(1)),
+            ]),
+            [
+                "shell $ echo hi\nresult: hi",
+                "shell $ false\nresult: [exit 1]",
+                "shell $ cat a b\nresult: a no such file [exit 1]",
+            ]
         );
     }
 

@@ -733,6 +733,24 @@ pub(crate) mod tests {
         )
     }
 
+    /// A shell line the person ran themselves (M65): outside every turn, as
+    /// the kernel journals one.
+    pub(crate) fn shell(id: &str, command: &str, output: &str, exit: Option<i32>) -> Item {
+        Item {
+            turn: None,
+            ..item(
+                id,
+                ItemStatus::Completed,
+                ItemBody::Shell {
+                    command: command.into(),
+                    output: output.into(),
+                    exit,
+                    cwd: "/tmp/p".into(),
+                },
+            )
+        }
+    }
+
     pub(crate) fn permission(session_scope: Option<&str>) -> Interaction {
         Interaction {
             id: InteractionId::from_raw("int_1"),

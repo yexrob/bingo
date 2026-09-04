@@ -137,6 +137,12 @@ impl Folder {
             ItemBody::QuestionAnswer {
                 question, answer, ..
             } => self.note(format!("Q: {question}\nA: {answer}")),
+            ItemBody::Shell {
+                command,
+                output,
+                exit,
+                ..
+            } => self.note(shell_note(command, output, *exit)),
             ItemBody::Action {
                 name,
                 args,
@@ -316,7 +322,7 @@ fn kernel_speaks_through(surface: &str) -> bool {
 /// kernel does not speak through. A door that is not the person has to sign
 /// what it sends — a principal, a conversation, or both — because the fold has
 /// nothing else to tell it apart by.
-fn the_persons_own(origin: &Origin) -> bool {
+pub(crate) fn the_persons_own(origin: &Origin) -> bool {
     speaker(origin).is_none() && !kernel_speaks_through(&origin.surface)
 }
 
@@ -1042,6 +1048,34 @@ mod tests {
         assert_eq!(
             messages[0].parts[0].as_text(),
             Some("[!] ls\na\nb\n[exit 1]")
+        );
+    }
+
+    /// A shell line the person ran reaches the model as their own note: the
+    /// line under a prompt, what it wrote in a fence, and the code only when
+    /// it was not a clean exit (M65).
+    #[test]
+    fn a_shell_line_reaches_the_model_as_the_line_and_its_output() {
+        let shell = |command: &str, output: &str, exit| ItemBody::Shell {
+            command: command.into(),
+            output: output.into(),
+            exit,
+            cwd: "/tmp/p".into(),
+        };
+        let messages = ContextView::fold_items(&[
+            item("s1", shell("echo hi", "hi\n", Some(0))),
+            item("s2", shell("false", "", Some(1))),
+            item("s3", shell("tail -f log", "one\n[interrupted]", None)),
+        ]);
+        assert_eq!(messages.len(), 1, "one user message carries all three");
+        let texts: Vec<Option<&str>> = messages[0].parts.iter().map(|p| p.as_text()).collect();
+        assert_eq!(
+            texts,
+            [
+                Some("$ echo hi\n```\nhi\n```"),
+                Some("$ false\n[exit 1]"),
+                Some("$ tail -f log\n```\none\n[interrupted]\n```"),
+            ]
         );
     }
 }

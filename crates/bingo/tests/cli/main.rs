@@ -681,6 +681,7 @@ mod provider_add;
 mod rooms;
 mod schedule;
 mod sessions;
+mod shell;
 mod skills;
 mod stream_json;
 mod tasks;

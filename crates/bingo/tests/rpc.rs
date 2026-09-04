@@ -443,8 +443,9 @@ async fn delete_removes_the_session_from_disk_and_shutdown_exits_zero() {
     assert!(server.child.wait().await.unwrap().success());
 }
 
-/// A shell line is an action in the transcript; `/permission` changes what the
-/// gate does for this session; both are commands the kernel dispatches (ADR-0008).
+/// A shell line is one shell item in the transcript, carrying the code it came
+/// to and where it ran (M65); `/permission` changes what the gate does for this
+/// session; both are commands the kernel dispatches (ADR-0008).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_shell_line_and_a_permission_mode_dispatch_as_commands() {
     let mut server = Server::spawn(
@@ -473,8 +474,11 @@ async fn a_shell_line_and_a_permission_mode_dispatch_as_commands() {
     assert!(
         matches!(
             &recorded.body,
-            bingo_sdk::ItemBody::Action { name, args, result: Some(out) }
-                if name == "!" && args == "echo hi over the wire" && out == "hi over the wire\n"
+            bingo_sdk::ItemBody::Shell { command, output, exit, cwd }
+                if command == "echo hi over the wire"
+                    && output == "hi over the wire\n"
+                    && *exit == Some(0)
+                    && *cwd == server.cwd()
         ),
         "{recorded:?}"
     );

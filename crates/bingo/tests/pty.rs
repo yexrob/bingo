@@ -348,6 +348,29 @@ fn leaving_prints_the_last_screenful_into_the_shells_own_screen() {
     );
 }
 
+/// A `!` line runs in the shell there and then and its output lands in the
+/// conversation, with no model turn spent on it (M65). The item is journaled
+/// whole, so the line and what it wrote reach the screen together.
+#[test]
+fn a_bang_line_runs_the_shell_and_leaves_its_output_in_the_transcript() {
+    let mut terminal = Terminal::open(&[]);
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"!echo landed\r");
+    terminal.wait_for("$ echo landed");
+    let screen = terminal.screen();
+    assert_eq!(
+        screen.matches("landed").count(),
+        2,
+        "the line, and under it what it wrote:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Hello from the pty."),
+        "the model was never asked:\n{screen}"
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
 #[test]
 fn no_print_on_exit_leaves_the_shell_as_it_was() {
     let shell = one_turn_then_leave(&["--no-print-on-exit"]);

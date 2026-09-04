@@ -30,13 +30,23 @@ impl Actor {
     }
 
     /// A command line: run now if instant, else behind whatever is running.
+    /// A shell line is the person's own and nobody else's ([`commands`]).
     async fn submit_command(&mut self, intent: IntentId, input: Input, parsed: commands::Parsed) {
+        if commands::is_shell(&parsed.name) && !commands::may_run_shell(&input) {
+            return self
+                .reject(
+                    intent,
+                    ErrorCode::PermissionDenied,
+                    "a shell line is the person's own: nobody else may run one",
+                )
+                .await;
+        }
         let Some(command) = self.commands.find(&parsed.name).await else {
             return self
                 .reject(
                     intent,
                     ErrorCode::InvalidInput,
-                    format!("unknown command: {}", commands::spelled(&parsed.name)),
+                    commands::unknown(&parsed.name),
                 )
                 .await;
         };

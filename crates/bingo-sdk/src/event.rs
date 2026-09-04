@@ -380,6 +380,17 @@ pub enum ItemBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
     },
+    /// A shell line a person ran themselves (`!<command>`, ADR-0008 §5): no
+    /// turn was spent on it and no model asked for it. `exit` is the code the
+    /// command came to; `None` says it never reached one — its timeout or an
+    /// interrupt ended it, and `output` carries the line that says which.
+    Shell {
+        command: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit: Option<i32>,
+        cwd: std::path::PathBuf,
+    },
     /// A long-running non-turn operation (login, reconnect, team start).
     Action {
         name: String,
@@ -433,6 +444,25 @@ impl ItemBody {
     pub fn is_message(&self) -> bool {
         matches!(self, ItemBody::User { .. } | ItemBody::Assistant { .. })
     }
+}
+
+/// A shell line as a model reads it ([`ItemBody::Shell`]): the line under the
+/// prompt it was typed at, what it wrote in a fence of its own, and the code
+/// it came to when that was not a clean exit. A command that reached no code
+/// says so in its own output and adds nothing here.
+///
+/// One rendering, written down once: the kernel's fold puts these words in
+/// the next request, and a surface reporting to a host quotes the same ones.
+pub fn shell_note(command: &str, output: &str, exit: Option<i32>) -> String {
+    let mut out = format!("$ {command}");
+    let body = output.trim_end_matches('\n');
+    if !body.is_empty() {
+        out.push_str(&format!("\n```\n{body}\n```"));
+    }
+    if let Some(code) = exit.filter(|code| *code != 0) {
+        out.push_str(&format!("\n[exit {code}]"));
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1205,6 +1235,25 @@ mod tests {
                     by: ResolvedBy::Client {
                         name: "tui-1".into(),
                         surface: "tui".into(),
+                    },
+                },
+            ),
+            // A shell line the person ran themselves: outside any turn, with
+            // the code it came to beside what it wrote (M65).
+            frame(
+                29,
+                Event::ItemCompleted {
+                    item: Item {
+                        turn: None,
+                        ..item(
+                            "itm_5",
+                            ItemBody::Shell {
+                                command: "git status --short".into(),
+                                output: " M src/lib.rs\n".into(),
+                                exit: Some(0),
+                                cwd: "/tmp/p".into(),
+                            },
+                        )
                     },
                 },
             ),

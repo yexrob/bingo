@@ -135,6 +135,7 @@ impl Deliverer {
     pub fn apply(&mut self, frame: &Frame, state: &SessionState, now: Instant) -> Vec<Op> {
         match &frame.event {
             Event::TurnStarted { turn, .. } => self.started(turn.clone()),
+            Event::ItemCompleted { item } if is_shell(item) => self.ran(item),
             Event::ItemStarted { .. }
             | Event::ItemUpdated { .. }
             | Event::ItemCompleted { .. }
@@ -200,6 +201,22 @@ impl Deliverer {
             ops.push(self.replace(full));
         }
         ops
+    }
+
+    /// A shell line the person ran themselves lands beside the answer, not in
+    /// it (M65): nobody asked the model for it, and a chat reads it as the
+    /// thing that happened that it is.
+    fn ran(&mut self, item: &bingo_sdk::Item) -> Vec<Op> {
+        let ItemBody::Shell {
+            command,
+            output,
+            exit,
+            ..
+        } = &item.body
+        else {
+            return Vec::new();
+        };
+        vec![self.status(&bingo_sdk::shell_note(command, output, *exit))]
     }
 
     /// A question stops the stream: a live message and a live button on the
@@ -314,6 +331,11 @@ fn answer(state: &SessionState, turn: &TurnId) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Whether this item is a shell line the person ran themselves.
+fn is_shell(item: &bingo_sdk::Item) -> bool {
+    matches!(item.body, ItemBody::Shell { .. })
 }
 
 /// What a turn's end is worth saying, if anything.

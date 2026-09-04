@@ -2018,6 +2018,38 @@
         {
           "type": "object",
           "properties": {
+            "command": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "exit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "shell"
+            }
+          },
+          "required": [
+            "kind",
+            "command",
+            "output",
+            "cwd"
+          ],
+          "description": "A shell line a person ran themselves (`!<command>`, ADR-0008 §5): no\nturn was spent on it and no model asked for it. `exit` is the code the\ncommand came to; `None` says it never reached one — its timeout or an\ninterrupt ended it, and `output` carries the line that says which."
+        },
+        {
+          "type": "object",
+          "properties": {
             "name": {
               "type": "string"
             },

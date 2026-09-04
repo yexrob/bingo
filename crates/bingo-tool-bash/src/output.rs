@@ -127,12 +127,13 @@ pub fn shape(command: &str, output: &str, ended: Ended) -> ToolOutput {
     }
 }
 
-/// How a command ended, for the person who typed it. A command that simply
-/// succeeded says nothing: its output is the whole answer.
-pub fn ending(ended: Ended) -> Option<String> {
+/// What ended a command that never reached an exit code, for the person who
+/// typed it. A command that exited says nothing here however it exited: the
+/// code is a field of the item it is recorded as (`ItemBody::Shell`), and a
+/// line beside it would be the same fact written twice.
+pub fn unfinished(ended: Ended) -> Option<String> {
     match ended {
-        Ended::Exited(0) => None,
-        Ended::Exited(code) => Some(format!("[exit {code}]")),
+        Ended::Exited(_) => None,
         Ended::Timeout { after_ms } => Some(format!("[timed out after {}s]", seconds(after_ms))),
         Ended::Interrupted => Some("[interrupted]".to_string()),
     }
@@ -279,14 +280,17 @@ mod tests {
     }
 
     #[test]
-    fn a_person_hears_about_an_ending_only_when_it_was_not_a_clean_exit() {
-        assert_eq!(ending(Ended::Exited(0)), None);
-        assert_eq!(ending(Ended::Exited(3)).as_deref(), Some("[exit 3]"));
+    fn a_person_hears_about_an_ending_only_when_there_was_no_exit_code() {
+        assert_eq!(unfinished(Ended::Exited(0)), None);
+        assert_eq!(unfinished(Ended::Exited(3)), None, "the code is the record");
         assert_eq!(
-            ending(Ended::Timeout { after_ms: 120_000 }).as_deref(),
+            unfinished(Ended::Timeout { after_ms: 120_000 }).as_deref(),
             Some("[timed out after 120s]")
         );
-        assert_eq!(ending(Ended::Interrupted).as_deref(), Some("[interrupted]"));
+        assert_eq!(
+            unfinished(Ended::Interrupted).as_deref(),
+            Some("[interrupted]")
+        );
     }
 
     #[test]
