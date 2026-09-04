@@ -1,10 +1,17 @@
 //! The tokens and glyphs the whole surface draws with, in one place, so a
 //! change of look is a change of one file rather than a hunt through the views.
 //!
-//! `docs/design/tui.md` §4 is the table this file is: eight tokens, each a
-//! function of the palette, and one glyph table with an ASCII fallback. A view
-//! never names a colour — it names a token — and a test asserts that no
-//! `Color::` or `Modifier::` literal exists outside this file.
+//! `docs/design/tui.md` §4 is the table this file is: the tokens, and one
+//! glyph table with an ASCII fallback. A view never names a colour — it names
+//! a token — and a test asserts that no `Color::` or `Modifier::` literal
+//! exists outside this file.
+//!
+//! Two of the tokens are not the palette's to choose. Body text is the
+//! terminal's own foreground and secondary text its own dim, so a terminal
+//! that flips its scheme remaps every line of prose itself, at once and in its
+//! scrollback (M73). What is left in the palette is what colour *means* —
+//! presence, good, bad, the mode, the grounds — and that is the only part a
+//! later answer about the ground can change.
 //!
 //! The look is chosen from the environment: `NO_COLOR` strips colour,
 //! `BINGO_ASCII=1` strips the glyphs, `COLORTERM` says whether 24-bit is safe.
@@ -23,11 +30,12 @@ use unicode_width::UnicodeWidthStr;
 
 // ---- the palettes -------------------------------------------------------
 
-/// The colours of one look. Light joins dark when M11e reads the background.
+/// The colours of one look — the accents, and the grounds they are read on.
+/// The ink is not among them: body text is the terminal's own foreground and
+/// secondary text its own dim, in every look (M73), so a palette says only
+/// what colour *means* here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
-    pub text: Color,
-    pub dim: Color,
     pub raised: Color,
     pub presence: Color,
     pub glow: Color,
@@ -40,10 +48,8 @@ pub struct Palette {
     pub bad_tint: Color,
 }
 
-/// Warm off-white over the terminal's own dark ground.
+/// The accents over a terminal's own dark ground.
 pub const DARK: Palette = Palette {
-    text: Color::Rgb(0xec, 0xe7, 0xdf),
-    dim: Color::Rgb(0x8a, 0x84, 0x7a),
     raised: Color::Rgb(0x21, 0x1d, 0x17),
     presence: Color::Rgb(0xd9, 0x77, 0x57),
     glow: Color::Rgb(0xf2, 0xa0, 0x7c),
@@ -54,14 +60,11 @@ pub const DARK: Palette = Palette {
     bad_tint: Color::Rgb(0x2d, 0x1a, 0x19),
 };
 
-/// The same eight, over a light ground. Each is [`DARK`]'s hue at the other
-/// end of its own lightness: the warm off-white becomes a warm near-black,
-/// `presence` deepens until it reads on paper, and `raised` is one step *down*
-/// from the background rather than one step up — the tint is what gives the
-/// frame depth either way (design §4).
+/// The same accents over a light ground. Each is [`DARK`]'s hue at the other
+/// end of its own lightness: `presence` deepens until it reads on paper, and
+/// `raised` is one step *down* from the background rather than one step up —
+/// the tint is what gives the frame depth either way (design §4).
 pub const LIGHT: Palette = Palette {
-    text: Color::Rgb(0x24, 0x20, 0x1a),
-    dim: Color::Rgb(0x77, 0x71, 0x67),
     raised: Color::Rgb(0xee, 0xe8, 0xdd),
     presence: Color::Rgb(0xb2, 0x4f, 0x2c),
     glow: Color::Rgb(0xd9, 0x77, 0x57),
@@ -531,17 +534,21 @@ pub fn with<R>(theme: Theme, f: impl FnOnce() -> R) -> R {
 
 // ---- the tokens ---------------------------------------------------------
 
-/// Answers, what you type, option labels — the warm off-white.
+/// Answers, what you type, option labels — the terminal's own foreground, in
+/// every look (M73). No palette names it: a terminal that flips its scheme
+/// remaps every cell of prose itself, on the spot and in its scrollback, which
+/// is why Codex and Claude Code both draw their prose with no colour at all.
+/// It is spelled `Reset` rather than left unsaid so that it can be patched
+/// over a colour — the end of a ramp, a bold name a light has left.
 pub fn text() -> Style {
-    current().fg(Color::Reset, |p| p.text)
+    Style::new().fg(Color::Reset)
 }
 
-/// Results under `⎿`, thinking, hints, the status line.
+/// Results under `⎿`, thinking, hints, the status line: the terminal's own
+/// dim, in every look (M73) — a weight and not a hue, so it follows the ink
+/// wherever the ink goes, and a hairline drawn in it reads on either ground.
 pub fn dim() -> Style {
-    match current().colors {
-        Colors::True(palette) => Style::new().fg(palette.dim),
-        _ => Style::new().add_modifier(Modifier::DIM),
-    }
+    Style::new().add_modifier(Modifier::DIM)
 }
 
 /// The bar behind a `>` line, a card's surface, a rail card. Never text.
@@ -636,12 +643,20 @@ pub fn pulse(level: f32) -> Style {
 }
 
 /// The comet tail on streaming text: the cell that just arrived wears the
-/// glow, and cools to `text` as it ages.
+/// glow, the cells behind it cool through `presence`, and the tail beyond
+/// [`SETTLES`] is the resting ink. One of the two gradients §4 sanctions, and
+/// the one place a ramp is still drawn towards the ink — which the terminal
+/// owns since M73, so the ink is where the ramp *ends* rather than a colour it
+/// can pass through.
 pub fn comet(age: f32) -> Style {
+    let age = settled(age);
     match current().colors {
         Colors::Plain => Style::new(),
         Colors::Ansi => two_ways(age, glow(), text()),
-        Colors::True(palette) => Style::new().fg(mix(palette.glow, palette.text, age)),
+        Colors::True(palette) if age < SETTLES => {
+            Style::new().fg(mix(palette.glow, palette.presence, age / SETTLES))
+        }
+        Colors::True(_) => text(),
     }
 }
 
@@ -656,70 +671,69 @@ pub fn attention(now: crate::clock::Now) -> Style {
     }
 }
 
-/// A notice arriving and leaving: `dim` at both edges of its life, its own
-/// level's colour while it is there to be read.
+/// A notice arriving and leaving: the words' own weight at both edges of its
+/// life, its own level's colour while it is there to be read. `dim` is a
+/// weight and not a hue since M73, so there is nothing left to mix through —
+/// the notice is dim until it has arrived, as it has always been on the eight.
 pub fn fading(level: bingo_sdk::Level, t: f32) -> Style {
-    let arrived = self::level(level);
-    match current().colors {
-        Colors::True(palette) => match arrived.fg {
-            Some(colour) => Style::new().fg(mix(palette.dim, colour, t)),
-            None => arrived,
-        },
-        _ => match t >= 1.0 {
-            true => arrived,
-            false => dim(),
-        },
+    match t >= 1.0 {
+        true => self::level(level),
+        false => dim(),
     }
 }
 
 /// The light that crosses a tool's name as its answer lands: `good` at the
 /// crest and the row's own weight where it has passed. The bullet is what
 /// says the call finished; this says only how fresh that is (§6), so a name
-/// the light has left carries no colour of its own.
+/// the light has left carries no colour of its own — and that is the
+/// terminal's ink now (M73), which no ramp reaches, so the light is the two
+/// stops the eight colours always drew it in.
 pub fn landing(level: f32) -> Style {
     if level <= 0.0 {
         return bold();
     }
     match current().colors {
         Colors::Plain => bold(),
-        Colors::Ansi => two_ways(level, bold(), good().patch(bold())),
-        Colors::True(palette) => bold().fg(mix(palette.text, palette.good, level)),
+        _ => two_ways(level, bold(), good().patch(bold())),
     }
 }
 
-/// A failure cooling into the words behind it: `bad` where it lands and
-/// `text` once it has settled. The bullet stays `bad`, so what cools is how
-/// fresh the failure is and never whether there was one (§4).
+/// A failure cooling into the words behind it: `bad` where it lands and the
+/// resting ink once it has settled. The bullet stays `bad`, so what cools is
+/// how fresh the failure is and never whether there was one (§4).
 pub fn cooling(t: f32) -> Style {
     match current().colors {
         Colors::Plain => Style::new(),
-        Colors::Ansi => two_ways(t, bad(), text()),
-        Colors::True(palette) => Style::new().fg(mix(palette.bad, palette.text, t)),
+        _ => two_ways(t, bad(), text()),
     }
 }
 
-/// The context notice warming from `dim` towards `bad` as the window fills.
+/// The context notice warming from the words' own weight towards `bad` as the
+/// window fills. It starts where secondary text does, which is a weight and
+/// no colour at all (M73), so the notice takes `bad` at [`SETTLES`] rather
+/// than creeping towards it through a grey.
 pub fn warming(t: f32) -> Style {
     match current().colors {
         Colors::Plain => Style::new(),
-        Colors::Ansi => two_ways(t, dim(), bad()),
-        Colors::True(palette) => Style::new().fg(mix(palette.dim, palette.bad, t)),
+        _ => two_ways(t, dim(), bad()),
     }
 }
 
 /// One pixel of the opening shot, by how much light stands on it and how much
 /// of that light came from the block (`docs/design/tui.md` §11).
 ///
-/// Three stops and no new token: from the *ground* a surface with no light on
-/// it is, through `dim` to `text` for what the world's own light reaches, and
-/// through bingo's own `presence` to `glow` for what the block reached. The
-/// ground is `raised`, which is the one token that steps towards the
-/// terminal's own background in both palettes — dark on dark, paper on paper.
+/// Three stops: from the *ground* a surface with no light on it is, through
+/// the picture's own two greys ([`picture`]) for what the world's own light
+/// reaches, and through bingo's own `presence` to `glow` for what the block
+/// reached. The ground is `raised`, which is the one token that steps towards
+/// the terminal's own background in both palettes — dark on dark, paper on
+/// paper.
 ///
 /// It has to reach the ground, because in a picture drawn out of half blocks
 /// the colour is the only thing carrying the brightness: a world whose
-/// darkest ink is `dim` is a world with a grey wash over it and no night in
-/// it at all.
+/// darkest ink is a wash of grey is a world with no night in it at all — and
+/// the same reason is why the neutral stops are the picture's own colours and
+/// not the ink the terminal owns (M73).
 pub fn lit(level: f32, warm: f32) -> Style {
     let (level, warm) = (settled(level), settled(warm));
     match current().colors {
@@ -729,11 +743,27 @@ pub fn lit(level: f32, warm: f32) -> Style {
             (false, true) => text(),
             (false, false) => dim(),
         },
-        Colors::True(palette) => Style::new().fg(mix(
-            through(palette.raised, palette.dim, palette.text, level),
-            through(palette.raised, palette.presence, palette.glow, level),
-            warm,
-        )),
+        Colors::True(palette) => {
+            let (half, whole) = picture(palette);
+            Style::new().fg(mix(
+                through(palette.raised, half, whole, level),
+                through(palette.raised, palette.presence, palette.glow, level),
+                warm,
+            ))
+        }
+    }
+}
+
+/// The neutral end of the opening's own ramp. A picture drawn out of half
+/// blocks carries its brightness in the colour and nowhere else, so where the
+/// surface handed its ink back to the terminal (M73) the picture keeps two
+/// greys of its own: what the world's light half reaches, and what it reaches
+/// whole. They belong to the picture, not to §4's table, and they go when the
+/// opening does.
+fn picture(palette: Palette) -> (Color, Color) {
+    match palette == LIGHT {
+        true => (Color::Rgb(0x77, 0x71, 0x67), Color::Rgb(0x24, 0x20, 0x1a)),
+        false => (Color::Rgb(0x8a, 0x84, 0x7a), Color::Rgb(0xec, 0xe7, 0xdf)),
     }
 }
 
@@ -776,10 +806,15 @@ fn settled(share: f32) -> f32 {
     }
 }
 
-/// A ramp the eight colours cannot draw collapses to its two ends, and the
-/// halfway mark is where it changes over.
+/// Where a ramp hands over to its other end: the halfway mark, for the eight
+/// colours that cannot draw a ramp at all and for the ramps 24 bits cannot
+/// finish either, because the ink at the end of them is the terminal's (M73).
+const SETTLES: f32 = 0.5;
+
+/// A ramp the eight colours cannot draw collapses to its two ends, and
+/// [`SETTLES`] is where it changes over.
 fn two_ways(level: f32, low: Style, high: Style) -> Style {
-    match level >= 0.5 {
+    match level >= SETTLES {
         true => high,
         false => low,
     }
@@ -870,6 +905,55 @@ pub fn struck() -> Style {
 pub fn link() -> Style {
     mode().add_modifier(Modifier::UNDERLINED)
 }
+
+/// Every foreground §4's table can put in a cell, in the look now standing:
+/// the accents, and each ramp between them sampled finely enough that any
+/// point one of them reaches is in the set. It is derived from the tokens
+/// themselves rather than from the palette, so a ramp added to the table is in
+/// it without anybody remembering to say so.
+///
+/// What a drawn screen carries outside this set, `Reset` aside — and `Reset`
+/// is the ink and the dim both since M73 — is a colour nobody sanctioned.
+/// `crate::screens` holds every screen to it.
+#[cfg(test)]
+pub fn spendable() -> std::collections::HashSet<Color> {
+    let mut out: std::collections::HashSet<Color> = std::collections::HashSet::new();
+    let mut keep = |style: Style| {
+        if let Some(colour) = style.fg {
+            out.insert(colour);
+        }
+    };
+    for style in [presence(), glow(), good(), bad(), mode()] {
+        keep(style);
+    }
+    for step in 0..=SAMPLES {
+        let t = step as f32 / SAMPLES as f32;
+        for style in [
+            breath(t),
+            pulse(t),
+            comet(t),
+            landing(t),
+            cooling(t),
+            warming(t),
+        ] {
+            keep(style);
+        }
+        for level in [
+            bingo_sdk::Level::Info,
+            bingo_sdk::Level::Warn,
+            bingo_sdk::Level::Error,
+        ] {
+            keep(fading(level, t));
+        }
+    }
+    out
+}
+
+/// How finely [`spendable`] samples a ramp. A ramp's channels move by at most
+/// 255 over its whole length, so a thousand steps reach every colour any `t`
+/// can land on.
+#[cfg(test)]
+const SAMPLES: u32 = 1_000;
 
 /// A token as a drawn cell wears it: a terminal gives every cell a colour, so
 /// an unpainted one reads back as `Reset` rather than as nothing. Comparing a
@@ -1438,8 +1522,6 @@ mod tests {
 
     /// Every token of §4's table, in the order the table lists them.
     const TOKENS: &[Token] = &[
-        ("text", |p| p.text),
-        ("dim", |p| p.dim),
         ("raised", |p| p.raised),
         ("presence", |p| p.presence),
         ("glow", |p| p.glow),
@@ -1486,16 +1568,12 @@ mod tests {
         0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
     }
 
+    /// Every accent reads against the ground its own palette is drawn on. The
+    /// ink is not among them any more (M73): what a terminal's own foreground
+    /// reads against is the terminal's business, as it is for every other
+    /// program.
     #[test]
     fn each_palette_reads_against_its_own_ground() {
-        assert!(
-            luma(DARK.text) > luma(DARK.raised),
-            "warm off-white on dark"
-        );
-        assert!(
-            luma(LIGHT.text) < luma(LIGHT.raised),
-            "warm near-black on paper"
-        );
         for (name, of) in TOKENS {
             if *name == "raised" || name.ends_with("_tint") {
                 continue;
@@ -1504,10 +1582,14 @@ mod tests {
                 luma(of(LIGHT)) < luma(LIGHT.raised),
                 "`{name}` must read on the light ground"
             );
+            assert!(
+                luma(of(DARK)) > luma(DARK.raised),
+                "`{name}` must read on the dark one"
+            );
         }
         assert!(
-            luma(DARK.raised) < luma(DARK.text) && luma(LIGHT.raised) > luma(LIGHT.text),
-            "the tint steps away from the background either way"
+            luma(DARK.raised) < luma(LIGHT.raised),
+            "and each tint is at its own ground's end of the scale"
         );
     }
 
@@ -1519,9 +1601,14 @@ mod tests {
                 glyphs: &UNICODE,
             },
             || {
-                for token in [text(), presence(), glow(), good(), bad(), mode(), raised()] {
+                for token in [presence(), glow(), good(), bad(), mode(), raised()] {
                     assert_eq!(token, Style::new(), "NO_COLOR spends no colour");
                 }
+                assert_eq!(
+                    as_drawn(text()),
+                    as_drawn(Style::new()),
+                    "and the ink it does spell is the terminal's own"
+                );
                 assert_eq!(dim(), Style::new().add_modifier(Modifier::DIM));
                 assert_eq!(bold(), Style::new().add_modifier(Modifier::BOLD));
             },
@@ -1614,22 +1701,61 @@ mod tests {
             let middle = pulse(0.5).fg.expect("a colour between the two");
             assert_ne!(middle, DARK.presence);
             assert_ne!(middle, DARK.glow);
+        });
+    }
+
+    /// A ramp whose far end is the resting ink stops at colour's own edge: the
+    /// tail is drawn while it is warm and handed to the terminal's foreground
+    /// where it has cooled, in every look (M73).
+    #[test]
+    fn a_ramp_towards_the_ink_ends_on_the_terminals_own() {
+        with(dark(), || {
             assert_eq!(comet(0.0).fg, Some(DARK.glow));
-            assert_eq!(comet(1.0).fg, Some(DARK.text));
-            assert_eq!(warming(0.0).fg, Some(DARK.dim));
-            assert_eq!(warming(1.0).fg, Some(DARK.bad));
+            let cooling = comet(SETTLES / 2.0).fg.expect("a colour on the way");
+            assert_ne!(cooling, DARK.glow);
+            assert_ne!(cooling, DARK.presence);
+            assert_eq!(comet(SETTLES), text(), "and the ink takes the rest");
+            assert_eq!(comet(1.0), text());
+            assert_eq!(self::cooling(1.0), text());
+            assert_eq!(landing(1.0), good().patch(bold()));
+            assert_eq!(landing(0.1), bold());
+            assert_eq!(warming(0.0), dim());
+            assert_eq!(warming(1.0), bad());
         });
     }
 
     #[test]
     fn a_notice_arrives_out_of_dim_and_leaves_into_it() {
         let level = bingo_sdk::Level::Error;
-        assert_eq!(fading(level, 0.0), dim());
-        assert_eq!(fading(level, 1.0), bad());
-        with(dark(), || {
-            assert_eq!(fading(level, 0.0).fg, Some(DARK.dim));
-            assert_eq!(fading(level, 1.0).fg, Some(DARK.bad));
-        });
+        for look in [dark(), ascii()] {
+            with(look, || {
+                assert_eq!(fading(level, 0.0), dim());
+                assert_eq!(fading(level, 1.0), bad());
+            });
+        }
+    }
+
+    /// The two tokens the terminal owns: no look, and no answer about the
+    /// ground, puts a colour of ours in prose or in what stands behind it
+    /// (M73). This is the whole of why a scheme flip is instant.
+    #[test]
+    fn the_ink_and_the_dim_are_the_terminals_own_in_every_look() {
+        for look in [
+            crate::painted::no_colour(),
+            crate::painted::ascii(),
+            crate::painted::truecolor(),
+            crate::painted::daylight(),
+        ] {
+            with(look, || {
+                assert_eq!(text(), Style::new().fg(Color::Reset), "{:?}", look.colors);
+                assert_eq!(
+                    dim(),
+                    Style::new().add_modifier(Modifier::DIM),
+                    "{:?}",
+                    look.colors
+                );
+            });
+        }
     }
 
     #[test]

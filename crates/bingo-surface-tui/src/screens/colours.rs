@@ -230,35 +230,93 @@ fn a_shell_line_sits_on_the_bar_your_own_words_sit_on() {
 /// palette from the frame after the terminal says its ground has turned — the
 /// blocks drawn in the old look are a memo of a drawing nobody would make
 /// again, and they go with it.
+///
+/// What is read is the band a person's own line sits on, because since M73 the
+/// prose on that screen has no colour of ours to change: the ink is the
+/// terminal's own and it follows a flip without being asked (the test under
+/// this one). What detection is still spent on is the tints and the accents,
+/// and this is one of them.
 #[test]
 fn a_terminal_that_turns_light_under_a_drawn_screen_is_followed() {
     let (ui, now) = scene();
     let tree = solo(&folded(answered()));
     crate::theme::with(truecolor(), || {
-        let inks = |painted: &crate::painted::Painted| {
+        let band = |painted: &crate::painted::Painted| {
             painted
-                .row("All 33 pass.")
+                .row("run the tests")
                 .into_iter()
-                .filter_map(|(_, style)| style.fg)
+                .filter_map(|(_, style)| style.bg)
                 .collect::<Vec<_>>()
         };
-        let before = inks(&painted(80, 24, &tree, &ui, now));
+        let before = band(&painted(80, 24, &tree, &ui, now));
         assert!(
-            before.contains(&crate::theme::DARK.text),
-            "the answer is drawn in the dark palette's ink: {before:?}"
+            before.contains(&crate::theme::DARK.raised),
+            "the line is banded in the dark palette's tint: {before:?}"
         );
         assert!(
             crate::theme::swap(true),
             "and then the terminal says its ground has turned"
         );
-        let after = inks(&painted(80, 24, &tree, &ui, now));
+        let after = band(&painted(80, 24, &tree, &ui, now));
         assert!(
-            after.contains(&crate::theme::LIGHT.text),
+            after.contains(&crate::theme::LIGHT.raised),
             "the next frame wears the light one: {after:?}"
         );
         assert!(
-            !after.contains(&crate::theme::DARK.text),
-            "and nothing on the row kept yesterday's ink: {after:?}"
+            !after.contains(&crate::theme::DARK.raised),
+            "and nothing on the row kept yesterday's ground: {after:?}"
         );
     });
+}
+
+/// The ink the terminal owns (M73). Every screen §3 draws, in both palettes,
+/// and no foreground on any of them but the terminal's own `Reset` and the
+/// accents §4's table sanctions — so prose and secondary text are remapped by
+/// the terminal itself the instant it flips its scheme, with nothing asked and
+/// nothing redrawn.
+#[test]
+fn no_screen_paints_prose_in_a_colour_of_its_own() {
+    let (idle, now) = scene();
+    let (busy, live) = mid_turn();
+    let (card, asking, asked_now) = asked(permission(Some("Edit(src/)"), Some(long_diff())));
+    for look in [truecolor(), daylight()] {
+        crate::theme::with(look, || {
+            let allowed = crate::theme::spendable();
+            let scenes: Vec<(&str, crate::painted::Painted)> = vec![
+                (
+                    "an answered question",
+                    painted(80, 24, &solo(&folded(answered())), &idle, now),
+                ),
+                (
+                    "a turn at work",
+                    painted(80, 24, &solo(&folded(running_together())), &busy, live),
+                ),
+                (
+                    "a card over a diff",
+                    painted(80, 24, &card, &asking, asked_now),
+                ),
+                (
+                    "a shell line the person ran",
+                    painted(80, 24, &solo(&super::ran::session()), &idle, now),
+                ),
+                (
+                    "what a channel reported",
+                    painted(120, 40, &solo(&folded(reported())), &idle, now),
+                ),
+            ];
+            for (name, painted) in scenes {
+                let ours: Vec<_> = painted
+                    .inks()
+                    .into_iter()
+                    .filter(|ink| *ink != ratatui::style::Color::Reset)
+                    .filter(|ink| !allowed.contains(ink))
+                    .collect();
+                assert!(
+                    ours.is_empty(),
+                    "{name} in {:?} spends a colour §4 never sanctioned: {ours:?}",
+                    look.colors
+                );
+            }
+        });
+    }
 }

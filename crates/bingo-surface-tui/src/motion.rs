@@ -746,25 +746,30 @@ fn context(share: u64) -> Tree {
     )]))
 }
 
+/// The notice is a notice until the way out joins it, and then it is bad — the
+/// same in every look since M73, because what it warms *from* is the
+/// terminal's own dim and no colour of ours can be mixed towards that. The
+/// turn lands where the words do, at 90 % (§4).
 #[test]
-fn the_context_notice_appears_at_seventy_and_warms_across_the_last_fifth() {
+fn the_context_notice_appears_at_seventy_and_turns_bad_at_ninety() {
     let (ui, now) = scene();
     assert!(
         !screen(&context(69), &ui, now).contains("context"),
         "nothing at all below 70 %"
     );
-    crate::theme::with(crate::painted::truecolor(), || {
-        let at = |share| style_of(&context(share), &ui, now, "context");
-        assert_eq!(at(79), theme::as_drawn(theme::warming(0.0)), "dim to 80 %");
-        let between = at(90);
-        assert_ne!(between, theme::as_drawn(theme::warming(0.0)));
-        assert_ne!(between, theme::as_drawn(theme::warming(1.0)));
-        assert_eq!(
-            at(100),
-            theme::as_drawn(theme::warming(1.0)),
-            "bad at the trigger"
-        );
-    });
+    for look in [crate::painted::truecolor(), crate::painted::ascii()] {
+        crate::theme::with(look, || {
+            let at = |share| style_of(&context(share), &ui, now, "context");
+            assert_eq!(at(79), theme::as_drawn(theme::dim()), "{:?}", look.colors);
+            assert_eq!(at(89), theme::as_drawn(theme::dim()), "{:?}", look.colors);
+            assert_eq!(
+                at(90),
+                theme::as_drawn(theme::bad()),
+                "the way out joins it, and so does the colour"
+            );
+            assert_eq!(at(100), theme::as_drawn(theme::bad()), "{:?}", look.colors);
+        });
+    }
 }
 
 // ---- stepping into another session --------------------------------------

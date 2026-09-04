@@ -100,6 +100,30 @@ impl Painted {
             .collect()
     }
 
+    /// Every foreground the frame put in a cell, once each. A picture's own
+    /// cells are left out: the kitty protocol carries a picture's id in the
+    /// foreground colour (M46), which is a number in a colour's clothing and
+    /// not a token at all.
+    pub fn inks(&self) -> Vec<ratatui::style::Color> {
+        let area = self.0.area();
+        let mut out: Vec<ratatui::style::Color> = Vec::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let cell = &self.0[(x, y)];
+                if cell
+                    .symbol()
+                    .starts_with(crate::graphics::kitty::PLACEHOLDER)
+                {
+                    continue;
+                }
+                if let Some(ink) = cell.style().fg.filter(|ink| !out.contains(ink)) {
+                    out.push(ink);
+                }
+            }
+        }
+        out
+    }
+
     fn text(&self, row: u16) -> String {
         (0..self.0.area().width)
             .map(|x| self.0[(x, row)].symbol())
