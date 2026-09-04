@@ -17,8 +17,9 @@ turn can hand work to a later turn of the same conversation.
    WAKE_MOST]` (10 s, 1 h; named constants, the clamp said in the
    result); `note` is what the next turn opens with — the model's
    own words to itself, delivered as a person-role line marked as a
-   wake (`Origin` says `wake`, so the transcript shows `⏰ note` and
-   not `>`); `stop: true` cancels the pending wake and schedules
+   wake (`Origin` says `wake`, so the transcript row wears a dim `wake`
+   label in the gutter where `>` would be — no emoji, the theme's
+   own glyph table as everywhere); `stop: true` cancels the pending wake and schedules
    nothing. **One pending wake per session**: a second call replaces
    the first. The wake fires only after the turn that set it has
    ended, and it fires on **this** session (a schedule entry with
@@ -33,7 +34,7 @@ turn can hand work to a later turn of the same conversation.
    goes back to diagnosis, not a shorter interval; when the budget is
    spent, stop and report. Snapshot the text.
 3. **The person sees it and can end it.** The status line shows
-   `⏰ 4m` while a wake is pending (derived from the schedules list,
+   `wake in 4m` while a wake is pending (derived from the schedules list,
    nothing stored twice); `/wake` bare shows the pending note and
    when; `/wake off` cancels. `esc` during the woken turn drops it as
    any turn.
@@ -57,7 +58,7 @@ session), `docs/design/tui.md` dated line.
 - [ ] The runner delivers the note to the same session after the
       turn ends (integration on the fake provider with an injected
       clock).
-- [ ] Status line `⏰` and `/wake off` (snapshot + test).
+- [ ] Status line `wake in …` and `/wake off` (snapshot + test).
 - [ ] The description snapshot.
 - [ ] All gates; the file format fixture for the new key.
 - [ ] Hands-on: appended by the parent.
