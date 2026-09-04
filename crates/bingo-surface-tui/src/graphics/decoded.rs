@@ -75,8 +75,7 @@ impl Decoded {
         if let Some(known) = self.known(asked) {
             return known;
         }
-        let whole = self.png(id, image)?;
-        let small = Arc::new(bingo_pictures::scaled(&whole, within));
+        let small = Arc::new(bingo_pictures::fitted(image, within).ok()?);
         self.keep(asked, Some(small.clone()));
         Some(small)
     }
