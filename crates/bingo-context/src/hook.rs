@@ -23,7 +23,8 @@ instructions, commit history):
 - project: a goal, decision or constraint the repository does not record (dates absolute)
 - reference: a URL, ticket or dashboard worth finding again
 Output one fact per line as `<type>: <fact>`, no numbering, no pleasantries. Leave out what \
-matters only to this conversation. Output nothing when no fact is worth remembering.";
+matters only to this conversation. Never output a secret, a key or a token, and name people \
+by their role, not their name. Output nothing when no fact is worth remembering.";
 
 /// What the extractor may say. A fact is a line, and a page of them is more
 /// than one turn learned.

@@ -21,9 +21,13 @@ URL, a ticket, a dashboard). [[slug]] links another memory.
 
 An index says what exists; Read a file for the whole fact. To remember: check \
 the index for a file that already covers it, then Write or Edit that file and \
-its line in MEMORY.md. Fix or delete a memory that turned out wrong. Never \
-store what the repository already records, nor what matters only to this \
-conversation.";
+its line in MEMORY.md. Fix or delete a memory that turned out wrong.
+
+Never store a secret, a key or a token; what the repository already records; \
+or what matters only to this conversation — asked to remember one of those, \
+keep what was non-obvious about it instead. A memory says what was true when \
+it was written: a file or flag it names may be gone, so check before relying \
+on it.";
 
 /// The same words for every session, so they sit in the cached prefix rather
 /// than beside the indexes, which change under the model's hands.
@@ -45,10 +49,12 @@ mod tests {
         insta::assert_snapshot!(block().text);
     }
 
-    /// Words this block may spend. Past ~150 it is a document, and a document
+    /// Words this block may spend. Past ~200 it is a document, and a document
     /// in every prompt is a tax on every turn. The four types are named here
-    /// because a memory of the wrong type is a memory nobody finds.
-    const MAX_WORDS: usize = 150;
+    /// because a memory of the wrong type is a memory nobody finds, and what
+    /// must never be kept is named because a secret in a memory file is a
+    /// secret in every later prompt.
+    const MAX_WORDS: usize = 200;
 
     #[test]
     fn it_is_short_enough_to_carry_every_turn() {
@@ -58,7 +64,14 @@ mod tests {
 
     #[test]
     fn it_says_the_format_and_the_rules_and_no_path() {
-        for word in ["name", "description", "type", "MEMORY.md", "delete"] {
+        for word in [
+            "name",
+            "description",
+            "type",
+            "MEMORY.md",
+            "delete",
+            "secret",
+        ] {
             assert!(TEACHING.contains(word), "the teaching drops {word}");
         }
         assert!(block().cache, "the words never change within a session");
