@@ -201,6 +201,12 @@ impl Encoder {
                 output.as_ref(),
                 tool_failed(item, output.as_ref()),
             )),
+            ItemBody::Shell {
+                command,
+                output,
+                exit,
+                ..
+            } => Some(shell(scope, command, output, *exit)),
             // Not part of the envelope: it has no shape for them.
             ItemBody::User { .. }
             | ItemBody::Reasoning { .. }
@@ -300,6 +306,22 @@ fn tool_result(
                 "content": tool_content(output),
                 "is_error": is_error,
             }],
+        },
+        "parent_tool_use_id": scope.parent_tool_use_id(),
+        "session_id": scope.session_id(),
+    })
+}
+
+/// A shell line the person ran themselves, in the words the model will read
+/// next turn ([`bingo_sdk::shell_note`]). It is a user message because that
+/// is what it becomes: nobody called a tool, and the host driving this run is
+/// told what landed in the conversation.
+fn shell(scope: &Scope<'_>, command: &str, output: &str, exit: Option<i32>) -> Value {
+    json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [text_block(&bingo_sdk::shell_note(command, output, exit))],
         },
         "parent_tool_use_id": scope.parent_tool_use_id(),
         "session_id": scope.session_id(),
@@ -570,6 +592,37 @@ mod tests {
     #[test]
     fn a_tool_round_is_a_tool_use_then_a_tool_result() {
         insta::assert_snapshot!("tool_round", play_stream(&tool_round()).out());
+    }
+
+    /// A shell line the person ran is a user message in the envelope, because
+    /// that is exactly what it becomes in the next request (M65).
+    #[test]
+    fn a_shell_line_is_a_user_message_of_the_line_and_its_output() {
+        let frames = vec![
+            frame(
+                1,
+                Event::ItemCompleted {
+                    item: crate::tests::shell("itm_1", "echo hi", "hi\n", Some(0)),
+                },
+            ),
+            frame(
+                2,
+                Event::ItemCompleted {
+                    item: crate::tests::shell("itm_2", "false", "", Some(1)),
+                },
+            ),
+        ];
+        let rendered = play_stream(&frames).out();
+        let lines: Vec<Value> = rendered
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("JSON"))
+            .collect();
+        let said: Vec<&str> = lines
+            .iter()
+            .filter(|line| line["type"] == "user")
+            .filter_map(|line| line["message"]["content"][0]["text"].as_str())
+            .collect();
+        assert_eq!(said, ["$ echo hi\n```\nhi\n```", "$ false\n[exit 1]"]);
     }
 
     #[test]
