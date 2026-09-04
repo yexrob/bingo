@@ -468,6 +468,8 @@ pub struct Ui {
     /// A memo like [`Ui::decoded`], and the bound on how many a run of words
     /// may send this surface after ([`crate::graphics::linked`]).
     pub linked: Linked,
+    /// A newer release than this build, as the start-up check found it (M63).
+    pub update: Option<String>,
     /// The paths the `@` dropdown ranks, walked when the first one asks.
     files: RefCell<Files>,
 }
@@ -509,6 +511,7 @@ impl Ui {
             painted: RefCell::default(),
             decoded: Decoded::default(),
             linked: Linked::default(),
+            update: None,
             files: RefCell::default(),
         }
     }

@@ -136,6 +136,15 @@ fn welcome_on_a_fresh_session() {
     both("welcome", &solo(&state()), &ui, now);
 }
 
+/// The same box with a newer release out (M63): one more row under the help
+/// line, the version in the spark's own colour and the words that fetch it.
+#[test]
+fn welcome_with_a_newer_release_out() {
+    let (mut ui, now) = scene();
+    ui.update = Some("0.5.0".to_string());
+    both("welcome_update", &solo(&state()), &ui, now);
+}
+
 #[test]
 fn streaming() {
     let state = folded(vec![

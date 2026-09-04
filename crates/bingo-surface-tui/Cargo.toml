@@ -42,6 +42,13 @@ bingo-pictures.workspace = true
 # this system shows pictures with (M56, ADR-0042 §1). A library, which a plugin
 # may depend on (ADR-0042 §2); already in the tree, so it costs no crate.
 bingo-loopback.workspace = true
+# Whether a newer release is out, said in the welcome box (M63, ADR-0043). A
+# library, which a plugin may depend on (ADR-0042 §2); it reaches no network
+# of its own, so the one GET is here.
+bingo-update.workspace = true
+# That GET. Already in this crate's tree under `bingo-pictures`, so it costs
+# no crate.
+reqwest.workspace = true
 thiserror.workspace = true
 
 # `O_NONBLOCK` for the graphics probe's own handle on the terminal, and

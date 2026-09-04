@@ -108,8 +108,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Exit, HostHandle, KernelError, Plugin, PluginError, PluginManifest, Registrar, Surface,
-    SurfaceKind, SurfaceOptions,
+    ConfigClaim, Exit, HostHandle, KernelError, Merge, Plugin, PluginError, PluginManifest,
+    Registrar, Surface, SurfaceKind, SurfaceOptions,
 };
 
 /// How long the graphics probe waits for an answer that has tmux to cross, so
@@ -172,7 +172,14 @@ static MANIFEST: PluginManifest = PluginManifest {
     sdk: "^0.1",
     provides: &["surface:tui"],
     requires: &[],
-    config: None,
+    // `update.check` (ADR-0043 §4): the box is where a newer release is said,
+    // so this is the surface that claims the key. The bin reads the answer
+    // out of the layers, as it does for every key that decides something
+    // before a host exists, and hands it over with the rest of the args.
+    config: Some(ConfigClaim {
+        keys: &[(bingo_update::SETTING, Merge::Replace)],
+        schema: bingo_update::schema,
+    }),
 };
 
 #[derive(Debug, Default, Clone, Copy)]

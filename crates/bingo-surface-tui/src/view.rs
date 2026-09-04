@@ -480,7 +480,8 @@ fn render_transcript(
             &ui.decoded,
             &ui.linked,
             now,
-        ),
+        )
+        .saying(ui.update.as_deref()),
         live,
     );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
