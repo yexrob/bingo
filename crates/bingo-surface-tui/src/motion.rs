@@ -219,6 +219,70 @@ fn nothing_of_the_presence_is_on_screen_while_no_turn_runs() {
     );
 }
 
+// ---- the person's own gesture -------------------------------------------
+
+/// The line the box's border wears, run by run, so a light crossing it can be
+/// told from the one style it rests in.
+fn border_runs(tree: &Tree, ui: &crate::ui::Ui, now: Now) -> Vec<Style> {
+    crate::painted::painted(80, 24, tree, ui, now)
+        .row(keys::PLACEHOLDER)
+        .into_iter()
+        .map(|(_, style)| style)
+        .collect()
+}
+
+/// `⏎` is the most repeated gesture in the whole surface and had no answer at
+/// all: the row simply existed. It runs one light along the box's border now,
+/// over six frames, and the border is back where it was on the seventh. The
+/// row read here is the box's own text row, so the two runs it carries are
+/// the border's left edge and its right — which is the light's first cell and
+/// its last, and so tells the direction as well as the fact.
+#[test]
+fn a_sent_line_runs_one_light_along_the_boxs_border() {
+    let state = state();
+    let tree = solo(&state);
+    let (mut ui, now) = scene();
+    let at_rest = crate::theme::with(crate::painted::truecolor(), || border_runs(&tree, &ui, now));
+
+    write(&mut ui, &state, "say hello", now);
+    crate::input::on_key(&mut ui, &tree, key(crossterm::event::KeyCode::Enter), now);
+    assert_eq!(ui.sending(now), Some(0.0), "the light starts on the key");
+    crate::theme::with(crate::painted::truecolor(), || {
+        let lit = |ms| border_runs(&tree, &ui, later(now, ms));
+        assert_ne!(lit(40), at_rest, "forty in, the near edge is lit");
+        assert_eq!(lit(40).last(), at_rest.last(), "and the far edge is not");
+        assert_ne!(lit(150), at_rest, "a hundred and fifty in, the far one is");
+        assert_eq!(lit(150).first(), at_rest.first(), "and the near one is not");
+        assert_eq!(lit(198), at_rest, "back at rest on the seventh frame");
+    });
+
+    // A second `⏎` is a second gesture: the light starts again rather than
+    // carrying on from where the first one had got to.
+    let half = later(now, 100);
+    write(&mut ui, &state, "again", half);
+    crate::input::on_key(&mut ui, &tree, key(crossterm::event::KeyCode::Enter), half);
+    assert_eq!(ui.sending(half), Some(0.0));
+    assert!(ui.sending(later(now, 298)).is_none(), "and ends six on");
+}
+
+#[test]
+fn a_still_surface_sends_a_line_with_no_light_at_all() {
+    let state = state();
+    let tree = solo(&state);
+    let (mut ui, now) = scene();
+    let at_rest = border_runs(&tree, &ui, still(now));
+    write(&mut ui, &state, "say hello", now);
+    crate::input::on_key(&mut ui, &tree, key(crossterm::event::KeyCode::Enter), now);
+    assert_eq!(ui.sending(still(now)), None);
+    for ms in [0i64, 33, 100, 198] {
+        assert_eq!(
+            border_runs(&tree, &ui, still(later(now, ms))),
+            at_rest,
+            "at {ms} ms the border is exactly what a still surface draws"
+        );
+    }
+}
+
 // ---- streaming: the comet tail ------------------------------------------
 
 /// An answer that is still arriving, with a tail long enough to ramp.

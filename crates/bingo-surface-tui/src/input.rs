@@ -805,6 +805,9 @@ fn enter(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
 /// beside whichever child is on screen.
 fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     let text = ui.composer.take();
+    // The gesture is answered on its own frame, whatever the line turns out
+    // to be and whatever the kernel makes of it (§6).
+    ui.sent = Some(now.instant);
     ui.history.remember(&text);
     ui.edited();
     ui.scroll.end();

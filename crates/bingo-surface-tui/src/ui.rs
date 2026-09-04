@@ -45,6 +45,10 @@ pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
 /// A transcript that has just been stepped into crossfades through dim over
 /// this long: two frames (§6).
 pub const SWITCH: Duration = Duration::from_millis(2 * FRAME.as_millis() as u64);
+/// One light along the input box's border when a line is sent: six frames
+/// (§6). The most repeated gesture in the surface, and the only motion that
+/// answers a person rather than reporting the model.
+pub const IGNITION: Duration = Duration::from_millis(6 * FRAME.as_millis() as u64);
 
 /// A message that is not transcript: an ack, a warning, a hint.
 #[derive(Clone, Debug)]
@@ -390,6 +394,11 @@ pub struct Ui {
     /// When the session in view was last stepped into: what the transcript
     /// crossfades from.
     pub switched: Option<Instant>,
+    /// When a line was last sent: what the box's border sweeps from. A fact
+    /// about the gesture, like [`Ui::switched`] and [`Ui::stop_asked`] — the
+    /// session's own stream says what became of the line, and this says only
+    /// that a person pressed the key.
+    pub sent: Option<Instant>,
     /// The frame as the last draw left it.
     pub painted: RefCell<Painted>,
     /// The pictures the transcript has turned into pixels. A memo of work
@@ -433,6 +442,7 @@ impl Ui {
             opening: false,
             focused: true,
             switched: None,
+            sent: None,
             painted: RefCell::default(),
             decoded: Decoded::default(),
             files: RefCell::default(),
@@ -495,6 +505,17 @@ impl Ui {
         }
         if self.layer.closing && self.layer.reveal(now).gone() {
             self.layer = Layer::shut(now.instant);
+        }
+    }
+
+    /// How far the light along the box's border has come since a line was
+    /// sent, or nothing at all once it has passed — and nothing where nothing
+    /// may move (§6).
+    pub fn sending(&self, now: Now) -> Option<f32> {
+        let sent = self.sent.filter(|_| now.motion)?;
+        match Anim::new(sent, IGNITION).progress(now.instant) {
+            done if done >= 1.0 => None,
+            come => Some(come),
         }
     }
 

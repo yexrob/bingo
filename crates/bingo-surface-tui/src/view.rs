@@ -779,7 +779,38 @@ fn render_composer(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect,
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if let Some(come) = ui.sending(now) {
+        ignite(frame, area, come);
+    }
     render_draft(state, ui, frame, inner, area.width);
+}
+
+/// The one light the box runs along its own border when a line is sent: the
+/// most repeated gesture in the surface, and until now the only one with no
+/// answer at all. It rides over the border the box has already drawn, so what
+/// the border says — dim while nothing is happening, breathing while the
+/// model works — is what it comes back to (§6).
+fn ignite(frame: &mut Frame, area: Rect, come: f32) {
+    let width = usize::from(area.width);
+    let buffer = frame.buffer_mut();
+    for (x, y) in outline(area) {
+        let lit = clock::sweep(come, usize::from(x - area.left()), width);
+        if lit <= 0.0 {
+            continue;
+        }
+        let under = buffer[(x, y)].style();
+        buffer[(x, y)].set_style(under.patch(theme::pulse(lit)));
+    }
+}
+
+/// The cells of a box's own outline, in reading order.
+fn outline(area: Rect) -> impl Iterator<Item = (u16, u16)> {
+    (area.top()..area.bottom()).flat_map(move |y| {
+        let whole = y == area.top() || y + 1 == area.bottom();
+        (area.left()..area.right())
+            .filter(move |x| whole || *x == area.left() || *x + 1 == area.right())
+            .map(move |x| (x, y))
+    })
 }
 
 /// The thumbnails, standing on the box's top border in the rows the frame

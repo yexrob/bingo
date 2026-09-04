@@ -866,9 +866,10 @@ mod tests {
             ("bad", &["transcript.rs", "views/badge.rs"]),
             ("mode", &["status.rs"]),
             ("breath", &["view.rs"]),
-            // The ramp `presence` → glow, spent on a live bullet and on the
-            // fill of a bar — one gradient, wherever §4 sanctions one.
-            ("pulse", &["transcript.rs", "views/progress.rs"]),
+            // The ramp `presence` → glow: a live bullet, the fill of a bar,
+            // and the light a sent line runs along the box's border — one
+            // gradient, wherever §4 sanctions one.
+            ("pulse", &["transcript.rs", "view.rs", "views/progress.rs"]),
             ("comet", &["transcript.rs"]),
             ("fading", &["status.rs"]),
             ("warming", &["status.rs"]),
