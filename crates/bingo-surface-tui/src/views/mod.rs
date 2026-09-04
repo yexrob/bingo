@@ -30,20 +30,37 @@ use bingo_sdk::{Action, ActionItem, View};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::clock::Now;
 use crate::theme;
 
 /// A value that is not there: an empty cell, a column a row does not carry.
 pub const MISSING: &str = "–";
 
 /// What the frame knows that a node does not: which action a person has
-/// fired and has not been answered about yet (ADR-0013 §3). It travels down
-/// the tree so an `Actions` row nested in a `Panel` still shows the mark.
+/// fired and has not been answered about yet (ADR-0013 §3), and where the
+/// free-running walk of a sheen has got to. It travels down the tree so an
+/// `Actions` row nested in a `Panel` still shows the mark, and a bar nested
+/// anywhere walks on the same beat as every other.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Marks {
     pub pending: Option<Action>,
+    /// Where an unbounded bar's sheen is in its turn: 0 at the head, which is
+    /// where a frame that says nothing about it leaves it (§6's rest).
+    pub beat: f32,
 }
 
-/// A view as styled lines, with nothing marked.
+impl Marks {
+    /// What the frame knows before it has been told anything: the clock.
+    pub fn at(now: Now) -> Self {
+        Self {
+            pending: None,
+            beat: progress::walk(now),
+        }
+    }
+}
+
+/// A view as styled lines at rest: a record — a finished output, a sheet of
+/// one — knows no frame and moves in none.
 pub fn render(view: &View, width: usize) -> Vec<Line<'static>> {
     marked(view, width, &Marks::default())
 }
@@ -62,7 +79,7 @@ pub fn marked(view: &View, width: usize, marks: &Marks) -> Vec<Line<'static>> {
             value,
             total,
             label,
-        } => progress::lines(*value, *total, label.as_deref(), width),
+        } => progress::lines(*value, *total, label.as_deref(), width, marks.beat),
         View::Badge { text, tone } => badge::lines(text, *tone),
         View::Tree { nodes } => tree::lines(nodes),
         View::Stack { children } => stack::lines(children, width, marks),

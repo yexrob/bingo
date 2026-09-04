@@ -443,13 +443,14 @@ impl Ui {
     /// person fired, while the session's stream has not moved since. The next
     /// frame from the session — the ack, or what the action changed — is the
     /// answer, so nothing has to be remembered to put the mark away.
-    pub fn marks(&self, state: &SessionState) -> Marks {
+    pub fn marks(&self, state: &SessionState, now: Now) -> Marks {
         Marks {
             pending: self
                 .pending
                 .as_ref()
                 .filter(|pending| pending.seq == state.seq)
                 .map(|pending| pending.action.clone()),
+            ..Marks::at(now)
         }
     }
 

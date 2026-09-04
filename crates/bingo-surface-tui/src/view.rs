@@ -67,7 +67,7 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
         &cards,
         rail::width(regions.rail, regions.transcript),
         ui.focus.as_ref(),
-        &ui.marks(tree.viewed()),
+        &ui.marks(tree.viewed(), now),
     );
     // A card is in the rail, or — where there is no rail — under the running
     // rows; never in both (design §3).
@@ -185,7 +185,7 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         [
             ui.block
                 .as_ref()
-                .map(|view| views::render(view, width))
+                .map(|view| views::marked(view, width, &views::Marks::at(now)))
                 .unwrap_or_default(),
             menu(
                 ui,
@@ -237,6 +237,7 @@ fn layer(
                 &ui.pinned,
                 width,
                 rows,
+                now,
             ),
             reveal,
         ),

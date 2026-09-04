@@ -222,6 +222,24 @@ fn an_unbounded_progress_shows_its_count_and_not_a_fraction() {
     );
 }
 
+/// A bar that has no fraction to show says the work is alive by walking its
+/// three lit cells along the track (design §5). The frame's own beat is what
+/// moves it, so a still surface — and a record, which is what [`render`]
+/// draws — leaves it at the head.
+#[test]
+fn an_unbounded_bar_walks_its_sheen_along_the_track() {
+    let bar = |beat| {
+        progress::lines(7, None, None, 80, beat)[0]
+            .to_string()
+            .trim_end()
+            .to_string()
+    };
+    assert_eq!(bar(0.0), "███░░░░░░░ 7", "parked at the head");
+    assert_eq!(bar(0.5), "░░░░░███░░ 7", "half a turn along");
+    assert_eq!(bar(0.9), "██░░░░░░░█ 7", "and it wraps, never falls off");
+    assert_eq!(bar(1.0), bar(0.0), "one whole turn is back where it began");
+}
+
 #[test]
 fn a_missing_cell_is_a_dash_and_numbers_hug_their_right_edge() {
     let drawn: Vec<String> = render(&table(), 80)
@@ -265,6 +283,7 @@ fn a_key_is_the_plugins_hint_else_where_the_button_sits() {
 fn a_fired_button_wears_the_mark_until_the_answer_comes_back() {
     let marks = Marks {
         pending: Some(action("board.tick")),
+        ..Marks::default()
     };
     let drawn = marked(&actions(), 80, &marks)[0].to_string();
     assert!(drawn.contains("[ 1 Approve… ]"), "{drawn}");
