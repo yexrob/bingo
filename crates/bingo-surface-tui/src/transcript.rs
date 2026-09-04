@@ -6,27 +6,32 @@
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{
-    CommandSpec, ContentPart, DecisionKind, Driver, Item, ItemBody, ItemStatus, SessionState,
-    ToolOutput, TurnStatus, View,
+    CommandSpec, DecisionKind, Driver, Item, ItemBody, ItemStatus, SessionState, ToolOutput,
+    TurnStatus,
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::clock::{self, Anim, Now};
 use crate::fold::{self, Fold, Folds};
 use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, markdown, paths, theme, views, wrap};
+use crate::{acp, markdown, paths, theme, wrap};
 
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
 mod said;
 
+/// What is under a tool row: its output, folded to what a row can spare.
+mod output;
 /// The picture under the words, where the terminal draws one (§5).
 mod pictured;
+
+pub use output::whole;
+use output::{folded, kept, plain, tail};
 
 pub(crate) use said::quiet;
 
@@ -758,100 +763,6 @@ fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
         return Vec::new();
     };
     returns(folded(output, call.fold, rows.result_width()), rows)
-}
-
-/// The last `keep` rows of something still arriving: what a running tool has
-/// printed so far, or what a thought has been thinking. One tail, so the two
-/// move the same way (§6); how many rows each spends is the one thing they
-/// differ by, and each names its own.
-fn tail(arriving: &str, keep: usize) -> Vec<Line<'static>> {
-    let all: Vec<&str> = arriving.trim_end().lines().collect();
-    plain(&all[all.len().saturating_sub(keep)..].join("\n"))
-}
-
-/// What a person reads under a finished tool row: the display the tool drew
-/// for them when there is one (ADR-0013 §2, the block lane), else the text the
-/// model read, folded to what a row can spare either way.
-fn folded(output: &ToolOutput, fold: Fold, width: usize) -> Vec<Line<'static>> {
-    let (rows, limit) = match &output.display {
-        // A diff is the one display a person reads by the dozen rows.
-        Some(view @ View::Diff { .. }) => (views::render(view, width), DIFF_ROWS),
-        Some(view) => (views::render(view, width), OUTPUT_ROWS),
-        None => (plain(&text_of(output)), OUTPUT_ROWS),
-    };
-    kept(rows, fold, limit, Some(EXPAND))
-}
-
-/// Everything a result says, with nothing folded away: what the pager opens
-/// (design §5 — a long output opens in a sheet).
-pub fn whole(output: &ToolOutput, width: usize) -> Vec<Line<'static>> {
-    folded(output, Fold::Open, width)
-}
-
-fn plain(text: &str) -> Vec<Line<'static>> {
-    text.trim_end()
-        .lines()
-        .map(|line| Line::from(Span::styled(expand_tabs(line), theme::dim())))
-        .collect()
-}
-
-/// A terminal cell has no tab in it: each one runs to the next stop of eight,
-/// as the shell would have shown it.
-fn expand_tabs(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut column = 0;
-    for c in line.chars() {
-        if c == '\t' {
-            let stop = 8 - column % 8;
-            out.extend(std::iter::repeat_n(' ', stop));
-            column += stop;
-        } else {
-            out.push(c);
-            column += UnicodeWidthChar::width(c).unwrap_or(0);
-        }
-    }
-    out
-}
-
-fn text_of(output: &ToolOutput) -> String {
-    output
-        .parts
-        .iter()
-        .filter_map(ContentPart::as_text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// What a block shows under its row, from the one fold it is in: nothing, the
-/// first `limit` rows with how many were left out, or the whole of it. One map
-/// answers for every fold, so a block is open in one way only.
-fn kept(
-    rows: Vec<Line<'static>>,
-    fold: Fold,
-    limit: usize,
-    opens: Option<&str>,
-) -> Vec<Line<'static>> {
-    match fold {
-        Fold::Shut => Vec::new(),
-        Fold::Peek => cut(rows, limit, opens),
-        Fold::Open => rows,
-    }
-}
-
-/// The first rows, then how many were left out and what opens them. `opens` is
-/// `None` for what no key reaches: `ctrl+o` reaches a result, so a block that
-/// is not one says how much it kept back and promises nothing.
-fn cut(rows: Vec<Line<'static>>, limit: usize, opens: Option<&str>) -> Vec<Line<'static>> {
-    let hidden = rows.len().saturating_sub(limit);
-    let mut out: Vec<Line<'static>> = rows.into_iter().take(limit).collect();
-    if hidden > 0 {
-        let key = opens.map(|key| format!(" ({key})")).unwrap_or_default();
-        out.push(Line::from(Span::styled(
-            format!("{} +{hidden} lines{key}", theme::ellipsis()),
-            theme::dim(),
-        )));
-    }
-    out
 }
 
 /// A sub-session is a row where it began: what it is, what it was asked, and
@@ -1780,8 +1691,11 @@ mod tests {
 
     #[test]
     fn a_tab_in_a_result_runs_to_the_next_stop_of_eight() {
-        assert_eq!(expand_tabs("     1\t[package]"), "     1  [package]");
-        assert_eq!(expand_tabs("a\tb\tc"), "a       b       c");
-        assert_eq!(expand_tabs("no tabs"), "no tabs");
+        assert_eq!(
+            output::expand_tabs("     1\t[package]"),
+            "     1  [package]"
+        );
+        assert_eq!(output::expand_tabs("a\tb\tc"), "a       b       c");
+        assert_eq!(output::expand_tabs("no tabs"), "no tabs");
     }
 }

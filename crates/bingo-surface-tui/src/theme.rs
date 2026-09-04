@@ -842,6 +842,8 @@ mod tests {
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
+                    // A folded result's own rows and its `+N lines` line.
+                    "transcript/output.rs",
                     // The chip that names a picture a terminal cannot draw
                     // (§5's image row).
                     "transcript/pictured.rs",
