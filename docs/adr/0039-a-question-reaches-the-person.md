@@ -84,5 +84,11 @@ a second representation.)
   mapping recorded there: a server's request becomes one form naming
   the server, the reply is `accept`/`decline`/`cancel`, and a schema
   the spec does not allow is declined with a notice.
+- *2026-09-04, M59:* an answer carries both halves of what a person
+  said. `Answer::Choice.other` holds the words typed beside the ticks
+  (serde-defaulted and skipped when absent, so an old frame reads as
+  the ticks alone, and words with nothing ticked stay `Answer::Text`).
+  An elicitation property has room for one value, so there the words
+  are what the server hears — recorded in the mapping's own doc.
 
 Refs: ADR-0035 §5, ADR-0036 §2, ADR-0011; Plans: M43, M53

@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::composer::Composer;
-use crate::{layers, theme};
+use crate::{layers, theme, wrap};
 
 /// From this many columns of card the preview stands beside the options; below
 /// it, above them. A 120-column terminal is the wide one (design §3).
@@ -119,9 +119,9 @@ fn chat_at(question: &Question) -> usize {
     question.options.len() + usize::from(question.free_text)
 }
 
-/// The rows the tab on screen offers a cursor.
-fn rows_on(form: &Form, questions: &[Question]) -> usize {
-    match questions.get(form.tab) {
+/// The rows one tab offers a cursor.
+fn rows_of(questions: &[Question], tab: usize) -> usize {
+    match questions.get(tab) {
         Some(question) => chat_at(question) + 1,
         None => SUBMIT_ROWS,
     }
@@ -155,12 +155,12 @@ pub fn on_key(
         KeyCode::Left => walk(form, focus, tabs, -1),
         KeyCode::Right | KeyCode::Tab => walk(form, focus, tabs, 1),
         KeyCode::Up => *focus = focus.saturating_sub(1),
-        KeyCode::Down => *focus = (*focus + 1).min(rows_on(form, questions) - 1),
+        KeyCode::Down => *focus = (*focus + 1).min(rows_of(questions, form.tab) - 1),
         KeyCode::Char(' ') => tick(form, questions, *focus),
         KeyCode::Enter => return chosen(form, focus, questions),
         KeyCode::Char(c @ '1'..='9') if bare(key) => {
             let index = (c as usize) - ('1' as usize);
-            if index >= rows_on(form, questions) {
+            if index >= rows_of(questions, form.tab) {
                 return None;
             }
             *focus = index;
@@ -290,31 +290,45 @@ fn fix(form: &mut Form, focus: &mut usize, questions: &[Question]) -> Option<Ans
     None
 }
 
-/// One question's answer, read off what the person left on it. A question
-/// nobody settled — or settled on nothing — is a cancel in its place.
+/// One question's answer, read off what the person left on it: what the card
+/// shows is what it sends, so a set with boxes ticked *and* words written under
+/// them answers with both (M59). Words with nothing ticked are the `Text` a
+/// question answered in words alone has always been, and a question nobody
+/// settled — or settled on nothing at all — is a cancel in its place.
 fn answer(form: &Form, tab: usize, question: &Question) -> Answer {
     let Some(slot) = form.slot(tab).filter(|slot| slot.fixed) else {
         return Answer::Cancel;
     };
-    if on_words(question, slot.cursor) {
-        let text = slot.words.as_ref().map_or("", |w| w.text()).trim();
-        return match text.is_empty() {
-            true => Answer::Cancel,
-            false => Answer::Text { text: text.into() },
-        };
+    let other = written(slot);
+    let ids = ticked_ids(slot, question);
+    if !ids.is_empty() {
+        return Answer::Choice { ids, other };
     }
-    let ids = match question.multi {
+    match other {
+        Some(text) => Answer::Text { text },
+        None => Answer::Cancel,
+    }
+}
+
+/// The ids a question was answered with: every box a set has ticked, or the one
+/// option a single choice's cursor was left on — none, where it was left on the
+/// words row.
+fn ticked_ids(slot: &Slot, question: &Question) -> Vec<String> {
+    match question.multi {
         true => slot.chosen.clone(),
         false => question
             .options
             .get(slot.cursor)
             .map(|option| vec![option.id.clone()])
             .unwrap_or_default(),
-    };
-    match ids.is_empty() {
-        true => Answer::Cancel,
-        false => Answer::Choice { ids },
     }
+}
+
+/// What stands in the words row, where it was opened and written in. Blanks are
+/// nothing said.
+fn written(slot: &Slot) -> Option<String> {
+    let text = slot.words.as_ref()?.text().trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// A bare digit, not a chord.
@@ -338,6 +352,20 @@ pub struct Head<'a> {
 /// what a click lands on.
 type Row = (Line<'static>, Option<usize>);
 
+/// The rows the band holds for one tab, whichever tab is walked to: one number
+/// for the whole form, so the rule that closes the band, the way out under it
+/// and everything above the band all stand where they stood (§3, "nothing
+/// jumps"). Measured at the width of the draw, so a resize re-measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Held {
+    /// The tallest tab's own rows, the mockup above its options included.
+    body: usize,
+    /// The same with the mockup given away, which is what a short screen shows.
+    bare: usize,
+    /// The longest key line's rows: a set says one key more than a choice.
+    keys: usize,
+}
+
 /// The card in the parts that give way in order. An answer is what the card
 /// was opened for, so the keys go first and the mockup above the options next;
 /// what is left is cut by [`crate::layers::card`], which keeps the first row
@@ -357,26 +385,99 @@ struct Card {
 }
 
 impl Card {
-    /// The card in the room it has: the keys are the first row it gives up and
-    /// the mockup the next, because a frame half drawn is worse than none.
-    fn within(self, room: usize) -> Vec<Row> {
-        let whole = self.head.len()
-            + self.asks.len()
-            + self.above.len()
-            + self.answers.len()
-            + self.tail.len();
-        let keys = whole < room;
+    /// The card in the room it has, padded out to the height the band holds for
+    /// every tab: the keys are the first rows it gives up and the mockup the
+    /// next, because a frame half drawn is worse than none. Rows are counted as
+    /// the screen will draw them — a line too long for the width costs two — so
+    /// the card never budgets for a row it then overruns.
+    fn within(self, held: Held, room: usize, width: usize) -> Vec<Row> {
+        let around = wrapped(&self.head, width) + wrapped(&self.tail, width);
+        let keys = around + held.body + held.keys <= room;
+        let mockup = keys || around + held.body <= room;
+        let asked = wrapped(&self.asks, width) + wrapped(&self.answers, width);
+        let (whole, spent) = match mockup {
+            true => (held.body, asked + wrapped(&self.above, width)),
+            false => (held.bare, asked),
+        };
+        let said = wrap::wrap(&self.keys.0, width).len();
         let mut out = self.head;
         out.extend(self.asks);
-        if keys || whole <= room {
+        if mockup {
             out.extend(self.above);
         }
         out.extend(self.answers);
+        out.extend(blank(whole.saturating_sub(spent)));
         out.extend(self.tail);
         if keys {
             out.push(self.keys);
+            out.extend(blank(held.keys.saturating_sub(said)));
         }
         out
+    }
+}
+
+/// Rows of nothing: what a tab shorter than the tallest stands on, so the rule
+/// under it and the card's own foot do not move as the tabs are walked.
+fn blank(rows: usize) -> Vec<Row> {
+    (0..rows).map(|_| (Line::default(), None)).collect()
+}
+
+/// How many rows of the screen these lines take once the view has wrapped them
+/// to the width the card was laid out in: a question too long for one row costs
+/// two, and a measure that did not know it would hold the band one row short.
+fn wrapped(rows: &[Row], width: usize) -> usize {
+    rows.iter()
+        .map(|(line, _)| wrap::wrap(line, width).len())
+        .sum()
+}
+
+/// The height the band holds, measured over every tab of the walk — the tab
+/// that sends included, or walking to it would shrink the band.
+fn holding(form: &Form, questions: &[Question], width: usize) -> Held {
+    let mut held = Held {
+        body: 0,
+        bare: 0,
+        keys: 1,
+    };
+    for tab in 0..=submit_tab(questions) {
+        let (body, bare) = deepest(form, tab, questions, width);
+        held.body = held.body.max(body);
+        held.bare = held.bare.max(bare);
+        held.keys = held
+            .keys
+            .max(wrap::wrap(&keys(questions, tab), width).len());
+    }
+    held
+}
+
+/// How tall one tab is at its tallest, with the mockup above its options and
+/// with it given away. Its rows are read with the cursor on each of them in
+/// turn: the mockup shown is the one under the cursor, and a tab may not change
+/// height as its own cursor walks it either.
+fn deepest(form: &Form, tab: usize, questions: &[Question], width: usize) -> (usize, usize) {
+    (0..rows_of(questions, tab))
+        .map(|focus| {
+            let (asks, above, answers) = body(form, tab, focus, questions, width);
+            let bare = wrapped(&asks, width) + wrapped(&answers, width);
+            (bare + wrapped(&above, width), bare)
+        })
+        .fold((0, 0), |(body, bare), (with, without)| {
+            (body.max(with), bare.max(without))
+        })
+}
+
+/// One tab in the three parts of [`Card`] it fills. A question and the tab that
+/// sends are both a tab of the walk, so both are laid out through here.
+fn body(
+    form: &Form,
+    tab: usize,
+    focus: usize,
+    questions: &[Question],
+    width: usize,
+) -> (Vec<Row>, Vec<Row>, Vec<Row>) {
+    match questions.get(tab) {
+        Some(question) => asked(form, tab, focus, question, width),
+        None => sending(form, focus, questions),
     }
 }
 
@@ -390,10 +491,7 @@ impl Card {
 /// them where there is not — never below, because what gives way on a short
 /// screen is whatever sits above the answers (design §2).
 pub fn rows(form: &Form, focus: usize, questions: &[Question], at: Head<'_>) -> Vec<Row> {
-    let (asks, above, answers) = match questions.get(form.tab) {
-        Some(question) => asked(form, focus, question, at.width),
-        None => sending(form, focus, questions),
-    };
+    let (asks, above, answers) = body(form, form.tab, focus, questions, at.width);
     Card {
         head: heading(form, questions, at),
         asks,
@@ -401,11 +499,11 @@ pub fn rows(form: &Form, focus: usize, questions: &[Question], at: Head<'_>) -> 
         answers,
         tail: vec![
             (layers::rule(at.width), None),
-            numbered(chat_row(form, questions), focus, CHAT),
+            numbered(chat_row(questions, form.tab), focus, CHAT),
         ],
-        keys: (keys(form, questions), None),
+        keys: (keys(questions, form.tab), None),
     }
-    .within(at.room)
+    .within(holding(form, questions, at.width), at.room, at.width)
 }
 
 /// What the card opens with: the title where there is one, and the tab row.
@@ -483,6 +581,7 @@ fn name(question: &Question, tab: usize) -> String {
 /// them, and the rows a person answers on.
 fn asked(
     form: &Form,
+    tab: usize,
     focus: usize,
     question: &Question,
     width: usize,
@@ -491,7 +590,7 @@ fn asked(
         Line::from(Span::styled(question.question.clone(), theme::text())),
         None,
     )];
-    let options = option_rows(form, focus, question, has_preview(question));
+    let options = option_rows(form, tab, focus, question, has_preview(question));
     match preview_of(question, focus) {
         Some(preview) if width >= PANE_FROM => (asks, Vec::new(), beside(options, &preview, width)),
         Some(preview) => (
@@ -520,9 +619,9 @@ fn sending(form: &Form, focus: usize, questions: &[Question]) -> (Vec<Row>, Vec<
     )
 }
 
-/// Which row of the tab on screen leaves it for the composer.
-fn chat_row(form: &Form, questions: &[Question]) -> usize {
-    match questions.get(form.tab) {
+/// Which row of a tab leaves it for the composer.
+fn chat_row(questions: &[Question], tab: usize) -> usize {
+    match questions.get(tab) {
         Some(question) => chat_at(question),
         None => SUBMIT_ROWS - 1,
     }
@@ -530,9 +629,9 @@ fn chat_row(form: &Form, questions: &[Question]) -> usize {
 
 /// The keys the card answers to, said on the card the way a permission's
 /// answers say theirs (§7).
-fn keys(form: &Form, questions: &[Question]) -> Line<'static> {
+fn keys(questions: &[Question], tab: usize) -> Line<'static> {
     let mut said = vec!["Enter to select"];
-    if questions.get(form.tab).is_some_and(|q| q.multi) {
+    if questions.get(tab).is_some_and(|q| q.multi) {
         said.push("Space to toggle");
     }
     said.extend([
@@ -551,16 +650,26 @@ fn preview_of(question: &Question, focus: usize) -> Option<String> {
 /// The options, each numbered, with its description under it — unless the
 /// question carries previews, and then the labels stand alone so the mockup is
 /// what is read.
-fn option_rows(form: &Form, focus: usize, question: &Question, compact: bool) -> Vec<Row> {
+fn option_rows(
+    form: &Form,
+    tab: usize,
+    focus: usize,
+    question: &Question,
+    compact: bool,
+) -> Vec<Row> {
     let mut out = Vec::new();
     for (index, option) in question.options.iter().enumerate() {
-        out.push(numbered(index, focus, &labelled(form, question, option)));
+        out.push(numbered(
+            index,
+            focus,
+            &labelled(form, tab, question, option),
+        ));
         if let Some(description) = option.description.as_ref().filter(|_| !compact) {
             out.push((described(description), Some(index)));
         }
     }
     if let Some(index) = words_at(question) {
-        out.extend(words_rows(form, focus, index));
+        out.extend(words_rows(form, tab, focus, index));
     }
     out
 }
@@ -583,18 +692,18 @@ fn described(description: &str) -> Line<'static> {
 }
 
 /// One option's words: the box it wears in a set, then its label.
-fn labelled(form: &Form, question: &Question, option: &QuestionOption) -> String {
+fn labelled(form: &Form, tab: usize, question: &Question, option: &QuestionOption) -> String {
     match question.multi {
         false => option.label.clone(),
-        true => format!("{} {}", ticked(form, option), option.label),
+        true => format!("{} {}", ticked(form, tab, option), option.label),
     }
 }
 
 /// A member of a set, ticked or not: brackets in either look, and the tick the
 /// glyph table spells — `[✔]`, `[x]` where nothing but ASCII may be drawn.
-fn ticked(form: &Form, option: &QuestionOption) -> String {
+fn ticked(form: &Form, tab: usize, option: &QuestionOption) -> String {
     let chosen = form
-        .slot(form.tab)
+        .slot(tab)
         .is_some_and(|slot| slot.chosen.iter().any(|id| id == &option.id));
     let mark = match chosen {
         true => theme::tick(),
@@ -605,9 +714,9 @@ fn ticked(form: &Form, option: &QuestionOption) -> String {
 
 /// The row where a person answers in their own words, and what they have
 /// typed into it so far.
-fn words_rows(form: &Form, focus: usize, index: usize) -> Vec<Row> {
+fn words_rows(form: &Form, tab: usize, focus: usize, index: usize) -> Vec<Row> {
     let mut out = vec![numbered(index, focus, WORDS)];
-    if let Some(words) = form.slot(form.tab).and_then(|slot| slot.words.as_ref()) {
+    if let Some(words) = form.slot(tab).and_then(|slot| slot.words.as_ref()) {
         out.push((
             Line::from(vec![
                 Span::styled(format!("     {} ", theme::user()), theme::dim()),
@@ -792,6 +901,7 @@ mod tests {
     fn chose(id: &str) -> Answer {
         Answer::Choice {
             ids: vec![id.into()],
+            other: None,
         }
     }
 
@@ -972,6 +1082,76 @@ mod tests {
         );
     }
 
+    /// The bug M59 was opened for, at the card's own end: a set ticked and then
+    /// written under keeps both halves, and opening the words row unticks
+    /// nothing.
+    #[test]
+    fn a_set_ticked_and_written_under_answers_with_both() {
+        let questions = three();
+        let (mut form, mut focus) = (Form::default(), 0);
+        press(
+            &mut form,
+            &mut focus,
+            &questions,
+            &[KeyCode::Tab, KeyCode::Tab],
+        );
+        // Both boxes ticked, then down to the words row and opened.
+        press(
+            &mut form,
+            &mut focus,
+            &questions,
+            &[
+                KeyCode::Char(' '),
+                KeyCode::Down,
+                KeyCode::Char(' '),
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
+        assert_eq!(
+            form.slot(2).map(|slot| slot.chosen.clone()),
+            Some(vec!["first".to_string(), "second".to_string()]),
+            "opening the words row unticks nothing"
+        );
+        for c in "and one more".chars() {
+            press(&mut form, &mut focus, &questions, &[KeyCode::Char(c)]);
+        }
+        press(&mut form, &mut focus, &questions, &[KeyCode::Enter]);
+        assert!(
+            form.fixed(2),
+            "however it was given, it is one answered question"
+        );
+        assert_eq!(
+            answer(&form, 2, &questions[2]),
+            Answer::Choice {
+                ids: vec!["first".into(), "second".into()],
+                other: Some("and one more".into()),
+            }
+        );
+    }
+
+    /// The words row is read whatever row the answer was fixed on — a click
+    /// may leave the cursor on an option with words already written — because
+    /// what the card shows is what it sends.
+    #[test]
+    fn the_words_row_is_read_wherever_the_cursor_was_fixed() {
+        let questions = [question("Auth", false, false)];
+        let mut form = Form::default();
+        let mut typed = Composer::default();
+        typed.insert("or neither");
+        let slot = form.slot_mut(0);
+        slot.words = Some(typed);
+        slot.cursor = 1;
+        slot.fixed = true;
+        assert_eq!(
+            answer(&form, 0, &questions[0]),
+            Answer::Choice {
+                ids: vec!["second".into()],
+                other: Some("or neither".into()),
+            }
+        );
+    }
+
     #[test]
     fn a_question_settled_on_nothing_is_a_cancel_in_its_place() {
         let questions = vec![
@@ -1122,7 +1302,14 @@ mod tests {
     fn the_key_line_is_the_cards_last_row_and_a_set_adds_its_own_key() {
         let questions = three();
         let one = drawn(&Form::default(), 0, &questions, 80);
-        let last = one.last().cloned().unwrap_or_default();
+        // The last row that says anything: a blank under it holds the card's
+        // foot where the longer key line of a set puts it (M59).
+        let last = one
+            .iter()
+            .rev()
+            .find(|row| !row.trim().is_empty())
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             last,
             "Enter to select · ↑/↓ to navigate · Tab to switch questions · Esc to cancel"
@@ -1164,6 +1351,80 @@ mod tests {
             drawn.iter().any(|row| row.contains(&format!("3. {WORDS}")))
                 && drawn.iter().any(|row| row.contains(&format!("4. {CHAT}"))),
             "{drawn:#?}"
+        );
+    }
+
+    /// Which row of the card the rule that closes the band is on. Every tab
+    /// must answer the same, however tall it is on its own.
+    fn rule_row(questions: &[Question], tab: usize, width: usize) -> Option<usize> {
+        let form = Form {
+            tab,
+            ..Form::default()
+        };
+        drawn(&form, 0, questions, width)
+            .iter()
+            .position(|row| row == &theme::rule().repeat(width))
+    }
+
+    /// §3's "nothing jumps" is the card's too (M59): the band's height is one
+    /// number for the whole form, so the rule that closes it — and everything
+    /// hanging under it — stands on one row whichever tab is walked to.
+    #[test]
+    fn the_rule_that_closes_the_band_is_on_one_row_for_every_tab() {
+        // Three of visibly different heights: one with a mockup above its
+        // options, one plain, one a set.
+        let questions = vec![
+            question("Auth", false, true),
+            question("Library", false, false),
+            question("Targets", true, false),
+        ];
+        let held = holding(&Form::default(), &questions, 80);
+        assert_eq!(
+            held.keys, 2,
+            "a set's key line wraps at 80, so the card's foot holds two rows"
+        );
+        assert!(held.body > held.bare, "the mockup is what gives way first");
+        let rows: Vec<Option<usize>> = (0..=submit_tab(&questions))
+            .map(|tab| rule_row(&questions, tab, 80))
+            .collect();
+        assert!(rows[0].is_some(), "the band closes with a rule");
+        assert!(
+            rows.iter().all(|row| *row == rows[0]),
+            "every tab holds the rule on one row: {rows:?}"
+        );
+    }
+
+    /// The mockup is the first thing the band gives away on a short screen, and
+    /// then every tab is held out to the shorter number instead — so the band
+    /// still holds one height, one row lower.
+    #[test]
+    fn a_screen_too_short_for_the_mockup_holds_the_shorter_height() {
+        let questions = vec![
+            question("Auth", false, true),
+            question("Library", false, false),
+        ];
+        let held = holding(&Form::default(), &questions, 80);
+        let short = |tab: usize| {
+            rows(
+                &Form {
+                    tab,
+                    ..Form::default()
+                },
+                0,
+                &questions,
+                Head {
+                    title: None,
+                    agent: None,
+                    width: 80,
+                    room: held.bare + 3,
+                },
+            )
+            .len()
+        };
+        assert_eq!(short(0), short(1), "one height with the mockup given away");
+        assert!(
+            short(0) < held.body + 3,
+            "and a shorter one than the mockup asked for"
         );
     }
 

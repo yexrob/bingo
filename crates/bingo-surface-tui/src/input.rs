@@ -1319,13 +1319,16 @@ mod tests {
                 answer: Answer::Form {
                     answers: vec![
                         Answer::Choice {
-                            ids: vec!["0".into()]
+                            ids: vec!["0".into()],
+                            other: None,
                         },
                         Answer::Choice {
-                            ids: vec!["0".into()]
+                            ids: vec!["0".into()],
+                            other: None,
                         },
                         Answer::Choice {
-                            ids: vec!["0".into()]
+                            ids: vec!["0".into()],
+                            other: None,
                         },
                     ],
                 },
@@ -1432,7 +1435,8 @@ mod tests {
             vec![Effect::Answer {
                 interaction: state.interactions[0].id.clone(),
                 answer: Answer::Choice {
-                    ids: vec!["o".into()]
+                    ids: vec!["o".into()],
+                    other: None,
                 },
                 activation: Activation::Keyboard,
             }]
@@ -1453,7 +1457,8 @@ mod tests {
             vec![Effect::Answer {
                 interaction: state.interactions[0].id.clone(),
                 answer: Answer::Choice {
-                    ids: vec!["a".into()]
+                    ids: vec!["a".into()],
+                    other: None,
                 },
                 activation: Activation::Keyboard,
             }],

@@ -58,7 +58,7 @@ pub fn picked(
     request: &RequestPermissionRequest,
     answer: &Answer,
 ) -> Option<RequestPermissionResponse> {
-    let Answer::Choice { ids } = answer else {
+    let Answer::Choice { ids, .. } = answer else {
         return None;
     };
     let chosen = ids.first()?;
@@ -238,6 +238,7 @@ mod tests {
         let asked = request(fixtures::request_permission());
         let chosen = Answer::Choice {
             ids: vec!["allow-once".into()],
+            other: None,
         };
         let answered = serde_json::to_value(picked(&asked, &chosen).expect("an option was picked"))
             .expect("an outcome serialises");
@@ -255,7 +256,8 @@ mod tests {
             picked(
                 &asked,
                 &Answer::Choice {
-                    ids: vec!["allow_once".into()]
+                    ids: vec!["allow_once".into()],
+                    other: None,
                 }
             )
             .is_none(),
