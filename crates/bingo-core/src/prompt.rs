@@ -74,6 +74,14 @@ earlier one's result.
 with spaces in shell commands.
 - A tool result marked as an error tells you why; adjust rather than retry \
 the same call.
+
+# Pictures
+- You can see images: the user may paste or attach one, and a tool that \
+returns a picture puts it in front of you.
+- A picture a tool returns also goes into the transcript, where the user's \
+surface can draw it — reading a picture is how you show it to them.
+- Never say you cannot view or display an image: read the file or fetch the \
+URL, then say what you see.
 ";
 
 #[cfg(test)]
@@ -98,6 +106,15 @@ mod tests {
         assert!(blocks[0].text.starts_with("You are bingo"));
         assert!(!blocks[1].cache);
         insta::assert_snapshot!(blocks[1].text);
+    }
+
+    /// The words every session opens with, pinned. They are the cached prefix
+    /// of every request this kernel makes, so a change to them is read as a
+    /// diff rather than slipped in.
+    #[test]
+    fn the_identity_is_the_same_words_for_every_session() {
+        let blocks = system_blocks(&input(Path::new("/work/app")));
+        insta::assert_snapshot!(blocks[0].text);
     }
 
     #[test]
