@@ -33,6 +33,22 @@ pub fn shorten_in(text: &str, cwd: &str, home: Option<&str>) -> String {
         .join(" ")
 }
 
+/// A path as this machine spells it, from the way it is written down: `~` is
+/// home. The inverse of the `~` [`short`] writes, so a path a person or a
+/// model wrote comes back through here before anything reads it.
+pub fn expand(word: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return word.to_string();
+    };
+    match word.strip_prefix('~') {
+        Some("") => home.to_string(),
+        Some(rest) if rest.starts_with('/') => format!("{home}{rest}"),
+        // `~other` is another person's home, which this does not know how to
+        // find; it stays the word it is and is not there.
+        _ => word.to_string(),
+    }
+}
+
 /// The home directory, read once. A surface that cannot see one just prints
 /// absolute paths.
 pub fn home() -> Option<&'static str> {
@@ -133,6 +149,24 @@ mod tests {
 
     fn short_path(path: &str) -> String {
         short(path, CWD, Some(HOME))
+    }
+
+    /// The way back: the `~` [`short`] writes, read again as a real path.
+    /// What it does *not* do is the other half of that reading — a relative
+    /// path is in the session's own directory, which is the caller's to join.
+    #[test]
+    fn the_tilde_a_path_is_shown_with_reads_back_as_home() {
+        for path in ["/Users/ada/notes.md", "/Users/ada"] {
+            assert_eq!(expand(&short_path(path), Some(HOME)), path);
+        }
+        assert_eq!(expand("~/a.png", Some(HOME)), "/Users/ada/a.png");
+        assert_eq!(expand("docs/a.png", Some(HOME)), "docs/a.png");
+        assert_eq!(
+            expand("~other/a.png", Some(HOME)),
+            "~other/a.png",
+            "not ours"
+        );
+        assert_eq!(expand("~/a.png", None), "~/a.png", "no home, no expansion");
     }
 
     #[test]

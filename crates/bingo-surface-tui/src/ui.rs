@@ -22,7 +22,7 @@ use crate::composer::Composer;
 use crate::dialog::Dialog;
 use crate::fold::Folds;
 use crate::frame::Regions;
-use crate::graphics::Decoded;
+use crate::graphics::{Decoded, Linked};
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
 use crate::pager::Pager;
@@ -396,6 +396,10 @@ pub struct Ui {
     /// already done, like [`Painted`], and holding no more of them than the
     /// terminal itself is asked to hold.
     pub decoded: Decoded,
+    /// The pictures this session's own words named, read in once each (M51).
+    /// A memo like [`Ui::decoded`], and the bound on how many a run of words
+    /// may send this surface after ([`crate::graphics::linked`]).
+    pub linked: Linked,
     /// The paths the `@` dropdown ranks, walked when the first one asks.
     files: RefCell<Files>,
 }
@@ -435,6 +439,7 @@ impl Ui {
             switched: None,
             painted: RefCell::default(),
             decoded: Decoded::default(),
+            linked: Linked::default(),
             files: RefCell::default(),
         }
     }

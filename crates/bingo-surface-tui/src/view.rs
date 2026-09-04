@@ -471,6 +471,7 @@ fn render_transcript(
             &ui.folds,
             &ui.catalogs.commands,
             &ui.decoded,
+            &ui.linked,
             now,
         ),
         live,

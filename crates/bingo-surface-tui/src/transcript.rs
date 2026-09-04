@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::clock::{self, Anim, Now};
 use crate::fold::{self, Fold, Folds};
-use crate::graphics::{Decoded, Picture};
+use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
 use crate::{acp, markdown, paths, theme, views, wrap};
@@ -72,6 +72,10 @@ pub struct Rows<'a> {
     /// know how many pixels it is before it can say how many cells it takes,
     /// and that answer is kept rather than worked out again every frame.
     pub pictures: &'a Decoded,
+    /// The pictures the words themselves named, as far as they have been read
+    /// in (M51). A row asks and draws what is there; it never goes looking,
+    /// which is the run's job between frames.
+    pub linked: &'a Linked,
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
@@ -92,6 +96,7 @@ impl<'a> Rows<'a> {
         folds: &'a Folds,
         commands: &'a [CommandSpec],
         pictures: &'a Decoded,
+        linked: &'a Linked,
         now: Now,
     ) -> Self {
         Self {
@@ -101,6 +106,7 @@ impl<'a> Rows<'a> {
             commands,
             now,
             pictures,
+            linked,
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
         }
@@ -147,6 +153,21 @@ pub fn joins_the_row_above(item: &Item) -> bool {
 pub struct Block {
     pub lines: Vec<Line<'static>>,
     pub pictures: Vec<Picture>,
+    /// The destinations this block's own words named (M51), whatever became
+    /// of them. It rides with the lines for the same reason the pictures do:
+    /// a block is drawn once and cloned ever after, and the run reads this
+    /// off the frame to go and fetch what the session has not got yet.
+    pub wanted: Vec<String>,
+}
+
+impl From<Vec<Line<'static>>> for Block {
+    /// Lines that named no picture, which is most of them.
+    fn from(lines: Vec<Line<'static>>) -> Self {
+        Block {
+            lines,
+            ..Block::default()
+        }
+    }
 }
 
 /// One item's block. `previous` is the item before it, which a receipt joins;
@@ -169,7 +190,10 @@ pub fn item_block(
     )
 }
 
-/// The words of one item's block, which is every row of it but the picture.
+/// The words of one item's block — every row of it but the picture its own
+/// parts carry. An answer's words may name a picture themselves, and that one
+/// is drawn among them ([`pictured::in_the_words`]), so this answers with a
+/// block rather than lines.
 fn item_lines(
     item: &Item,
     previous: Option<&Item>,
@@ -177,10 +201,10 @@ fn item_lines(
     rows: &Rows<'_>,
     cue: Cue,
     fold: Fold,
-) -> Vec<Line<'static>> {
+) -> Block {
     match &item.body {
-        ItemBody::User { parts, origin } => said::lines(item, parts, origin, fold, rows),
-        ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
+        ItemBody::User { parts, origin } => said::lines(item, parts, origin, fold, rows).into(),
+        ItemBody::Assistant { text } => assistant(text, item.status, fold, rows, cue),
         // An agent that runs its own tools journals each finished call as a
         // reasoning item whose metadata is the whole call (ADR-0035 §4), so
         // what a reasoning item draws is the one question of whether it is a
@@ -188,40 +212,42 @@ fn item_lines(
         ItemBody::Reasoning { .. } => match acp::call(item) {
             Some(call) => agent_call(call, fold, rows, cue),
             None => thinking(item, fold, rows),
-        },
-        ItemBody::ToolCall { .. } => called(item, agents, fold, rows, cue),
+        }
+        .into(),
+        ItemBody::ToolCall { .. } => called(item, agents, fold, rows, cue).into(),
         ItemBody::Action { name, args, result } => {
-            action(item.status, name, args, result.as_ref(), fold, rows)
+            action(item.status, name, args, result.as_ref(), fold, rows).into()
         }
         ItemBody::Compaction { before, after, .. } => vec![rule(
             &format!("context compacted ({before} → {after} tokens)"),
             rows.width,
-        )],
-        ItemBody::Rewind { dropped, .. } => {
-            vec![rule(
-                &format!("rewound, {dropped} items dropped"),
-                rows.width,
-            )]
-        }
+        )]
+        .into(),
+        ItemBody::Rewind { dropped, .. } => vec![rule(
+            &format!("rewound, {dropped} items dropped"),
+            rows.width,
+        )]
+        .into(),
         ItemBody::Interruption { marker } => {
-            vec![Line::from(Span::styled(marker.clone(), theme::dim()))]
+            vec![Line::from(Span::styled(marker.clone(), theme::dim()))].into()
         }
         ItemBody::Notice { level, text, .. } => {
-            vec![Line::from(Span::styled(text.clone(), theme::level(*level)))]
+            vec![Line::from(Span::styled(text.clone(), theme::level(*level)))].into()
         }
         ItemBody::QuestionAnswer {
             question, answer, ..
-        } => answered(question, answer, rows),
+        } => answered(question, answer, rows).into(),
         ItemBody::PermissionReceipt {
             tool,
             decision,
             feedback,
             ..
-        } => receipt(tool, *decision, feedback.as_deref(), previous, rows),
+        } => receipt(tool, *decision, feedback.as_deref(), previous, rows).into(),
         ItemBody::Asset { asset, label } => vec![Line::from(Span::styled(
             format!("[{}]", label.clone().unwrap_or_else(|| asset.clone())),
             theme::dim(),
-        ))],
+        ))]
+        .into(),
     }
 }
 
@@ -360,13 +386,21 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 
 /// The answer: the brightest text on the screen, after a white `⏺` — and,
 /// while it is still arriving, a comet tail on the cells that just landed.
-fn assistant(text: &str, status: ItemStatus, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
-    let body = markdown::render(text, rows.measure().saturating_sub(speaks_indent()));
-    let body = match arriving(status, rows, cue) {
-        Some(age) => comet(body, age),
-        None => body,
+///
+/// The words may name a picture themselves (M51). The tail is lit first: a row
+/// of placeholder cells is not text, and cooling it would spend the colour the
+/// picture's own number is carried in.
+fn assistant(text: &str, status: ItemStatus, fold: Fold, rows: &Rows<'_>, cue: Cue) -> Block {
+    let written = markdown::rendered(text, rows.measure().saturating_sub(speaks_indent()));
+    let lit = match arriving(status, rows, cue) {
+        Some(age) => comet(written.lines, age),
+        None => written.lines,
     };
-    speaks(theme::text().patch(theme::bold()), body, rows)
+    let body = pictured::in_the_words(lit, &written.images, fold, rows);
+    Block {
+        lines: speaks(theme::text().patch(theme::bold()), body.lines, rows),
+        ..body
+    }
 }
 
 /// How far a block still arriving is through its tail, and nothing at all
@@ -937,7 +971,8 @@ mod tests {
         let welcomed = crate::welcome::lines(state, 60).len();
         let mut blocks = crate::blocks::Blocks::default();
         let pictures = Decoded::default();
-        let rows = Rows::of(state, 60, folds, commands, &pictures, scene().1);
+        let linked = Linked::default();
+        let rows = Rows::of(state, 60, folds, commands, &pictures, &linked, scene().1);
         let height = blocks.sync(state, &Agents::new(), &rows, Vec::new());
         let mut rows: Vec<String> = blocks
             .window(0, height)
@@ -1600,7 +1635,8 @@ mod tests {
         let mut blocks = crate::blocks::Blocks::default();
         let folds = Folds::new();
         let pictures = Decoded::default();
-        let rows = Rows::of(&state, 160, &folds, &[], &pictures, scene().1);
+        let linked = Linked::default();
+        let rows = Rows::of(&state, 160, &folds, &[], &pictures, &linked, scene().1);
         let height = blocks.sync(&state, &Agents::new(), &rows, Vec::new());
         let widest = blocks
             .window(0, height)

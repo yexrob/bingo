@@ -31,6 +31,13 @@ const READS_A_PICTURE: &str = r#"{"responses":[
   {"steps":[{"toolCall":{"name":"Read","input":{"file_path":"shot.png"}}}]},
   {"steps":[{"text":"That is the picture."}]}]}"#;
 
+/// An answer that names a picture in its own words and calls nothing: the
+/// path by which a picture reaches the transcript without a tool at all
+/// (M51). The file is in the session's directory, so the destination is
+/// relative the way a model writes one.
+const NAMES_A_PICTURE: &str = r#"{"responses":[
+  {"steps":[{"text":"Here it is:\n\n![the shot](shot.png)\n\nThat is all."}]}]}"#;
+
 /// What the terminal at the other end of the pty answers the graphics probe
 /// with. Every terminal answers DA1; only one that speaks the kitty protocol
 /// answers the graphics query, only some say how big a cell is, and only the
@@ -192,6 +199,22 @@ impl Terminal {
         writer.flush().unwrap();
     }
 
+    /// Wait for the child to write `needle`, escapes and all — for a
+    /// sequence that paints no cell and so never reaches the screen.
+    fn wait_written(&self, needle: &[u8]) {
+        let deadline = Instant::now() + LIMIT;
+        while Instant::now() < deadline {
+            if contains(&self.written(), needle) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for {needle:?} in the child's output\n--- screen ---\n{}",
+            self.screen()
+        );
+    }
+
     /// Wait for `needle` to appear, or say what was there instead.
     fn wait_for(&self, needle: &str) {
         let deadline = Instant::now() + LIMIT;
@@ -313,6 +336,47 @@ fn a_terminal_that_answers_the_graphics_probe_is_sent_the_picture() {
         !terminal.screen().contains("[image:"),
         "and no chip was drawn:\n{}",
         terminal.screen()
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// A picture the answer named in its own words, on a terminal that draws
+/// pictures (M51): the chip stays as the line it hangs from, the file is read
+/// in between frames, and the bytes go out once.
+#[test]
+fn a_picture_an_answer_named_in_markdown_is_read_in_and_sent() {
+    let mut terminal = Terminal::opened(&[], NAMES_A_PICTURE, Answers::Pictures);
+    std::fs::write(
+        terminal.home.path().join("shot.png"),
+        bingo_pictures::testing::png_bytes(300, 200),
+    )
+    .unwrap();
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"show me the shot\r");
+    terminal.wait_for("[image: the shot]");
+    // The read happens between frames, so the bytes come after the chip.
+    terminal.wait_written(b"\x1b_Ga=T,f=100");
+    let written = terminal.written();
+    assert_eq!(
+        count(&written, b"\x1b_Ga=T,f=100"),
+        1,
+        "read in once and sent once"
+    );
+    assert!(contains(&written, b"U=1"), "as a virtual placement");
+    let sent = transmitted(&written);
+    assert!(
+        bingo_pictures::png_size(&sent).is_some(),
+        "and what went out is a PNG"
+    );
+    let screen = terminal.screen();
+    assert!(
+        screen.contains("[image: the shot]"),
+        "the chip stays: it is the line the picture hangs from\n{screen}"
+    );
+    assert!(
+        screen.contains("That is all."),
+        "and the words after it are still there\n{screen}"
     );
     terminal.send(&[0x04]);
     terminal.leave();
