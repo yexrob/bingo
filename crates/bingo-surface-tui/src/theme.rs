@@ -101,8 +101,12 @@ pub struct Glyphs {
     pub caret: &'static str,
     /// bingo at work, one frame every [`SPARKLE_MS`].
     pub sparkles: [&'static str; 4],
-    pub todo: &'static str,
-    pub todo_done: &'static str,
+    /// A box a person ticks: `[0]` open, `[1]` done. One field because it is
+    /// one fact in two states, as the sparkles are one in four.
+    pub todo: [&'static str; 2],
+    /// A tick with no box drawn round it: what a form's `Submit` tab wears and
+    /// what stands inside a multi-select's own brackets.
+    pub tick: &'static str,
     /// The permission mode on the status line.
     pub mode: &'static str,
     /// A tree node with siblings under it, and the last one.
@@ -124,8 +128,8 @@ pub const UNICODE: Glyphs = Glyphs {
     find: "⌕",
     caret: "▌",
     sparkles: ["✻", "✢", "✶", "✽"],
-    todo: "☐",
-    todo_done: "☒",
+    todo: ["☐", "☒"],
+    tick: "✔",
     mode: "⏵⏵",
     branch: "├",
     corner: "└",
@@ -136,8 +140,8 @@ pub const UNICODE: Glyphs = Glyphs {
 
 /// `BINGO_ASCII=1`: the seven characters of §7, each doing the job its shape
 /// suggests — `>` says you, `*` is a bullet, `+` sparkles and turns a corner,
-/// `x` crosses a box off, `-` connects and rules, `|` stands a wall up and
-/// stands where typing lands, `/` opens a query as vim's does.
+/// `x` crosses a box off and ticks one, `-` connects and rules, `|` stands a
+/// wall up and stands where typing lands, `/` opens a query as vim's does.
 ///
 /// A skill spends no seventh character: the row says `Skill(guide)` in words,
 /// so the glyph is what a glance finds and never the only place the fact is.
@@ -151,8 +155,8 @@ pub const ASCII: Glyphs = Glyphs {
     find: "/",
     caret: "|",
     sparkles: ["+", "+", "+", "+"],
-    todo: "-",
-    todo_done: "x",
+    todo: ["-", "x"],
+    tick: "x",
     mode: ">>",
     branch: "+",
     corner: "+",
@@ -677,8 +681,13 @@ pub fn cursor_span(focused: bool) -> ratatui::text::Span<'static> {
 }
 
 pub fn todo(done: bool) -> &'static str {
-    let glyphs = glyphs();
-    if done { glyphs.todo_done } else { glyphs.todo }
+    glyphs().todo[usize::from(done)]
+}
+
+/// The tick a card spends where no box is drawn round it: `✔ Submit` on a
+/// form's tab row, and the mark inside a multi-select's `[✔]`.
+pub fn tick() -> &'static str {
+    glyphs().tick
 }
 
 /// A rule between blocks: the same stroke a box draws its edge with, because

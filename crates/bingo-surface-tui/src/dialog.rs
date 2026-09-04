@@ -17,7 +17,7 @@ use crate::clock::Now;
 use crate::composer::Composer;
 use crate::effect::Effect;
 use crate::form::{self, Form};
-use crate::{preview, theme};
+use crate::{layers, preview, theme};
 
 /// What one row of the dialog does when it is chosen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,6 +244,15 @@ fn letter(c: char, options: &[Opt]) -> Option<usize> {
     })
 }
 
+/// What this interaction is drawn as. Every card is a box but the form, which
+/// is a band — the user's word on 2026-09-04, recorded in design §2 and §10.
+pub fn shape(interaction: &Interaction) -> layers::Shape {
+    match interaction.kind {
+        InteractionKind::Form { .. } => layers::Shape::Band,
+        _ => layers::Shape::Boxed,
+    }
+}
+
 /// The rows this interaction offers, in the order they are shown.
 pub fn options(interaction: &Interaction) -> Vec<Opt> {
     match &interaction.kind {
@@ -354,6 +363,7 @@ pub fn rows(
     agent: Option<&str>,
     cwd: &str,
     width: usize,
+    room: usize,
 ) -> Vec<(Line<'static>, Option<usize>)> {
     if let InteractionKind::Form { questions, title } = &interaction.kind {
         let mut out = form::rows(
@@ -364,6 +374,7 @@ pub fn rows(
                 title: title.as_deref(),
                 agent,
                 width,
+                room,
             },
         );
         out.extend(answering(dialog));

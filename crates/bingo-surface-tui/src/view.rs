@@ -302,24 +302,32 @@ fn sheet(frame: &mut Frame, above: Rect, lines: Vec<Line<'static>>, reveal: laye
     layers::sheet(frame, above, lines, reveal);
 }
 
-/// The open interaction, as a bordered box under the `⎿` of the row that
-/// asked. Its arrival is measured from when the kernel opened it, so a card
-/// that was already up when this client attached is simply there.
+/// The open interaction, under the `⎿` of the row that asked: a bordered box,
+/// or the form's band ([`dialog::shape`]). Its arrival is measured from when
+/// the kernel opened it, so a card that was already up when this client
+/// attached is simply there.
 fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     let Some((owner, interaction)) = tree.open_interaction() else {
         return;
     };
     let asked_elsewhere = owner.summary.id != *tree.view();
     let agent = asked_elsewhere.then(|| tree::name(owner));
+    let shape = dialog::shape(interaction);
     // Each row keeps the option it belongs to through the wrap, so a click
-    // lands on what the eye is on. Two border cells and two of padding.
-    let width = regions.transcript.width.saturating_sub(4) as usize;
+    // lands on what the eye is on. A box holds its rows in from each side; a
+    // band draws them where the transcript's own rows are.
+    let width = usize::from(regions.transcript.width.saturating_sub(2 * shape.inset()));
+    let above = regions.above();
+    // The shape's own rows and the title it keeps: what is left is what the
+    // answers have to be walked in, and what a card lays itself out within.
+    let room = usize::from(above.height).saturating_sub(usize::from(shape.chrome()) + 1);
     let rows: Vec<(Line<'static>, Option<usize>)> = dialog::rows(
         &ui.dialog,
         interaction,
         agent.as_deref(),
         &owner.summary.cwd,
         width,
+        room,
     )
     .into_iter()
     .flat_map(|(line, option)| {
@@ -328,10 +336,6 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
             .map(move |wrapped| (wrapped, option))
     })
     .collect();
-    let above = regions.above();
-    // Two border rows and the title the box keeps: what is left is what the
-    // answers have to be walked in.
-    let room = usize::from(above.height).saturating_sub(3);
     let rows = fitted_answers(rows, ui.dialog.focus, room);
     let lines: Vec<Line<'static>> = rows.iter().map(|(line, _)| line.clone()).collect();
     // Only a row of the transcript on screen can anchor it: a child's item
@@ -339,7 +343,7 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     let anchor = (!asked_elsewhere)
         .then(|| asking_row(ui, interaction))
         .flatten();
-    let at = layers::under(above, anchor, rows_of(&lines, above));
+    let at = layers::under(above, anchor, shape.height(lines.len(), above));
     ui.painted.borrow_mut().card = Some(Card {
         area: at,
         options: rows.iter().map(|(_, option)| *option).collect(),
@@ -348,6 +352,7 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     layers::card(
         frame,
         at,
+        shape,
         lines,
         opening(interaction, now),
         guarded(interaction, now),
@@ -424,13 +429,6 @@ fn opening(interaction: &bingo_sdk::Interaction, now: Now) -> layers::Reveal {
     let elapsed = now.past(interaction.opened_at);
     let since = now.instant.checked_sub(elapsed).unwrap_or(now.instant);
     layers::Reveal::at(layers::CARD_FRAMES, since, now.instant, false)
-}
-
-fn rows_of(lines: &[Line<'static>], region: Rect) -> u16 {
-    u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .min(region.height)
 }
 
 /// Rows that ride just above the input box, trimmed from the top when the

@@ -23,7 +23,9 @@ use crate::ui::{Open, Switcher, Ui};
 mod acp;
 /// Where the colour lands on these same scenes (§4).
 mod colours;
-/// A question, and the questions asked together (M43, M53).
+/// The screens a set of questions asked together is read through (§2's band).
+mod forms;
+/// A question alone (M43).
 mod questions;
 /// The screens one skill run is read through (§4's skill row).
 mod skills;
