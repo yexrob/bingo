@@ -73,13 +73,36 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if let Some((_, interaction)) = tree.open_interaction() {
         return ui.dialog.on_key(interaction, key, now);
     }
-    if key.code == KeyCode::Tab && suggestions(ui, tree).is_empty() && cycle_focus(ui, tree) {
-        return Vec::new();
+    if key.code == KeyCode::Tab {
+        return tabbed(ui, tree, now);
     }
     if let Some(effects) = menu(ui, tree, key) {
         return effects;
     }
     editing(ui, tree, key, now)
+}
+
+/// `tab`, by the one table there is of it ([`keys::tab`]). Everything that
+/// captures the keyboard has already answered by the time this runs, so the
+/// rungs here are the dropdown, the running turn and the card ring.
+fn tabbed(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+    let at = keys::Tabbed {
+        dropdown: !suggestions(ui, tree).is_empty(),
+        busy: tree.viewed().busy(),
+        typing: !ui.composer.text().trim().is_empty(),
+        focusable: !rail::cards(tree.viewed(), tree.view(), &ui.pinned).is_empty(),
+    };
+    match keys::tab(at) {
+        Some(keys::Tab::Complete) => accept(ui, tree),
+        // The same road out as `⏎`, with the one word that differs: this line
+        // waits for the running turn rather than steering it.
+        Some(keys::Tab::Queue) => submit(ui, tree, now, Delivery::Hold),
+        Some(keys::Tab::Focus) => {
+            cycle_focus(ui, tree);
+            Vec::new()
+        }
+        None => Vec::new(),
+    }
 }
 
 /// What a layer answers, and the chords that open one.
@@ -580,16 +603,16 @@ fn step(ui: &mut Ui, by: isize, now: Now) {
     ui.scroll.show(hit.line, total, rows, now.instant);
 }
 
-/// The dropdown owns the arrows and the completion keys while it is open.
+/// The dropdown owns the arrows and the enter key while it is open; `tab` is
+/// answered before this, by the one table of it ([`tabbed`]).
 fn menu(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
     let rows = suggestions(ui, tree);
     if rows.is_empty() {
-        return (key.code == KeyCode::Tab).then(Vec::new);
+        return None;
     }
     match key.code {
         KeyCode::Up => ui.menu.selected = ui.menu.selected.saturating_sub(1),
         KeyCode::Down => ui.menu.selected = (ui.menu.selected + 1).min(rows.len() - 1),
-        KeyCode::Tab => return Some(accept(ui, tree)),
         // Enter completes only while there is something left to complete; a
         // name already typed in full is meant to run.
         KeyCode::Enter if adds_something(ui, tree) => return Some(accept(ui, tree)),
@@ -725,12 +748,15 @@ fn enter(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     if ui.composer.text().trim().is_empty() {
         return Vec::new();
     }
-    submit(ui, tree, now)
+    submit(ui, tree, now, Delivery::Wake)
 }
 
 /// What a line does. `/clear` starts a fresh session beside the root's, not
 /// beside whichever child is on screen.
-fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+///
+/// `delivery` is the whole of the difference between the two keys that send:
+/// `⏎` steers a running turn at its next barrier, `tab` waits for it to end.
+fn submit(ui: &mut Ui, tree: &Tree, now: Now, delivery: Delivery) -> Vec<Effect> {
     let text = ui.composer.take();
     // The gesture is answered on its own frame, whatever the line turns out
     // to be and whatever the kernel makes of it (§6).
@@ -760,7 +786,7 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
             images: ui.pictures.carried(&text),
             text,
             origin: Origin::surface(SURFACE_ID),
-            delivery: Delivery::Wake,
+            delivery,
         })],
     }
 }
@@ -3066,5 +3092,62 @@ mod tests {
         assert!(ui.pinned.is_empty(), "the same key takes it back");
         press(&mut ui, &state, ctrl('t'), now);
         assert!(!ui.layer.showing(), "ctrl+t still closes it");
+    }
+
+    // ---- the line that waits (M68) --------------------------------------
+
+    fn delivery_of(effects: &[Effect]) -> Option<Delivery> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Submit(Input::Text { delivery, .. }) => Some(*delivery),
+            _ => None,
+        })
+    }
+
+    /// The user's second ask: `⏎` steers the running turn, `tab` sends a line
+    /// that waits for it to end. One road out, one word different.
+    #[test]
+    fn tab_mid_turn_sends_a_line_that_waits_and_enter_sends_one_that_steers() {
+        let (mut ui, now) = scene();
+        write(&mut ui, &busy(), "and then the docs", now);
+        let held = press(&mut ui, &busy(), key(KeyCode::Tab), now);
+        assert_eq!(delivery_of(&held), Some(Delivery::Hold));
+        assert!(ui.composer.is_empty(), "the box is cleared as by any send");
+
+        let steer = line(&mut ui, &busy(), "no, this first", now);
+        assert_eq!(delivery_of(&steer), Some(Delivery::Wake));
+    }
+
+    /// The three cases the risk register named, at the keyboard rather than
+    /// in the table: the dropdown still completes, an empty box still walks
+    /// the cards, and with no turn running there is nothing to wait for.
+    #[test]
+    fn tab_completes_before_it_queues_and_queues_only_while_a_turn_runs() {
+        let (mut ui, now) = scene();
+        ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
+            name: "compact".into(),
+            aliases: vec![],
+            hint: String::new(),
+            args: bingo_sdk::ArgSpec::None,
+            instant: false,
+            family: "kernel".into(),
+        }];
+        write(&mut ui, &busy(), "/comp", now);
+        assert!(
+            press(&mut ui, &busy(), key(KeyCode::Tab), now).is_empty(),
+            "the dropdown is what tab is for while one is open"
+        );
+        assert_eq!(ui.composer.text(), "/compact ");
+
+        let (mut ui, now) = scene();
+        assert!(
+            press(&mut ui, &busy(), key(KeyCode::Tab), now).is_empty(),
+            "an empty box queues nothing"
+        );
+        write(&mut ui, &state(), "no turn is running", now);
+        assert!(
+            press(&mut ui, &state(), key(KeyCode::Tab), now).is_empty(),
+            "and with nothing running there is nothing to wait for"
+        );
+        assert_eq!(ui.composer.text(), "no turn is running", "nor is it sent");
     }
 }
