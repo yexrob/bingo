@@ -280,3 +280,9 @@ one thing to the editor (`75cb4d3`).
 
 - [x] Hands-on in the user's tmux: strip, block — seen; scroll and the
   off case not driven.
+
+**M60 follows this one** (`docs/plans/M60-the-late-answer.md`): the 400 ms window
+above is too short for tmux's own round trip, and the answers that arrived after
+it landed in crossterm's key stream as typed characters. M60 asks tmux whether the
+passthrough is on, waits three times as long when it is, and eats whatever is
+still late off the key stream.
