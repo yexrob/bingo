@@ -378,8 +378,8 @@ impl Screen for Recorder {
         Ok(())
     }
 
-    fn rows(&self) -> u16 {
-        24
+    fn size(&self) -> (u16, u16) {
+        (80, 24)
     }
 }
 

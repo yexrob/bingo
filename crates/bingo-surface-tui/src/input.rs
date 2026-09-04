@@ -46,6 +46,12 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if key.kind == KeyEventKind::Release {
         return Vec::new();
     }
+    // Any key skips the opening, and *that* is all it does: the key is
+    // consumed rather than typed, so a `/` pressed to cut the piece short does
+    // not also open the dropdown (M70, design §11).
+    if ui.intro.take().is_some() {
+        return Vec::new();
+    }
     ui.block = None;
     // `esc esc` needs no clock: any other key is what says the two were not
     // one gesture.

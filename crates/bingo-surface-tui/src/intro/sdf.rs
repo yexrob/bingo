@@ -84,32 +84,28 @@ impl Vec3 {
 /// live in [`super::scenes::Solid`] where the list does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
-    Sphere {
-        at: Vec3,
-        radius: f32,
-    },
     /// A box with its edges rounded off by `round`, spun about the world's
     /// up axis by `spin` radians. The rounding is what gives an edge a lit
     /// rim instead of a hard corner, which is what a person reads as depth.
+    ///
+    /// A ball is one of these with no extent at all: `half` of nothing and a
+    /// `round` of the radius. One primitive, both surfaces.
     Block {
         at: Vec3,
         half: Vec3,
         round: f32,
         spin: f32,
     },
-    Torus {
-        at: Vec3,
-        major: f32,
-        minor: f32,
-    },
     /// The ground, level at `y`.
-    Ground {
-        y: f32,
-    },
+    Ground { y: f32 },
     /// A [`Shape::Block`] at every point of a grid without end: the world is
     /// folded into one cell of `period` and the block is measured inside it.
-    /// One shape, however far the corridor runs.
+    /// One shape, however far the field runs.
+    ///
+    /// `at` is where one of those blocks stands, which is what keeps a lattice
+    /// off whatever else the shot has put at the origin.
     Lattice {
+        at: Vec3,
         period: Vec3,
         half: Vec3,
         round: f32,
@@ -120,20 +116,19 @@ impl Shape {
     /// How far `point` is from this solid's surface.
     pub fn distance(&self, point: Vec3) -> f32 {
         match *self {
-            Shape::Sphere { at, radius } => point.minus(at).length() - radius,
             Shape::Block {
                 at,
                 half,
                 round,
                 spin,
             } => block(spun(point.minus(at), -spin), half, round),
-            Shape::Torus { at, major, minor } => torus(point.minus(at), major, minor),
             Shape::Ground { y } => point.y - y,
             Shape::Lattice {
+                at,
                 period,
                 half,
                 round,
-            } => block(folded(point, period), half, round),
+            } => block(folded(point.minus(at), period), half, round),
         }
     }
 }
@@ -144,12 +139,6 @@ impl Shape {
 fn block(point: Vec3, half: Vec3, round: f32) -> f32 {
     let beyond = point.abs().minus(half);
     beyond.floored(0.0).length() + beyond.largest().min(0.0) - round
-}
-
-/// The distance to a ring lying in the world's `xz` plane.
-fn torus(point: Vec3, major: f32, minor: f32) -> f32 {
-    let ring = at(point.x, point.z, 0.0).length() - major;
-    at(ring, point.y, 0.0).length() - minor
 }
 
 /// `point` turned about the up axis by `spin` radians.
@@ -186,12 +175,20 @@ mod tests {
 
     const CENTRE: Vec3 = at(0.0, 0.0, 0.0);
 
-    #[test]
-    fn a_sphere_is_its_radius_away_from_its_centre() {
-        let ball = Shape::Sphere {
+    /// A block with no extent and a rounded edge, which is the only ball
+    /// there is.
+    fn ball(radius: f32) -> Shape {
+        Shape::Block {
             at: CENTRE,
-            radius: 2.0,
-        };
+            half: at(0.0, 0.0, 0.0),
+            round: radius,
+            spin: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_ball_is_its_radius_away_from_its_centre() {
+        let ball = ball(2.0);
         assert!(
             (ball.distance(CENTRE) + 2.0).abs() < 1e-5,
             "inside is signed"
@@ -234,23 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn a_torus_is_a_ring_about_the_up_axis() {
-        let ring = Shape::Torus {
-            at: CENTRE,
-            major: 2.0,
-            minor: 0.5,
-        };
-        assert!(
-            (ring.distance(at(2.0, 0.5, 0.0))).abs() < 1e-5,
-            "on the skin"
-        );
-        assert!(
-            (ring.distance(CENTRE) - 1.5).abs() < 1e-5,
-            "through the hole"
-        );
-    }
-
-    #[test]
     fn the_ground_is_signed_by_which_side_of_it_you_stand() {
         let floor = Shape::Ground { y: -1.0 };
         assert!((floor.distance(CENTRE) - 1.0).abs() < 1e-5);
@@ -260,6 +240,7 @@ mod tests {
     #[test]
     fn a_lattice_repeats_one_block_down_the_grid() {
         let grid = Shape::Lattice {
+            at: CENTRE,
             period: at(4.0, 0.0, 4.0),
             half: at(1.0, 1.0, 1.0),
             round: 0.0,
@@ -277,6 +258,7 @@ mod tests {
     #[test]
     fn a_lattice_axis_with_no_period_does_not_repeat() {
         let wall = Shape::Lattice {
+            at: CENTRE,
             period: at(4.0, 0.0, 0.0),
             half: at(1.0, 1.0, 1.0),
             round: 0.0,
@@ -293,20 +275,18 @@ mod tests {
     #[test]
     fn every_distance_is_a_lower_bound_on_the_true_one() {
         let shapes = [
-            Shape::Sphere {
-                at: at(1.0, 0.0, 2.0),
-                radius: 1.5,
-            },
+            ball(1.5),
             Shape::Block {
                 at: at(-1.0, 0.5, 0.0),
                 half: at(0.7, 1.2, 0.4),
                 round: 0.1,
                 spin: 0.6,
             },
-            Shape::Torus {
+            Shape::Lattice {
                 at: CENTRE,
-                major: 2.0,
-                minor: 0.4,
+                period: at(3.0, 0.0, 3.0),
+                half: at(0.6, 1.0, 0.6),
+                round: 0.05,
             },
         ];
         // Stepping by the reported distance may touch a surface but never

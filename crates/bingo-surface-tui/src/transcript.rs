@@ -110,6 +110,11 @@ pub struct Rows<'a> {
     /// (M63). Terminal-side, like the fold and the scroll: it is a fact about
     /// this machine, not about the conversation.
     pub update: Option<&'a str>,
+    /// The frame the opening is on, while it is playing (M70). It is drawn in
+    /// the welcome box's place — the piece plays *inside* that box and lands on
+    /// it — and it is rendered off the draw thread, so what is here is the
+    /// newest one the run has, never one this frame waited for.
+    pub opening: Option<&'a [Line<'static>]>,
 }
 
 impl<'a> Rows<'a> {
@@ -136,12 +141,18 @@ impl<'a> Rows<'a> {
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
             update: None,
+            opening: None,
         }
     }
 
     /// What the welcome box has to add: the release this build could become.
     pub fn saying(self, update: Option<&'a str>) -> Self {
         Self { update, ..self }
+    }
+
+    /// The frame the opening is on, drawn in that box's place while it plays.
+    pub fn opening(self, opening: Option<&'a [Line<'static>]>) -> Self {
+        Self { opening, ..self }
     }
 }
 

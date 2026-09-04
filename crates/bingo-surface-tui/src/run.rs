@@ -23,6 +23,8 @@ use futures::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+/// The opening shot: whether it plays, and its frames (M70).
+mod opening;
 /// The pictures a frame drew, on their way to the terminal.
 mod showing;
 /// A line on its way out of the composer, and the pictures it named.
@@ -90,6 +92,10 @@ enum Reply {
     Fitted(Box<decoded::Fitted>),
     /// A newer release than this build, as the start-up check found it (M63).
     Update(String),
+    /// One frame of the opening, drawn off the loop's thread (M70): a
+    /// ray-marched picture costs tens of milliseconds in a debug build, and no
+    /// draw may wait for one.
+    Opening(Box<opening::Rendered>),
     /// The line the queue gave back, or why it did not (M68). It is carried
     /// whole rather than through `Failed`, because a line the turn took first
     /// is a note about a race and not a refusal of anything.
@@ -192,7 +198,11 @@ pub(crate) async fn drive(
     mut keys: Keys,
 ) -> Result<Farewell, KernelError> {
     let (tx, mut replies) = mpsc::channel(16);
+    // A run given work on the command line goes and does it, so what the
+    // opening is decided from is read before the prompt is spent.
+    let asked = opts.prompt.is_some();
     let (mut run, mut events) = attach(host, opts, tx).await?;
+    opening::begin(&mut run, screen, asked, Now::real());
     // The host's own stream, beside the session's: what changed for the whole
     // process rather than for this conversation (ADR-0026 §4).
     let mut gateway = Some(host.gateway_events());
@@ -357,6 +367,7 @@ impl Run {
             ..now
         };
         self.behind
+            || self.ui.intro.is_some()
             || self.session.tree.sessions().any(SessionState::busy)
             || self.ui.scroll.moving(screen.instant)
             || self.ui.layer_moving(screen)
@@ -386,7 +397,7 @@ impl Run {
         let _ = self.host.close(&root, CloseReason::Client).await;
         Ok(Farewell {
             exit,
-            screen: self.farewell(screen.rows()),
+            screen: self.farewell(screen.size().1),
         })
     }
 
@@ -419,6 +430,7 @@ impl Run {
         showing::hand(self, screen)?;
         showing::fit(self);
         showing::read_linked(self);
+        opening::ask(self, now);
         Ok(())
     }
 
@@ -842,6 +854,7 @@ impl Run {
             Reply::Linked(answer) => self.ui.linked.answered(*answer),
             Reply::Fitted(fitted) => self.ui.decoded.answered(*fitted),
             Reply::Update(version) => self.told_of(version),
+            Reply::Opening(frame) => opening::landed(self, *frame),
             Reply::Withdrawn(taken) => withdraw::took(self, *taken),
             Reply::Failed(error) => {
                 self.ui.opening = false;

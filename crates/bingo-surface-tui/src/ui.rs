@@ -470,6 +470,11 @@ pub struct Ui {
     pub linked: Linked,
     /// A newer release than this build, as the start-up check found it (M63).
     pub update: Option<String>,
+    /// The opening, while it is playing (M70, design §11). It is drawn in the
+    /// welcome box's place and it lands on that box, so the moment it has run
+    /// out it is taken away and the box the transcript has always had is what
+    /// is derived — there is no last frame that merely looks like one.
+    pub intro: Option<crate::intro::Playing>,
     /// The paths the `@` dropdown ranks, walked when the first one asks.
     files: RefCell<Files>,
 }
@@ -512,6 +517,7 @@ impl Ui {
             decoded: Decoded::default(),
             linked: Linked::default(),
             update: None,
+            intro: None,
             files: RefCell::default(),
         }
     }
@@ -580,6 +586,9 @@ impl Ui {
         }
         if self.layer.closing && self.layer.reveal(now).gone() {
             self.layer = Layer::shut(now.instant);
+        }
+        if self.intro.as_ref().is_some_and(|intro| intro.over(now)) {
+            self.intro = None;
         }
     }
 
