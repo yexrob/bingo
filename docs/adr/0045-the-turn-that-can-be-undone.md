@@ -63,10 +63,12 @@ file I/O for a turn, and a snapshot is a plugin's business (ADR-0001).
    refused for asking.
 4. **Collection.** A checkpoint outlives nothing but its session. The plugin
    sweeps at `start`, where the store's own GC runs (ADR-0005): every
-   checkpoint directory whose session the host no longer lists is removed. A
-   host that lists no session at all collects nothing — silence is a host with
-   no store, not a host whose sessions were all deleted. A session deleted
-   mid-run keeps its snapshots until the next start. Nothing else expires them.
+   checkpoint directory whose session the host no longer lists is removed.
+   What the host lists is the whole of what exists — an empty listing is an
+   answer, and a host with no store has no session anything could have
+   rewound; only an `Err` is "cannot tell", and then nothing is collected. A
+   session deleted mid-run keeps its snapshots until the next start. Nothing
+   else expires them.
 
 ## Consequences
 

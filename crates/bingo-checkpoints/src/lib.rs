@@ -74,9 +74,10 @@ impl Plugin for CheckpointsPlugin {
     }
 
     /// Nothing expires a checkpoint but the end of the session it belongs to
-    /// (ADR-0045 §4). A host that lists no session at all is a host with no
-    /// store, not a host whose sessions have all been deleted, so it collects
-    /// nothing: silence is never evidence of a deletion.
+    /// (ADR-0045 §4). What the host lists is the whole of what exists — an
+    /// empty listing is an answer, not a failure to answer, and a host with
+    /// no store has no session anything could have rewound. Only an error is
+    /// "cannot tell", and then nothing is collected.
     async fn start(&self, host: HostHandle) -> Result<(), PluginError> {
         let Some(store) = self.store.get() else {
             return Ok(());
@@ -89,9 +90,6 @@ impl Plugin for CheckpointsPlugin {
                 return Ok(());
             }
         };
-        if alive.is_empty() {
-            return Ok(());
-        }
         let kept: Vec<String> = alive.iter().map(|s| s.id.as_str().to_string()).collect();
         let gone = store.collect(&kept);
         if !gone.is_empty() {
@@ -275,14 +273,26 @@ mod plugin_tests {
         );
     }
 
-    /// Silence is not evidence of a deletion: a host with no store lists no
-    /// session, and a run without one must not take the snapshots with it.
+    /// An empty listing is an answer: no session exists, so no checkpoint
+    /// belongs to one. A store that could not be read answers `Err` instead,
+    /// and that is the case where nothing is collected.
     #[tokio::test]
-    async fn a_host_that_lists_no_session_collects_nothing() {
+    async fn a_host_that_lists_no_session_has_no_checkpoint_left_to_keep() {
         let home = tempfile::tempdir().expect("a temp home");
         let plugin = planted(home.path());
         plugin
             .start(HostHandle(Arc::new(OneSession(None))))
+            .await
+            .expect("start");
+        assert!(plugin.store.get().expect("a store").sessions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_host_that_cannot_say_collects_nothing() {
+        let home = tempfile::tempdir().expect("a temp home");
+        let plugin = planted(home.path());
+        plugin
+            .start(bingo_sdk::testing::NoHost::handle())
             .await
             .expect("start");
         assert_eq!(
