@@ -41,6 +41,13 @@ bingo-channels.workspace = true
 # `bingo provider add` writes a pasted key to the one credential store
 # (ADR-0012 §2): the library tier, not a new external crate.
 bingo-auth-oauth.workspace = true
+# `bingo update`: the release the API names, the digest the list gives, and
+# the two renames that replace this binary (M63, ADR-0043). A library, and
+# the one place the archive names are spelled.
+bingo-update.workspace = true
+# Its downloads. Already in this binary's tree under the providers, so it
+# costs no crate.
+reqwest.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

@@ -6,6 +6,7 @@ mod channels;
 mod gateway;
 mod login;
 mod provider;
+mod update;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -167,6 +168,12 @@ enum Command {
         /// The provider id, e.g. `codex`.
         provider: String,
     },
+    /// Become the newest release, or say what is out (ADR-0043).
+    Update {
+        /// Report the two versions and change nothing.
+        #[arg(long)]
+        check: bool,
+    },
     /// Named provider instances: more endpoints than the three built in
     /// (ADR-0017).
     Provider {
@@ -235,6 +242,7 @@ impl Command {
             | Command::Channels { .. }
             | Command::Gateway { .. }
             | Command::Provider { .. }
+            | Command::Update { .. }
             | Command::AcpMcpProxy => None,
         }
     }
@@ -342,13 +350,11 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let config = host_config(&cli, &cwd)?;
     let demo = demo_ui(&cli, &config.layers);
     let listening = channels_wanted(&cli, &config.layers);
+    let updates = update_wanted(&config.layers);
     let host = Host::build(plugins(demo)?, config)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
-    for (code, text) in host.notices() {
-        let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
-        eprintln!("{}", notice_report(&code, &text, human));
-    }
+    report(&host);
     if let Some(code) = credentials(&host, &cli).await {
         return code;
     }
@@ -359,8 +365,10 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
             bingo_channels::SURFACE_ID,
             channel_options(cwd.clone(), env.clone()),
         ),
-        Work::Session if interactive => ("tui", surface_options(cli, cwd.clone(), env.clone())),
-        Work::Session => ("print", surface_options(cli, cwd.clone(), env.clone())),
+        Work::Session => {
+            let id = if interactive { "tui" } else { "print" };
+            (id, surface_options(cli, cwd.clone(), env.clone(), updates))
+        }
     };
     let beside = match listening && id != bingo_channels::SURFACE_ID {
         true => start_channels(&host, channel_options(cwd, env)),
@@ -386,6 +394,15 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     }
     host.shutdown().await;
     exit.map(|e| e.code)
+}
+
+/// What a built host has to say for itself: a plugin that could not be
+/// registered, a setting nobody claimed. On stderr, as every diagnostic is.
+fn report(host: &Host) {
+    for (code, text) in host.notices() {
+        let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        eprintln!("{}", notice_report(&code, &text, human));
+    }
 }
 
 /// What this command line is for, decided before anything is built.
@@ -442,6 +459,9 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
         // but the bytes it is carrying (ADR-0036 §3).
         Some(Command::AcpMcpProxy) => Some(acp_proxy::run().await),
         Some(Command::Provider { .. }) => Some(added_provider(&env).await),
+        // An asked-for update always asks: the daily stamp is the start-up
+        // check's discipline, not a person's.
+        Some(Command::Update { check }) => Some(update::run(&env, *check).await),
         Some(Command::Channels {
             action: Some(ChannelsAction::Add { adapter }),
         }) => Some(channel_add(&env, adapter).await),
@@ -465,6 +485,17 @@ async fn channel_add(env: &Env, adapter: &str) -> Result<i32, KernelError> {
 async fn channel_secret(env: &Env, adapter: &str) -> Result<i32, KernelError> {
     println!("{}", channels::secret(env, adapter).await?);
     Ok(0)
+}
+
+/// Whether a start may ask whether a newer release is out (ADR-0043 §4). The
+/// highest layer that mentions the key decides; absent, it may. The library
+/// owns the spelling.
+fn update_wanted(layers: &[settings::Layer]) -> bool {
+    layers
+        .iter()
+        .rev()
+        .find(|layer| layer.value.contains_key(bingo_update::SETTING))
+        .is_none_or(|layer| bingo_update::wanted(&Value::Object(layer.value.clone())))
 }
 
 /// Whether a chat is being listened on: the flag, else any settings layer
@@ -680,7 +711,7 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     Ok(config)
 }
 
-fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
+fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>, updates: bool) -> SurfaceOptions {
     SurfaceOptions {
         selector: selector(&cli, cwd.clone()),
         cwd,
@@ -690,6 +721,7 @@ fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
             "inputFormat": cli.input_format.as_str(),
             "permissionPromptTool": cli.permission_prompt_tool.map(PromptTool::as_str),
             "noPrintOnExit": cli.no_print_on_exit,
+            "updateCheck": updates,
             "images": cli.image,
         }),
         env,

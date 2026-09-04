@@ -684,6 +684,7 @@ mod sessions;
 mod skills;
 mod stream_json;
 mod tasks;
+mod update;
 mod views;
 
 /// `--mcp-config` names a file whose `mcpServers` join the settings for this
