@@ -189,10 +189,12 @@ fn cells(line: &Line<'static>) -> Vec<Cell> {
 /// paints a body background — the terminal's stays — so a picture of a frame
 /// has to stand one in for it, and these two are the preview's alone.
 fn ground() -> [u8; 3] {
-    match crate::theme::text().fg {
-        // The warm off-white is the dark look's ink; the near-black is the
-        // light look's.
-        Some(Color::Rgb(r, _, _)) if r > 0x80 => [0x14, 0x11, 0x0e],
+    // Which look is standing, read off the one token that still names a
+    // colour either side of it: the tint is a step up from night in the dark
+    // look and a step down from paper in the light one. The ink cannot say —
+    // it is the terminal's own in both (M73).
+    match crate::theme::raised().bg {
+        Some(Color::Rgb(r, _, _)) if r < 0x80 => [0x14, 0x11, 0x0e],
         _ => [0xfa, 0xf6, 0xef],
     }
 }
