@@ -54,6 +54,11 @@ fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect>
         ui.focus = Some(card);
         return Vec::new();
     }
+    // A picture is a thing to click before it is part of a block: a click on
+    // one opens it, and a click beside it is the block's (§7).
+    if let Some(picture) = picture(ui, mouse) {
+        return vec![Effect::OpenPicture(picture.source)];
+    }
     let Some(cell) = transcript_cell(ui, mouse) else {
         return Vec::new();
     };
@@ -94,6 +99,20 @@ fn drag(ui: &mut Ui, mouse: MouseEvent) {
     if let Some(cell) = transcript_cell(ui, mouse) {
         ui.select.extend(cell);
     }
+}
+
+/// The picture under the pointer, wherever this frame drew one — among the
+/// transcript's rows, or on the composer's strip. A layer over the frame has
+/// covered both, so while one is up the click is the layer's and no picture is
+/// under it.
+fn picture(ui: &Ui, mouse: MouseEvent) -> Option<crate::graphics::Picture> {
+    if ui.layer.showing() {
+        return None;
+    }
+    ui.painted.borrow().picture_at(Position {
+        x: mouse.column,
+        y: mouse.row,
+    })
 }
 
 /// Which option of the open card the pointer is on.

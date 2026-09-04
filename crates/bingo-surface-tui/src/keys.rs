@@ -101,6 +101,13 @@ pub const BINDINGS: &[Binding] = &[
         description: "run a command · run a shell line",
     },
     Binding {
+        // Mouse reporting has to reach us for this to happen at all: inside
+        // tmux it wants `set -g mouse on`, and without it a click is the
+        // multiplexer's own (M56).
+        keys: "click",
+        description: "a picture · open it",
+    },
+    Binding {
         keys: "?",
         description: "toggle this panel",
     },

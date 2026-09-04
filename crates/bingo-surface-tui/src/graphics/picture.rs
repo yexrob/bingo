@@ -55,6 +55,25 @@ impl Source {
             Source::Linked { dest } => LINKED | hashed(b"linked", dest.as_bytes()),
         }
     }
+
+    /// The picture itself, read back out of where it came from — one lookup
+    /// that knows all three places, so nothing that needs the bytes has a
+    /// second one. The arguments are the three arms in order.
+    pub fn image_in<'a>(
+        &self,
+        state: &'a SessionState,
+        held: &'a Held,
+        linked: &'a Linked,
+    ) -> Option<&'a Image> {
+        match self {
+            Source::Journal { item, part } => {
+                let found = state.items.iter().find(|kept| kept.id == *item)?;
+                pictures_of(&found.body).get(*part).copied()
+            }
+            Source::Draft { token } => held.under(*token),
+            Source::Linked { dest } => linked.image(dest),
+        }
+    }
 }
 
 impl Picture {
@@ -69,25 +88,6 @@ impl Picture {
             u32::from(self.cols) * u32::from(cell.width),
             u32::from(self.rows) * u32::from(cell.height),
         )
-    }
-
-    /// The picture itself, read back out of where it came from — one lookup
-    /// that knows all three places, so the send needs no second one. The
-    /// arguments are the three arms in order.
-    pub fn image_in<'a>(
-        &self,
-        state: &'a SessionState,
-        held: &'a Held,
-        linked: &'a Linked,
-    ) -> Option<&'a Image> {
-        match &self.source {
-            Source::Journal { item, part } => {
-                let found = state.items.iter().find(|kept| kept.id == *item)?;
-                pictures_of(&found.body).get(*part).copied()
-            }
-            Source::Draft { token } => held.under(*token),
-            Source::Linked { dest } => linked.image(dest),
-        }
     }
 }
 
@@ -271,11 +271,15 @@ mod tests {
         let mut held = Held::default();
         let token = held.hold("", image("pasted"));
         assert_eq!(
-            draft(token).image_in(&state, &held, &Linked::default()),
+            draft(token)
+                .source
+                .image_in(&state, &held, &Linked::default()),
             Some(&image("pasted"))
         );
         assert_eq!(
-            draft(token + 1).image_in(&state, &held, &Linked::default()),
+            draft(token + 1)
+                .source
+                .image_in(&state, &held, &Linked::default()),
             None
         );
     }
@@ -345,16 +349,22 @@ mod tests {
         ));
         let held = Held::default();
         assert_eq!(
-            picture("itm_9", 0).image_in(&state, &held, &Linked::default()),
+            picture("itm_9", 0)
+                .source
+                .image_in(&state, &held, &Linked::default()),
             Some(&image("one"))
         );
         assert_eq!(
-            picture("itm_9", 1).image_in(&state, &held, &Linked::default()),
+            picture("itm_9", 1)
+                .source
+                .image_in(&state, &held, &Linked::default()),
             None,
             "no second part"
         );
         assert_eq!(
-            picture("itm_8", 0).image_in(&state, &held, &Linked::default()),
+            picture("itm_8", 0)
+                .source
+                .image_in(&state, &held, &Linked::default()),
             None,
             "no such item"
         );

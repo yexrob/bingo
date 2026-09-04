@@ -28,11 +28,12 @@ mod submit;
 
 use crate::clock::{self, Now};
 use crate::effect::Effect;
+use crate::graphics::picture::Source;
 use crate::graphics::{Cell, Graphics, Picture, Stored, Transport, linked};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
-use crate::{SURFACE_ID, clipboard, commands, history, input, pictures, pointer};
+use crate::{SURFACE_ID, clipboard, commands, history, input, pictures, pointer, viewer};
 
 /// How often a frame is redrawn *while something is moving*: thirty a second
 /// (§6). Nothing moves when nothing is happening, and then there is no tick at
@@ -131,6 +132,9 @@ struct Run {
     replies: mpsc::Sender<Reply>,
     /// A selection a key asked for, handed to the terminal between frames.
     clipboard: Option<String>,
+    /// Who opens a picture a click landed on: this system's own viewer, and a
+    /// test's recorder in its place ([`viewer::Opener`]).
+    opener: viewer::Opener,
     /// The pictures the terminal is holding, which the frames that draw them
     /// keep in step (design §5). Empty on every run: a terminal taken afresh
     /// holds nothing this surface put there.
@@ -237,6 +241,7 @@ async fn attach(
         mine: HashMap::new(),
         replies,
         clipboard: None,
+        opener: viewer::system(),
         // Older than a frame, on the loop's own clock, so the first thing
         // that happens is drawn.
         painted: older_than_a_frame(),
@@ -272,7 +277,7 @@ fn placing(
     transport: Transport,
 ) -> Vec<u8> {
     let pixels = |picture: &Picture| {
-        let image = picture.image_in(state, &ui.pictures, &ui.linked)?;
+        let image = picture.source.image_in(state, &ui.pictures, &ui.linked)?;
         ui.decoded
             .thumbnail(picture.id(), image, picture.pixels(cell))
     };
@@ -629,6 +634,7 @@ impl Run {
             Effect::ListStored => self.list_stored(),
             Effect::Copy(text) => self.clipboard = Some(text),
             Effect::PasteImage => self.paste_image(),
+            Effect::OpenPicture(source) => self.open_picture(&source),
             Effect::Exit => self.exit = Some(Exit { code: 0 }),
         }
     }
@@ -650,6 +656,36 @@ impl Run {
                     .notify(Level::Warn, format!("clipboard: {error}"), Instant::now())
             }
         }
+    }
+
+    /// A click on a drawn picture hands it to whatever this system opens
+    /// pictures with (M56) — always a file on this machine, never an address —
+    /// and the notice says what was opened, or, when nothing would, what it was
+    /// handed.
+    fn open_picture(&mut self, source: &Source) {
+        let opened = self.hand_to_viewer(source);
+        let now = Instant::now();
+        match opened {
+            Ok(word) => self.ui.notify(Level::Info, format!("opened {word}"), now),
+            Err(why) => self.ui.notify(Level::Warn, why, now),
+        }
+    }
+
+    /// The picture behind the click, read out of wherever it came from and
+    /// handed over as a file ([`viewer`]).
+    fn hand_to_viewer(&self, source: &Source) -> Result<String, String> {
+        let state = self.session.tree.viewed();
+        let image = source.image_in(state, &self.ui.pictures, &self.ui.linked);
+        viewer::open(
+            &self.opener,
+            source,
+            image,
+            viewer::Where {
+                cwd: std::path::Path::new(&state.summary.cwd),
+                home: crate::paths::home(),
+                data_dir: &self.data_dir,
+            },
+        )
     }
 
     fn interrupt(&mut self) {
@@ -1644,6 +1680,7 @@ mod tests {
             mine: HashMap::new(),
             replies: mpsc::channel(1).0,
             clipboard: None,
+            opener: viewer::system(),
             painted: at,
             behind: false,
             sluggish: false,
@@ -1790,6 +1827,180 @@ mod tests {
                 .any(|n| n.text.contains("not a picture")),
             "{:?}",
             run.ui.notices
+        );
+    }
+
+    // ---- a click on a picture opens it (M56) ------------------------------
+
+    /// A run whose data directory is a scratch one and whose opener records
+    /// what the system would have been handed rather than handing it over.
+    fn opening(
+        state: SessionState,
+    ) -> (
+        tempfile::TempDir,
+        Run,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let dir = tempfile::tempdir().expect("a directory");
+        let mut state = state;
+        state.summary.cwd = dir.path().to_string_lossy().into_owned();
+        let mut run = idle_in(
+            state,
+            std::sync::Arc::new(TestSession::default()),
+            Instant::now(),
+        );
+        run.data_dir = dir.path().to_path_buf();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = std::sync::Arc::clone(&seen);
+        run.opener = std::sync::Arc::new(move |word: &str| {
+            kept.lock().expect("the record").push(word.to_string());
+            true
+        });
+        (dir, run, seen)
+    }
+
+    fn read_a_picture() -> SessionState {
+        let read = tool(
+            "itm_1",
+            "Read",
+            serde_json::json!({ "file_path": "shot.png" }),
+            Some(bingo_sdk::ToolOutput {
+                parts: vec![bingo_sdk::ContentPart::Image(bingo_pictures::testing::png(
+                    100, 200,
+                ))],
+                display: None,
+                is_error: false,
+            }),
+            ItemStatus::Completed,
+        );
+        folded(vec![frame(1, Event::ItemCompleted { item: read })])
+    }
+
+    /// A picture a tool answered with is bytes and no name: they are written
+    /// out under the number the picture is already known by, and that file is
+    /// what the system is handed. The notice says what was opened.
+    #[test]
+    fn a_journal_pictures_bytes_are_written_out_and_the_file_opened() {
+        let source = crate::graphics::picture::Source::Journal {
+            item: bingo_sdk::ItemId::from_raw("itm_1"),
+            part: 0,
+        };
+        let (dir, mut run, seen) = opening(read_a_picture());
+        run.effect(Effect::OpenPicture(source.clone()));
+        let want = dir
+            .path()
+            .join(crate::viewer::DIR)
+            .join(format!("{:06x}.png", source.id()))
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            seen.lock().expect("the record").as_slice(),
+            std::slice::from_ref(&want)
+        );
+        assert!(
+            std::fs::read(&want)
+                .expect("the file")
+                .starts_with(b"\x89PNG"),
+            "and the bytes are a PNG"
+        );
+        let [notice] = run.ui.notices.as_slice() else {
+            panic!("one notice: {:?}", run.ui.notices)
+        };
+        assert_eq!(notice.level, Level::Info);
+        assert_eq!(notice.text, format!("opened {want}"));
+    }
+
+    /// A path an answer's words named is already a file to open: it is made
+    /// whole from the session's own directory, and nothing is decoded or
+    /// written for it.
+    #[test]
+    fn a_named_path_is_opened_where_the_words_said_it_was() {
+        let (dir, mut run, seen) = opening(state());
+        run.effect(Effect::OpenPicture(
+            crate::graphics::picture::Source::Linked {
+                dest: "docs/x.png".into(),
+            },
+        ));
+        assert_eq!(
+            seen.lock().expect("the record").as_slice(),
+            std::slice::from_ref(&dir.path().join("docs/x.png").to_string_lossy().into_owned())
+        );
+        assert!(
+            !dir.path().join(crate::viewer::DIR).exists(),
+            "a path needs no file written for it"
+        );
+    }
+
+    /// A picture the words named by address opens as a file too: the memo is
+    /// holding the bytes it fetched, so they are written out under the
+    /// picture's own number and the viewer — not a browser — is handed that
+    /// file. Nothing is fetched a second time.
+    #[test]
+    fn a_named_address_opens_the_file_its_fetched_bytes_were_written_to() {
+        let source = crate::graphics::picture::Source::Linked {
+            dest: "https://x.dev/a.png".into(),
+        };
+        let (dir, mut run, seen) = opening(state());
+        assert!(run.ui.linked.take("https://x.dev/a.png"));
+        run.ui.linked.answered(linked::Answer {
+            dest: "https://x.dev/a.png".into(),
+            result: Ok(bingo_pictures::testing::png(4, 3)),
+        });
+        run.effect(Effect::OpenPicture(source.clone()));
+        let want = dir
+            .path()
+            .join(crate::viewer::DIR)
+            .join(format!("{:06x}.png", source.id()))
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            seen.lock().expect("the record").as_slice(),
+            std::slice::from_ref(&want),
+            "a file on this machine, never the address"
+        );
+        assert!(
+            std::fs::read(&want)
+                .expect("the file")
+                .starts_with(b"\x89PNG")
+        );
+    }
+
+    /// A machine with nothing to open it with — no viewer, or
+    /// `BINGO_NO_BROWSER` — is said so, with the word it was handed, so a
+    /// person at the machine can open it themselves.
+    #[test]
+    fn a_picture_nothing_will_open_says_so_with_the_word() {
+        let (dir, mut run, _) = opening(state());
+        run.opener = std::sync::Arc::new(|_| false);
+        run.effect(Effect::OpenPicture(
+            crate::graphics::picture::Source::Linked {
+                dest: "docs/x.png".into(),
+            },
+        ));
+        let path = dir.path().join("docs/x.png");
+        let [notice] = run.ui.notices.as_slice() else {
+            panic!("one notice: {:?}", run.ui.notices)
+        };
+        assert_eq!(notice.level, Level::Warn);
+        assert!(notice.text.contains(&path.to_string_lossy().into_owned()));
+    }
+
+    /// A picture the session no longer holds is a warning and not a file: a
+    /// rewind dropped the item, so there is nothing to open.
+    #[test]
+    fn a_picture_the_session_no_longer_holds_opens_nothing() {
+        let (dir, mut run, seen) = opening(state());
+        run.effect(Effect::OpenPicture(
+            crate::graphics::picture::Source::Journal {
+                item: bingo_sdk::ItemId::from_raw("itm_gone"),
+                part: 0,
+            },
+        ));
+        assert!(seen.lock().expect("the record").is_empty());
+        assert!(!dir.path().join(crate::viewer::DIR).exists());
+        assert_eq!(
+            run.ui.notices.first().map(|notice| notice.level),
+            Some(Level::Warn)
         );
     }
 

@@ -62,7 +62,7 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     let area = frame.area();
     let cards = rail::cards(tree.viewed(), tree.view(), &ui.pinned);
     let regions = frame::regions(area, demand(tree, ui, area.width, now, !cards.is_empty()));
-    ui.painted.borrow_mut().regions = regions;
+    ui.painted.borrow_mut().begin(regions);
     let drawn = rail::render(
         &cards,
         rail::width(regions.rail, regions.transcript),
@@ -488,6 +488,8 @@ fn render_transcript(
     // A short transcript hangs from the composer, not from the top of the screen.
     let padding = painted.padding();
     shown.splice(..0, std::iter::repeat_n(Line::default(), padding));
+    // Where the pictures among those lines landed, for a click on one (M56).
+    painted.cells = graphics::placed::cells(&shown, area);
     frame.render_widget(Paragraph::new(shown), area);
     // A mark is measured from the row line `top` was drawn at, which is where
     // the lines start rather than where the region does.
@@ -826,15 +828,17 @@ fn render_strip(ui: &Ui, frame: &mut Frame, area: Rect, strip: strip::Strip) {
         return;
     }
     let indent = 2;
-    frame.render_widget(
-        Paragraph::new(strip.lines),
-        Rect {
-            x: area.x + indent,
-            width: area.width.saturating_sub(indent),
-            ..area
-        },
-    );
-    ui.painted.borrow_mut().strip = strip.pictures;
+    let band = Rect {
+        x: area.x + indent,
+        width: area.width.saturating_sub(indent),
+        ..area
+    };
+    let mut painted = ui.painted.borrow_mut();
+    painted
+        .cells
+        .extend(graphics::placed::cells(&strip.lines, band));
+    painted.strip = strip.pictures;
+    frame.render_widget(Paragraph::new(strip.lines), band);
 }
 
 /// The draft itself and the caret in it. `width` is the box's, borders and

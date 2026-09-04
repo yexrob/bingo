@@ -22,7 +22,7 @@ use crate::composer::Composer;
 use crate::dialog::Dialog;
 use crate::fold::Folds;
 use crate::frame::Regions;
-use crate::graphics::{Decoded, Linked};
+use crate::graphics::{Decoded, Linked, Placed};
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
 use crate::pager::Pager;
@@ -131,9 +131,31 @@ pub struct Painted {
     pub rail: Vec<(CardId, std::ops::Range<usize>)>,
     /// The thumbnails the composer's strip drew, in the line's own order.
     pub strip: Vec<crate::graphics::Picture>,
+    /// Where this frame drew each picture's cells, in the terminal's own rows
+    /// and columns: what a click on a picture is answered against. It is read
+    /// back out of the lines that were drawn
+    /// ([`crate::graphics::placed::cells`]), so it can never say a picture is
+    /// somewhere the screen does not (M56).
+    pub cells: Vec<Placed>,
 }
 
 impl Painted {
+    /// A frame is beginning: the regions it cut, and none of the cells the last
+    /// one drew — every region fills its own in as it draws.
+    pub fn begin(&mut self, regions: Regions) {
+        self.regions = regions;
+        self.cells.clear();
+    }
+
+    /// The picture a pointer is on, when it is on one. The cells under it say
+    /// which picture they are cells of, and this frame's own list says which
+    /// picture that is — so a click can only ever open a picture the screen is
+    /// showing (M56).
+    pub fn picture_at(&self, at: ratatui::layout::Position) -> Option<crate::graphics::Picture> {
+        let id = self.cells.iter().find(|one| one.area.contains(at))?.id;
+        self.placed().into_iter().find(|picture| picture.id() == id)
+    }
+
     /// Every picture this frame put cells on the screen for, oldest first: the
     /// transcript's, then the composer's own. The strip comes last because
     /// what falls off the terminal's cap is the oldest, and the picture a

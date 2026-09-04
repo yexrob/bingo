@@ -95,6 +95,8 @@ mod transcript;
 mod tree;
 mod ui;
 mod view;
+/// Handing a picture to whatever this system opens pictures with (M56).
+mod viewer;
 mod views;
 mod welcome;
 mod window;

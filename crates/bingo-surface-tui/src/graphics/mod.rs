@@ -14,6 +14,8 @@
 //! - [`picture`] is one picture a frame drew: where it came from and how many
 //!   cells it took.
 //! - [`kitty`] is the protocol as bytes.
+//! - [`placed`] reads back out of a drawn frame where each picture's cells
+//!   landed, which is what a click on one is answered against.
 //! - [`linked`] keeps the pictures the words themselves named, read in once.
 //! - [`decoded`] keeps the pixels, so a picture is decoded once.
 //! - [`stored`] keeps what the terminal is holding, and says what to send.
@@ -22,6 +24,7 @@ pub mod decoded;
 pub mod kitty;
 pub mod linked;
 pub mod picture;
+pub mod placed;
 pub mod placeholders;
 pub mod probe;
 pub mod stored;
@@ -30,6 +33,7 @@ pub mod tmux;
 pub use decoded::Decoded;
 pub use linked::Linked;
 pub use picture::Picture;
+pub use placed::Placed;
 pub use placeholders::draws_placeholders;
 pub use probe::Probe;
 pub use stored::Stored;
