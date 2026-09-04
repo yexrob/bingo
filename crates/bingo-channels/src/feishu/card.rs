@@ -119,6 +119,7 @@ mod tests {
                 },
             ],
             free_text: false,
+            rest: None,
         }
     }
 

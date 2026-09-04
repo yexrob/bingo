@@ -133,6 +133,38 @@ pub fn permission(scope: Option<&str>) -> Interaction {
     }
 }
 
+/// Two questions asked together (M53): what one `AskUserQuestion` call opens
+/// and a chat asks one message at a time.
+pub fn form() -> Interaction {
+    let asked = |header: &str, question: &str, labels: [&str; 2]| bingo_sdk::Question {
+        question: question.into(),
+        header: Some(header.into()),
+        options: labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| bingo_sdk::QuestionOption {
+                id: index.to_string(),
+                label: (*label).into(),
+                description: None,
+                role: None,
+                preview: None,
+            })
+            .collect(),
+        free_text: true,
+        multi: false,
+    };
+    Interaction {
+        kind: InteractionKind::Form {
+            questions: vec![
+                asked("Store", "Which store?", ["Postgres", "SQLite"]),
+                asked("Runtime", "Which runtime?", ["tokio", "smol"]),
+            ],
+        },
+        answers: vec![AnswerSpec::Form, AnswerSpec::Cancel],
+        ..permission(None)
+    }
+}
+
 pub fn asks(seq: u64, interaction: Interaction) -> Frame {
     frame(seq, Event::InteractionOpened { interaction })
 }

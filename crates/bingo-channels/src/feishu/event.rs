@@ -433,6 +433,7 @@ mod tests {
             prompt: "p".into(),
             choices: Vec::new(),
             free_text: false,
+            rest: None,
         };
         let value = button_value(&conversation, &question, "2");
         let heard = heard(

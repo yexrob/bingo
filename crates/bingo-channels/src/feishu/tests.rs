@@ -55,6 +55,7 @@ fn question() -> Question {
             answer: Answer::AllowOnce,
         }],
         free_text: false,
+        rest: None,
     }
 }
 

@@ -205,6 +205,64 @@ fn a_pipe_without_print_still_runs_headlessly() {
     assert_eq!(stdout(&out), "Hello from the fake provider.\n");
 }
 
+/// The one frame a form makes crosses the JSON wire whole (M53): the kind,
+/// its questions with their previews, and the answer it was declined with.
+#[test]
+fn a_form_crosses_the_json_wire_as_one_frame() {
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"text":"Asking."},{"toolCall":{"name":"AskUserQuestion","input":{"questions":[
+                {"question":"Which store?","header":"Store","options":[
+                    {"label":"Postgres","preview":"CREATE TABLE …"},{"label":"Redis"}]},
+                {"question":"Which runtime?","header":"Runtime","options":[
+                    {"label":"tokio"},{"label":"smol"}]}]}}}]},
+            {"steps":[{"text":"Fine."}]}
+        ]}"#,
+    );
+    let out = run(bingo().env("BINGO_FAKE_SCRIPT", script.path()).args([
+        "--print",
+        "--output-format",
+        "json",
+        "pick one",
+    ]));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let frames: Vec<bingo_sdk::Frame> = stdout(&out)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("every line is a frame"))
+        .collect();
+    let opened = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            bingo_sdk::Event::InteractionOpened { interaction } => Some(interaction),
+            _ => None,
+        })
+        .expect("the form was opened");
+    let bingo_sdk::InteractionKind::Form { questions } = &opened.kind else {
+        panic!("expected one form, got {:?}", opened.kind);
+    };
+    assert_eq!(questions.len(), 2, "one interaction for both questions");
+    assert_eq!(
+        questions[0].options[0].preview.as_deref(),
+        Some("CREATE TABLE …")
+    );
+    assert_eq!(
+        opened.answers,
+        vec![bingo_sdk::AnswerSpec::Form, bingo_sdk::AnswerSpec::Cancel]
+    );
+    let answer = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            bingo_sdk::Event::InteractionResolved { answer, .. } => Some(answer.clone()),
+            _ => None,
+        })
+        .expect("and resolved");
+    assert_eq!(
+        answer,
+        bingo_sdk::Answer::Cancel,
+        "nobody was at the keyboard"
+    );
+}
+
 #[test]
 fn a_question_is_declined_when_nobody_is_at_the_keyboard() {
     let script = script(

@@ -592,6 +592,75 @@ async fn a_question_becomes_buttons_and_a_click_answers_it() {
     assert_eq!(answered.2, Activation::Pointer, "a button is a pointer");
 }
 
+/// A chat has no card that walks tabs, so a set of questions is asked one
+/// message at a time and answered once, at the last of them (M53). The message
+/// just answered says what it was answered with and loses its buttons.
+#[tokio::test]
+async fn a_form_is_asked_one_message_at_a_time_and_answered_once() {
+    let chat = Chat::open();
+    chat.say(hello("oc_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    session.publish(Event::TurnStarted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        inputs: Vec::new(),
+        origin: bingo_sdk::TurnOrigin::Submit,
+    });
+    session.publish(Event::InteractionOpened {
+        interaction: fixtures::form(),
+    });
+    let records = chat.records(1).await;
+    let Record::Ask { question, .. } = &records[0] else {
+        panic!("expected the first question, got {records:?}");
+    };
+    assert_eq!(question.prompt, "Store: Which store?");
+
+    // The first reply fills one slot: the kernel hears nothing yet, the
+    // answered message loses its buttons, and the next question arrives.
+    chat.say(Incoming::Click {
+        conversation: Conversation::direct("oc_1"),
+        principal: "ou_person".into(),
+        question: question.id.clone(),
+        choice: "2".into(),
+    })
+    .await;
+    let records = chat.records(3).await;
+    assert_eq!(
+        records[1],
+        Record::Settle {
+            at: Posted::new("m1"),
+            outcome: "chose SQLite".into(),
+        },
+        "no live button outlives its question: {records:?}"
+    );
+    let Record::Ask { question, .. } = &records[2] else {
+        panic!("expected the second question, got {records:?}");
+    };
+    assert_eq!(question.prompt, "Runtime: Which runtime?");
+    assert!(
+        session.answers().is_empty(),
+        "nothing is sent until all of it is"
+    );
+
+    // The last reply answers the whole set, in the order it was asked.
+    chat.say(said(Conversation::direct("oc_1"), "async-std", true))
+        .await;
+    let answered = chat.until(|| session.answers().first().cloned()).await;
+    assert_eq!(answered.0, InteractionId::from_raw("int_1"));
+    assert_eq!(
+        answered.1,
+        Answer::Form {
+            answers: vec![
+                Answer::Choice {
+                    ids: vec!["1".into()]
+                },
+                Answer::Text {
+                    text: "async-std".into()
+                },
+            ]
+        }
+    );
+}
+
 #[tokio::test]
 async fn without_buttons_the_numbered_rung_is_drawn_and_a_reply_answers_it() {
     let chat = Chat::with(loopback::Config {

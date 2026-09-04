@@ -25,9 +25,6 @@ use crate::theme;
 /// it, above them. A 120-column terminal is the wide one (design §3).
 const PANE_FROM: usize = 100;
 
-/// The narrowest pane worth reading a mockup in.
-const PANE_LEAST: usize = 28;
-
 /// The narrowest the options' column is squeezed to, so a label and its
 /// description are not made to wrap for the sake of the pane.
 const COLUMN_LEAST: usize = 24;

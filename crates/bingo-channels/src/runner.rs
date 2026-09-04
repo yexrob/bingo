@@ -22,7 +22,7 @@ use crate::conversation::{Conversation, Posted};
 use crate::deliver::{Deliverer, Op};
 use crate::error::ChannelError;
 use crate::gate::Gate;
-use crate::question::Question;
+use crate::question::{Question, Settled};
 
 /// The surface id, and the `Origin.surface` of everything a chat submits.
 pub const SURFACE_ID: &str = "channels";
@@ -108,7 +108,7 @@ impl Runner {
                     self.perform(ops).await;
                 }
                 event = self.inbound.recv() => match event {
-                    Some(event) => self.heard(event),
+                    Some(event) => self.heard(event).await,
                     None => return,
                 },
             }
@@ -342,7 +342,7 @@ impl Runner {
         )
     }
 
-    fn heard(&mut self, event: Incoming) {
+    async fn heard(&mut self, event: Incoming) {
         match event {
             Incoming::Message {
                 principal,
@@ -352,19 +352,19 @@ impl Runner {
                 ..
             } => {
                 self.parent = parent;
-                self.said(&principal, text, images);
+                self.said(&principal, text, images).await;
             }
             Incoming::Click {
                 question, choice, ..
-            } => self.clicked(&question, &choice),
+            } => self.clicked(&question, &choice).await,
         }
     }
 
     /// A reply that answers the open question is that answer; anything else
     /// is the next thing to work on.
-    fn said(&mut self, principal: &str, text: String, images: Vec<Image>) {
+    async fn said(&mut self, principal: &str, text: String, images: Vec<Image>) {
         match self.answering(&text) {
-            Some((id, answer)) => self.answer(id, answer),
+            Some((id, answer)) => self.settles(id, answer).await,
             None => self.handle.submit(
                 IntentId::mint(),
                 Input::Text {
@@ -386,11 +386,35 @@ impl Runner {
             .find_map(|asked| Some((asked.question.id.clone(), asked.question.parse(text)?)))
     }
 
-    fn clicked(&mut self, id: &InteractionId, choice: &str) {
+    async fn clicked(&mut self, id: &InteractionId, choice: &str) {
         let Some(answer) = self.asked.get(id).and_then(|a| a.question.pick(choice)) else {
             return;
         };
-        self.answer(id.clone(), answer);
+        self.settles(id.clone(), answer).await;
+    }
+
+    /// A reply either answers the interaction or fills one slot of a form: a
+    /// set asked one message at a time is answered once, at the last of them
+    /// (M53). The message just answered says what it was answered with and
+    /// loses its buttons, so no live button ever outlives its question.
+    async fn settles(&mut self, id: InteractionId, answer: Answer) {
+        let Some(asked) = self.asked.get(&id) else {
+            return;
+        };
+        match asked.question.clone().settles(answer.clone()) {
+            Settled::Whole(whole) => self.answer(id, whole),
+            Settled::More(next) => {
+                let outcome = asked.question.decided(&answer);
+                if let Err(error) = self.settle(&id, &outcome).await {
+                    tracing::warn!(%error, key = %self.key, "the answered question kept its buttons");
+                }
+                self.perform(vec![Op::Finalize {
+                    text: String::new(),
+                    question: Some(*next),
+                }])
+                .await;
+            }
+        }
     }
 
     /// Always `Pointer`, on both rungs. The kernel reads the activation for

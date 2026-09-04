@@ -755,12 +755,19 @@ mod tests {
     /// The protocol has a shape for a tool call and for nothing else.
     #[tokio::test]
     async fn a_question_stays_refused_even_when_the_host_answers_permissions() {
-        let (host, session) = TestHost::live(vec![frame(
-            1,
-            Event::InteractionOpened {
-                interaction: question(&[("a", "Cargo.toml")]),
-            },
-        )]);
+        refused(question(&[("a", "Cargo.toml")])).await;
+    }
+
+    /// A set of questions is no more answerable over this protocol than one
+    /// is: it falls to the narrowest refusal the interaction offers (M53).
+    #[tokio::test]
+    async fn a_form_stays_refused_too() {
+        refused(crate::tests::form()).await;
+    }
+
+    async fn refused(interaction: Interaction) {
+        let (host, session) =
+            TestHost::live(vec![frame(1, Event::InteractionOpened { interaction })]);
         let (mut console, lines) = TestConsole::fed();
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();

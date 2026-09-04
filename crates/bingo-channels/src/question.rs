@@ -30,11 +30,35 @@ pub struct Question {
     pub choices: Vec<Choice>,
     /// Words of one's own are an answer too.
     pub free_text: bool,
+    /// Set only for a form (M53): a chat asks a set of questions one message
+    /// at a time, so each ladder carries what has been answered and what is
+    /// still to come. `None` is a question that stands alone.
+    pub(crate) rest: Option<Rest>,
+}
+
+/// A form part-answered: the slots given so far, and the questions left.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Rest {
+    given: Vec<Answer>,
+    left: Vec<bingo_sdk::Question>,
+}
+
+/// What a reply settles: the whole interaction, or one question of a form —
+/// in which case the next one is what to ask.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Settled {
+    /// The answer the kernel is owed.
+    Whole(Answer),
+    /// One slot filled; this is the next question of the same interaction.
+    More(Box<Question>),
 }
 
 /// The interaction as a chat can answer it, or `None` when this surface has
 /// no rung for it — a browser login is nobody's chat message.
 pub fn ladder(interaction: &Interaction) -> Option<Question> {
+    if let InteractionKind::Form { questions } = &interaction.kind {
+        return form(interaction, questions);
+    }
     let offered = |spec: AnswerSpec| interaction.answers.contains(&spec);
     let (prompt, mut answers) = match &interaction.kind {
         InteractionKind::Permission {
@@ -46,17 +70,10 @@ pub fn ladder(interaction: &Interaction) -> Option<Question> {
             format!("{tool}: {summary}"),
             permission(session_scope.as_deref(), &offered),
         ),
-        InteractionKind::Question(bingo_sdk::Question {
-            question,
-            header,
-            options,
-            ..
-        }) => (
-            match header {
-                Some(header) => format!("{header}: {question}"),
-                None => question.clone(),
-            },
-            options
+        InteractionKind::Question(asked) => (
+            prompt_of(asked),
+            asked
+                .options
                 .iter()
                 .map(|option| {
                     (
@@ -75,8 +92,8 @@ pub fn ladder(interaction: &Interaction) -> Option<Question> {
                 ("No".to_string(), Answer::Cancel),
             ],
         ),
-        // A form is asked one message per question (M53), which is not one
-        // ladder; `form` builds those.
+        // A form has its own way in, above; a browser login is nobody's chat
+        // message.
         InteractionKind::Form { .. } | InteractionKind::Login { .. } => return None,
     };
     answers.retain(|(_, answer)| offered(answer.spec()));
@@ -88,7 +105,60 @@ pub fn ladder(interaction: &Interaction) -> Option<Question> {
         prompt,
         choices: numbered(answers),
         free_text: offered(AnswerSpec::Text),
+        rest: None,
     })
+}
+
+/// A form's first question, holding the rest of the set for the replies to
+/// come. A chat has no card that walks tabs, so its honest degrade is one
+/// message per question and one answer at the end (M53).
+fn form(interaction: &Interaction, questions: &[bingo_sdk::Question]) -> Option<Question> {
+    if !interaction.answers.contains(&AnswerSpec::Form) {
+        return None;
+    }
+    let (first, left) = questions.split_first()?;
+    Some(asking(
+        interaction.id.clone(),
+        first,
+        Rest {
+            given: Vec::new(),
+            left: left.to_vec(),
+        },
+    ))
+}
+
+/// One question of a form as a chat asks it. A set the card would tick is one
+/// choice here: a reply names one option, which is the most a numbered list or
+/// a row of buttons can carry.
+fn asking(id: InteractionId, question: &bingo_sdk::Question, rest: Rest) -> Question {
+    Question {
+        id,
+        prompt: prompt_of(question),
+        choices: numbered(
+            question
+                .options
+                .iter()
+                .map(|option| {
+                    (
+                        option.label.clone(),
+                        Answer::Choice {
+                            ids: vec![option.id.clone()],
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        free_text: question.free_text,
+        rest: Some(rest),
+    }
+}
+
+/// The words that ask, with the tag the question carries before them.
+fn prompt_of(question: &bingo_sdk::Question) -> String {
+    match &question.header {
+        Some(header) => format!("{header}: {}", question.question),
+        None => question.question.clone(),
+    }
 }
 
 /// The permission rungs, widest first. `AllowSession` without a scope would
@@ -187,6 +257,28 @@ impl Question {
             .map(|choice| choice.answer.clone())
     }
 
+    /// What a reply to this question means to the interaction it belongs to:
+    /// a lone question is settled by it, and one of a form fills its slot and
+    /// hands back the next question to ask (M53).
+    pub fn settles(&self, answer: Answer) -> Settled {
+        let Some(rest) = &self.rest else {
+            return Settled::Whole(answer);
+        };
+        let mut given = rest.given.clone();
+        given.push(answer);
+        match rest.left.split_first() {
+            None => Settled::Whole(Answer::Form { answers: given }),
+            Some((next, left)) => Settled::More(Box::new(asking(
+                self.id.clone(),
+                next,
+                Rest {
+                    given,
+                    left: left.to_vec(),
+                },
+            ))),
+        }
+    }
+
     /// The line that replaces the buttons once the question is settled:
     /// what was decided, and where (ADR-0016 §3). `here` is this surface's
     /// own client name, so a decision made in this chat says so plainly.
@@ -194,7 +286,9 @@ impl Question {
         format!("{}{}", self.decided(answer), place(by, here))
     }
 
-    fn decided(&self, answer: &Answer) -> String {
+    /// What was decided, with no word of where: what a question answered in
+    /// this very chat says as its own buttons come off.
+    pub fn decided(&self, answer: &Answer) -> String {
         match answer {
             Answer::AllowOnce => "approved".into(),
             Answer::AllowSession { .. } => "approved for this session".into(),
@@ -349,6 +443,104 @@ mod tests {
             None,
             "anything else is a new prompt"
         );
+    }
+
+    /// A form is a sequence of ladders under one interaction id, and only the
+    /// last of them settles anything (M53).
+    #[test]
+    fn a_form_is_one_ladder_per_question_and_the_last_settles_them_all() {
+        let first = ladder(&interaction(
+            InteractionKind::Form {
+                questions: vec![
+                    asked("Store", &["Postgres", "SQLite"]),
+                    asked("Runtime", &["tokio"]),
+                ],
+            },
+            vec![AnswerSpec::Form, AnswerSpec::Cancel],
+        ))
+        .expect("a form is a ladder");
+        assert_eq!(first.prompt, "Store: Which Store?");
+        assert_eq!(first.choices.len(), 2);
+        assert!(
+            first.free_text,
+            "the words of one's own the question offers"
+        );
+
+        let Settled::More(second) = first.settles(first.parse("2").expect("a number")) else {
+            panic!("one of two settles nothing");
+        };
+        assert_eq!(second.prompt, "Runtime: Which Runtime?");
+        assert_eq!(second.id, first.id, "the same interaction all along");
+
+        let Settled::Whole(answer) = second.settles(second.parse("1").expect("a number")) else {
+            panic!("the last of them is the answer");
+        };
+        assert_eq!(
+            answer,
+            Answer::Form {
+                answers: vec![
+                    Answer::Choice {
+                        ids: vec!["1".into()]
+                    },
+                    Answer::Choice {
+                        ids: vec!["0".into()]
+                    },
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn a_lone_question_is_settled_by_its_own_reply() {
+        let question = ladder(&permission_interaction(None)).expect("a ladder");
+        assert_eq!(
+            question.settles(Answer::AllowOnce),
+            Settled::Whole(Answer::AllowOnce)
+        );
+    }
+
+    /// The specs say what the *whole* answer may be; a form's are `form` and
+    /// `cancel`, so a set the kernel will not take a form for is no ladder.
+    #[test]
+    fn a_form_the_kernel_will_not_take_a_form_for_is_not_asked() {
+        assert!(
+            ladder(&interaction(
+                InteractionKind::Form {
+                    questions: vec![asked("Store", &["Postgres"])],
+                },
+                vec![AnswerSpec::Cancel],
+            ))
+            .is_none()
+        );
+        assert!(
+            ladder(&interaction(
+                InteractionKind::Form { questions: vec![] },
+                vec![AnswerSpec::Form],
+            ))
+            .is_none(),
+            "and neither is a set of nothing"
+        );
+    }
+
+    /// One question of a form, its options labelled and numbered from zero.
+    fn asked(header: &str, labels: &[&str]) -> bingo_sdk::Question {
+        bingo_sdk::Question {
+            question: format!("Which {header}?"),
+            header: Some(header.into()),
+            options: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| QuestionOption {
+                    id: index.to_string(),
+                    label: (*label).into(),
+                    description: None,
+                    role: None,
+                    preview: None,
+                })
+                .collect(),
+            free_text: true,
+            multi: false,
+        }
     }
 
     #[test]
