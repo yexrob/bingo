@@ -32,6 +32,12 @@ const READS_A_PICTURE: &str = r#"{"responses":[
   {"steps":[{"toolCall":{"name":"Read","input":{"file_path":"shot.png"}}}]},
   {"steps":[{"text":"That is the picture."}]}]}"#;
 
+/// A turn that writes a file, so going back to it has something on disk to
+/// put back as well as a conversation (M67).
+const WRITES_A_NOTE: &str = r#"{"responses":[
+  {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"note.md","content":"written by the turn\n"}}}]},
+  {"steps":[{"text":"Wrote the note."}]}]}"#;
+
 /// An answer that names a picture in its own words and calls nothing: the
 /// path by which a picture reaches the transcript without a tool at all
 /// (M51). The file is in the session's directory, so the destination is
@@ -125,6 +131,13 @@ impl Answers {
 const LATE: Duration =
     Duration::from_millis(bingo_surface_tui::PROBE_THROUGH.as_millis() as u64 + 400);
 
+/// How far apart two keystrokes of one gesture are sent. Two writes back to
+/// back arrive in one read, and one read of `ESC ESC` does not become two
+/// `esc` events; a person's two escapes are a moment apart. It is a lower
+/// bound on the gap and never a deadline — a slower machine makes it longer,
+/// which is the direction that cannot fail.
+const BETWEEN_KEYS: Duration = Duration::from_millis(200);
+
 /// What the graphics probe asks, as it appears in the child's output: seeing
 /// it is what tells the fake terminal to answer. Wrapped or bare, the query
 /// itself reads the same — under tmux there is one more `ESC` in front of it.
@@ -148,7 +161,6 @@ struct Terminal {
     /// Set once the scene's late answer has gone down the wire, so a test
     /// waits on the write itself and never on a clock of its own.
     answered_late: Arc<AtomicBool>,
-    #[allow(dead_code)]
     home: tempfile::TempDir,
 }
 
@@ -256,6 +268,12 @@ impl Terminal {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("the late answer was never written");
+    }
+
+    /// The child's home, which is also its working directory: where a file a
+    /// turn wrote lands, and where a rewind puts it back.
+    fn home(&self) -> &std::path::Path {
+        self.home.path()
     }
 
     /// Everything the child has written, escapes and all.
@@ -405,6 +423,46 @@ fn every_frame_is_written_inside_a_synchronized_update() {
     assert_eq!(count(&under_tmux, END), 0);
     through.send(&[0x04]);
     through.leave();
+}
+
+/// `esc esc` on an empty composer lists the turns, and `⏎` goes back to one:
+/// the file the turn wrote is gone again and the transcript says what it
+/// dropped (M67, ADR-0045). The picker itself is M11e's and unchanged — what
+/// is new is that a `rewind` is in the catalogue for it to offer.
+#[test]
+fn esc_twice_rewinds_the_turn_and_the_file_it_wrote() {
+    let mut terminal = Terminal::opened(
+        &["--allowed-tools", "Write"],
+        WRITES_A_NOTE,
+        Answers::Da1Only,
+    );
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"write me a note\r");
+    terminal.wait_for("Wrote the note.");
+    let note = terminal.home().join("note.md");
+    assert!(note.is_file(), "the turn wrote it");
+
+    // Two escapes, a moment apart: any other key between them would say they
+    // were not one gesture.
+    terminal.send(b"\x1b");
+    std::thread::sleep(BETWEEN_KEYS);
+    terminal.send(b"\x1b");
+    terminal.wait_for("Rewind to");
+    terminal.send(b"\r");
+    terminal.wait_for("rewound,");
+
+    assert!(
+        !note.exists(),
+        "a file the turn created is gone again:\n{}",
+        terminal.screen()
+    );
+    let screen = terminal.screen();
+    assert!(
+        !screen.contains("Wrote the note."),
+        "and the turn is out of the transcript:\n{screen}"
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
 }
 
 /// Answer the rest of it after [`LATE`], from a thread of its own.

@@ -5,10 +5,11 @@
 //! turn it belongs to, so the boundaries are already in the transcript and
 //! nothing here keeps a second list of them.
 //!
-//! The picker is offered only where the session has a `/rewind` to run. As of
-//! M11e no plugin registers one (`docs/plans/M11e-content-kinds.md`), so the
-//! chord is silent rather than opening a card that could not do anything; the
-//! day a store command lands, it lights up with no change here.
+//! The picker is offered only where the session has a `/rewind` to run, which
+//! keeps it honest wherever it is not registered. Since M67 the checkpoints
+//! plugin registers one (`docs/plans/M67-the-turn-that-can-be-undone.md`,
+//! ADR-0045) and the chord is live; nothing here changed for it, which was
+//! the point of asking the catalogue rather than assuming.
 
 use bingo_sdk::{CommandSpec, ContentPart, ItemBody, SessionState, TurnId};
 use ratatui::text::{Line, Span};
@@ -255,6 +256,9 @@ mod tests {
         );
     }
 
+    /// Data-driven, both ways: a session whose catalogue has a `rewind` is
+    /// offered the card, and one built without the plugin that registers it
+    /// is silent.
     #[test]
     fn nothing_is_offered_that_could_not_be_done() {
         assert!(!offered(&[spec("compact"), spec("model")]));
