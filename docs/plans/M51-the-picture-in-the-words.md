@@ -297,3 +297,17 @@ before and after.
 
 *To be filled after the merge: "直接展示" answered with a markdown image
 and no tool call, on the user's own terminal — including anything wrong.*
+
+### Hands-on (main session with the user, 2026-09-04)
+
+In the user's Ghostty, `target/debug/bingo` at dev `71493c97`: asked
+to show a desktop screenshot and a remote PNG as markdown, the model
+wrote both as `![…](…)` and both drew under their chips ("有了有了").
+Two earlier failures were not this milestone's code: a path with
+spaces written bare is not a CommonMark link (the words showed as
+words — the identity now says to use `<…>`, and not a code block), and
+one session had no graphics at all (chips with no note: the surface
+reads nothing where it can draw nothing). A dead URL now says its
+status (`79c14d2b`).
+
+- [x] Hands-on: "直接展示" answered with a markdown image, no `Read`.

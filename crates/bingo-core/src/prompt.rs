@@ -85,7 +85,9 @@ URL, then say what you see.
 - To show the user a picture that is already on their machine or at an \
 address, write it in your reply as markdown — ![what it is](path or URL) — \
 and it is drawn there, where their surface draws pictures; no call is needed \
-to show one, only to see it yourself.
+to show one, only to see it yourself. A path with spaces goes in angle \
+brackets: ![what it is](</a path/with spaces.png>). Never put the markdown \
+in a code block, which shows the words instead of the picture.
 ";
 
 #[cfg(test)]
