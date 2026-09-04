@@ -1,6 +1,7 @@
 //! Inputs that arrived while the session was busy, drained one unit at a time
 //! (ADR-0008 §2): a run of prose opens one turn, a command is one unit, and a
-//! barrier absorbs prose only up to the first command.
+//! barrier absorbs prose only up to the first line that will not steer — a
+//! command, or a line that asked to wait for the turn to end (M68).
 
 use std::collections::VecDeque;
 
@@ -35,14 +36,42 @@ impl Queue {
         self.entries.drain(..).collect()
     }
 
-    /// The prose at the head, up to the first command.
+    /// The prose at the head, up to the first command: what a turn opening
+    /// now takes with it. A held line is prose here — it asked to wait for a
+    /// turn, and this is the turn it waited for.
     pub(super) fn take_prose(&mut self) -> Vec<(IntentId, Input)> {
+        self.take_run(|input| !commands::is_command(input))
+    }
+
+    /// The prose a running turn may be steered with: up to the first command
+    /// and the first line that asked to wait (M68).
+    pub(super) fn take_steers(&mut self) -> Vec<(IntentId, Input)> {
+        self.take_run(steerable)
+    }
+
+    /// The head of the queue for as long as `keep` holds.
+    fn take_run(&mut self, keep: impl Fn(&Input) -> bool) -> Vec<(IntentId, Input)> {
         let n = self
             .entries
             .iter()
-            .take_while(|(_, input)| !commands::is_command(input))
+            .take_while(|(_, input)| keep(input))
             .count();
         self.entries.drain(..n).collect()
+    }
+
+    /// What `intent` is queued as, while it still is: what a withdraw reads
+    /// before it decides whether the line is the caller's to take.
+    pub(super) fn queued(&self, intent: &IntentId) -> Option<&Input> {
+        self.entries
+            .iter()
+            .find(|(queued, _)| queued == intent)
+            .map(|(_, input)| input)
+    }
+
+    /// Take `intent` out of the queue; `None` when it is not in it.
+    pub(super) fn take(&mut self, intent: &IntentId) -> Option<Input> {
+        let at = self.entries.iter().position(|(id, _)| id == intent)?;
+        self.entries.remove(at).map(|(_, input)| input)
     }
 
     /// The next unit, when there is one.
@@ -77,12 +106,19 @@ fn entry(intent: &IntentId, input: &Input, position: u32) -> QueueEntry {
         intent: intent.clone(),
         position,
         preview: preview(input),
-        steerable: !commands::is_command(input),
+        steerable: steerable(input),
         origin: origin_of(input),
     }
 }
 
-fn origin_of(input: &Input) -> Origin {
+/// Whether a running turn may be steered with this line: not a command, and
+/// not one that asked to wait for the turn to end (M68). It is what the wire's
+/// `steerable` says and what the barrier obeys, from the one reading.
+fn steerable(input: &Input) -> bool {
+    !commands::is_command(input) && !input.is_held()
+}
+
+pub(super) fn origin_of(input: &Input) -> Origin {
     match input {
         Input::Text { origin, .. } => origin.clone(),
         Input::Action { .. } => Origin::default(),
@@ -108,6 +144,24 @@ mod tests {
 
     fn text(t: &str) -> (IntentId, Input) {
         (IntentId::mint(), Input::text(t, Origin::surface("test")))
+    }
+
+    /// A line that asked to wait for the turn to end (M68).
+    fn held(t: &str) -> (IntentId, Input) {
+        (
+            IntentId::mint(),
+            Input::Text {
+                text: t.into(),
+                images: Vec::new(),
+                origin: Origin::surface("test"),
+                delivery: Delivery::Hold,
+            },
+        )
+    }
+
+    fn push(q: &mut Queue, entry: (IntentId, Input)) -> IntentId {
+        q.push(entry.0.clone(), entry.1);
+        entry.0
     }
 
     #[test]
@@ -163,5 +217,61 @@ mod tests {
             panic!("a queue change");
         };
         assert_eq!(entries[0].preview, "(an image)");
+    }
+
+    /// The barrier is what `Hold` is about: a running turn is steered with
+    /// the lines that steer and with nothing after the first that does not.
+    #[test]
+    fn a_barrier_stops_at_a_held_line_as_it_stops_at_a_command() {
+        let mut q = Queue::default();
+        push(&mut q, text("a"));
+        push(&mut q, held("b"));
+        push(&mut q, text("c"));
+        assert_eq!(q.take_steers().len(), 1, "only the line that steers");
+        assert!(q.take_steers().is_empty(), "the held line blocks the rest");
+    }
+
+    /// And the turn it waited for takes it: a held line is prose to whatever
+    /// opens next, so two of them are one turn's inputs.
+    #[test]
+    fn the_turn_that_opens_next_takes_the_held_lines() {
+        let mut q = Queue::default();
+        push(&mut q, held("a"));
+        push(&mut q, held("b"));
+        push(&mut q, text("/compact"));
+        assert!(matches!(q.take_unit(), Some(Unit::Prose(p)) if p.len() == 2));
+        assert!(matches!(q.take_unit(), Some(Unit::Command(..))));
+    }
+
+    #[test]
+    fn the_wire_view_marks_a_held_line_as_not_steerable() {
+        let mut q = Queue::default();
+        push(&mut q, text("a"));
+        push(&mut q, held("b"));
+        let Event::QueueChanged { entries, .. } = q.changed() else {
+            panic!("a queue change");
+        };
+        assert!(entries[0].steerable);
+        assert!(!entries[1].steerable, "it asked to wait");
+    }
+
+    /// What a withdraw reads and then takes; an intent that is not queued is
+    /// nothing to either of them.
+    #[test]
+    fn a_queued_line_is_found_by_its_intent_and_taken_out_once() {
+        let mut q = Queue::default();
+        let first = push(&mut q, text("a"));
+        let second = push(&mut q, text("b"));
+        assert!(q.queued(&first).is_some());
+        assert!(q.queued(&IntentId::mint()).is_none());
+        let taken = q.take(&first).expect("the first line");
+        assert_eq!(preview(&taken), "a");
+        assert!(q.take(&first).is_none(), "once");
+        let Event::QueueChanged { entries, .. } = q.changed() else {
+            panic!("a queue change");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].intent, second);
+        assert_eq!(entries[0].position, 1, "what is left is renumbered");
     }
 }

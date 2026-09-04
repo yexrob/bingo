@@ -17,6 +17,9 @@ pub enum ErrorCode {
     InvalidInput,
     PermissionDenied,
     ToolNotFound,
+    /// What was named is not there any more: a queued line a turn has taken
+    /// (ADR-0008 §2, amended M68).
+    NotFound,
     ToolFailed,
     ProviderUnavailable,
     AuthRequired,
@@ -45,6 +48,7 @@ impl ErrorCode {
             ErrorCode::InvalidInput => "INVALID_INPUT",
             ErrorCode::PermissionDenied => "PERMISSION_DENIED",
             ErrorCode::ToolNotFound => "TOOL_NOT_FOUND",
+            ErrorCode::NotFound => "NOT_FOUND",
             ErrorCode::ToolFailed => "TOOL_FAILED",
             ErrorCode::ProviderUnavailable => "PROVIDER_UNAVAILABLE",
             ErrorCode::AuthRequired => "AUTH_REQUIRED",
@@ -86,6 +90,7 @@ mod tests {
     fn the_wire_form_and_the_str_form_agree() {
         for code in [
             ErrorCode::SessionNotFound,
+            ErrorCode::NotFound,
             ErrorCode::InteractionClosed,
             ErrorCode::TurnBudgetExhausted,
             ErrorCode::Storage,

@@ -145,6 +145,11 @@ impl Actor {
                 payload,
             } => self.signal(plugin, kind, payload).await,
             Msg::Interrupt { intent, scope } => self.interrupt(intent, scope).await,
+            Msg::Withdraw {
+                intent,
+                surface,
+                reply,
+            } => drop(reply.send(self.withdraw(intent, surface).await)),
             Msg::Answer(answered) => self.answer(answered).await,
             Msg::Attach { reply } => {
                 let snapshot = self.state.clone();
@@ -246,7 +251,7 @@ impl Actor {
     /// nothing for a turn that is not the one running.
     async fn absorb(&mut self, turn: &TurnId) -> Vec<(IntentId, Input)> {
         if self.is_running(turn) {
-            self.take_queue().await
+            self.take_steers().await
         } else {
             Vec::new()
         }

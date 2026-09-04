@@ -822,6 +822,20 @@ impl HostApi for Host {
         ask::put(self, session, kind, answers).await
     }
 
+    /// The session must be live: a queue is what an actor holds, and a
+    /// session that is only stored has none to take a line out of.
+    async fn withdraw(
+        &self,
+        session: &SessionId,
+        intent: &IntentId,
+        who: ClientIdentity,
+    ) -> Result<Input, KernelError> {
+        self.live(session)?
+            .mailbox
+            .withdraw(intent.clone(), who.surface)
+            .await
+    }
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         let resolved = self.providers().await;
         Ok(Catalog {

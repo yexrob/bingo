@@ -1152,6 +1152,11 @@
         },
         {
           "type": "string",
+          "const": "NOT_FOUND",
+          "description": "What was named is not there any more: a queued line a turn has taken\n(ADR-0008 §2, amended M68)."
+        },
+        {
+          "type": "string",
           "const": "STORAGE",
           "description": "The store could not read or write; the disk, not the kernel."
         }

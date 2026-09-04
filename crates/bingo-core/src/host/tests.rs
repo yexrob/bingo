@@ -12,6 +12,7 @@ mod login;
 mod models;
 mod policy;
 mod providers;
+mod queue;
 mod resume;
 mod rewind;
 mod services;
