@@ -73,8 +73,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "plugin state (tasks, rooms)",
     },
     Binding {
+        // The stack of [`TABS`], in the order it is obeyed; a test holds the
+        // two together.
         keys: "tab",
-        description: "complete the command under the caret",
+        description: "complete → queue → next card",
     },
     Binding {
         keys: "shift+tab",
@@ -115,8 +117,12 @@ pub const BINDINGS: &[Binding] = &[
 
 pub const FOOTER_HINT: &str = "? for shortcuts";
 pub const PLACEHOLDER: &str = "ask anything · / for commands · ! for shell";
+/// What the empty box offers while a turn runs: the two ways a line goes out
+/// of it (ADR-0008 §2, amended M68). One string, so the box and the help can
+/// never say different things about the same key.
+pub const BUSY_PLACEHOLDER: &str = "ask anything · ⏎ steers · tab queues";
 
-// ---- the two ordered stacks (design §7) ---------------------------------
+// ---- the three ordered stacks (design §7) -------------------------------
 
 /// What `esc` closes, innermost first. It is a table rather than a chain of
 /// conditions so that the order is one thing, tested once and printed in the
@@ -168,6 +174,56 @@ pub fn escape(open: Open) -> Option<Escape> {
         .iter()
         .map(|(rung, _)| *rung)
         .find(|rung| open.has(*rung))
+}
+
+/// What `tab` does, innermost first (§7). A layer that captures never reaches
+/// this table — the switcher, the panel and a form answer their own keys while
+/// they are up — so every rung here is about the composer and the cards
+/// beneath it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    /// The dropdown is open: take the row the cursor is on.
+    Complete,
+    /// A turn is running and there are words in the box: the line waits for
+    /// that turn to end instead of steering it (ADR-0008 §2, amended M68).
+    Queue,
+    /// Move the ring to the next card that answers keys.
+    Focus,
+}
+
+/// The stack, in the order it is obeyed, with the word the help prints.
+pub const TABS: &[(Tab, &str)] = &[
+    (Tab::Complete, "complete"),
+    (Tab::Queue, "queue"),
+    (Tab::Focus, "next card"),
+];
+
+/// What is true when `tab` is pressed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Tabbed {
+    pub dropdown: bool,
+    pub busy: bool,
+    /// There are words in the box: `tab` on an empty one queues nothing.
+    pub typing: bool,
+    pub focusable: bool,
+}
+
+impl Tabbed {
+    fn has(self, rung: Tab) -> bool {
+        match rung {
+            Tab::Complete => self.dropdown,
+            Tab::Queue => self.busy && self.typing,
+            Tab::Focus => self.focusable,
+        }
+    }
+}
+
+/// The innermost thing `tab` does, and nothing at all when there is nothing to
+/// complete, nothing to queue and no card to walk to.
+pub fn tab(at: Tabbed) -> Option<Tab> {
+    TABS.iter()
+        .map(|(rung, _)| *rung)
+        .find(|rung| at.has(*rung))
 }
 
 /// What `ctrl+c` does, which is not what `esc` does: it is the key that gets
@@ -354,6 +410,62 @@ mod tests {
             Some(Escape::Interrupt)
         );
         assert_eq!(escape(Open::default()), None, "and nothing to close");
+    }
+
+    /// The order `tab` is obeyed in is the order the help prints, because
+    /// there is only one of it.
+    #[test]
+    fn the_help_prints_the_tab_stack() {
+        let stack = TABS
+            .iter()
+            .map(|(_, word)| *word)
+            .collect::<Vec<_>>()
+            .join(" → ");
+        let tab = BINDINGS
+            .iter()
+            .find(|binding| binding.keys == "tab")
+            .expect("a row for tab");
+        assert_eq!(tab.description, stack);
+    }
+
+    /// The three cases the risk register named: the dropdown still completes,
+    /// a running turn with words in the box queues them, and a card ring is
+    /// what is left. `tab` on an empty box queues nothing.
+    #[test]
+    fn tab_completes_then_queues_then_walks_the_cards() {
+        let all = Tabbed {
+            dropdown: true,
+            busy: true,
+            typing: true,
+            focusable: true,
+        };
+        assert_eq!(tab(all), Some(Tab::Complete));
+        assert_eq!(
+            tab(Tabbed {
+                dropdown: false,
+                ..all
+            }),
+            Some(Tab::Queue)
+        );
+        assert_eq!(
+            tab(Tabbed {
+                dropdown: false,
+                typing: false,
+                ..all
+            }),
+            Some(Tab::Focus),
+            "an empty box queues nothing, so the ring has it"
+        );
+        assert_eq!(
+            tab(Tabbed {
+                dropdown: false,
+                busy: false,
+                ..all
+            }),
+            Some(Tab::Focus),
+            "and with no turn running there is nothing to wait for"
+        );
+        assert_eq!(tab(Tabbed::default()), None);
     }
 
     /// One test per row of what ctrl+c does.

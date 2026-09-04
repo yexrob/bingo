@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use bingo_sdk::{
-    Activation, Answer, Event, Exit, Frame, Image, Input, IntentId, IntentOutcome, Interaction,
-    InteractionId, InteractionKind, InterruptScope, ItemBody, KernelError, Origin, SessionHandle,
-    SessionState, TurnId, TurnStatus,
+    Activation, Answer, Delivery, Event, Exit, Frame, Image, Input, IntentId, IntentOutcome,
+    Interaction, InteractionId, InteractionKind, InterruptScope, ItemBody, KernelError, Origin,
+    SessionHandle, SessionState, TurnId, TurnStatus,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -158,6 +158,9 @@ impl Hosted {
                 text,
                 images,
                 origin: Origin::surface(SURFACE_ID),
+                // A prompt on this protocol is a prompt: the dialect has no
+                // word for a line that waits, so none is invented for it.
+                delivery: Delivery::Wake,
             },
         );
     }

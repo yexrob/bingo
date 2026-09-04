@@ -199,7 +199,9 @@ fn the_sparkle_is_drawn_on_the_period_the_state_asks_for() {
 #[test]
 fn the_input_box_glows_on_the_same_breath_and_is_dim_when_idle() {
     let (ui, now) = mid_turn();
-    let working = leading_style(&turning(), &ui, now, keys::PLACEHOLDER);
+    // The box is found by what it offers, and a busy box offers the two keys
+    // that send (M68).
+    let working = leading_style(&turning(), &ui, now, keys::BUSY_PLACEHOLDER);
     assert_eq!(
         working,
         leading_style(&turning(), &ui, now, "esc to interrupt"),

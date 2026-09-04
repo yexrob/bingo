@@ -12,7 +12,7 @@ use serde_json::json;
 use jiff::Timestamp;
 use serde_json::Value;
 
-use super::queue::Unit;
+use super::queue::{self, Unit};
 use super::{Actor, commands, invoke, validate};
 use crate::turn::TurnKind;
 
@@ -156,6 +156,7 @@ impl Actor {
             text,
             images,
             origin,
+            ..
         } = input
         else {
             return self
@@ -185,6 +186,7 @@ impl Actor {
     /// A peer's message (ADR-0010 §1): prose from another session, past the
     /// command parser and the submit hooks, into the queue or a `Peer` turn.
     pub(super) async fn deliver(&mut self, intent: IntentId, input: Input, delivery: Delivery) {
+        let input = stamped(input, delivery);
         if self.state.closed || self.closing.is_some() {
             return self
                 .reject(intent, ErrorCode::SessionClosed, "the session is closed")
@@ -201,7 +203,7 @@ impl Actor {
         if !self.answers() {
             return self.log_input(intent, input).await;
         }
-        if self.busy() || delivery == Delivery::Hold {
+        if self.busy() || input.is_held() {
             return self.enqueue(intent, input).await;
         }
         let inputs = self.held_then(intent, input).await;
@@ -380,14 +382,58 @@ impl Actor {
 
     // ----- queue -----
 
-    /// The prose a barrier may steer with: up to the first command.
+    /// What an opening turn takes off the queue with it: the prose at the
+    /// head, up to the first command. A line that asked to wait is in it —
+    /// this is the turn it was waiting for.
     pub(super) async fn take_queue(&mut self) -> Vec<(IntentId, Input)> {
         let taken = self.queue.take_prose();
+        self.queue_moved(taken).await
+    }
+
+    /// What a running turn's barrier may be steered with (ADR-0008 §2): the
+    /// prose at the head, up to the first command and the first line that
+    /// asked to wait for the turn to end (M68).
+    pub(super) async fn take_steers(&mut self) -> Vec<(IntentId, Input)> {
+        let taken = self.queue.take_steers();
+        self.queue_moved(taken).await
+    }
+
+    /// Whatever came off the queue, with every client told when anything did.
+    async fn queue_moved(&mut self, taken: Vec<(IntentId, Input)>) -> Vec<(IntentId, Input)> {
         if !taken.is_empty() {
             let changed = self.queue.changed();
             self.publish(changed, None).await;
         }
         taken
+    }
+
+    /// A queued line back out of the queue and into the hands of the surface
+    /// that submitted it (ADR-0008 §2, amended M68). The actor is one thread
+    /// per session, so the entry is either still queued or was taken by a
+    /// turn: `NOT_FOUND` is the honest answer to the race, and the surface
+    /// that asked says so rather than guessing.
+    pub(super) async fn withdraw(
+        &mut self,
+        intent: IntentId,
+        surface: String,
+    ) -> Result<Input, KernelError> {
+        match self.queue.queued(&intent).map(queue::origin_of) {
+            None => Err(gone(&intent)),
+            Some(origin) if origin.surface != surface => Err(KernelError::new(
+                ErrorCode::PermissionDenied,
+                format!("that line is {}'s to take back", origin.surface),
+            )),
+            Some(_) => self.take_back(&intent).await.ok_or_else(|| gone(&intent)),
+        }
+    }
+
+    /// It is queued and it is the caller's: out it comes, and every client's
+    /// fold loses the row.
+    async fn take_back(&mut self, intent: &IntentId) -> Option<Input> {
+        let input = self.queue.take(intent)?;
+        let changed = self.queue.changed();
+        self.publish(changed, None).await;
+        Some(input)
     }
 
     /// An idle session takes the next unit off the queue (ADR-0008 §2).
@@ -430,4 +476,31 @@ impl Actor {
             }
         }
     }
+}
+
+/// The delivery the caller asked for, written into the line itself: from here
+/// on one place says whether a barrier may steer with it (M68).
+fn stamped(input: Input, delivery: Delivery) -> Input {
+    match input {
+        Input::Text {
+            text,
+            images,
+            origin,
+            ..
+        } => Input::Text {
+            text,
+            images,
+            origin,
+            delivery,
+        },
+        other => other,
+    }
+}
+
+/// The line is not in the queue: a turn took it, or it was never there.
+fn gone(intent: &IntentId) -> KernelError {
+    KernelError::new(
+        ErrorCode::NotFound,
+        format!("no line of {intent} is waiting in this queue"),
+    )
 }

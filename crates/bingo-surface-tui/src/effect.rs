@@ -2,13 +2,17 @@
 //! call that reaches the kernel or the terminal leaves as one of these, so a
 //! key table is a test with no runtime in it.
 
-use bingo_sdk::{Activation, Answer, Input, InteractionId, SessionId, SessionSelector};
+use bingo_sdk::{Activation, Answer, Input, IntentId, InteractionId, SessionId, SessionSelector};
 
 use crate::graphics::picture::Source;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Submit(Input),
+    /// Take one of this surface's own queued lines back out of the session it
+    /// waits in and into the composer (ADR-0008 §2, amended M68). The kernel
+    /// answers with the line, or says it is no longer there to take.
+    Withdraw(IntentId),
     Interrupt,
     Answer {
         interaction: InteractionId,

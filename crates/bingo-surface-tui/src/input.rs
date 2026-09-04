@@ -7,7 +7,9 @@
 
 use std::path::PathBuf;
 
-use bingo_sdk::{Input, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState};
+use bingo_sdk::{
+    Delivery, Input, IntentId, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::SURFACE_ID;
@@ -71,13 +73,36 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if let Some((_, interaction)) = tree.open_interaction() {
         return ui.dialog.on_key(interaction, key, now);
     }
-    if key.code == KeyCode::Tab && suggestions(ui, tree).is_empty() && cycle_focus(ui, tree) {
-        return Vec::new();
+    if key.code == KeyCode::Tab {
+        return tabbed(ui, tree, now);
     }
     if let Some(effects) = menu(ui, tree, key) {
         return effects;
     }
     editing(ui, tree, key, now)
+}
+
+/// `tab`, by the one table there is of it ([`keys::tab`]). Everything that
+/// captures the keyboard has already answered by the time this runs, so the
+/// rungs here are the dropdown, the running turn and the card ring.
+fn tabbed(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+    let at = keys::Tabbed {
+        dropdown: !suggestions(ui, tree).is_empty(),
+        busy: tree.viewed().busy(),
+        typing: !ui.composer.text().trim().is_empty(),
+        focusable: !rail::cards(tree.viewed(), tree.view(), &ui.pinned).is_empty(),
+    };
+    match keys::tab(at) {
+        Some(keys::Tab::Complete) => accept(ui, tree),
+        // The same road out as `⏎`, with the one word that differs: this line
+        // waits for the running turn rather than steering it.
+        Some(keys::Tab::Queue) => submit(ui, tree, now, Delivery::Hold),
+        Some(keys::Tab::Focus) => {
+            cycle_focus(ui, tree);
+            Vec::new()
+        }
+        None => Vec::new(),
+    }
 }
 
 /// What a layer answers, and the chords that open one.
@@ -578,16 +603,16 @@ fn step(ui: &mut Ui, by: isize, now: Now) {
     ui.scroll.show(hit.line, total, rows, now.instant);
 }
 
-/// The dropdown owns the arrows and the completion keys while it is open.
+/// The dropdown owns the arrows and the enter key while it is open; `tab` is
+/// answered before this, by the one table of it ([`tabbed`]).
 fn menu(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
     let rows = suggestions(ui, tree);
     if rows.is_empty() {
-        return (key.code == KeyCode::Tab).then(Vec::new);
+        return None;
     }
     match key.code {
         KeyCode::Up => ui.menu.selected = ui.menu.selected.saturating_sub(1),
         KeyCode::Down => ui.menu.selected = (ui.menu.selected + 1).min(rows.len() - 1),
-        KeyCode::Tab => return Some(accept(ui, tree)),
         // Enter completes only while there is something left to complete; a
         // name already typed in full is meant to run.
         KeyCode::Enter if adds_something(ui, tree) => return Some(accept(ui, tree)),
@@ -656,11 +681,11 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => newline(ui),
         KeyCode::Enter => return enter(ui, tree, now),
         KeyCode::BackTab => return cycle_mode(ui, tree.viewed(), now),
-        KeyCode::Up => history_or_line(ui, Step::Up),
+        KeyCode::Up => return walk_back(ui, tree),
         // The list's other door: `↓` on an empty box opens the same list
         // `ctrl+g` does, with the cursor on the session already in view.
         KeyCode::Down if switcher::opens(ui, tree) => return switcher::toggle(ui, tree, now),
-        KeyCode::Down => history_or_line(ui, Step::Down),
+        KeyCode::Down => walk_forward(ui),
         KeyCode::PageUp => scroll(ui, ui.page() as isize, now),
         KeyCode::PageDown => scroll(ui, -(ui.page() as isize), now),
         KeyCode::Left => ui.composer.left(),
@@ -723,12 +748,15 @@ fn enter(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     if ui.composer.text().trim().is_empty() {
         return Vec::new();
     }
-    submit(ui, tree, now)
+    submit(ui, tree, now, Delivery::Wake)
 }
 
 /// What a line does. `/clear` starts a fresh session beside the root's, not
 /// beside whichever child is on screen.
-fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+///
+/// `delivery` is the whole of the difference between the two keys that send:
+/// `⏎` steers a running turn at its next barrier, `tab` waits for it to end.
+fn submit(ui: &mut Ui, tree: &Tree, now: Now, delivery: Delivery) -> Vec<Effect> {
     let text = ui.composer.take();
     // The gesture is answered on its own frame, whatever the line turns out
     // to be and whatever the kernel makes of it (§6).
@@ -758,28 +786,51 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
             images: ui.pictures.carried(&text),
             text,
             origin: Origin::surface(SURFACE_ID),
+            delivery,
         })],
     }
 }
 
-enum Step {
-    Up,
-    Down,
+/// `↑` walks back through what a person has sent: the caret while it can
+/// still move, then the lines of theirs the queue is still holding — newest
+/// first, each taken back out of it and into the box — and only then the
+/// prompt history (M68). A line still queued is still theirs to edit; one a
+/// turn has already taken is in the history like every other line.
+fn walk_back(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
+    if ui.composer.up() {
+        return Vec::new();
+    }
+    if let Some(intent) = newest_of_ours(tree.viewed()) {
+        return vec![Effect::Withdraw(intent)];
+    }
+    let older = ui.history.older(ui.composer.text());
+    recall(ui, older);
+    Vec::new()
 }
 
-/// The arrows walk the buffer until it runs out, then the prompt history.
-fn history_or_line(ui: &mut Ui, step: Step) {
-    let moved = match step {
-        Step::Up => ui.composer.up(),
-        Step::Down => ui.composer.down(),
-    };
-    if moved {
+/// The last line this surface put in the queue, which is the first one `↑`
+/// asks for back. Another surface's is not ours to take (ADR-0008 §2), so it
+/// is not offered here either.
+fn newest_of_ours(state: &SessionState) -> Option<IntentId> {
+    state
+        .queue
+        .iter()
+        .rfind(|entry| entry.origin.surface == SURFACE_ID)
+        .map(|entry| entry.intent.clone())
+}
+
+/// `↓` walks the buffer until it runs out, then forward through the history
+/// and back to the draft the walk set aside. It passes no queue: what came
+/// out of one is in the box, and a line is only ever put back by sending it.
+fn walk_forward(ui: &mut Ui) {
+    if ui.composer.down() {
         return;
     }
-    let recalled = match step {
-        Step::Up => ui.history.older(ui.composer.text()),
-        Step::Down => ui.history.newer(),
-    };
+    let newer = ui.history.newer();
+    recall(ui, newer);
+}
+
+fn recall(ui: &mut Ui, recalled: Option<String>) {
     if let Some(text) = recalled {
         ui.composer.set(&text);
         ui.menu = Default::default();
@@ -856,6 +907,7 @@ mod tests {
                 text: "look at @shot.png".into(),
                 images: Vec::new(),
                 origin: Origin::surface(SURFACE_ID),
+                delivery: Delivery::Wake,
             })],
         );
     }
@@ -892,6 +944,7 @@ mod tests {
                 text: "see [image 2]".into(),
                 images: vec![second],
                 origin: Origin::surface(SURFACE_ID),
+                delivery: Delivery::Wake,
             })],
         );
     }
@@ -3061,5 +3114,125 @@ mod tests {
         assert!(ui.pinned.is_empty(), "the same key takes it back");
         press(&mut ui, &state, ctrl('t'), now);
         assert!(!ui.layer.showing(), "ctrl+t still closes it");
+    }
+
+    // ---- the line that waits (M68) --------------------------------------
+
+    /// A queue as the kernel published it, with the surface that put each
+    /// line there and whether the running turn may be steered with it.
+    fn queued(entries: &[(&str, &str)]) -> SessionState {
+        folded(vec![
+            frame(1, started("trn_1")),
+            frame(
+                2,
+                bingo_sdk::Event::QueueChanged {
+                    revision: 1,
+                    entries: entries
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (surface, preview))| bingo_sdk::QueueEntry {
+                            intent: IntentId::from_raw(format!("req_{i}")),
+                            position: i as u32 + 1,
+                            preview: (*preview).to_string(),
+                            steerable: true,
+                            origin: Origin::surface(*surface),
+                        })
+                        .collect(),
+                },
+            ),
+        ])
+    }
+
+    fn delivery_of(effects: &[Effect]) -> Option<Delivery> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Submit(Input::Text { delivery, .. }) => Some(*delivery),
+            _ => None,
+        })
+    }
+
+    /// The user's second ask: `⏎` steers the running turn, `tab` sends a line
+    /// that waits for it to end. One road out, one word different.
+    #[test]
+    fn tab_mid_turn_sends_a_line_that_waits_and_enter_sends_one_that_steers() {
+        let (mut ui, now) = scene();
+        write(&mut ui, &busy(), "and then the docs", now);
+        let held = press(&mut ui, &busy(), key(KeyCode::Tab), now);
+        assert_eq!(delivery_of(&held), Some(Delivery::Hold));
+        assert!(ui.composer.is_empty(), "the box is cleared as by any send");
+
+        let steer = line(&mut ui, &busy(), "no, this first", now);
+        assert_eq!(delivery_of(&steer), Some(Delivery::Wake));
+    }
+
+    /// The three cases the risk register named, at the keyboard rather than
+    /// in the table: the dropdown still completes, an empty box still walks
+    /// the cards, and with no turn running there is nothing to wait for.
+    #[test]
+    fn tab_completes_before_it_queues_and_queues_only_while_a_turn_runs() {
+        let (mut ui, now) = scene();
+        ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
+            name: "compact".into(),
+            aliases: vec![],
+            hint: String::new(),
+            args: bingo_sdk::ArgSpec::None,
+            instant: false,
+            family: "kernel".into(),
+        }];
+        write(&mut ui, &busy(), "/comp", now);
+        assert!(
+            press(&mut ui, &busy(), key(KeyCode::Tab), now).is_empty(),
+            "the dropdown is what tab is for while one is open"
+        );
+        assert_eq!(ui.composer.text(), "/compact ");
+
+        let (mut ui, now) = scene();
+        assert!(
+            press(&mut ui, &busy(), key(KeyCode::Tab), now).is_empty(),
+            "an empty box queues nothing"
+        );
+        write(&mut ui, &state(), "no turn is running", now);
+        assert!(
+            press(&mut ui, &state(), key(KeyCode::Tab), now).is_empty(),
+            "and with nothing running there is nothing to wait for"
+        );
+        assert_eq!(ui.composer.text(), "no turn is running", "nor is it sent");
+    }
+
+    /// The user's first ask: a queued line comes back to be edited. `↑` walks
+    /// into the person's own entries, newest first, and asks for that one.
+    #[test]
+    fn up_on_an_empty_box_asks_for_the_newest_line_of_ours_that_is_queued() {
+        let (mut ui, now) = scene();
+        let state = queued(&[("tui", "first"), ("tui", "second")]);
+        assert_eq!(
+            press(&mut ui, &state, key(KeyCode::Up), now),
+            vec![Effect::Withdraw(IntentId::from_raw("req_1"))],
+            "the newest, which is the last one queued"
+        );
+        assert!(
+            ui.composer.is_empty(),
+            "the answer fills the box, not the key"
+        );
+    }
+
+    /// Only ours: another surface's queued line is not this one's to take
+    /// back, so `↑` walks past it into the prompt history.
+    #[test]
+    fn up_walks_past_another_surfaces_queued_line_into_the_history() {
+        let (mut ui, now) = scene();
+        ui.history = crate::history::PromptHistory::new(vec!["an older ask".into()]);
+        let state = queued(&[("rpc", "not ours")]);
+        assert!(press(&mut ui, &state, key(KeyCode::Up), now).is_empty());
+        assert_eq!(ui.composer.text(), "an older ask");
+    }
+
+    /// And with nothing of the person's waiting, `↑` is the history key it
+    /// has always been.
+    #[test]
+    fn up_with_an_empty_queue_recalls_the_prompt_history() {
+        let (mut ui, now) = scene();
+        ui.history = crate::history::PromptHistory::new(vec!["an older ask".into()]);
+        assert!(press(&mut ui, &busy(), key(KeyCode::Up), now).is_empty());
+        assert_eq!(ui.composer.text(), "an older ask");
     }
 }

@@ -6,7 +6,7 @@
 //!
 //! `draw` is pure of everything but the frame it paints.
 
-use bingo_sdk::{Driver, LiveTurn, Origin, SessionState, SessionSummary};
+use bingo_sdk::{Driver, LiveTurn, Origin, QueueEntry, SessionState, SessionSummary};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -531,7 +531,7 @@ fn activity(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
             .filter(|entry| pending(&entry.origin))
             .map(|entry| {
                 Line::from(Span::styled(
-                    format!("{} {}", theme::user(), entry.preview),
+                    format!("{} {}{}", theme::user(), entry.preview, waits(entry)),
                     theme::dim(),
                 ))
             }),
@@ -542,6 +542,17 @@ fn activity(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
         out.insert(0, Line::default());
     }
     out
+}
+
+/// The tag a row wears when the running turn will not be steered with it: a
+/// line that asked to wait for the turn to end, and a command, which has
+/// always waited for one (ADR-0008 §2, amended M68). `steerable` is the one
+/// reading of that, so there is nothing else here to keep in step with it.
+fn waits(entry: &QueueEntry) -> &'static str {
+    match entry.steerable {
+        true => "",
+        false => " (waits)",
+    }
 }
 
 /// Whether a queued input is a message the person is waiting to send. A
@@ -906,10 +917,14 @@ fn border(state: &SessionState, now: Now) -> ratatui::style::Style {
 /// What the empty composer offers. Nothing answers a `Log` session, so it is
 /// posted into rather than asked (ADR-0011 §1) — and the prompt already says
 /// which room, so the placeholder does not say it twice.
+///
+/// While a turn runs there are two keys that send and they do different
+/// things, so the box says which is which (M68).
 fn placeholder(state: &SessionState) -> String {
-    match state.summary.driver {
-        Driver::Log => "post to the room".to_string(),
-        Driver::Model => keys::PLACEHOLDER.to_string(),
+    match (state.summary.driver, state.busy()) {
+        (Driver::Log, _) => "post to the room".to_string(),
+        (Driver::Model, true) => keys::BUSY_PLACEHOLDER.to_string(),
+        (Driver::Model, false) => keys::PLACEHOLDER.to_string(),
     }
 }
 
@@ -1390,8 +1405,9 @@ mod tests {
     }
 
     /// A queue as the kernel published it, each entry labelled by the surface
-    /// that put it there.
-    fn queue_frame(seq: u64, entries: &[(&str, &str)]) -> bingo_sdk::Frame {
+    /// that put it there and by whether the running turn may be steered with
+    /// it (ADR-0008 §2, amended M68).
+    fn queue_frame(seq: u64, entries: &[(&str, &str, bool)]) -> bingo_sdk::Frame {
         frame(
             seq,
             Event::QueueChanged {
@@ -1399,11 +1415,11 @@ mod tests {
                 entries: entries
                     .iter()
                     .enumerate()
-                    .map(|(i, (surface, preview))| QueueEntry {
+                    .map(|(i, (surface, preview, steerable))| QueueEntry {
                         intent: bingo_sdk::IntentId::from_raw(format!("req_{i}")),
                         position: i as u32,
                         preview: (*preview).to_string(),
-                        steerable: true,
+                        steerable: *steerable,
                         origin: bingo_sdk::Origin::surface(*surface),
                     })
                     .collect(),
@@ -1414,7 +1430,7 @@ mod tests {
     /// The band under the transcript, drawn from a queue of `(surface,
     /// preview)`. The turn has only just started, so nothing but the queue asks
     /// for a row: what the band holds is what the queue put there.
-    fn band(entries: &[(&str, &str)]) -> String {
+    fn band(entries: &[(&str, &str, bool)]) -> String {
         let (ui, now) = scene();
         render(
             &folded(vec![frame(1, started("trn_1")), queue_frame(2, entries)]),
@@ -1429,10 +1445,10 @@ mod tests {
     /// surface the quiet set has never heard of stays on the person's side.
     #[test]
     fn the_pending_area_draws_only_what_the_person_queued() {
-        let mine = band(&[("tui", "also fix the docs")]);
+        let mine = band(&[("tui", "also fix the docs", true)]);
         assert!(mine.contains("> also fix the docs"), "{mine}");
 
-        let steer = band(&[("room", "the build is green")]);
+        let steer = band(&[("room", "the build is green", true)]);
         assert_eq!(
             steer,
             band(&[]),
@@ -1440,15 +1456,37 @@ mod tests {
              would have been spaced from the transcript by"
         );
 
-        let both = band(&[("room", "the build is green"), ("tui", "also fix the docs")]);
+        let both = band(&[
+            ("room", "the build is green", true),
+            ("tui", "also fix the docs", true),
+        ]);
         assert!(both.contains("> also fix the docs"), "{both}");
         assert!(!both.contains("the build is green"), "{both}");
 
-        let unknown = band(&[("brand-new", "who knows")]);
+        let unknown = band(&[("brand-new", "who knows", true)]);
         assert!(
             unknown.contains("> who knows"),
             "a surface nobody has judged is the person's: {unknown}"
         );
+    }
+
+    /// The two keys that send do different things while a turn runs, so the
+    /// rows say which line is which and the box says which key is which
+    /// (M68). `steerable` is the one reading of it: a queued command has
+    /// always waited for the turn to end, and now says so too.
+    #[test]
+    fn a_line_that_will_not_steer_wears_the_tag_and_the_busy_box_says_why() {
+        let steers = band(&[("tui", "also fix the docs", true)]);
+        assert!(steers.contains("> also fix the docs"), "{steers}");
+        assert!(!steers.contains("(waits)"), "{steers}");
+
+        let waits = band(&[("tui", "and then the docs", false)]);
+        assert!(waits.contains("> and then the docs (waits)"), "{waits}");
+
+        assert!(waits.contains(keys::BUSY_PLACEHOLDER), "{waits}");
+        let idle = render(&state(), &scene().0, scene().1);
+        assert!(idle.contains(keys::PLACEHOLDER), "{idle}");
+        assert!(!idle.contains(keys::BUSY_PLACEHOLDER), "{idle}");
     }
 
     /// The rows the band asks for, which the screen above cannot show: a blank
@@ -1459,7 +1497,7 @@ mod tests {
     #[test]
     fn a_steer_in_flight_asks_the_frame_for_no_row_at_all() {
         let (ui, now) = scene();
-        let rows = |entries: &[(&str, &str)]| {
+        let rows = |entries: &[(&str, &str, bool)]| {
             activity(
                 &folded(vec![frame(1, started("trn_1")), queue_frame(2, entries)]),
                 &ui,
@@ -1467,9 +1505,9 @@ mod tests {
             )
             .len()
         };
-        assert_eq!(rows(&[("room", "the build is green")]), 0);
+        assert_eq!(rows(&[("room", "the build is green", true)]), 0);
         assert_eq!(
-            rows(&[("tui", "also fix the docs")]),
+            rows(&[("tui", "also fix the docs", true)]),
             2,
             "the row and its air"
         );

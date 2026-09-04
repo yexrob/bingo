@@ -1016,6 +1016,21 @@
         "deny"
       ]
     },
+    "Delivery": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "wake",
+          "description": "An idle target opens a turn on it; a busy one absorbs it at the next barrier."
+        },
+        {
+          "type": "string",
+          "const": "hold",
+          "description": "It waits in the queue for whatever opens the next turn."
+        }
+      ],
+      "description": "How a line reaches a session's queue: a peer's message (ADR-0010 §1) and\na person's own line are the same question, so they are the same word."
+    },
     "DeltaKind": {
       "oneOf": [
         {
@@ -1134,6 +1149,11 @@
             "TURN_BUDGET_EXHAUSTED",
             "INTERNAL"
           ]
+        },
+        {
+          "type": "string",
+          "const": "NOT_FOUND",
+          "description": "What was named is not there any more: a queued line a turn has taken\n(ADR-0008 §2, amended M68)."
         },
         {
           "type": "string",
@@ -2330,6 +2350,10 @@
             },
             "origin": {
               "$ref": "#/$defs/Origin"
+            },
+            "delivery": {
+              "$ref": "#/$defs/Delivery",
+              "description": "Whether a running turn may be steered with it (ADR-0008 §2,\namended M68). `Wake` is the line every client has always sent, so\nit is the default and nothing is written for it."
             },
             "kind": {
               "type": "string",

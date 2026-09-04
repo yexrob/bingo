@@ -38,6 +38,13 @@ pub(crate) enum Msg {
         intent: IntentId,
         scope: InterruptScope,
     },
+    /// Take a queued line back out for the surface that submitted it
+    /// (ADR-0008 §2, amended M68).
+    Withdraw {
+        intent: IntentId,
+        surface: String,
+        reply: oneshot::Sender<Result<Input, KernelError>>,
+    },
     Answer(Answered),
     Attach {
         reply: oneshot::Sender<(SessionState, FrameStream)>,
@@ -223,6 +230,18 @@ impl Mailbox {
 
     pub fn interrupt(&self, intent: IntentId, scope: InterruptScope) {
         self.send(Msg::Interrupt { intent, scope });
+    }
+
+    /// Take the line `intent` named back out of the queue and answer with it
+    /// (ADR-0008 §2, amended M68). Refused when it is no longer queued, and
+    /// when `surface` is not the one that put it there.
+    pub async fn withdraw(&self, intent: IntentId, surface: String) -> Result<Input, KernelError> {
+        self.call(|reply| Msg::Withdraw {
+            intent,
+            surface,
+            reply,
+        })
+        .await?
     }
 
     pub fn answer(

@@ -100,6 +100,7 @@ fn prefixed(input: Input) -> Value {
         text,
         images,
         origin,
+        delivery,
     } = input
     else {
         return decided(HookOutcome::Continue, None);
@@ -108,6 +109,7 @@ fn prefixed(input: Input) -> Value {
         text: format!("{text} (stub)"),
         images,
         origin,
+        delivery,
     };
     decided(HookOutcome::Continue, Some(HookValue::Input { input }))
 }

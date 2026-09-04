@@ -114,6 +114,11 @@ pub enum Input {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<Image>,
         origin: Origin,
+        /// Whether a running turn may be steered with it (ADR-0008 §2,
+        /// amended M68). `Wake` is the line every client has always sent, so
+        /// it is the default and nothing is written for it.
+        #[serde(default, skip_serializing_if = "Delivery::is_wake")]
+        delivery: Delivery,
     },
     Action {
         action: Action,
@@ -126,7 +131,21 @@ impl Input {
             text: text.into(),
             images: Vec::new(),
             origin,
+            delivery: Delivery::Wake,
         }
+    }
+
+    /// Whether the line asked to wait for the running turn to end rather than
+    /// steer it. A barrier absorbs the lines that steer and leaves this one
+    /// to open the next turn.
+    pub fn is_held(&self) -> bool {
+        matches!(
+            self,
+            Input::Text {
+                delivery: Delivery::Hold,
+                ..
+            }
+        )
     }
 }
 
@@ -274,14 +293,24 @@ impl std::fmt::Debug for Attachment {
     }
 }
 
-/// How a peer message reaches a session's queue (ADR-0010 §1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// How a line reaches a session's queue: a peer's message (ADR-0010 §1) and
+/// a person's own line are the same question, so they are the same word.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Delivery {
     /// An idle target opens a turn on it; a busy one absorbs it at the next barrier.
+    #[default]
     Wake,
     /// It waits in the queue for whatever opens the next turn.
     Hold,
+}
+
+impl Delivery {
+    /// The default, which is written nowhere: a frame from before there was a
+    /// field for it reads as `Wake` and goes back on the wire byte-identical.
+    fn is_wake(&self) -> bool {
+        matches!(self, Delivery::Wake)
+    }
 }
 
 #[async_trait]
@@ -424,6 +453,29 @@ pub trait HostApi: Send + Sync {
         ))
     }
 
+    /// Take a queued line back out of a session's queue and hand it to
+    /// whoever put it there (ADR-0008 §2, amended M68). A line that waits is
+    /// still the person's: this is how it reaches an editor again.
+    ///
+    /// The entry must still be queued — one a turn has already taken is
+    /// `NOT_FOUND`, and so is an intent this session never held — and it must
+    /// be the caller's own: `who.surface` is the surface that submitted it,
+    /// and another surface's line is `PERMISSION_DENIED`. `QueueChanged`
+    /// follows, so every client's fold loses the row at once.
+    ///
+    /// It does not join the JSON-RPC wire.
+    async fn withdraw(
+        &self,
+        _session: &SessionId,
+        _intent: &IntentId,
+        _who: ClientIdentity,
+    ) -> Result<Input, KernelError> {
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            "this host keeps no queue",
+        ))
+    }
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 
     /// Say one line to the person, wherever they are: a transcript notice on
@@ -486,5 +538,61 @@ impl std::ops::Deref for HostHandle {
 
     fn deref(&self) -> &Self::Target {
         self.0.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The field is new (M68) and the line that never asks for it is the line
+    /// every client has always sent: it reads without one and writes none.
+    #[test]
+    fn a_line_that_says_nothing_about_delivery_is_on_the_wire_as_it_was() {
+        let bare = serde_json::json!({
+            "kind": "text",
+            "text": "fix the docs",
+            "origin": { "surface": "tui" }
+        });
+        let input: Input = serde_json::from_value(bare.clone()).expect("an old line");
+        assert_eq!(input, Input::text("fix the docs", Origin::surface("tui")));
+        assert!(!input.is_held(), "a line with no word for it steers");
+        assert_eq!(serde_json::to_value(&input).expect("json"), bare);
+    }
+
+    /// A line that asked to wait says so, and says it in one place.
+    #[test]
+    fn a_held_line_carries_the_word_and_answers_to_it() {
+        let held = Input::Text {
+            text: "and then the docs".into(),
+            images: Vec::new(),
+            origin: Origin::surface("tui"),
+            delivery: Delivery::Hold,
+        };
+        assert!(held.is_held());
+        assert_eq!(
+            serde_json::to_value(&held).expect("json"),
+            serde_json::json!({
+                "kind": "text",
+                "text": "and then the docs",
+                "origin": { "surface": "tui" },
+                "delivery": "hold"
+            })
+        );
+        let read: Input = serde_json::from_value(serde_json::to_value(&held).expect("json"))
+            .expect("a held line");
+        assert_eq!(read, held);
+    }
+
+    /// An action carries no words to steer with, so it is never a held line.
+    #[test]
+    fn an_action_is_never_held() {
+        let action = Input::Action {
+            action: Action {
+                name: "x".into(),
+                args: Value::Null,
+            },
+        };
+        assert!(!action.is_held());
     }
 }
