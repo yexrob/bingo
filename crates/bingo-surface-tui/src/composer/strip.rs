@@ -1,5 +1,6 @@
-//! The thumbnails of the pictures the draft is carrying, drawn inside the
-//! input box above the prompt row.
+//! The thumbnails of the pictures the draft is carrying, standing on the
+//! input box's top border in rows of their own (outside the box since M51,
+//! at the user's word: the box keeps its height whatever is pasted).
 //!
 //! `[image 2]` stays in the words — it is the record, and the anchor in the
 //! sentence, so deleting it takes its picture with it (M45). The strip is
@@ -21,7 +22,7 @@ use crate::theme;
 /// How many thumbnails are drawn before the rest are counted.
 pub const SHOWN: usize = 4;
 /// How many rows the strip is. Enough to see what a picture is of, few enough
-/// that the ten rows of draft above it are still the point of the box.
+/// that the box under it is still the point of the screen's bottom.
 pub const ROWS: u16 = 3;
 /// How many columns one thumbnail may take.
 pub const COLS: u16 = 12;

@@ -25,8 +25,8 @@ pub const COMPOSER_MAX: u16 = 12;
 pub struct Demand {
     /// Rows of text in the input box, before its border.
     pub composer: u16,
-    /// Rows of thumbnails inside the box above the prompt, when the draft
-    /// carries pictures a terminal can draw (M48).
+    /// Rows of thumbnails standing on the box, when the draft carries
+    /// pictures a terminal can draw (M48; outside the border since M51).
     pub strip: u16,
     /// Rows between the transcript and the box: the activity row and whatever
     /// is queued behind it.
@@ -43,6 +43,8 @@ pub struct Regions {
     /// The rail, past [`RAIL_AT`] columns and only when something wants it.
     pub rail: Option<Rect>,
     pub activity: Rect,
+    /// The thumbnails' rows, directly on the box's top border.
+    pub strip: Rect,
     pub composer: Rect,
     pub status: Rect,
 }
@@ -50,14 +52,14 @@ pub struct Regions {
 impl Regions {
     /// Everything above the input box: what a layer may cover.
     pub fn above(&self) -> Rect {
-        let band = self.transcript.union(self.activity);
-        // `union` of an empty rect with another is not the other, so an empty
-        // transcript would drag the band back to row 0 with no height.
-        match (self.transcript.height, self.activity.height) {
-            (0, _) => self.activity,
-            (_, 0) => self.transcript,
-            _ => band,
-        }
+        // `union` of an empty rect with another is not the other — an empty
+        // transcript would drag the band back to row 0 with no height — so
+        // only the regions with rows are joined.
+        [self.transcript, self.activity, self.strip]
+            .into_iter()
+            .filter(|region| region.height > 0)
+            .reduce(|band, region| band.union(region))
+            .unwrap_or_default()
     }
 }
 
@@ -65,8 +67,10 @@ impl Regions {
 pub fn regions(size: Rect, demand: Demand) -> Regions {
     let mut rest = size;
     let status = take_bottom(&mut rest, 1);
-    let rows = composer_rows(demand.composer, demand.strip, rest.height);
+    let rows = composer_rows(demand.composer, rest.height);
     let composer = take_bottom(&mut rest, rows);
+    let rows = strip_rows(demand.strip, rest.height);
+    let strip = take_bottom(&mut rest, rows);
     let rows = activity_rows(demand.activity, rest.height);
     let activity = take_bottom(&mut rest, rows);
     let (transcript, rail) = split_rail(rest, demand.rail);
@@ -76,6 +80,7 @@ pub fn regions(size: Rect, demand: Demand) -> Regions {
         // The box and the rows above it are the width of the transcript: the
         // rail's column is the rail's for the whole of its height.
         activity: narrow(activity, transcript.width),
+        strip: narrow(strip, transcript.width),
         composer: narrow(composer, transcript.width),
         status,
     }
@@ -83,14 +88,18 @@ pub fn regions(size: Rect, demand: Demand) -> Regions {
 
 /// The box grows with the draft and stops at ten rows; it never shrinks below
 /// one row, and it takes what is left when even that does not fit.
-///
-/// The strip is rows on top of those ten rather than out of them: a picture
-/// pasted into a full draft must not push a line of it off the screen.
-fn composer_rows(text: u16, strip: u16, room: u16) -> u16 {
+fn composer_rows(text: u16, room: u16) -> u16 {
     text.saturating_add(2)
         .clamp(COMPOSER_MIN, COMPOSER_MAX)
-        .saturating_add(strip)
         .min(room)
+}
+
+/// The strip is rows of its own above the box, never rows out of it: a
+/// picture pasted into a full draft must not push a line of it off the
+/// screen. It is all there or not there — a thumbnail cut to one row is not a
+/// thumbnail — and it yields before the transcript's last row does.
+fn strip_rows(want: u16, room: u16) -> u16 {
+    if want < room { want } else { 0 }
 }
 
 /// The activity rows yield before the transcript's last row does.
@@ -238,11 +247,12 @@ mod tests {
         assert_eq!(rows(40), COMPOSER_MAX, "it never eats the transcript");
     }
 
-    /// A strip of thumbnails is rows of its own on top of the ten: a picture
-    /// pasted into a full draft costs the transcript, never the draft.
+    /// A strip of thumbnails is rows of its own standing on the box: a
+    /// picture pasted into a full draft costs the transcript, never the
+    /// draft, and the box is exactly the height it was.
     #[test]
-    fn a_strip_grows_the_box_without_eating_the_ten_rows_of_draft() {
-        let rows = |text, strip| {
+    fn a_strip_stands_on_the_box_without_changing_it() {
+        let with = |text, strip| {
             at(
                 80,
                 40,
@@ -252,17 +262,38 @@ mod tests {
                     ..demand()
                 },
             )
-            .composer
-            .height
         };
-        assert_eq!(rows(1, 3), COMPOSER_MIN + 3);
-        assert_eq!(rows(10, 3), COMPOSER_MAX + 3);
-        assert_eq!(rows(40, 3), COMPOSER_MAX + 3);
-        assert_eq!(
-            rows(1, 0),
-            COMPOSER_MIN,
-            "and none of it when there is none"
-        );
+        for text in [1, 10, 40] {
+            let plain = with(text, 0);
+            let r = with(text, 3);
+            assert_eq!(r.composer, plain.composer, "{text} rows of draft");
+            assert_eq!(r.strip.height, 3);
+            assert_eq!(r.strip.bottom(), r.composer.y, "on the box's border");
+            assert_eq!(r.strip.width, r.composer.width);
+            assert_eq!(r.transcript.height, plain.transcript.height - 3);
+        }
+        assert_eq!(with(1, 0).strip.height, 0, "and none when there is none");
+    }
+
+    /// A screen with rows for the box but not for the whole strip gets the
+    /// box and none of the strip: a thumbnail cut short is not a thumbnail.
+    #[test]
+    fn the_strip_is_all_there_or_not_there() {
+        let at_height = |height| {
+            at(
+                80,
+                height,
+                Demand {
+                    strip: 3,
+                    ..demand()
+                },
+            )
+        };
+        assert_eq!(at_height(7).strip.height, 0, "three rows are not spare");
+        assert_eq!(at_height(7).composer.height, COMPOSER_MIN);
+        assert_eq!(at_height(8).strip.height, 3, "the transcript keeps a row");
+        assert_eq!(at_height(8).transcript.height, 1);
+        assert!(at_height(7).above().height > 0, "the band still has rows");
     }
 
     #[test]

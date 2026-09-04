@@ -8,6 +8,7 @@
 //! `complete::attachments`; this module is only the pasted kind.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use bingo_sdk::Image;
 
@@ -21,17 +22,45 @@ pub fn placeholder(n: u32) -> String {
 /// The tokens in the line, in the order they appear; a `[image x]` that is
 /// not a number is words.
 pub fn tokens(line: &str) -> Vec<u32> {
+    spans(line).into_iter().map(|(_, n)| n).collect()
+}
+
+/// Where each token sits in the line, as byte ranges, with its number.
+fn spans(line: &str) -> Vec<(Range<usize>, u32)> {
     let mut found = Vec::new();
-    let mut rest = line;
-    while let Some(at) = rest.find(OPEN) {
-        rest = &rest[at + OPEN.len()..];
-        let Some(end) = rest.find(']') else { break };
-        if let Ok(n) = rest[..end].parse::<u32>() {
-            found.push(n);
+    let mut from = 0;
+    while let Some(at) = line[from..].find(OPEN) {
+        let start = from + at;
+        let digits = start + OPEN.len();
+        let Some(close) = line[digits..].find(']') else {
+            break;
+        };
+        let end = digits + close + 1;
+        if let Ok(n) = line[digits..digits + close].parse::<u32>() {
+            found.push((start..end, n));
         }
-        rest = &rest[end + 1..];
+        from = end;
     }
     found
+}
+
+/// The start of the token whose last byte is at `at`, when the caret stands
+/// right after one. A token is one thing in the line: a backspace or a step
+/// left at its end takes all of it, never its closing bracket alone.
+pub fn ending_at(line: &str, at: usize) -> Option<usize> {
+    spans(line)
+        .into_iter()
+        .find(|(span, _)| span.end == at)
+        .map(|(span, _)| span.start)
+}
+
+/// The end of the token whose first byte is at `at`: what a delete or a step
+/// right from just before one covers.
+pub fn starting_at(line: &str, at: usize) -> Option<usize> {
+    spans(line)
+        .into_iter()
+        .find(|(span, _)| span.start == at)
+        .map(|(span, _)| span.end)
 }
 
 /// The number the next paste takes: one past the highest in the line, so a
@@ -96,6 +125,19 @@ mod tests {
         assert_eq!(tokens("see [image 2] and [image 1]"), vec![2, 1]);
         assert!(tokens("[image x] [image ] [image").is_empty());
         assert_eq!(tokens("[image 3"), Vec::<u32>::new());
+    }
+
+    /// A token's edges are known from the line, so an editor can treat it as
+    /// one thing; a caret anywhere else — inside it, beside words — sees none.
+    #[test]
+    fn a_tokens_edges_are_found_from_either_end() {
+        let line = "see [image 12] now";
+        assert_eq!(ending_at(line, 14), Some(4));
+        assert_eq!(starting_at(line, 4), Some(14));
+        assert_eq!(ending_at(line, 13), None, "inside is not an edge");
+        assert_eq!(starting_at(line, 5), None);
+        assert_eq!(ending_at(line, line.len()), None, "words are words");
+        assert_eq!(ending_at("[image x]", 9), None, "and so is a non-token");
     }
 
     #[test]

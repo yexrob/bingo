@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{theme, tree};
+use crate::{pictures, theme, tree};
 
 pub mod strip;
 
@@ -184,18 +184,25 @@ impl Composer {
         Layout { lines, cursor }
     }
 
+    /// Where one step back lands: over a whole `[image N]` when the caret
+    /// stands at its end, else one grapheme. The token is one thing in the
+    /// line, so no motion or deletion ever opens it.
     fn prev(&self) -> Option<usize> {
-        self.text[..self.cursor]
-            .graphemes(true)
-            .next_back()
-            .map(|g| self.cursor - g.len())
+        pictures::ending_at(&self.text, self.cursor).or_else(|| {
+            self.text[..self.cursor]
+                .graphemes(true)
+                .next_back()
+                .map(|g| self.cursor - g.len())
+        })
     }
 
     fn next(&self) -> Option<usize> {
-        self.text[self.cursor..]
-            .graphemes(true)
-            .next()
-            .map(|g| self.cursor + g.len())
+        pictures::starting_at(&self.text, self.cursor).or_else(|| {
+            self.text[self.cursor..]
+                .graphemes(true)
+                .next()
+                .map(|g| self.cursor + g.len())
+        })
     }
 
     fn line_start(&self) -> usize {
@@ -307,6 +314,38 @@ mod tests {
         c.left();
         c.backspace();
         assert_eq!(c.text(), "hll", "the two-byte é is one backspace");
+    }
+
+    /// `[image 1]` is one thing: a backspace at its end takes all of it, a
+    /// delete at its start does too, and `←`/`→` step over it whole. Words
+    /// around it are still edited by the grapheme.
+    #[test]
+    fn a_picture_token_is_deleted_and_stepped_over_whole() {
+        let mut c = Composer::default();
+        c.insert("see ");
+        c.insert(&pictures::placeholder(1));
+        c.insert(" now");
+        c.backspace();
+        assert_eq!(c.text(), "see [image 1] no", "words go by the grapheme");
+        c.set("see [image 1]");
+        c.backspace();
+        assert_eq!(c.text(), "see ", "the token goes whole");
+
+        let mut c = at("see [image 12] now", 4);
+        c.right();
+        assert_eq!(c.cursor, 4 + "[image 12]".len(), "→ steps over it");
+        c.left();
+        assert_eq!(c.cursor, 4, "← steps back over it");
+        c.delete();
+        assert_eq!(c.text(), "see  now", "delete takes it whole");
+
+        let mut c = at("[image x]", "[image x]".len());
+        c.backspace();
+        assert_eq!(
+            c.text(),
+            "[image x",
+            "a token that is not a number is words"
+        );
     }
 
     #[test]

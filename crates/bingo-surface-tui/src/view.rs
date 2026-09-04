@@ -72,6 +72,12 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     render_transcript(tree, ui, frame, regions.transcript, now, live);
     render_rail(ui, frame, regions.rail, &drawn);
     render_activity(tree.viewed(), ui, frame, regions.activity, now);
+    render_strip(
+        ui,
+        frame,
+        regions.strip,
+        strip(tree.viewed(), ui, area.width),
+    );
     render_composer(tree.viewed(), ui, frame, regions.composer, now);
     render_status(tree, ui, frame, regions.status, now);
     layers(tree, ui, frame, regions, now);
@@ -734,33 +740,30 @@ fn render_composer(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect,
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let under = render_strip(ui, frame, inner, strip(state, ui, area.width));
-    render_draft(state, ui, frame, under, area.width);
+    render_draft(state, ui, frame, inner, area.width);
 }
 
-/// The thumbnails, on the box's own first rows, and the rows left under them
-/// for the draft. The strip is the first thing to go when the box did not get
-/// the rows it asked for: what is being typed matters more than what was
-/// pasted beside it.
-fn render_strip(ui: &Ui, frame: &mut Frame, inner: Rect, strip: strip::Strip) -> Rect {
+/// The thumbnails, standing on the box's top border in the rows the frame
+/// cut for them, indented to the prompt's own column so a picture sits over
+/// the words it belongs to. A frame that cut no rows for it — the screen was
+/// too short — draws none of it: what is being typed matters more than what
+/// was pasted beside it.
+fn render_strip(ui: &Ui, frame: &mut Frame, area: Rect, strip: strip::Strip) {
     let rows = strip.height();
-    if rows == 0 || rows >= inner.height {
+    if rows == 0 || area.height < rows {
         ui.painted.borrow_mut().strip.clear();
-        return inner;
+        return;
     }
+    let indent = 2;
     frame.render_widget(
         Paragraph::new(strip.lines),
         Rect {
-            height: rows,
-            ..inner
+            x: area.x + indent,
+            width: area.width.saturating_sub(indent),
+            ..area
         },
     );
     ui.painted.borrow_mut().strip = strip.pictures;
-    Rect {
-        y: inner.y + rows,
-        height: inner.height - rows,
-        ..inner
-    }
 }
 
 /// The draft itself and the caret in it. `width` is the box's, borders and
@@ -2263,7 +2266,7 @@ mod tests {
         );
     }
 
-    // ---- M48: the strip of thumbnails inside the box ---------------------
+    // ---- M48/M51: the strip of thumbnails standing on the box -----------
 
     /// A draft carrying pictures, as a person leaves it: the tokens in the
     /// line and the pictures held behind them.
@@ -2298,42 +2301,47 @@ mod tests {
             .count()
     }
 
-    /// A pasted picture is three rows of cells inside the box above the
-    /// prompt, and the box is three rows taller for them.
+    /// A pasted picture is three rows of cells standing on the box's top
+    /// border, and the box itself is exactly the height it was.
     #[test]
-    fn a_carried_picture_puts_a_strip_above_the_prompt() {
+    fn a_carried_picture_puts_a_strip_on_the_box() {
         let state = state();
         let (mut ui, now) = scene();
         let plain = render(&state, &ui, now);
         crate::graphics::with(crate::graphics::drawing(), || {
             carrying(&mut ui, 1);
             let screen = render(&state, &ui, now);
-            assert_eq!(
-                box_rows(&screen).len(),
-                box_rows(&plain).len() + usize::from(strip::ROWS),
-                "{screen}"
-            );
+            assert_eq!(box_rows(&screen).len(), box_rows(&plain).len(), "{screen}");
             assert_eq!(
                 placeholder_rows(&screen),
                 usize::from(strip::ROWS),
                 "{screen}"
             );
-            let rows = box_rows(&screen);
-            let prompt = rows
+            let lines: Vec<&str> = screen.lines().collect();
+            let top = lines
                 .iter()
-                .position(|row| row.contains("[image 1]"))
-                .expect("the token is still in the words");
+                .rposition(|line| line.contains('╭'))
+                .expect("the input box");
             assert!(
-                rows[1..prompt]
+                lines[top - usize::from(strip::ROWS)..top]
                     .iter()
                     .all(|row| row.contains(crate::graphics::kitty::PLACEHOLDER)),
-                "the cells are between the border and the prompt: {rows:?}"
+                "the cells are the rows right above the border: {screen}"
+            );
+            let first = lines[top - usize::from(strip::ROWS)].trim_start_matches('"');
+            assert!(
+                first.starts_with("  ") && first.chars().nth(2) != Some(' '),
+                "and stand in the prompt's own column: {screen}"
+            );
+            assert!(
+                box_rows(&screen)[1].contains("[image 1]"),
+                "the token is still in the words, on the box's first row: {screen}"
             );
         });
     }
 
     /// The line is the record: deleting the token takes the strip with it and
-    /// gives the box its rows back.
+    /// gives the transcript its rows back.
     #[test]
     fn deleting_the_token_takes_the_strip_with_it() {
         let state = state();
@@ -2379,8 +2387,8 @@ mod tests {
         assert!(ui.painted.borrow().strip.is_empty());
     }
 
-    /// A room is posted into rather than asked, and its prompt keeps its own
-    /// row under the strip.
+    /// A room is posted into rather than asked, and its prompt keeps the
+    /// box's first row with the strip standing above the border.
     #[test]
     fn a_rooms_prompt_keeps_its_row_under_the_strip() {
         let tree = room_tree(Vec::new());
@@ -2393,12 +2401,13 @@ mod tests {
                 .iter()
                 .position(|row| row.contains("#design >"))
                 .unwrap_or_else(|| panic!("the room's own prompt: {screen}"));
-            assert_eq!(prompt, 1 + usize::from(strip::ROWS), "{rows:?}");
+            assert_eq!(prompt, 1, "{rows:?}");
+            assert_eq!(placeholder_rows(&screen), usize::from(strip::ROWS));
         });
     }
 
-    /// The box yields the strip before it yields the row a person is typing
-    /// on: a screen too short for both keeps the prompt.
+    /// The frame yields the strip before it yields the row a person is
+    /// typing on: a screen too short for both keeps the prompt.
     #[test]
     fn a_screen_too_short_for_both_keeps_the_prompt_and_not_the_strip() {
         let state = state();
