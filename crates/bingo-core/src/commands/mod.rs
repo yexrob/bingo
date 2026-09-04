@@ -1,12 +1,13 @@
 //! The kernel's own commands (ADR-0008 §4, ADR-0012 §5): what changes the
-//! next turn's model or thinking, what makes room, and a provider's
-//! credential. They are registered like any plugin's and listed in the same
+//! next turn's model or thinking, what a session is called, what makes room,
+//! and a provider's credential. They are registered like any plugin's and listed in the same
 //! catalogue.
 
 mod compact;
 mod login;
 mod model;
 mod models;
+mod rename;
 mod status;
 mod think;
 
@@ -21,6 +22,7 @@ pub(crate) fn builtins(host: Weak<Host>) -> Vec<Arc<dyn Command>> {
         Arc::new(model::ModelCommand { host: host.clone() }),
         Arc::new(models::ModelsCommand { host: host.clone() }),
         Arc::new(think::ThinkCommand { host: host.clone() }),
+        Arc::new(rename::RenameCommand { host: host.clone() }),
         Arc::new(compact::CompactCommand { host: host.clone() }),
         Arc::new(login::LoginCommand { host: host.clone() }),
         Arc::new(login::LogoutCommand { host: host.clone() }),

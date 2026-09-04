@@ -265,7 +265,7 @@ async fn the_catalogue_lists_the_builtins_and_the_models() {
     let (host, _) = host_for(vec![], None).await;
     let commands = host.catalog(CatalogKind::Commands).await.unwrap();
     let names: Vec<&str> = commands.entries.iter().map(|e| e.id.as_str()).collect();
-    for name in ["model", "think", "compact"] {
+    for name in ["model", "think", "rename", "compact"] {
         assert!(names.contains(&name), "{names:?}");
     }
     let models = host.catalog(CatalogKind::Models).await.unwrap();
@@ -396,4 +396,38 @@ async fn host_in(home: &std::path::Path, remembered: Option<&str>) -> Arc<Host> 
         None => config.with_layer("cli", json!({ "model": "m" })),
     };
     Host::build(plugins, config).await.expect("a host")
+}
+
+/// `/rename` is a session saying what it is called: one `SessionUpdated` and
+/// nothing else. Bare, it answers the question instead, and a name too long
+/// for a row is refused before anything is published.
+#[tokio::test]
+async fn rename_names_the_session_and_announces_it() {
+    let (host, _) = host_for(vec![], None).await;
+    let mut client = Client::open(&host).await;
+    assert_eq!(client.state.summary.title, None);
+
+    let (ack, before) = client.ack("/rename the release").await;
+    assert_eq!(message(&ack), "name: the release");
+    assert_eq!(client.state.summary.title.as_deref(), Some("the release"));
+    assert!(
+        before.iter().any(|f| matches!(
+            &f.event,
+            Event::SessionUpdated { summary } if summary.title.as_deref() == Some("the release")
+        )),
+        "the new name is announced before the ack"
+    );
+
+    let (ack, _) = client.ack("/rename").await;
+    assert_eq!(shown(&ack), "name: the release\nusage: /rename <title>");
+
+    let (ack, _) = client.ack(&format!("/rename {}", "x".repeat(81))).await;
+    assert!(
+        matches!(ack, IntentOutcome::Rejected { error } if error.code == ErrorCode::InvalidInput)
+    );
+    assert_eq!(
+        client.state.summary.title.as_deref(),
+        Some("the release"),
+        "a refused name changes nothing"
+    );
 }

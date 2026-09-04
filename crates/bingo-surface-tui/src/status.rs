@@ -529,6 +529,21 @@ mod tests {
         );
     }
 
+    /// `/rename` reaches the screen the way every other fact does: the
+    /// kernel publishes a `SessionUpdated` and the slot reads it at render
+    /// time, so nothing here remembers a name.
+    #[test]
+    fn a_renamed_session_is_renamed_on_the_line() {
+        let mut tree = folded_tree(vec![
+            child_frame(1, announced("reviewer")),
+            child_frame(2, announced("the release")),
+        ]);
+        tree.show(&child_id());
+        let (ui, _) = scene();
+        let drawn = text(&tree, &ui, 80);
+        assert!(drawn.contains("in the release · fake/fake-1"), "{drawn}");
+    }
+
     /// A summary written before the kernel stamped the provider on it.
     #[test]
     fn a_model_with_no_provider_stands_alone() {

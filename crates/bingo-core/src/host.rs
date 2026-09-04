@@ -152,6 +152,8 @@ pub enum Change {
         model: String,
     },
     Thinking(Option<Effort>),
+    /// What the session is called from now on.
+    Title(String),
 }
 
 impl Change {
@@ -164,6 +166,7 @@ impl Change {
                 spec.model = Some(model);
             }
             Change::Thinking(level) => *thinking = level,
+            Change::Title(title) => spec.title = Some(title),
         }
     }
 }
@@ -588,7 +591,12 @@ impl Host {
         let (mut spec, mut thinking) = (live.spec.clone(), live.thinking);
         change.apply(&mut spec, &mut thinking);
         let choice = self.choose_model(&spec, thinking).await?;
-        let summary = turn::runs_on(live.mailbox.summary().await?, Some(&choice));
+        // The spec is what the session was asked to be, the actor's summary
+        // what it has become: a rename is the one thing here the spec knows
+        // first, and a name the actor minted is one the spec never had.
+        let mut summary = live.mailbox.summary().await?;
+        summary.title = spec.title.clone().or(summary.title);
+        let summary = turn::runs_on(summary, Some(&choice));
         let config =
             Arc::new(self.turn_config(&spec, &summary, Some(choice.clone()), &live.mailbox));
         if let Some(entry) = self.lock().get_mut(id) {
