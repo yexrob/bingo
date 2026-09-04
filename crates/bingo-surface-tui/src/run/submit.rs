@@ -6,7 +6,7 @@
 //! their own and mailed back, so no key press waits on a web server and a line
 //! that could not be sent is handed back to the composer whole.
 
-use bingo_sdk::{Image, Input, Level, Origin, SessionHandle};
+use bingo_sdk::{Delivery, Image, Input, Level, Origin, SessionHandle};
 
 use super::{Reply, Run};
 use crate::{complete, history};
@@ -18,6 +18,10 @@ pub(super) struct Mentioned {
     handle: SessionHandle,
     text: String,
     origin: Origin,
+    /// Whether the line steers the running turn or waits for the next one:
+    /// the key that sent it decided, and a picture read on the way does not
+    /// change what was pressed.
+    delivery: Delivery,
     /// The composer's own pictures with the mentions read in after them, or
     /// the first mention that did not read, in the words a person is shown.
     images: Result<Vec<Image>, String>,
@@ -33,7 +37,8 @@ impl Run {
                 text,
                 images,
                 origin,
-            } => self.submit_text(handle, text, images, origin),
+                delivery,
+            } => self.submit_text(handle, text, images, origin, delivery),
             action => {
                 let intent = self.mint(None);
                 handle.submit(intent, action);
@@ -50,10 +55,11 @@ impl Run {
         text: String,
         images: Vec<Image>,
         origin: Origin,
+        delivery: Delivery,
     ) {
         let mentions = complete::attachments(&text);
         if mentions.is_empty() {
-            return self.send_text(handle, text, images, origin);
+            return self.send_text(handle, text, images, origin, delivery);
         }
         let cwd = std::path::PathBuf::from(&self.session.tree.root().summary.cwd);
         self.spawn(async move {
@@ -62,6 +68,7 @@ impl Run {
                 handle,
                 text,
                 origin,
+                delivery,
                 images,
             })))
         });
@@ -75,10 +82,11 @@ impl Run {
             handle,
             text,
             origin,
+            delivery,
             images,
         } = waiting;
         match images {
-            Ok(images) => self.send_text(handle, text, images, origin),
+            Ok(images) => self.send_text(handle, text, images, origin, delivery),
             Err(why) => {
                 self.ui.notify(Level::Warn, why, std::time::Instant::now());
                 self.ui.composer.set(&text);
@@ -93,6 +101,7 @@ impl Run {
         text: String,
         images: Vec<Image>,
         origin: Origin,
+        delivery: Delivery,
     ) {
         history::append(&self.data_dir, &text);
         self.ui.pictures.clear();
@@ -103,6 +112,7 @@ impl Run {
                 text,
                 images,
                 origin,
+                delivery,
             },
         );
     }

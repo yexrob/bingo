@@ -699,6 +699,7 @@ impl Actor {
                 text,
                 images,
                 origin,
+                ..
             } = input
             else {
                 continue;

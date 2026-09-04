@@ -461,6 +461,7 @@ mod tests {
                 text: "!ls".into(),
                 images: Vec::new(),
                 origin,
+                delivery: Delivery::Wake,
             })
         };
         assert!(from(Origin::surface("tui")));

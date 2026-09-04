@@ -155,6 +155,7 @@ mod tests {
             text: String::new(),
             images: vec![image],
             origin: Origin::surface("test"),
+            delivery: Delivery::Wake,
         };
         let mut q = Queue::default();
         q.push(IntentId::mint(), input);

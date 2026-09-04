@@ -445,6 +445,7 @@ async fn a_picture_steered_in_at_the_barrier_is_kept() {
             text: "and this".into(),
             images: vec![image],
             origin: Origin::surface("tui"),
+            delivery: Delivery::Wake,
         },
     ));
     run(&cfg, &host, CancellationToken::new()).await;

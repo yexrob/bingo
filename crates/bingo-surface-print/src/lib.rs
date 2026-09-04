@@ -24,10 +24,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
-    ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId, IntentOutcome,
-    Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin, PluginError,
-    PluginManifest, Question, Registrar, SessionHandle, SessionId, SessionState, Surface,
-    SurfaceKind, SurfaceOptions, TurnStatus,
+    Delivery, ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId,
+    IntentOutcome, Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin,
+    PluginError, PluginManifest, Question, Registrar, SessionHandle, SessionId, SessionState,
+    Surface, SurfaceKind, SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -256,6 +256,9 @@ impl<'a> Attached<'a> {
                 text,
                 images,
                 origin: Origin::surface(SURFACE_ID),
+                // A prompt on this protocol is a prompt: the dialect has no
+                // word for a line that waits, so none is invented for it.
+                delivery: Delivery::Wake,
             },
         );
     }

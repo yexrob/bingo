@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bingo_sdk::{
-    Activation, Answer, Applied, Attachment, ClientIdentity, ErrorCode, Event, Frame, FrameStream,
-    HostHandle, Image, Input, IntentId, InteractionId, KernelError, OpenOptions, Origin,
-    SessionHandle, SessionId, SessionSelector, SessionSpec, SessionState,
+    Activation, Answer, Applied, Attachment, ClientIdentity, Delivery, ErrorCode, Event, Frame,
+    FrameStream, HostHandle, Image, Input, IntentId, InteractionId, KernelError, OpenOptions,
+    Origin, SessionHandle, SessionId, SessionSelector, SessionSpec, SessionState,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -375,6 +375,7 @@ impl Runner {
                         principal: Some(principal.to_string()),
                         conversation: Some(self.key.clone()),
                     },
+                    delivery: Delivery::Wake,
                 },
             ),
         }

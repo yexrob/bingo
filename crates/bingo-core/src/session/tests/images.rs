@@ -52,6 +52,7 @@ async fn an_image_with_no_words_journals_as_one_image_part() {
             text: String::new(),
             images: vec![image("image/png", b"abc")],
             origin: Origin::surface("tui"),
+            delivery: Delivery::Wake,
         },
     );
     frames_until(&mut events, &mut state, acked).await;
@@ -70,6 +71,7 @@ async fn text_and_two_images_journal_in_order() {
             text: "look at these".into(),
             images: vec![image("image/png", b"one"), image("image/gif", b"two")],
             origin: Origin::surface("tui"),
+            delivery: Delivery::Wake,
         },
     );
     frames_until(&mut events, &mut state, acked).await;
@@ -94,6 +96,7 @@ async fn an_unknown_media_type_is_invalid_input() {
             text: String::new(),
             images: vec![bogus],
             origin: Origin::surface("tui"),
+            delivery: Delivery::Wake,
         },
     );
     let frames = frames_until(&mut events, &mut state, acked).await;
@@ -115,6 +118,7 @@ async fn an_oversize_image_is_invalid_input() {
             text: String::new(),
             images: vec![oversized_image()],
             origin: Origin::surface("tui"),
+            delivery: Delivery::Wake,
         },
     );
     let frames = frames_until(&mut events, &mut state, acked).await;

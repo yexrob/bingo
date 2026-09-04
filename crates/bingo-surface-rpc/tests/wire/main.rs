@@ -315,6 +315,7 @@ async fn a_submitted_image_reaches_the_kernel_beside_the_text() {
         text: "look".into(),
         images: vec![image.clone()],
         origin: Origin::surface("test"),
+        delivery: Delivery::Wake,
     };
     wire.call(
         name::SESSION_SUBMIT,
@@ -335,6 +336,7 @@ async fn a_submitted_image_reaches_the_kernel_beside_the_text() {
             text: "look".into(),
             images: vec![image],
             origin: Origin::surface("test"),
+            delivery: Delivery::Wake,
         }
     );
 }

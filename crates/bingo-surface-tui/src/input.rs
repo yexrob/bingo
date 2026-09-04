@@ -7,7 +7,9 @@
 
 use std::path::PathBuf;
 
-use bingo_sdk::{Input, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState};
+use bingo_sdk::{
+    Delivery, Input, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::SURFACE_ID;
@@ -758,6 +760,7 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
             images: ui.pictures.carried(&text),
             text,
             origin: Origin::surface(SURFACE_ID),
+            delivery: Delivery::Wake,
         })],
     }
 }
@@ -856,6 +859,7 @@ mod tests {
                 text: "look at @shot.png".into(),
                 images: Vec::new(),
                 origin: Origin::surface(SURFACE_ID),
+                delivery: Delivery::Wake,
             })],
         );
     }
@@ -892,6 +896,7 @@ mod tests {
                 text: "see [image 2]".into(),
                 images: vec![second],
                 origin: Origin::surface(SURFACE_ID),
+                delivery: Delivery::Wake,
             })],
         );
     }

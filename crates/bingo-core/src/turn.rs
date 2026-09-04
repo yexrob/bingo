@@ -530,6 +530,7 @@ impl Turn<'_> {
                 text,
                 images,
                 origin,
+                ..
             } = input
             {
                 self.record(ItemBody::User {
