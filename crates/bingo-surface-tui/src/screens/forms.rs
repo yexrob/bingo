@@ -115,3 +115,44 @@ fn form_set_ticked_and_typed_on() {
     }
     both("form_set_ticked_and_typed_on", &tree, &ui, now);
 }
+
+/// §3's "nothing jumps" is the card's too (M59): the band holds one height for
+/// the whole form, so walking the tabs of three questions of different heights
+/// moves no row of the screen. Three frames are compared row for row rather
+/// than read off three snapshots — a snapshot says what one frame looks like,
+/// not that two of them agree.
+#[test]
+fn the_band_holds_still_as_the_tabs_are_walked() {
+    let (tree, mut ui, now) = asked(crate::test_support::form());
+    let mut walked = Vec::new();
+    for tab in 0..3 {
+        if tab > 0 {
+            crate::input::on_key(&mut ui, &tree, key(KeyCode::Right), now);
+        }
+        walked.push(landmarks(&draw_tree(80, 24, &tree, &ui, now), 80));
+    }
+    assert_eq!(walked[0], walked[1], "{walked:#?}");
+    assert_eq!(walked[1], walked[2], "{walked:#?}");
+}
+
+/// Where the rows that may not move are in one frame: the rule the band opens
+/// with — which is also what says nothing above it moved — the rule that closes
+/// it, the way out under that, and the key line.
+fn landmarks(screen: &str, width: usize) -> Vec<(&'static str, usize)> {
+    let whole = crate::theme::rule().repeat(width);
+    let rules: Vec<usize> = screen
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&whole))
+        .map(|(y, _)| y)
+        .collect();
+    let at = |needle: &str| crate::test_support::row_carrying(screen, needle) as usize;
+    vec![
+        ("the tab row", at("Submit")),
+        ("the band opens", rules.first().copied().unwrap_or_default()),
+        ("the band closes", rules.get(1).copied().unwrap_or_default()),
+        ("the way out", at("Chat about this")),
+        ("the key line", at("Enter to select")),
+        ("the composer", at("ask anything")),
+    ]
+}

@@ -1,6 +1,6 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 40
+assertion_line: 42
 expression: "draw_tree(120, 40, tree, ui, now)"
 ---
 "                                                                                                                        "
@@ -28,14 +28,14 @@ expression: "draw_tree(120, 40, tree, ui, now)"
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
-"                                                                                                                        "
-"                                                                                                                        "
-"                                                                                                                        "
-"╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮"
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 "←  ☒ Auth method  ☒ Library  ☐ Targets  ✔ Submit  →                                                                     "
 "1 question is still open.                                                                                               "
 "❯ 1. Submit                                                                                                             "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
+"                                                                                                                        "
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 "  2. Chat about this                                                                                                    "
 "Enter to select · ↑/↓ to navigate · Tab to switch questions · Esc to cancel                                             "

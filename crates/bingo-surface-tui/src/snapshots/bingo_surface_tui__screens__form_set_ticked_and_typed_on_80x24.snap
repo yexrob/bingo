@@ -1,10 +1,8 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
+assertion_line: 41
 expression: "draw_tree(80, 24, tree, ui, now)"
 ---
-"                                                                                "
-"                                                                                "
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -18,6 +16,9 @@ expression: "draw_tree(80, 24, tree, ui, now)"
 "  3. [ ] windows                                                                "
 "❯ 4. Type something.                                                            "
 "     > and freebsd                                                              "
+"                                                                                "
+"                                                                                "
+"                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
 "  5. Chat about this                                                            "
 "Enter to select · Space to toggle · ↑/↓ to navigate · Tab to switch questions · "

@@ -1,9 +1,8 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 40
+assertion_line: 42
 expression: "draw_tree(120, 40, tree, ui, now)"
 ---
-"                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
@@ -36,6 +35,7 @@ expression: "draw_tree(120, 40, tree, ui, now)"
 "  2. [ ] macos                                                                                                          "
 "  3. [ ] windows                                                                                                        "
 "  4. Type something.                                                                                                    "
+"                                                                                                                        "
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 "  5. Chat about this                                                                                                    "
 "Enter to select · Space to toggle · ↑/↓ to navigate · Tab to switch questions · Esc to cancel                           "
