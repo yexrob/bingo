@@ -84,8 +84,10 @@ pub(crate) trait Screen: Send {
     /// these are what the terminal draws into them.
     fn place(&mut self, bytes: &[u8]) -> io::Result<()>;
 
-    /// How many rows it has, for the screenful printed back on the way out.
-    fn rows(&self) -> u16;
+    /// How big it is, in columns and rows: what the screenful printed back on
+    /// the way out is cut to, and what says whether there is room for the
+    /// opening to play (design §11).
+    fn size(&self) -> (u16, u16);
 }
 
 pub struct Tui {
@@ -186,8 +188,11 @@ impl Screen for Tui {
         out_of_band(bytes)
     }
 
-    fn rows(&self) -> u16 {
-        self.terminal.size().map(|size| size.height).unwrap_or(0)
+    fn size(&self) -> (u16, u16) {
+        self.terminal
+            .size()
+            .map(|size| (size.width, size.height))
+            .unwrap_or((0, 0))
     }
 }
 

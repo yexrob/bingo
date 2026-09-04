@@ -25,6 +25,8 @@ mod acp;
 mod colours;
 /// The screens a set of questions asked together is read through (§2's band).
 mod forms;
+/// The welcome box with the opening playing in it (§11, M70).
+mod opening;
 /// The band above a line somebody sent with pictures (§5's image row, M62).
 mod pictures;
 /// A question alone (M43).

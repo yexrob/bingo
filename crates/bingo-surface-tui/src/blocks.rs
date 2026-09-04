@@ -227,7 +227,12 @@ impl Blocks {
             self.blocks.clear();
             self.width = rows.width;
         }
-        self.head = welcome::lines(state, rows.width, rows.update);
+        self.head = match rows.opening.filter(|_| welcome::wanted(state)) {
+            // The opening plays in the welcome box's place and lands on it, so
+            // while it runs the box *is* the frame (M70, design §11).
+            Some(playing) => playing.to_vec(),
+            None => welcome::lines(state, rows.width, rows.update),
+        };
         let mut kept = 0;
         let mut previous: Option<&Item> = None;
         for item in &state.items {

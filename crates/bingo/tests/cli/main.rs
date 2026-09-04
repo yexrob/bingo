@@ -101,6 +101,33 @@ fn print_streams_prose_to_stdout_and_nothing_else() {
     assert_eq!(stderr(&out), "");
 }
 
+/// The opening shot is an entrance to the terminal surface and nothing else
+/// (design §11, M70): a `--print` run has no screen to enter, and its stdout
+/// is prose. The half blocks the piece is drawn out of are the one byte that
+/// could never be anything but the piece.
+#[test]
+fn a_print_run_never_plays_the_opening() {
+    let script = script(r#"{"responses":[{"steps":[{"text":"Hello from the fake provider."}]}]}"#);
+    let out = run(bingo()
+        // Everything the opening would want, said out loud, so what keeps it
+        // off this run is that there is no screen and not that there is no
+        // colour.
+        .env("COLORTERM", "truecolor")
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--provider", "fake", "hello"]));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let said = stdout(&out);
+    assert_eq!(said, "Hello from the fake provider.\n");
+    for glyph in ['\u{2580}', '\u{2584}'] {
+        assert!(!said.contains(glyph), "a half block on stdout: {said:?}");
+        assert!(
+            !stderr(&out).contains(glyph),
+            "a half block on stderr: {:?}",
+            stderr(&out)
+        );
+    }
+}
+
 #[test]
 fn json_output_is_one_frame_per_line_ending_in_turn_completed() {
     let script = script(r#"{"responses":[{"steps":[{"text":"Hello from the fake provider."}]}]}"#);

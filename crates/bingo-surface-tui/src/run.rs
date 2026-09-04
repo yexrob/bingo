@@ -25,6 +25,8 @@ use tokio::sync::mpsc;
 
 /// The look, following the terminal for as long as the run lasts (M71).
 mod look;
+/// The opening shot: whether it plays, and its frames (M70).
+mod opening;
 /// The pictures a frame drew, on their way to the terminal.
 mod showing;
 /// A line on its way out of the composer, and the pictures it named.
@@ -92,6 +94,10 @@ enum Reply {
     Fitted(Box<decoded::Fitted>),
     /// A newer release than this build, as the start-up check found it (M63).
     Update(String),
+    /// One frame of the opening, drawn off the loop's thread (M70): a
+    /// ray-marched picture costs tens of milliseconds in a debug build, and no
+    /// draw may wait for one.
+    Opening(Box<opening::Rendered>),
     /// The line the queue gave back, or why it did not (M68). It is carried
     /// whole rather than through `Failed`, because a line the turn took first
     /// is a note about a race and not a refusal of anything.
@@ -196,10 +202,7 @@ pub(crate) async fn drive(
     mut keys: Keys,
 ) -> Result<Farewell, KernelError> {
     let (tx, mut replies) = mpsc::channel(16);
-    let (mut run, mut events) = attach(host, opts, tx).await?;
-    // The host's own stream, beside the session's: what changed for the whole
-    // process rather than for this conversation (ADR-0026 §4).
-    let mut gateway = Some(host.gateway_events());
+    let (mut run, mut events, mut gateway) = standing(host, opts, screen.size(), tx).await?;
     loop {
         // `biased`, keys first: a person outranks the machine, and a
         // keystroke is never continuously ready, so checking it first
@@ -245,6 +248,24 @@ pub(crate) async fn drive(
         }
         run.paint(screen, wake, now)?;
     }
+}
+
+/// Everything the loop stands on before its first pass: the run, the session's
+/// frames, and the host's own stream beside them — what changed for the whole
+/// process rather than for this conversation (ADR-0026 §4). A run that opens
+/// with the piece starts it here, before a frame has been drawn (M70).
+async fn standing(
+    host: &HostHandle,
+    opts: SurfaceOptions,
+    screen: (u16, u16),
+    replies: mpsc::Sender<Reply>,
+) -> Result<(Run, Option<FrameStream>, Option<GatewayStream>), KernelError> {
+    // A run given work on the command line goes and does it, so what the
+    // opening is decided from is read before the prompt is spent.
+    let asked = opts.prompt.is_some();
+    let (mut run, events) = attach(host, opts, replies).await?;
+    opening::begin(&mut run, screen, asked, Now::real());
+    Ok((run, events, Some(host.gateway_events())))
 }
 
 /// Open the session the options name and take everything the loop holds with
@@ -359,6 +380,7 @@ impl Run {
             ..now
         };
         self.behind
+            || self.ui.intro.is_some()
             || self.session.tree.sessions().any(SessionState::busy)
             || self.ui.scroll.moving(screen.instant)
             || self.ui.layer_moving(screen)
@@ -388,7 +410,7 @@ impl Run {
         let _ = self.host.close(&root, CloseReason::Client).await;
         Ok(Farewell {
             exit,
-            screen: self.farewell(screen.rows()),
+            screen: self.farewell(screen.size().1),
         })
     }
 
@@ -422,6 +444,7 @@ impl Run {
         showing::hand(self, screen)?;
         showing::fit(self);
         showing::read_linked(self);
+        opening::ask(self, now);
         Ok(())
     }
 
@@ -868,6 +891,7 @@ impl Run {
             Reply::Linked(answer) => self.ui.linked.answered(*answer),
             Reply::Fitted(fitted) => self.ui.decoded.answered(*fitted),
             Reply::Update(version) => self.told_of(version),
+            Reply::Opening(frame) => opening::landed(self, *frame),
             Reply::Withdrawn(taken) => withdraw::took(self, *taken),
             Reply::Failed(error) => {
                 self.ui.opening = false;
@@ -1660,13 +1684,17 @@ mod tests {
     }
 
     /// A run with nothing happening in it, whose one painted frame is `at`.
-    fn idle(at: Instant) -> Run {
+    pub(super) fn idle(at: Instant) -> Run {
         idle_in(state(), std::sync::Arc::new(TestSession::default()), at)
     }
 
     /// `idle`, over a session of one's choosing — its directory is where a
     /// mentioned picture is looked for, and its handle is what is submitted.
-    fn idle_in(state: SessionState, session: std::sync::Arc<TestSession>, at: Instant) -> Run {
+    pub(super) fn idle_in(
+        state: SessionState,
+        session: std::sync::Arc<TestSession>,
+        at: Instant,
+    ) -> Run {
         Run {
             stored: Stored::default(),
             cache: None,

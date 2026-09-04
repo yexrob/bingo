@@ -1,11 +1,11 @@
 //! The six points that rise.
 //!
-//! The only particles in the opening, and they are points: a cell each, no
+//! The only particles in the opening, and they are points: a pixel each, no
 //! shape, no shadow. They are not solids, so they cost the marcher nothing —
-//! each is projected onto the screen once and drawn where it lands, if what
-//! is already there stands further off. That depth test is what makes them
-//! pass *behind* the block and *in front of* her, which is most of what the
-//! shot has to say about where things are.
+//! each is projected onto the field once and drawn where it lands, if what is
+//! already there stands further off. That depth test is what makes one pass
+//! *behind* the block rather than over it, which is most of what a mote of
+//! dust has to say about where it is.
 //!
 //! Each rises on its own clock and fades in at the bottom and out at the top,
 //! so none of them ever appears or vanishes on a cut.
@@ -14,7 +14,7 @@ use std::f32::consts::PI;
 
 use super::march::{Camera, Scene};
 use super::sdf::{Vec3, at};
-use super::shade::{Lit, Rendered, cell};
+use super::shade::{Lit, Pixels};
 
 /// How many rise at once.
 pub const COUNT: usize = 6;
@@ -74,26 +74,26 @@ fn cycled(turns: f32) -> f32 {
 
 /// How far off one has to be before it is no longer worth a cell.
 const REACH: f32 = 9.0;
-/// Below this it is not drawn at all, rather than drawn as the ramp's first
-/// step for a second at each end of its climb.
+/// Below this it is not drawn at all, rather than flickering at the edge of
+/// what a pixel can say for a moment at each end of its climb.
 const SEEN: f32 = 0.10;
 
 /// The embers over the world, where the world is not already in front of them.
-pub fn draw(rendered: &mut Rendered, camera: &Camera, scene: &Scene) {
-    let (width, height) = (rendered.grid.width(), rendered.grid.height());
+pub fn draw(field: &mut Pixels, camera: &Camera, scene: &Scene) {
+    let (width, height) = (field.width(), field.height());
     for ember in &scene.embers {
         let Some((u, v, depth)) = camera.project(ember.at) else {
             continue;
         };
-        let Some((x, y)) = super::shade::cell_at(u, v, width, height) else {
+        let Some((x, y)) = super::shade::pixel_at(u, v, width, height) else {
             continue;
         };
-        if !rendered.in_front(x, y, depth) {
+        if !field.in_front(x, y, depth) {
             continue;
         }
         let level = ember.level * (1.0 - depth / REACH).clamp(0.0, 1.0) * scene.exposure;
         if level > SEEN {
-            rendered.grid.set(x, y, cell(Lit { level, warm: 1.0 }));
+            field.set(x, y, Lit { level, warm: 1.0 });
         }
     }
 }

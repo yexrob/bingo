@@ -46,6 +46,12 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if key.kind == KeyEventKind::Release {
         return Vec::new();
     }
+    // Any key skips the opening, and *that* is all it does: the key is
+    // consumed rather than typed, so a `/` pressed to cut the piece short does
+    // not also open the dropdown (M70, design §11).
+    if ui.intro.take().is_some() {
+        return Vec::new();
+    }
     ui.block = None;
     // `esc esc` needs no clock: any other key is what says the two were not
     // one gesture.
@@ -869,6 +875,42 @@ mod tests {
         let mut state = state();
         state.summary.cwd = dir.path().to_string_lossy().into_owned();
         (dir, state)
+    }
+
+    /// Any key skips the opening, and does nothing else with itself: the `/`
+    /// that cut the piece short does not also open the dropdown, and the `d`
+    /// that cut it short is not typed (M70, design §11).
+    #[test]
+    fn any_key_skips_the_opening_and_is_spent_on_nothing_else() {
+        for key in [
+            typed('/'),
+            typed('d'),
+            key(KeyCode::Esc),
+            key(KeyCode::Enter),
+            ctrl('c'),
+        ] {
+            let state = state();
+            let tree = solo(&state);
+            let (mut ui, now) = scene();
+            ui.intro = Some(crate::intro::Playing::from(now.instant));
+            let effects = on_key(&mut ui, &tree, key, now);
+            assert!(ui.intro.is_none(), "{key:?} skipped it");
+            assert!(effects.is_empty(), "{key:?} did nothing else: {effects:?}");
+            assert_eq!(ui.composer.text(), "", "{key:?} typed nothing");
+            assert!(ui.suggestions(&state.summary.cwd, &[]).is_empty());
+        }
+    }
+
+    /// And the next key is a key again.
+    #[test]
+    fn the_key_after_the_skip_is_typed() {
+        let state = state();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        ui.intro = Some(crate::intro::Playing::from(now.instant));
+        on_key(&mut ui, &tree, typed('h'), now);
+        on_key(&mut ui, &tree, typed('i'), now);
+        assert_eq!(ui.composer.text(), "i");
     }
 
     #[test]

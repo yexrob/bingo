@@ -707,14 +707,19 @@ pub fn warming(t: f32) -> Style {
     }
 }
 
-/// One cell of the opening shot, by how much light stands on it and how much
+/// One pixel of the opening shot, by how much light stands on it and how much
 /// of that light came from the block (`docs/design/tui.md` §11).
 ///
-/// It spends the two inks the world is made of — `dim` where a surface barely
-/// catches anything and `text` where it is full in the light — and bingo's own
-/// warm pair where the block reached it. There is no third colour: the ramp's
-/// glyph carries the brightness, so a terminal with no colour at all still has
-/// the whole shape of the world and loses only where the light came from.
+/// Three stops and no new token: from the *ground* a surface with no light on
+/// it is, through `dim` to `text` for what the world's own light reaches, and
+/// through bingo's own `presence` to `glow` for what the block reached. The
+/// ground is `raised`, which is the one token that steps towards the
+/// terminal's own background in both palettes — dark on dark, paper on paper.
+///
+/// It has to reach the ground, because in a picture drawn out of half blocks
+/// the colour is the only thing carrying the brightness: a world whose
+/// darkest ink is `dim` is a world with a grey wash over it and no night in
+/// it at all.
 pub fn lit(level: f32, warm: f32) -> Style {
     let (level, warm) = (settled(level), settled(warm));
     match current().colors {
@@ -725,11 +730,41 @@ pub fn lit(level: f32, warm: f32) -> Style {
             (false, false) => dim(),
         },
         Colors::True(palette) => Style::new().fg(mix(
-            mix(palette.dim, palette.text, level),
-            mix(palette.presence, palette.glow, level),
+            through(palette.raised, palette.dim, palette.text, level),
+            through(palette.raised, palette.presence, palette.glow, level),
             warm,
         )),
     }
+}
+
+/// A ramp of three stops: nothing, half, whole.
+fn through(ground: Color, half: Color, whole: Color, level: f32) -> Color {
+    match level < 0.5 {
+        true => mix(ground, half, level * 2.0),
+        false => mix(half, whole, level * 2.0 - 1.0),
+    }
+}
+
+/// One cell of the opening's half-block picture (§11): the pixel in the top
+/// half of the cell as ink, and the one in the bottom half as the ground
+/// behind it. Each is a [`lit`] pair — how much light, and how much of it came
+/// from the block.
+///
+/// A look with no room between two colours has no ground to paint either, so
+/// the cell keeps its ink and the terminal's own background stands.
+pub fn half(ink: (f32, f32), ground: (f32, f32)) -> Style {
+    let above = lit(ink.0, ink.1);
+    match lit(ground.0, ground.1).fg {
+        Some(colour) => above.bg(colour),
+        None => above,
+    }
+}
+
+/// Whether this run draws twenty-four bits. The opening is a picture of light
+/// — a truecolor mix at every pixel — and eight colours are a ramp with three
+/// steps in it, so it does not play at all where they are all there is (§11).
+pub fn full_colour() -> bool {
+    matches!(current().colors, Colors::True(_))
 }
 
 /// A share of something, held to 0 and 1 — and to 0 where the arithmetic it
@@ -1051,8 +1086,6 @@ mod tests {
                     // The question a form is on, and the option under its
                     // cursor: the same weight the dialog's rows wear.
                     "form.rs",
-                    // The greeting in the box the opening lands on (M69).
-                    "intro/end.rs",
                     "markdown.rs",
                     "pager.rs",
                     "panel.rs",
@@ -1095,8 +1128,6 @@ mod tests {
                     // wherever one stands: the composer's strip, and a
                     // person's own `>` block.
                     "graphics/band.rs",
-                    // That box's border, its help line and its cwd (M69).
-                    "intro/end.rs",
                     "keys.rs",
                     "layers.rs",
                     "markdown.rs",
@@ -1150,9 +1181,6 @@ mod tests {
                     // Which session asked, named after a card's own title —
                     // every card's head is written in one place (ADR-0010 §3).
                     "form.rs",
-                    // The mark on that box's greeting, and the caret the
-                    // opening's block came down to be (M69).
-                    "intro/end.rs",
                     "panel.rs",
                     "search.rs",
                     "select.rs",
@@ -1187,13 +1215,15 @@ mod tests {
                 // thing wants a person, and no longer the exception.
                 &["layers.rs", "roster.rs", "status.rs", "transcript.rs"],
             ),
-            // Every cell of the opening shot, and nothing else on the
+            // Every pixel of the opening shot, and nothing else on the
             // surface: the ramp `dim` → `text` for what the world's own light
-            // reaches and `presence` → glow for what the block does (§11).
-            (
-                "lit",
-                &["intro/mascot.rs", "intro/mod.rs", "intro/shade.rs"],
-            ),
+            // reaches and `presence` → glow for what the block does (§11). The
+            // caret the block becomes on its way down is the same ink at its
+            // brightest.
+            ("lit", &["intro/settle.rs", "intro/shade.rs"]),
+            // The two pixels stacked in one cell of that picture: the top one
+            // as ink and the bottom one as the ground behind it (§11).
+            ("half", &["intro/shade.rs"]),
             // Highlighted code reaches the table through one door, so no view
             // has to know that a keyword and the mode badge share a colour.
             ("ink", &["highlight.rs"]),

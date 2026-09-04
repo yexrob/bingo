@@ -8,26 +8,17 @@
 //! is one lookup and not a thousand.
 //!
 //! Two numbers come out of each pixel and no more: how bright it is, and how
-//! warm — which is exactly what [`super::shade::Lit`] spends. The picture is
+//! warm — which is exactly what [`crate::intro::shade::Lit`] spends. The picture is
 //! a rim-lit profile on black, so the bright part *is* the drawing, and the
 //! warm part is the block's light on her. The theme's own two inks draw her
 //! from those, and a terminal with no colour still has the rim.
 
 use std::sync::OnceLock;
 
-use super::grid::{Cell, Grid};
-use super::shade::Lit;
-use crate::theme;
+use crate::intro::shade::Lit;
 
 /// The picture, as the site draws it: her in profile, the block before her.
 const MASCOT: &[u8] = include_bytes!("../../assets/mascot.png");
-
-/// The picture's bytes, for a terminal that draws pictures rather than
-/// characters. Nothing here decodes them for that road — they go the way
-/// every other picture on this surface goes.
-pub fn png() -> &'static [u8] {
-    MASCOT
-}
 
 /// The part of the picture she is in: her head from the ears to the chin,
 /// with the hood behind it. The picture's own block and the embers before it
@@ -39,11 +30,21 @@ const CROP: (f32, f32, f32, f32) = (0.30, 0.02, 0.762, 0.62);
 /// to this, so she is never stretched.
 pub const SHAPE: f32 = (CROP.3 - CROP.1) / (CROP.2 - CROP.0);
 
-/// How finely the crop is filtered down. Wide enough that the billboard is
-/// never magnified past its samples at the sizes the opening draws it, and
-/// small enough that the whole field is a few tens of kilobytes.
-const ACROSS: usize = 96;
-const DOWN: usize = 112;
+/// How finely the crop is filtered down: about the size the billboard is
+/// drawn at, in pixels, and not much more.
+///
+/// One reduction and not two. She is a *line* drawing — the profile is a rim a
+/// pixel or two wide in the source — and every resampling between the file and
+/// the screen is a chance to average that rim away. Reducing once, straight to
+/// the size she is seen at, and keeping some of the brightest sample in each
+/// ([`PEAK`]) is what leaves her a face rather than a smudge.
+const ACROSS: usize = 56;
+const DOWN: usize = 72;
+
+/// How much of a sample is the brightest pixel under it rather than the mean
+/// of them all. A plain average buries a one-pixel rim under the dark beside
+/// it; the rim is the whole of what makes a face a face.
+const PEAK: f32 = 0.30;
 
 /// The window of the picture's own light the ramp is spent on.
 ///
@@ -58,10 +59,6 @@ const DOWN: usize = 112;
 const FLOOR: f32 = 0.048;
 const CEIL: f32 = 0.45;
 const CURVE: f32 = 0.8;
-
-/// Where the silhouette is cut, for the ramp that has no shades to draw her
-/// with (design §7).
-const EDGE: f32 = 0.34;
 
 /// Her light, sampled: [`ACROSS`] by [`DOWN`] of it.
 struct Field {
@@ -131,10 +128,12 @@ fn filtered(picture: bingo_pictures::Pixels) -> Vec<Lit> {
     lit
 }
 
-/// One sample: the average of the pixels under it, as light.
+/// One sample: the pixels under it, mostly as their brightest and partly as
+/// their mean ([`PEAK`]).
 fn boxed(picture: &bingo_pictures::Pixels, from: (f32, f32), size: (f32, f32)) -> Lit {
     let mut light = 0.0f32;
     let mut warm = 0.0f32;
+    let mut peak = 0.0f32;
     let mut taken = 0.0f32;
     for down in 0..size.1.ceil() as u32 {
         for across in 0..size.0.ceil() as u32 {
@@ -142,12 +141,23 @@ fn boxed(picture: &bingo_pictures::Pixels, from: (f32, f32), size: (f32, f32)) -
             let (level, hue) = of(pixel);
             light += level;
             warm += hue * level;
+            peak = peak.max(level);
             taken += 1.0;
         }
     }
-    match taken > 0.0 {
-        true => graded(light / taken, warm / light.max(f32::EPSILON)),
-        false => Lit::default(),
+    if taken <= 0.0 {
+        return Lit::default();
+    }
+    // Both ends are graded before they are mixed. Mixing first and grading
+    // once would push every sample that touched anything lit through the top
+    // of the window, and a picture whose every sample is at the top of the
+    // ramp is a flat one.
+    let warm = warm / light.max(f32::EPSILON);
+    let mean = graded(light / taken, warm);
+    let brightest = graded(peak, warm);
+    Lit {
+        level: mean.level * (1.0 - PEAK) + brightest.level * PEAK,
+        warm: mean.warm,
     }
 }
 
@@ -189,84 +199,9 @@ pub fn light(across: f32, down: f32) -> Lit {
     }
 }
 
-/// Her, drawn straight on into a rectangle of cells — the welcome box's own
-/// picture, where there is no world to march.
-///
-/// A terminal drawing nothing but ASCII gets the silhouette: the punctuation
-/// ramp has no shade to it, and a rim-lit face spread over ten steps of it
-/// comes out as noise. Cut at one level, she is still a hooded head in
-/// profile, which is the whole of what the box needs her to be.
-pub fn draw(grid: &mut Grid, corner: (u16, u16), size: (u16, u16)) {
-    let silhouette = theme::glyphs() == &theme::ASCII;
-    for row in 0..size.1 {
-        for column in 0..size.0 {
-            // Cells are twice as tall as they are wide; nothing corrects for
-            // that here, because the caller shapes the rectangle to [`SHAPE`].
-            let lit = over((column, size.0), (row, size.1));
-            let cell = match silhouette {
-                true => cut(lit),
-                false => super::shade::cell(lit),
-            };
-            grid.set(corner.0 + column, corner.1 + row, cell);
-        }
-    }
-}
-
-/// How many samples of the field one cell is made of, each way.
-const SUB: u16 = 3;
-/// How much of a cell's light is the brightest thing under it rather than the
-/// average of everything under it.
-///
-/// She is a *line* drawing: the profile is one bright rim a pixel or two
-/// wide, and a plain average of the cell it falls in buries it under the dark
-/// beside it — at twenty cells across she comes out a smudge. Keeping some of
-/// the brightest sample keeps the rim, which is the whole of what makes a
-/// face a face.
-const PEAK: f32 = 0.55;
-
-/// One cell of the rectangle: the field over its whole footprint, not the one
-/// sample at the middle of it.
-fn over(across: (u16, u16), down: (u16, u16)) -> Lit {
-    let mut mean = Lit::default();
-    let mut peak = 0.0f32;
-    let mut taken = 0.0f32;
-    for row in 0..SUB {
-        for column in 0..SUB {
-            let lit = light(place(across, column), place(down, row));
-            mean.level += lit.level;
-            mean.warm += lit.warm * lit.level;
-            peak = peak.max(lit.level);
-            taken += 1.0;
-        }
-    }
-    let level = mean.level / taken.max(1.0);
-    Lit {
-        level: level * (1.0 - PEAK) + peak * PEAK,
-        warm: (mean.warm / mean.level.max(f32::EPSILON)).clamp(0.0, 1.0),
-    }
-}
-
-/// One sample inside one cell of the rectangle, from -1 to 1 across the whole.
-fn place((step, of): (u16, u16), sub: u16) -> f32 {
-    let within = (f32::from(sub) + 0.5) / f32::from(SUB);
-    (f32::from(step) + within) / f32::from(of).max(1.0) * 2.0 - 1.0
-}
-
-/// One cell of the silhouette.
-fn cut(lit: Lit) -> Cell {
-    match lit.level >= EDGE {
-        true => Cell {
-            glyph: '#',
-            style: theme::lit(lit.level, lit.warm),
-        },
-        false => Cell::default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::painted::{ascii, in_look, truecolor};
 
     #[test]
     fn the_picture_decodes_and_the_field_is_the_size_it_says() {
@@ -320,33 +255,62 @@ mod tests {
         assert!(warm > 0.3, "and what light there is on her is warm: {warm}");
     }
 
+    /// The reduction keeps the rim, and keeps it *continuous*: her lit profile
+    /// is a line a pixel or two wide in the source, and a plain mean of each
+    /// sample's own pixels would leave it a dotted one. A dotted rim is what a
+    /// smudge is.
     #[test]
-    fn she_is_drawn_as_shades_where_a_terminal_has_them_and_cut_out_where_not() {
-        let drawn = |theme| {
-            in_look(theme, || {
-                let mut grid = Grid::new(24, 12);
-                draw(&mut grid, (0, 0), (24, 12));
-                grid.lines()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
+    fn the_lit_profile_survives_the_reduction_as_a_line() {
+        let brightest = |from: f32| {
+            (0..DOWN)
+                .map(|y| light(from, y as f32 / DOWN as f32 * 2.0 - 1.0).level)
+                .fold(0.0f32, f32::max)
         };
-        let cut = drawn(ascii());
+        let across: Vec<f32> = (0..20).map(|step| -0.6 + step as f32 * 0.06).collect();
+        let lit = across.iter().filter(|x| brightest(**x) > 0.5).count();
         assert!(
-            cut.chars()
-                .all(|glyph| glyph == '#' || glyph == ' ' || glyph == '\n'),
-            "a silhouette is one ink:\n{cut}"
+            lit >= 14,
+            "the profile runs down her face: {lit} of {} columns, {:?}",
+            across.len(),
+            across.iter().map(|x| brightest(*x)).collect::<Vec<_>>()
         );
-        insta::assert_snapshot!("mascot_silhouette", cut);
-        insta::assert_snapshot!("mascot_shaded", drawn(truecolor()));
     }
 }
 
 #[cfg(test)]
 mod probe {
     use super::*;
+
+    /// Her alone, at the sizes the shots draw her, so the sizing decision is
+    /// made by looking rather than by arguing. The billboard in the world is
+    /// this field and nothing else — what a ray finds on it is one
+    /// [`light`] — so a picture of the field at `w × h` pixels is exactly what
+    /// the shot puts on the screen when she is `w × h` pixels of it.
+    #[test]
+    #[ignore = "writes her at the sizes the shots draw her, to look at"]
+    fn sizes() {
+        let out = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/intro"));
+        std::fs::create_dir_all(out).expect("somewhere to write them");
+        for (across, down) in [(14u16, 18u16), (18, 24), (24, 32), (36, 48)] {
+            let mut field = crate::intro::shade::Pixels::new(across, down);
+            for y in 0..down {
+                for x in 0..across {
+                    let place =
+                        |step: u16, of: u16| (f32::from(step) + 0.5) / f32::from(of) * 2.0 - 1.0;
+                    field.set(x, y, light(place(x, across), place(y, down)));
+                }
+            }
+            let rows = crate::theme::with(crate::painted::truecolor(), || {
+                crate::intro::shade::halves(&field).lines()
+            });
+            let png = crate::theme::with(crate::painted::truecolor(), || {
+                crate::intro::storyboard::picture_of(&rows)
+            });
+            std::fs::write(out.join(format!("her_{across}x{down}.png")), png)
+                .expect("her, at that size");
+        }
+        println!("intro: her written to {}", out.display());
+    }
 
     #[test]
     #[ignore = "prints the crop's own histogram, for grading it"]

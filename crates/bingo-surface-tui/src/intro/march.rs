@@ -52,16 +52,10 @@ impl Default for Scene {
     }
 }
 
-/// One thing in the world: a shape, optionally with another taken out of it,
-/// and what light does when it lands.
+/// One thing in the world: a shape, and what light does when it lands on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Solid {
     pub shape: Shape,
-    /// Subtraction, the only other way solids join: the surface is `shape`
-    /// with `cut` removed from it. A lattice of frames is one block-lattice
-    /// minus a smaller one, which is why a corridor of them has edges to
-    /// catch the light.
-    pub cut: Option<Shape>,
     pub material: Material,
 }
 
@@ -69,7 +63,6 @@ impl Solid {
     pub fn of(shape: Shape) -> Self {
         Solid {
             shape,
-            cut: None,
             material: Material::Matte,
         }
     }
@@ -78,6 +71,14 @@ impl Solid {
     pub fn lit(self) -> Self {
         Solid {
             material: Material::Emissive,
+            ..self
+        }
+    }
+
+    /// The same solid with a grid ruled on it.
+    pub fn ruled(self) -> Self {
+        Solid {
+            material: Material::Ruled,
             ..self
         }
     }
@@ -91,20 +92,8 @@ impl Solid {
         }
     }
 
-    /// The same solid with `cut` taken out of it.
-    pub fn less(self, cut: Shape) -> Self {
-        Solid {
-            cut: Some(cut),
-            ..self
-        }
-    }
-
     fn distance(&self, point: Vec3) -> f32 {
-        let solid = self.shape.distance(point);
-        match self.cut {
-            Some(cut) => solid.max(-cut.distance(point)),
-            None => solid,
-        }
+        self.shape.distance(point)
     }
 }
 
@@ -117,9 +106,33 @@ pub enum Material {
     Emissive,
     /// A picture, standing in the world as a surface: it is marched, fogged
     /// and occluded like anything else, and what it looks like comes off the
-    /// picture's own pixels. It casts no shadow either, because a picture is
-    /// not a body.
+    /// picture's own pixels. It casts no shadow, because a picture is not a
+    /// body.
     Pictured,
+    /// Matte, with a grid ruled on it: the floor. The rules are drawn where
+    /// the ray landed rather than built out of solids, so a floor that runs to
+    /// the horizon costs the marcher exactly one plane.
+    Ruled,
+}
+
+/// Which bodies may stand in a light's way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Casting {
+    /// Every body in the world. A picture is not a body and never casts one.
+    Bodies,
+    /// The same, less whatever is its own light: the lamp stands at the middle
+    /// of the block, so a walk towards it that counted the block would find it
+    /// from every direction and nothing in the world would be lit at all.
+    ButTheLamp,
+}
+
+impl Casting {
+    fn counts(self, material: Material) -> bool {
+        !matches!(
+            (self, material),
+            (_, Material::Pictured) | (Casting::ButTheLamp, Material::Emissive)
+        )
+    }
 }
 
 /// The one point light.
@@ -293,12 +306,12 @@ impl<'a> Marcher<'a> {
     /// How much of the light at `towards` reaches `from`: 1 in the open, 0
     /// behind something, and the values between where an edge passes close to
     /// the ray — which is what makes a shadow soft rather than cut out.
-    pub fn shadow(&mut self, from: Vec3, towards: Vec3, far: f32) -> f32 {
+    pub fn shadow(&mut self, from: Vec3, towards: Vec3, far: f32, casting: Casting) -> f32 {
         let mut light = 1.0f32;
         let mut travelled = 0.05;
         for _ in 0..SHADOW_STEPS {
             self.steps += 1;
-            let distance = self.nearest_opaque(from.plus(towards.times(travelled)));
+            let distance = self.nearest_opaque(from.plus(towards.times(travelled)), casting);
             if distance < 1e-3 {
                 return 0.0;
             }
@@ -345,12 +358,12 @@ impl<'a> Marcher<'a> {
         nearest
     }
 
-    /// The same, counting only what can stand in a light's way.
-    fn nearest_opaque(&self, point: Vec3) -> f32 {
+    /// The same, counting only what may stand in this light's way.
+    fn nearest_opaque(&self, point: Vec3, casting: Casting) -> f32 {
         self.scene
             .solids
             .iter()
-            .filter(|solid| solid.material == Material::Matte)
+            .filter(|solid| casting.counts(solid.material))
             .map(|solid| solid.distance(point))
             .fold(FAR, f32::min)
     }
@@ -360,18 +373,25 @@ impl<'a> Marcher<'a> {
 mod tests {
     use super::*;
 
+    /// A ball is a block with no extent and a rounded edge.
+    fn ball_at(centre: Vec3, radius: f32) -> Shape {
+        Shape::Block {
+            at: centre,
+            half: at(0.0, 0.0, 0.0),
+            round: radius,
+            spin: 0.0,
+        }
+    }
+
     fn ball(radius: f32) -> Scene {
         Scene {
-            solids: vec![Solid::of(Shape::Sphere {
-                at: at(0.0, 0.0, 0.0),
-                radius,
-            })],
+            solids: vec![Solid::of(ball_at(at(0.0, 0.0, 0.0), radius))],
             ..Scene::default()
         }
     }
 
     #[test]
-    fn a_ray_pointed_at_a_sphere_lands_on_its_near_face() {
+    fn a_ray_pointed_at_a_ball_lands_on_its_near_face() {
         let scene = ball(1.0);
         let mut marcher = Marcher::new(&scene);
         let hit = marcher
@@ -399,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn the_normal_of_a_sphere_points_away_from_its_centre() {
+    fn the_normal_of_a_ball_points_away_from_its_centre() {
         let scene = ball(1.0);
         let mut marcher = Marcher::new(&scene);
         let normal = marcher.normal(at(0.0, 0.0, -1.0));
@@ -411,58 +431,54 @@ mod tests {
         let scene = ball(1.0);
         let mut marcher = Marcher::new(&scene);
         let behind = at(0.0, 0.0, 4.0);
-        let lit = marcher.shadow(behind, at(0.0, 1.0, 0.0), 10.0);
-        let shaded = marcher.shadow(behind, at(0.0, 0.0, -1.0), 10.0);
+        let lit = marcher.shadow(behind, at(0.0, 1.0, 0.0), 10.0, Casting::Bodies);
+        let shaded = marcher.shadow(behind, at(0.0, 0.0, -1.0), 10.0, Casting::Bodies);
         assert!(lit > 0.9, "nothing stands overhead: {lit}");
         assert!(shaded < 0.05, "the sphere stands in the way: {shaded}");
     }
 
+    /// A lamp's body is a body: it stands in the sun's way like anything
+    /// else, which is what puts a shadow on the floor under a glowing block —
+    /// but it is never in the way of its own light, whose walks all end
+    /// inside it.
     #[test]
-    fn a_lamp_casts_no_shadow_of_its_own_body() {
+    fn a_lamp_casts_a_shadow_of_its_body_but_never_of_its_own_light() {
+        let scene = Scene {
+            solids: vec![Solid::of(ball_at(at(0.0, 0.0, 0.0), 1.0)).lit()],
+            ..Scene::default()
+        };
+        let mut marcher = Marcher::new(&scene);
+        let from = at(0.0, 0.0, 4.0);
+        let towards = at(0.0, 0.0, -1.0);
+        assert!(
+            marcher.shadow(from, towards, 10.0, Casting::Bodies) < 0.05,
+            "a body stands in the sun's way whether it glows or not"
+        );
+        assert!(
+            marcher.shadow(from, towards, 10.0, Casting::ButTheLamp) > 0.9,
+            "and the light itself is not in its own way"
+        );
+    }
+
+    /// A picture is not a body: it is drawn where it stands and shadows
+    /// nothing.
+    #[test]
+    fn a_picture_stands_in_no_lights_way() {
         let scene = Scene {
             solids: vec![
-                Solid::of(Shape::Sphere {
+                Solid::of(Shape::Block {
                     at: at(0.0, 0.0, 0.0),
-                    radius: 1.0,
+                    half: at(2.0, 2.0, 0.02),
+                    round: 0.0,
+                    spin: 0.0,
                 })
-                .lit(),
+                .pictured(),
             ],
             ..Scene::default()
         };
         let mut marcher = Marcher::new(&scene);
-        let through = marcher.shadow(at(0.0, 0.0, 4.0), at(0.0, 0.0, -1.0), 10.0);
-        assert!(through > 0.9, "the light itself is not in its own way");
-    }
-
-    #[test]
-    fn subtracting_one_shape_from_another_opens_it_up() {
-        let shell = Solid::of(Shape::Block {
-            at: at(0.0, 0.0, 0.0),
-            half: at(1.0, 1.0, 1.0),
-            round: 0.0,
-            spin: 0.0,
-        })
-        .less(Shape::Block {
-            at: at(0.0, 0.0, 0.0),
-            half: at(0.6, 0.6, 4.0),
-            round: 0.0,
-            spin: 0.0,
-        });
-        let scene = Scene {
-            solids: vec![shell],
-            ..Scene::default()
-        };
-        let mut marcher = Marcher::new(&scene);
-        let through = marcher.cast(Ray {
-            from: at(0.0, 0.0, -5.0),
-            towards: at(0.0, 0.0, 1.0),
-        });
-        assert!(through.is_none(), "the middle has been taken out");
-        let frame = marcher.cast(Ray {
-            from: at(0.8, 0.0, -5.0),
-            towards: at(0.0, 0.0, 1.0),
-        });
-        assert!(frame.is_some(), "and the frame around it is still there");
+        let through = marcher.shadow(at(0.0, 0.0, 4.0), at(0.0, 0.0, -1.0), 10.0, Casting::Bodies);
+        assert!(through > 0.9, "{through}");
     }
 
     #[test]
