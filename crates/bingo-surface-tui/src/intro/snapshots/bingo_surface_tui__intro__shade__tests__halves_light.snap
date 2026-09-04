@@ -1,8 +1,0 @@
----
-source: crates/bingo-surface-tui/src/intro/shade.rs
-expression: cells(daylight())
----
-  fg None bg None
-▀ fg Some(Rgb(53, 48, 41)) bg None
-▄ fg Some(Rgb(53, 48, 41)) bg None
-▀ fg Some(Rgb(209, 111, 78)) bg Some(Rgb(167, 161, 150))

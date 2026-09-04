@@ -2,7 +2,7 @@
 //! away like anything else once there is something above it. A sub-session and
 //! a room are joined, not started, so neither is welcomed.
 //!
-//! It is also where the opening plays ([`crate::intro`]): the piece runs
+//! It is also where the opening plays ([`crate::opening`]): the piece runs
 //! *inside* this box and lands on it, so what says whether it plays at all is
 //! here, beside the box it would be playing in.
 
@@ -20,8 +20,8 @@ const BECOME: &str = "bingo update";
 /// Where the box's own mark stands, from the box's top-left corner: one cell
 /// of border, one of padding, and the greeting is the first row inside.
 ///
-/// It is the cell the opening's block walks down to become
-/// ([`crate::intro`]), which is the only reason it is written down — a test
+/// It is the cell the opening ignites when its light comes home to that corner
+/// ([`crate::opening`]), which is the only reason it is written down — a test
 /// below holds it against the box the surface actually draws.
 pub const MARK: (u16, u16) = (2, 1);
 

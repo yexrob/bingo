@@ -25,7 +25,9 @@ use tokio::sync::mpsc;
 
 /// The look, following the terminal for as long as the run lasts (M71).
 mod look;
-/// The opening shot: whether it plays, and its frames (M70).
+/// What the run has to say the moment it opens.
+mod notices;
+/// The opening: whether it plays, and when it started (M70, M72).
 mod opening;
 /// The pictures a frame drew, on their way to the terminal.
 mod showing;
@@ -94,10 +96,6 @@ enum Reply {
     Fitted(Box<decoded::Fitted>),
     /// A newer release than this build, as the start-up check found it (M63).
     Update(String),
-    /// One frame of the opening, drawn off the loop's thread (M70): a
-    /// ray-marched picture costs tens of milliseconds in a debug build, and no
-    /// draw may wait for one.
-    Opening(Box<opening::Rendered>),
     /// The line the queue gave back, or why it did not (M68). It is carried
     /// whole rather than through `Failed`, because a line the turn took first
     /// is a note about a race and not a refusal of anything.
@@ -300,7 +298,7 @@ async fn attach(
     };
     run.fetch_catalogs();
     run.ask_for_updates(&opts.args);
-    crate::opening::notices(&mut run.ui, Instant::now());
+    notices::raise(&mut run.ui, Instant::now());
     if let Some(prompt) = opts.prompt {
         run.effect(Effect::Submit(bingo_sdk::Input::text(
             prompt,
@@ -444,7 +442,6 @@ impl Run {
         showing::hand(self, screen)?;
         showing::fit(self);
         showing::read_linked(self);
-        opening::ask(self, now);
         Ok(())
     }
 
@@ -891,7 +888,6 @@ impl Run {
             Reply::Linked(answer) => self.ui.linked.answered(*answer),
             Reply::Fitted(fitted) => self.ui.decoded.answered(*fitted),
             Reply::Update(version) => self.told_of(version),
-            Reply::Opening(frame) => opening::landed(self, *frame),
             Reply::Withdrawn(taken) => withdraw::took(self, *taken),
             Reply::Failed(error) => {
                 self.ui.opening = false;

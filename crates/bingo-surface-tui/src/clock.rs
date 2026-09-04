@@ -149,8 +149,31 @@ pub fn sweep(t: f32, column: usize, width: usize) -> f32 {
         return 0.0;
     }
     let at = (column as f32 + 0.5) / width as f32;
-    let head = t.clamp(0.0, 1.0) * (1.0 + CREST);
-    (1.0 - (at - head).abs() / CREST).clamp(0.0, 1.0)
+    (1.0 - (at - head(t)).abs() / CREST).clamp(0.0, 1.0)
+}
+
+/// Whether the light of a [`sweep`] has reached a cell at all.
+///
+/// What a run the light *reveals* asks — the opening's own rows, which are
+/// blank until it arrives (§11) — where a run it merely lights asks how
+/// brightly ([`sweep`]). It answers for the cell's near edge rather than its
+/// middle, so the first cell is revealed on the first frame, which is the
+/// frame `sweep` already lights it in.
+pub fn swept(t: f32, column: usize, width: usize) -> bool {
+    width > 0 && column as f32 / width as f32 <= head(t)
+}
+
+/// Where the crest of a [`sweep`] stands, as a share of the run it crosses. It
+/// leaves past the far end, which is what leaves the run at rest behind it.
+fn head(t: f32) -> f32 {
+    t.clamp(0.0, 1.0) * (1.0 + CREST)
+}
+
+/// A run that goes there and comes back, eased at both ends: 0 at each end of
+/// `p` and 1 in the middle of it. One breath, whether it is counted off the
+/// wall clock ([`breath`]) or off a beat of its own with a beginning (§11).
+pub fn swell(p: f32) -> f32 {
+    ease_in_out(1.0 - (2.0 * p.clamp(0.0, 1.0) - 1.0).abs())
 }
 
 /// Slow at both ends: what a breath does.
@@ -193,8 +216,7 @@ pub fn phase(now: Now, period: Duration) -> f32 {
 /// 1 halfway through it, 0 again at the next. A breath that only rose would
 /// snap back, and a snap is not a breath.
 pub fn breath(now: Now, period: Duration) -> f32 {
-    let there_and_back = 1.0 - (2.0 * phase(now, period) - 1.0).abs();
-    ease_in_out(there_and_back)
+    swell(phase(now, period))
 }
 
 /// A cycle that alternates rather than ramps: what pulses at 1 Hz. Everything
@@ -315,6 +337,46 @@ mod tests {
             assert_eq!(sweep(t, 0, 0), 0.0, "a run of no cells lights nothing");
             assert!((0.0..=1.0).contains(&sweep(t, 3, 4)), "and never outside");
         }
+    }
+
+    /// The same light, asked whether it has come at all: what reveals a row.
+    #[test]
+    fn a_sweep_reveals_its_run_from_the_near_end_and_leaves_none_of_it_behind() {
+        let shown = |t| (0..10).map(|c| swept(t, c, 10)).collect::<Vec<bool>>();
+        assert_eq!(
+            shown(0.0),
+            [
+                true, false, false, false, false, false, false, false, false, false
+            ],
+            "the near cell is revealed on the very first frame"
+        );
+        assert!(
+            shown(1.0).iter().all(|seen| *seen),
+            "and all of them by the end"
+        );
+        let count = |t| shown(t).iter().filter(|seen| **seen).count();
+        assert!(count(0.25) < count(0.5), "it comes left to right");
+        assert!(count(0.5) < count(0.75));
+        assert!(
+            count(0.5) > 5,
+            "the crest runs ahead of the middle: {:?}",
+            shown(0.5)
+        );
+        for t in [-1.0, 0.5, 2.0] {
+            assert!(!swept(t, 0, 0), "a run of no cells reveals nothing");
+        }
+    }
+
+    /// The shape of every breath, wherever its `p` came from.
+    #[test]
+    fn a_swell_rises_to_the_middle_of_its_run_and_comes_back() {
+        assert_eq!(swell(0.0), 0.0);
+        assert_eq!(swell(0.25), 0.5);
+        assert_eq!(swell(0.5), 1.0);
+        assert_eq!(swell(0.75), 0.5);
+        assert_eq!(swell(1.0), 0.0);
+        assert_eq!(swell(-1.0), 0.0, "clamped");
+        assert_eq!(swell(2.0), 0.0);
     }
 
     #[test]

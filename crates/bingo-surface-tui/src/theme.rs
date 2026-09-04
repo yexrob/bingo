@@ -645,6 +645,39 @@ pub fn comet(age: f32) -> Style {
     }
 }
 
+/// A border with light on it: the hairline it rests as at 0, bingo's own
+/// colour halfway up, and its glow at 1.
+///
+/// The opening's own ramp (§11). [`comet`] cools to `text` because that is
+/// what streaming words rest as, and a border rests as [`dim`] — so the light
+/// that draws one, and the breath it takes when the drawing is done, both run
+/// through here and both come home to the hairline rather than near it.
+pub fn hairline(warmth: f32) -> Style {
+    match current().colors {
+        Colors::True(palette) => Style::new().fg(through(
+            palette.dim,
+            palette.presence,
+            palette.glow,
+            settled(warmth),
+        )),
+        // Three stops and eight colours: the two ends and the one in the
+        // middle, which is the only warm colour either of them has.
+        _ => match settled(warmth) {
+            warm if warm >= 0.75 => glow(),
+            warm if warm >= 0.25 => presence(),
+            _ => dim(),
+        },
+    }
+}
+
+/// A ramp of three stops: nothing, half, whole.
+fn through(ground: Color, half: Color, whole: Color, level: f32) -> Color {
+    match level < 0.5 {
+        true => mix(ground, half, level * 2.0),
+        false => mix(half, whole, level * 2.0 - 1.0),
+    }
+}
+
 /// What wants a person, wherever it is said — the `N needs you` notice, a
 /// waiting child's row, its line in the switcher. It alternates with plain
 /// text once a second so the eye is drawn back to it, and rests on bingo's
@@ -707,62 +740,10 @@ pub fn warming(t: f32) -> Style {
     }
 }
 
-/// One pixel of the opening shot, by how much light stands on it and how much
-/// of that light came from the block (`docs/design/tui.md` §11).
-///
-/// Three stops and no new token: from the *ground* a surface with no light on
-/// it is, through `dim` to `text` for what the world's own light reaches, and
-/// through bingo's own `presence` to `glow` for what the block reached. The
-/// ground is `raised`, which is the one token that steps towards the
-/// terminal's own background in both palettes — dark on dark, paper on paper.
-///
-/// It has to reach the ground, because in a picture drawn out of half blocks
-/// the colour is the only thing carrying the brightness: a world whose
-/// darkest ink is `dim` is a world with a grey wash over it and no night in
-/// it at all.
-pub fn lit(level: f32, warm: f32) -> Style {
-    let (level, warm) = (settled(level), settled(warm));
-    match current().colors {
-        Colors::Plain => Style::new(),
-        Colors::Ansi => match (warm >= 0.5, level >= 0.5) {
-            (true, _) => presence(),
-            (false, true) => text(),
-            (false, false) => dim(),
-        },
-        Colors::True(palette) => Style::new().fg(mix(
-            through(palette.raised, palette.dim, palette.text, level),
-            through(palette.raised, palette.presence, palette.glow, level),
-            warm,
-        )),
-    }
-}
-
-/// A ramp of three stops: nothing, half, whole.
-fn through(ground: Color, half: Color, whole: Color, level: f32) -> Color {
-    match level < 0.5 {
-        true => mix(ground, half, level * 2.0),
-        false => mix(half, whole, level * 2.0 - 1.0),
-    }
-}
-
-/// One cell of the opening's half-block picture (§11): the pixel in the top
-/// half of the cell as ink, and the one in the bottom half as the ground
-/// behind it. Each is a [`lit`] pair — how much light, and how much of it came
-/// from the block.
-///
-/// A look with no room between two colours has no ground to paint either, so
-/// the cell keeps its ink and the terminal's own background stands.
-pub fn half(ink: (f32, f32), ground: (f32, f32)) -> Style {
-    let above = lit(ink.0, ink.1);
-    match lit(ground.0, ground.1).fg {
-        Some(colour) => above.bg(colour),
-        None => above,
-    }
-}
-
-/// Whether this run draws twenty-four bits. The opening is a picture of light
-/// — a truecolor mix at every pixel — and eight colours are a ramp with three
-/// steps in it, so it does not play at all where they are all there is (§11).
+/// Whether this run draws twenty-four bits. Every beat of the opening is a
+/// ramp — the tail behind the light, the mark cooling, the words settling — and
+/// eight colours are a ramp with three steps in it, so the piece does not play
+/// at all where they are all there is (§11).
 pub fn full_colour() -> bool {
     matches!(current().colors, Colors::True(_))
 }
@@ -1037,7 +1018,7 @@ mod tests {
                         // The storyboard turns a drawn cell back into pixels
                         // and into an escape, so it reads colours off the
                         // tokens rather than naming any (M69).
-                        | "intro/storyboard.rs"
+                        | "opening/storyboard.rs"
                         | "motion.rs"
                         | "motion/landing.rs"
                         | "painted.rs"
@@ -1203,8 +1184,18 @@ mod tests {
             // The ramp `presence` → glow: a live bullet, the fill of a bar,
             // and the light a sent line runs along the box's border — one
             // gradient, wherever §4 sanctions one.
-            ("pulse", &["transcript.rs", "view.rs", "views/progress.rs"]),
-            ("comet", &["transcript.rs", "view.rs"]),
+            (
+                "pulse",
+                &[
+                    // The mark igniting, which is the head's own light spent
+                    // on it (§11).
+                    "opening/frame.rs",
+                    "transcript.rs",
+                    "view.rs",
+                    "views/progress.rs",
+                ],
+            ),
+            ("comet", &["opening/frame.rs", "transcript.rs", "view.rs"]),
             ("landing", &["transcript.rs"]),
             ("cooling", &["transcript.rs"]),
             ("fading", &["status.rs"]),
@@ -1215,15 +1206,9 @@ mod tests {
                 // thing wants a person, and no longer the exception.
                 &["layers.rs", "roster.rs", "status.rs", "transcript.rs"],
             ),
-            // Every pixel of the opening shot, and nothing else on the
-            // surface: the ramp `dim` → `text` for what the world's own light
-            // reaches and `presence` → glow for what the block does (§11). The
-            // caret the block becomes on its way down is the same ink at its
-            // brightest.
-            ("lit", &["intro/settle.rs", "intro/shade.rs"]),
-            // The two pixels stacked in one cell of that picture: the top one
-            // as ink and the bottom one as the ground behind it (§11).
-            ("half", &["intro/shade.rs"]),
+            // The one border the light draws, and the one breath it takes
+            // when the drawing is done (§11).
+            ("hairline", &["opening/frame.rs"]),
             // Highlighted code reaches the table through one door, so no view
             // has to know that a keyword and the mode badge share a colour.
             ("ink", &["highlight.rs"]),
@@ -1621,6 +1606,36 @@ mod tests {
         });
     }
 
+    /// The opening's own ramp: three stops, and both ends of it are somewhere
+    /// the border already rests — the hairline at one end and the glow the
+    /// light's head wears at the other (§11).
+    #[test]
+    fn a_border_with_light_on_it_runs_from_its_own_hairline_to_the_glow() {
+        for look in [dark(), light()] {
+            with(look, || {
+                assert_eq!(hairline(0.0), dim(), "at rest it is the hairline");
+                assert_eq!(hairline(0.5), presence(), "halfway, bingo's colour");
+                assert_eq!(hairline(1.0), glow(), "and under the head, its glow");
+                assert_eq!(hairline(-1.0), dim(), "clamped");
+                assert_eq!(hairline(2.0), glow());
+                assert_eq!(hairline(f32::NAN), dim(), "and never a colour of NaN");
+                let warming = hairline(0.25).fg.expect("a colour between the two");
+                assert_ne!(warming, dim().fg.expect("the hairline's own"));
+                assert_ne!(warming, presence().fg.expect("bingo's own"));
+            });
+        }
+        assert_eq!(hairline(0.0), dim(), "and the eight take the three stops");
+        assert_eq!(hairline(0.5), presence());
+        assert_eq!(hairline(1.0), glow());
+    }
+
+    fn light() -> Theme {
+        Theme {
+            colors: Colors::True(LIGHT),
+            glyphs: &UNICODE,
+        }
+    }
+
     #[test]
     fn a_notice_arrives_out_of_dim_and_leaves_into_it() {
         let level = bingo_sdk::Level::Error;
@@ -1635,7 +1650,13 @@ mod tests {
     #[test]
     fn nothing_that_moves_spends_a_colour_under_no_colour() {
         with(no_colour(), || {
-            for style in [breath(1.0), pulse(1.0), comet(0.0), warming(1.0)] {
+            for style in [
+                breath(1.0),
+                pulse(1.0),
+                comet(0.0),
+                warming(1.0),
+                hairline(1.0),
+            ] {
                 assert_eq!(style, Style::new());
             }
             assert_eq!(fading(bingo_sdk::Level::Error, 1.0), Style::new());

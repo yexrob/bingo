@@ -110,11 +110,10 @@ pub struct Rows<'a> {
     /// (M63). Terminal-side, like the fold and the scroll: it is a fact about
     /// this machine, not about the conversation.
     pub update: Option<&'a str>,
-    /// The frame the opening is on, while it is playing (M70). It is drawn in
-    /// the welcome box's place — the piece plays *inside* that box and lands on
-    /// it — and it is rendered off the draw thread, so what is here is the
-    /// newest one the run has, never one this frame waited for.
-    pub opening: Option<&'a [Line<'static>]>,
+    /// Which second of the opening this frame is (M70, M72): the piece plays
+    /// *inside* the welcome box and lands on it, so the box is derived from the
+    /// second rather than drawn twice. Nothing at all once it is over.
+    pub opening: Option<f32>,
 }
 
 impl<'a> Rows<'a> {
@@ -150,8 +149,8 @@ impl<'a> Rows<'a> {
         Self { update, ..self }
     }
 
-    /// The frame the opening is on, drawn in that box's place while it plays.
-    pub fn opening(self, opening: Option<&'a [Line<'static>]>) -> Self {
+    /// Which second of the opening this frame is, while it plays.
+    pub fn opening(self, opening: Option<f32>) -> Self {
         Self { opening, ..self }
     }
 }

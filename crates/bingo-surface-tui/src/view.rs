@@ -482,7 +482,7 @@ fn render_transcript(
             now,
         )
         .saying(ui.update.as_deref())
-        .opening(ui.intro.as_ref().and_then(|intro| intro.rows(area.width))),
+        .opening(ui.intro.as_ref().map(|intro| intro.seconds(now))),
         live,
     );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
