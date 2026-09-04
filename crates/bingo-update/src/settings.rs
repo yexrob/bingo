@@ -2,8 +2,9 @@
 //!
 //! It is claimed by the surface that says what the check found, so a person
 //! who turns it off is not told about an unknown key; the binary reads the
-//! answer out of the settings layers, as it does for every other plugin whose
-//! key decides something before a host exists.
+//! answer out of the settings layers and hands it to that surface with the
+//! rest of its arguments, as it does for `demoUi` — every key that decides
+//! something before a host exists is read there.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -20,8 +21,10 @@ pub struct Settings {
     pub update: Update,
 }
 
-/// A typo here would leave a check running that a person asked to stop, so an
-/// unknown key is a startup failure rather than a silence.
+/// `update` is claimed by the surface that says what the check found, so a
+/// misspelling of *it* is reported as an unknown setting like any other. A
+/// misspelling of what is inside it leaves the check where it was — on —
+/// which is the safe way for this one setting to be wrong.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Update {
@@ -79,12 +82,16 @@ mod tests {
         ));
     }
 
-    /// The kernel validates a claimed slice against this schema, so a typo
-    /// inside `update` is a startup failure and never a silent default.
+    /// A misspelling inside the slice is not a setting, and leaves the check
+    /// on rather than half-reading the object it is in.
     #[test]
-    fn an_unknown_key_inside_the_slice_is_refused() {
-        let refused = serde_json::from_value::<Settings>(json!({"update": {"chek": false}}));
-        assert!(refused.is_err(), "a typo is not a setting");
+    fn an_unknown_key_inside_the_slice_is_not_a_setting() {
+        let typo = json!({"update": {"chek": false}});
+        assert!(
+            serde_json::from_value::<Settings>(typo.clone()).is_err(),
+            "a typo is not a setting"
+        );
+        assert!(wanted(&typo), "and the check stays on");
         assert!(
             schema().as_value().is_object(),
             "the claim carries a schema"
