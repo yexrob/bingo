@@ -161,6 +161,15 @@ impl Terminal {
         let home = tempfile::tempdir().unwrap();
         let script = home.path().join("script.json");
         std::fs::write(&script, script_text).unwrap();
+        // The suite reaches nothing outward. A run with a terminal asks once
+        // a day whether a newer release is out (M63); a test's run says no,
+        // as it says no to every other outward call.
+        std::fs::create_dir_all(home.path().join(".bingo")).unwrap();
+        std::fs::write(
+            home.path().join(".bingo/settings.json"),
+            r#"{ "update": { "check": false } }"#,
+        )
+        .unwrap();
 
         let pty = native_pty_system()
             .openpty(PtySize {

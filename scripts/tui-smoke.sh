@@ -24,7 +24,10 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
-mkdir -p "$WORK/home" "$WORK/cwd"
+mkdir -p "$WORK/home/.bingo" "$WORK/cwd"
+# The smoke reaches nothing outward. A run with a terminal asks once a day
+# whether a newer release is out (M63); this one says no.
+printf '{ "update": { "check": false } }' >"$WORK/home/.bingo/settings.json"
 
 pane() { tmux -L "$SOCKET" capture-pane -p -t "$SESSION"; }
 keys() { tmux -L "$SOCKET" send-keys -t "$SESSION" "$@"; }

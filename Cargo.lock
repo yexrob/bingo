@@ -256,11 +256,13 @@ dependencies = [
  "bingo-tool-bash",
  "bingo-tool-fs",
  "bingo-tool-web",
+ "bingo-update",
  "clap",
  "futures",
  "jiff",
  "portable-pty",
  "process-wrap 10.0.0",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",
@@ -703,6 +705,7 @@ dependencies = [
  "bingo-loopback",
  "bingo-pictures",
  "bingo-sdk",
+ "bingo-update",
  "crossterm",
  "futures",
  "ignore",
@@ -712,6 +715,7 @@ dependencies = [
  "nucleo-matcher",
  "pulldown-cmark",
  "ratatui",
+ "reqwest",
  "serde_json",
  "similar 3.2.0",
  "syntect",
@@ -799,6 +803,20 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "bingo-update"
+version = "0.4.2"
+dependencies = [
+ "jiff",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

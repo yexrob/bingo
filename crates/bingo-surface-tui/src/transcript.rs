@@ -103,6 +103,10 @@ pub struct Rows<'a> {
     /// conversation is read — from a member's, where none of it belongs
     /// (ADR-0034).
     pub driver: Driver,
+    /// A newer release than this build, when the start-up check found one
+    /// (M63). Terminal-side, like the fold and the scroll: it is a fact about
+    /// this machine, not about the conversation.
+    pub update: Option<&'a str>,
 }
 
 impl<'a> Rows<'a> {
@@ -128,7 +132,13 @@ impl<'a> Rows<'a> {
             linked,
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
+            update: None,
         }
+    }
+
+    /// What the welcome box has to add: the release this build could become.
+    pub fn saying(self, update: Option<&'a str>) -> Self {
+        Self { update, ..self }
     }
 }
 
@@ -984,7 +994,7 @@ mod tests {
     }
 
     fn rendered_with(state: &SessionState, folds: &Folds, commands: &[CommandSpec]) -> Vec<String> {
-        let welcomed = crate::welcome::lines(state, 60).len();
+        let welcomed = crate::welcome::lines(state, 60, None).len();
         let mut blocks = crate::blocks::Blocks::default();
         let pictures = Decoded::default();
         let linked = Linked::default();
@@ -1647,7 +1657,7 @@ mod tests {
                 item: assistant("itm_1", &"word ".repeat(60), ItemStatus::Completed),
             },
         )]);
-        let welcomed = crate::welcome::lines(&state, 160).len();
+        let welcomed = crate::welcome::lines(&state, 160, None).len();
         let mut blocks = crate::blocks::Blocks::default();
         let folds = Folds::new();
         let pictures = Decoded::default();

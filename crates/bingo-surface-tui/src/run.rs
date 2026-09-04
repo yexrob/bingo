@@ -27,6 +27,8 @@ use tokio::sync::mpsc;
 mod showing;
 /// A line on its way out of the composer, and the pictures it named.
 mod submit;
+/// Whether a newer release is out, asked once at start (M63).
+mod updates;
 
 use crate::clock::{self, Now};
 use crate::effect::Effect;
@@ -84,6 +86,8 @@ enum Reply {
     /// One picture fitted to the cells it was drawn into (M61): a decode and a
     /// resize, done on a blocking thread so no frame paid for it.
     Fitted(Box<decoded::Fitted>),
+    /// A newer release than this build, as the start-up check found it (M63).
+    Update(String),
     Failed(KernelError),
 }
 
@@ -266,6 +270,7 @@ async fn attach(
         exit: None,
     };
     run.fetch_catalogs();
+    run.ask_for_updates(&opts.args);
     crate::opening::notices(&mut run.ui, Instant::now());
     if let Some(prompt) = opts.prompt {
         run.effect(Effect::Submit(bingo_sdk::Input::text(
@@ -775,6 +780,25 @@ impl Run {
         self.fetch_catalogue(source, kind);
     }
 
+    /// Whether a newer release is out — asked once a day, and only by a run
+    /// with a welcome box to say it in (M63).
+    fn ask_for_updates(&self, args: &Value) {
+        if !updates::wanted(args) || !crate::welcome::wanted(self.session.tree.root()) {
+            return;
+        }
+        updates::spawn(self.replies.clone(), self.data_dir.clone());
+    }
+
+    /// The check came back. The box says it where the box is still on screen;
+    /// where it has scrolled away, the status line says it once instead.
+    fn told_of(&mut self, version: String) {
+        if self.ui.painted.borrow().top > 0 {
+            let said = format!("↑ v{version} is out · bingo update");
+            self.ui.notify(Level::Info, said, Instant::now());
+        }
+        self.ui.update = Some(version);
+    }
+
     fn spawn(&self, call: impl Future<Output = Result<Reply, KernelError>> + Send + 'static) {
         let replies = self.replies.clone();
         tokio::spawn(async move {
@@ -805,6 +829,7 @@ impl Run {
             Reply::Mentioned(waiting) => self.mentioned(*waiting),
             Reply::Linked(answer) => self.ui.linked.answered(*answer),
             Reply::Fitted(fitted) => self.ui.decoded.answered(*fitted),
+            Reply::Update(version) => self.told_of(version),
             Reply::Failed(error) => {
                 self.ui.opening = false;
                 self.ui.notify(Level::Error, error.message, Instant::now());
@@ -1642,6 +1667,36 @@ mod tests {
         // scratch directory, not beside the crate's sources.
         run.data_dir = dir.path().to_path_buf();
         (dir, run, session, waiting)
+    }
+
+    /// What the start-up check found, folded in the way the loop folds it.
+    fn told_of_update(top: usize) -> Run {
+        let mut run = idle(Instant::now());
+        run.ui.painted.borrow_mut().top = top;
+        run.reply(Reply::Update("0.5.0".to_string()), &mut None);
+        run
+    }
+
+    #[test]
+    fn a_newer_release_reaches_the_welcome_box() {
+        let run = told_of_update(0);
+        assert_eq!(run.ui.update.as_deref(), Some("0.5.0"));
+        assert!(
+            run.ui.notices.is_empty(),
+            "the box is on screen, so nothing else says it"
+        );
+    }
+
+    /// The check comes back seconds after the start, and a run that opened on
+    /// a long transcript has scrolled the box away by then. The status line
+    /// says it once instead — the box still carries it for a scroll back up.
+    #[test]
+    fn a_welcome_box_that_has_scrolled_away_is_said_in_the_status_line() {
+        let run = told_of_update(12);
+        assert_eq!(run.ui.update.as_deref(), Some("0.5.0"));
+        let said = run.ui.notice().expect("a notice");
+        assert_eq!(said.level, Level::Info);
+        assert_eq!(said.text, "↑ v0.5.0 is out · bingo update");
     }
 
     /// The hop the loop makes: the work a frame owed is done on a task of its

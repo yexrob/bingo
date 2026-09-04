@@ -1,0 +1,37 @@
+[package]
+name = "bingo-update"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Whether a newer release is out, and how this binary becomes it"
+
+# A library (ADR-0012 §1, ADR-0042 §2): registers nothing, any plugin may
+# depend on it. It reaches no network of its own — the fetch is handed in
+# (ADR-0043 §2) — so it cross-checks for Windows without a C toolchain, which
+# is what keeps the rename dance and `tar.exe` under a compiler locally.
+[package.metadata.bingo]
+tier = "library"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The release the API answers with, and the stamp on disk.
+serde.workspace = true
+serde_json.workspace = true
+# The claimed settings slice's schema (`update.check`), as every plugin's is.
+schemars.workspace = true
+# When this machine last asked, in the spelling the rest of the tree writes.
+jiff.workspace = true
+thiserror.workspace = true
+# A check that fails says nothing to a person and one line to a log.
+tracing.workspace = true
+
+[dev-dependencies]
+# The bricks' orchestration is async because the fetch is; the runtime is a
+# test's, never a library's.
+tokio.workspace = true
+tempfile.workspace = true

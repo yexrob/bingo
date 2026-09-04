@@ -218,7 +218,7 @@ impl Blocks {
             self.blocks.clear();
             self.width = rows.width;
         }
-        self.head = welcome::lines(state, rows.width);
+        self.head = welcome::lines(state, rows.width, rows.update);
         let mut kept = 0;
         let mut previous: Option<&Item> = None;
         for item in &state.items {
@@ -514,7 +514,7 @@ mod tests {
 
     /// The rows the welcome box takes at the top, plus the blank under it.
     fn head(state: &SessionState, width: usize) -> usize {
-        let rows = welcome::lines(state, width).len();
+        let rows = welcome::lines(state, width, None).len();
         rows + usize::from(rows > 0)
     }
 

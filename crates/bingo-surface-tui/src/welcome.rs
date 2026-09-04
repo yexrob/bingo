@@ -10,16 +10,24 @@ use crate::{paths, theme, wrap};
 
 const GREETING: &str = "Welcome to bingo!";
 const HELP: &str = "/help for help · /login codex to use a subscription";
+/// What a person types to become the release the check found (M63).
+const BECOME: &str = "bingo update";
+
+/// Whether this surface opened the session, and so has a box to say things
+/// in. The start-up check asks the same question before it asks anything of
+/// the network: a run with nowhere to put an answer does not go looking.
+pub fn wanted(state: &SessionState) -> bool {
+    state.summary.parent.is_none() && state.summary.driver == Driver::Model
+}
 
 /// The box, or nothing at all for a session this surface did not open.
-pub fn lines(state: &SessionState, width: usize) -> Vec<Line<'static>> {
-    if state.summary.parent.is_some() || state.summary.driver != Driver::Model {
+pub fn lines(state: &SessionState, width: usize, update: Option<&str>) -> Vec<Line<'static>> {
+    if !wanted(state) {
         return Vec::new();
     }
-    boxed(
-        vec![greeting(), Line::default(), help(), cwd(&state.summary.cwd)],
-        width,
-    )
+    let mut body = vec![greeting(), Line::default(), help(), cwd(&state.summary.cwd)];
+    body.extend(update.map(newer));
+    boxed(body, width)
 }
 
 fn greeting() -> Line<'static> {
@@ -32,6 +40,16 @@ fn greeting() -> Line<'static> {
 /// Under the mark, as everything the box says after the greeting is.
 fn help() -> Line<'static> {
     Line::from(Span::styled(format!("  {HELP}"), theme::dim()))
+}
+
+/// A release this build could become, under the rest: the version in the
+/// spark's own colour, and the words that fetch it.
+fn newer(version: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ↑ ".to_string(), theme::dim()),
+        Span::styled(format!("v{version}"), theme::presence()),
+        Span::styled(format!(" is out · {BECOME}"), theme::dim()),
+    ])
 }
 
 fn cwd(cwd: &str) -> Line<'static> {
@@ -80,7 +98,7 @@ mod tests {
     use crate::test_support::{child_summary, folded, log_summary, state};
 
     fn drawn(state: &SessionState, width: usize) -> Vec<String> {
-        lines(state, width)
+        lines(state, width, None)
             .iter()
             .map(ToString::to_string)
             .collect()
@@ -104,16 +122,33 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_release_is_one_more_row_under_the_help_line() {
+        let plain = drawn(&state(), 60);
+        let told = lines(&state(), 60, Some("0.5.0"))
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(told.len(), plain.len() + 1, "one row, and no other change");
+        assert!(
+            told[5].contains("↑ v0.5.0 is out · bingo update"),
+            "{:?}",
+            told[5]
+        );
+        for row in &told {
+            assert_eq!(row.width(), 60, "{row}");
+        }
+    }
+
+    #[test]
     fn a_session_this_surface_did_not_open_is_not_welcomed() {
         let mut child = state();
         child.summary = child_summary("reviewer");
-        assert!(lines(&child, 60).is_empty(), "a sub-session joins");
+        assert!(!wanted(&child), "a sub-session joins");
+        assert!(lines(&child, 60, None).is_empty());
 
         let mut room = folded(vec![]);
         room.summary = log_summary("#design");
-        assert!(
-            lines(&room, 60).is_empty(),
-            "a room is not a session of ours"
-        );
+        assert!(!wanted(&room), "a room is not a session of ours");
+        assert!(lines(&room, 60, Some("0.5.0")).is_empty());
     }
 }
