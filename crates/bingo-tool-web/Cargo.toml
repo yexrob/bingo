@@ -13,6 +13,9 @@ workspace = true
 
 [dependencies]
 bingo-sdk.workspace = true
+# M50: a picture behind a URL is read by the library crate (ADR-0041 §1), the
+# one place bytes become the picture a provider accepts. No decoder here.
+bingo-pictures.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 reqwest.workspace = true
@@ -35,6 +38,8 @@ regex.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
+# The pictures the tests serve, drawn rather than pasted in as bytes.
+bingo-pictures = { workspace = true, features = ["testing"] }
 wiremock.workspace = true
 # `tokio::time::pause`, so the 20s search bound costs a test no wall time.
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
