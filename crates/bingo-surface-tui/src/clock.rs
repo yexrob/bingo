@@ -149,8 +149,24 @@ pub fn sweep(t: f32, column: usize, width: usize) -> f32 {
         return 0.0;
     }
     let at = (column as f32 + 0.5) / width as f32;
-    let head = t.clamp(0.0, 1.0) * (1.0 + CREST);
-    (1.0 - (at - head).abs() / CREST).clamp(0.0, 1.0)
+    (1.0 - (at - head(t)).abs() / CREST).clamp(0.0, 1.0)
+}
+
+/// Whether the light of a [`sweep`] has reached a cell at all.
+///
+/// What a run the light *reveals* asks — the opening's own rows, which are
+/// blank until it arrives (§11) — where a run it merely lights asks how
+/// brightly ([`sweep`]). It answers for the cell's near edge rather than its
+/// middle, so the first cell is revealed on the first frame, which is the
+/// frame `sweep` already lights it in.
+pub fn swept(t: f32, column: usize, width: usize) -> bool {
+    width > 0 && column as f32 / width as f32 <= head(t)
+}
+
+/// Where the crest of a [`sweep`] stands, as a share of the run it crosses. It
+/// leaves past the far end, which is what leaves the run at rest behind it.
+fn head(t: f32) -> f32 {
+    t.clamp(0.0, 1.0) * (1.0 + CREST)
 }
 
 /// Slow at both ends: what a breath does.
@@ -314,6 +330,34 @@ mod tests {
         for t in [-1.0, 0.5, 2.0] {
             assert_eq!(sweep(t, 0, 0), 0.0, "a run of no cells lights nothing");
             assert!((0.0..=1.0).contains(&sweep(t, 3, 4)), "and never outside");
+        }
+    }
+
+    /// The same light, asked whether it has come at all: what reveals a row.
+    #[test]
+    fn a_sweep_reveals_its_run_from_the_near_end_and_leaves_none_of_it_behind() {
+        let shown = |t| (0..10).map(|c| swept(t, c, 10)).collect::<Vec<bool>>();
+        assert_eq!(
+            shown(0.0),
+            [
+                true, false, false, false, false, false, false, false, false, false
+            ],
+            "the near cell is revealed on the very first frame"
+        );
+        assert!(
+            shown(1.0).iter().all(|seen| *seen),
+            "and all of them by the end"
+        );
+        let count = |t| shown(t).iter().filter(|seen| **seen).count();
+        assert!(count(0.25) < count(0.5), "it comes left to right");
+        assert!(count(0.5) < count(0.75));
+        assert!(
+            count(0.5) > 5,
+            "the crest runs ahead of the middle: {:?}",
+            shown(0.5)
+        );
+        for t in [-1.0, 0.5, 2.0] {
+            assert!(!swept(t, 0, 0), "a run of no cells reveals nothing");
         }
     }
 
