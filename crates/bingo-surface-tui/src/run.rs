@@ -2082,6 +2082,100 @@ mod tests {
         );
     }
 
+    /// M61 brick 3, in bytes: the tree switcher opened over a picture and
+    /// closed again writes **no graphics at all**.
+    ///
+    /// The list is drawn over the transcript, so the placeholder cells under
+    /// it are written over and written back — but the terminal is holding the
+    /// picture the whole time (`6dffe3a8`) and nothing on this path asks it to
+    /// hold it again. Whatever a person sees when the list goes, it is not
+    /// bytes this surface sent.
+    #[tokio::test]
+    async fn the_switcher_opened_over_a_picture_writes_no_graphics() {
+        let read = tool(
+            "itm_1",
+            "Read",
+            serde_json::json!({ "file_path": "shot.png" }),
+            Some(bingo_sdk::ToolOutput {
+                parts: vec![bingo_sdk::ContentPart::Image(bingo_pictures::testing::png(
+                    100, 200,
+                ))],
+                display: None,
+                is_error: false,
+            }),
+            ItemStatus::Completed,
+        );
+        let (mut run, mut waiting) =
+            replying(folded(vec![frame(1, Event::ItemCompleted { item: read })]));
+        // A store with rows in it, so the list that comes down is a list.
+        let stored: Vec<SessionSummary> = (0..4)
+            .map(|at| stored_summary(&format!("ses_{at}"), &format!("scout {at}")))
+            .collect();
+        run.host = TestHost::with_stored(vec![], stored).0;
+        let mut recorder = Recorder::default();
+        // Still, so the list is whole on the frame it opens on rather than a
+        // quarter of the way down it.
+        let now = crate::test_support::still(crate::test_support::scene().1);
+        let drawing = crate::graphics::drawing();
+        crate::graphics::with(drawing, || {
+            run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
+        });
+        settle(&mut run, &mut waiting).await;
+        crate::graphics::with(drawing, || {
+            run.paint(&mut recorder, Wake::Frame, now)
+                .expect("the picture");
+        });
+        assert_eq!(recorder.places.len(), 1, "the terminal has the picture");
+        let cells = placeholders(recorder.last());
+        assert!(cells > 0, "and its cells are drawn:\n{}", recorder.last());
+
+        // ctrl+g: the list comes down over the transcript, and what the store
+        // holds fills it.
+        run.terminal_event(Term::Key(ctrl('g')));
+        settle(&mut run, &mut waiting).await;
+        crate::graphics::with(drawing, || {
+            run.paint(&mut recorder, Wake::Frame, now)
+                .expect("the list");
+        });
+        assert!(run.ui.layer.showing(), "the switcher is open");
+        assert!(
+            placeholders(recorder.last()) < cells,
+            "and it covers cells the picture had:\n{}",
+            recorder.last()
+        );
+        assert_eq!(
+            recorder.places.len(),
+            1,
+            "nothing went out for it: {:?}",
+            places(&recorder)
+        );
+
+        // esc: the list goes, and the cells under it are written back.
+        run.terminal_event(Term::Key(key(KeyCode::Esc)));
+        crate::graphics::with(drawing, || {
+            run.paint(&mut recorder, Wake::Frame, now)
+                .expect("back again");
+        });
+        assert!(!run.ui.layer.showing());
+        assert_eq!(
+            placeholders(recorder.last()),
+            cells,
+            "every cell is back:\n{}",
+            recorder.last()
+        );
+        assert_eq!(
+            recorder.places.len(),
+            1,
+            "and still nothing went out: {:?}",
+            places(&recorder)
+        );
+    }
+
+    /// How many of a screen's cells are a picture's placeholders.
+    fn placeholders(screen: &str) -> usize {
+        screen.matches(crate::graphics::kitty::PLACEHOLDER).count()
+    }
+
     /// A picture an answer's own words named, through the whole seam (M51):
     /// the first frame draws the chip and sends the loop after the file, the
     /// read comes back, the frame after it measures the picture and owes the
