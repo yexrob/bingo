@@ -86,18 +86,21 @@ config, `docs/design/tui.md`.
 
 ## Exit criteria
 
-- [ ] `version`, `release`, `asset`, `checksums`, `stamp` bricks each
+- [x] `version`, `release`, `asset`, `checksums`, `stamp` bricks each
       have fixture tests; the four asset names match `release.yml`.
-- [ ] A stamp younger than 24 h is not asked again (counting fetch
+- [x] A stamp younger than 24 h is not asked again (counting fetch
       seam); a failed fetch leaves the stamp as it was.
-- [ ] Welcome box snapshot with the row, and without it; the notice
+- [x] Welcome box snapshot with the row, and without it; the notice
       path tested.
-- [ ] `bingo update --check` black-box: exit 0, stdout is the two
+- [x] `bingo update --check` black-box: exit 0, stdout is the two
       versions, nothing else; with a fake API on loopback (the pty
       tests already start local servers) the full update replaces a
       copy of the binary and the copy prints the new version.
-- [ ] All gates; `cargo check -p bingo-update -p bingo --all-targets
-      --target x86_64-pc-windows-msvc` (rename dance, `tar.exe`).
+- [x] All gates; `cargo check -p bingo-update --all-targets --target
+      x86_64-pc-windows-msvc` passes (rename dance, `tar.exe`). `-p
+      bingo` alongside it does not: `aws-lc-sys` wants `windows.h`
+      (ADR-0041's note). Keeping the library free of `reqwest` is what
+      bought the cross-check of the platform code back.
 - [ ] Hands-on: appended by the parent.
 
 ## Non-goals
@@ -119,3 +122,67 @@ downloaded binary may be blocked by Gatekeeper on first run if the
 release is unsigned — try it hands-on and record what happens; if it
 is blocked, `xattr -d com.apple.quarantine` in the update path is the
 fix, done by us, not asked of the person.
+
+## Verified
+
+2026-09-04, worker on `m63-update` (`-j 2`, from the worktree root).
+
+**The plan's two dependency assumptions did not hold, and the hard rule
+won.** `semver` is in `Cargo.lock` only as a *build* edge
+(`rustc_version` under `derive_more`) and `sha2` only as a *dev* edge
+(`portable-pty` → `termwiz`); `cargo tree -i <name> -e normal` prints
+"nothing to print" for both, and `budget.sh` counts the **normal**
+tree. Taking either as a dependency would have cost a crate each, over
+the "+1 for the member and no more" the brief set. So the version
+comparison is three numbers (all a `vX.Y.Z` tag is) and the digest is
+`sha256.rs`, checked against FIPS 180-4's own vectors plus six block
+boundaries measured with `shasum -a 256`. `aws-lc-rs` was refused for a
+second reason: it builds C, which would have taken the Windows
+cross-check with it. Recorded in ADR-0043 §3 and in `budget.toml`.
+
+```
+$ cargo fmt --all -- --check                       # silent
+$ cargo check --workspace --all-targets --locked -j 2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.69s
+$ cargo clippy --workspace --all-targets --locked -j 2 -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.56s
+$ cargo test --workspace --locked -j 2 --no-fail-fast
+    82 binaries, every one `test result: ok`; 0 failed, 0 FAILED, no
+    `failures:` block. bingo-update 50 passed; bingo-surface-tui 900
+    passed; the cli suite 188 passed.
+$ scripts/check_discipline.sh
+    dependency direction ok / kernel names no tool / cohesion ok
+    discipline ok
+    (no new warning: `fn run` in main.rs was brought back under 60 by
+     folding the two `Work::Session` arms and lifting the notices loop
+     into `report`; `ui.rs` at 703 lines joins twenty-odd files already
+     over the 700 soft line.)
+$ scripts/budget.sh
+    dependencies (unique, normal): 333 (max  333)
+    warm cargo check -p bingo-core: 0s (max  20s)
+    relink isolation: touching the TUI recompiled 0 crates for core
+    budget ok
+    (`target/debug: 10 GB` warns, as it did before this branch.)
+$ cargo deny check
+    advisories ok, bans ok, licenses ok, sources ok
+$ cargo check -p bingo-update --all-targets --locked -j 2 \
+      --target x86_64-pc-windows-msvc
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.97s
+$ cargo check -p bingo-update -p bingo --all-targets --locked -j 2 \
+      --target x86_64-pc-windows-msvc
+    error occurred in cc-rs: … aws-lc-sys … jitterentropy-base-windows.h:49
+    fatal error: 'windows.h' file not found
+```
+
+The end-to-end black-box (`crates/bingo/tests/cli/update.rs`) serves a
+release on the loopback with wiremock, copies this binary into a temp
+directory, and runs `bingo update` against it: the copy comes back
+`bingo 9.9.9`, with no `bingo.old` and no `bingo.new` beside it. Its
+archive is a `tar.gz` holding a shell script, so that half is
+`#[cfg(unix)]`; the zip half is Windows' and is compiled, not run.
+
+Not verified here, and left for the hands-on: a real GitHub release
+(this machine's address was already over the API's 60/h unauthenticated
+limit while the fixture was being written, which is itself the argument
+for the daily stamp), macOS Gatekeeper on an unsigned downloaded
+binary, and `tar.exe` unpacking the zip on Windows.
