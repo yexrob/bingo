@@ -91,15 +91,15 @@ settings fixture if a key is added.
 
 ## Exit criteria
 
-- [ ] Fixture round-trips for a memory file and an index; a name that
+- [x] Fixture round-trips for a memory file and an index; a name that
       is not the file name is refused.
-- [ ] The prompt carries both indexes and the teaching paragraph
+- [x] The prompt carries both indexes and the teaching paragraph
       (snapshot), never a body.
-- [ ] The extractor writes one file per fact and one index line;
+- [x] The extractor writes one file per fact and one index line;
       a repeated fact writes nothing.
-- [ ] The old single file migrates once and is gone afterwards.
-- [ ] `/memory` lists both scopes.
-- [ ] All gates; the Windows cross-check for `bingo-context`.
+- [x] The old single file migrates once and is gone afterwards.
+- [x] `/memory` lists both scopes.
+- [x] All gates; the Windows cross-check for `bingo-context`.
 - [ ] Hands-on: appended by the parent.
 
 ## Non-goals
@@ -118,3 +118,37 @@ picture cache does, and a re-read before each write. The extractor
 may produce a slug that collides with a hand-written memory of a
 different meaning: the extractor never overwrites, so the worst case
 is a lost extraction, which is the cheap side.
+
+## Verified
+
+2026-09-04, branch `m64-memory`. ADR-0044; ADR-0006 §7 amended in place.
+
+Deviations from the plan, both subtractions:
+`memory.rs` split into seven files, not four — `dir.rs` (where a scope is)
+and `store.rs` (what a scope holds) are two nouns, and `teach.rs` and
+`command.rs` are two more. `index::without` was written, had no caller, and
+was deleted: a memory that turned out wrong leaves the index by the model's
+`Edit`, which is the same door it came in by.
+
+```
+$ cargo fmt --all -- --check
+fmt: clean
+$ cargo check --workspace --all-targets --locked -j 2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.98s
+$ cargo clippy --workspace --all-targets --locked -j 2 -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.54s
+$ cargo test --workspace --locked -j 2 --no-fail-fast
+81 suites, 3892 passed, 0 failed
+    bingo_context: 109 passed        cli (black box): 184 passed
+$ scripts/check_discipline.sh
+dependency direction ok / kernel names no tool / cohesion ok
+discipline ok          (no new warning: every file and function is under)
+$ scripts/budget.sh
+dependencies (unique, normal): 332 (max  332)
+budget ok
+$ cargo deny check
+advisories ok, bans ok, licenses ok, sources ok
+$ cargo check -p bingo-context --all-targets --locked -j 2 \
+    --target x86_64-pc-windows-msvc
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
