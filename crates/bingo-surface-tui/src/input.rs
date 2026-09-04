@@ -1935,8 +1935,9 @@ mod tests {
 
     // ---- one list, two doors --------------------------------------------
 
-    /// `↓` means two things and a query changes neither: on an empty composer
-    /// it opens the list, and inside it it walks — the rows the query left.
+    /// `↓` means two things and the box holding a query changes neither: on an
+    /// empty box it opens the list, and inside it it walks — the rows the
+    /// query left — while the line a person typed stays where it was put.
     #[test]
     fn down_opens_the_list_and_then_walks_what_the_query_left() {
         let tree = with_agents();
@@ -1944,6 +1945,7 @@ mod tests {
         press_tree(&mut ui, &tree, key(KeyCode::Down), now);
         // `o` is in `project` and in `scout` and in neither's way.
         typing(&mut ui, &tree, "o", now);
+        assert_eq!(ui.composer.text(), "o", "the box is holding the query");
         assert_eq!(selected(&ui), at(0), "the root is still the row in view");
         assert_eq!(
             walked_to(&mut ui, &tree, key(KeyCode::Down), now),
@@ -1951,6 +1953,11 @@ mod tests {
             "and the step goes to the next row the query left, not the tree's"
         );
         assert_eq!(selected(&ui), at(1));
+        assert_eq!(
+            ui.composer.text(),
+            "o",
+            "the walk is the list's; the box keeps the line it was given"
+        );
     }
 
     /// `↓` on an empty composer opens the same list `ctrl+g` does, and asks
