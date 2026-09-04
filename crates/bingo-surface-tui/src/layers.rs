@@ -2,7 +2,8 @@
 //!
 //! A **card** is the dialog form — a permission, a question, the switcher: a
 //! bordered box under the row that asked, with the only bright border on the
-//! screen, revealed top-down over three frames. A **sheet** is the whole frame
+//! screen, revealed top-down over three frames. The form card is the one
+//! exception, a band between two dim rules ([`Shape`]). A **sheet** is the whole frame
 //! for a moment — help, the panel, the resume picker — sliding up from the
 //! composer over four. Behind either, the world dims.
 //!
@@ -107,17 +108,56 @@ pub fn hush(frame: &mut Frame, area: Rect) {
     }
 }
 
-/// A bordered box at `at`, revealed top-down. Its top edge lands first, so it
-/// grows downwards into the transcript and nothing under it moves. While the
-/// kernel's guard is down its rows are dim — the border is bright, because the
+/// What a card is drawn as. A box is every card's shape and §2's law — the
+/// only bright border on the screen. A **band** is the form card's alone, at
+/// the user's word on 2026-09-04 (design §2, §10): no border, one dim rule
+/// where the box's top edge was, because a set of questions with a mockup
+/// beside it reads as a page of the transcript rather than as a box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Boxed,
+    Band,
+}
+
+impl Shape {
+    /// The rows the shape itself spends: two borders, or one rule.
+    pub fn chrome(self) -> u16 {
+        match self {
+            Self::Boxed => 2,
+            Self::Band => 1,
+        }
+    }
+
+    /// The cells its lines are held in from each side: a box pads by one
+    /// inside its border, a band starts where the transcript's own rows do.
+    pub fn inset(self) -> u16 {
+        match self {
+            Self::Boxed => 2,
+            Self::Band => 0,
+        }
+    }
+
+    /// The rows `lines` need of `at`, the shape's own included.
+    pub fn height(self, lines: usize, at: Rect) -> u16 {
+        u16::try_from(lines)
+            .unwrap_or(u16::MAX)
+            .saturating_add(self.chrome())
+            .min(at.height)
+    }
+}
+
+/// A card at `at`, revealed top-down. Its top edge lands first, so it grows
+/// downwards into the transcript and nothing under it moves. While the
+/// kernel's guard is down its rows are dim — the edge is bright, because the
 /// card has arrived; the answers are not yet listening.
 ///
-/// The border wears [`theme::attention`], the one beat everything that wants
-/// a person shares (§6): a card is on the screen exactly while it is
+/// A box's border wears [`theme::attention`], the one beat everything that
+/// wants a person shares (§6): a card is on the screen exactly while it is
 /// unanswered, so it is asking for the whole of its life and stops by going.
 pub fn card(
     frame: &mut Frame,
     at: Rect,
+    shape: Shape,
     lines: Vec<Line<'static>>,
     reveal: Reveal,
     guarded: bool,
@@ -127,7 +167,7 @@ pub fn card(
         true => lines.into_iter().map(hushed).collect(),
         false => lines,
     };
-    let full = box_height(&lines, at);
+    let full = shape.height(lines.len(), at);
     let shown = reveal.rows(full);
     if shown == 0 {
         return;
@@ -137,9 +177,17 @@ pub fn card(
         ..at
     };
     frame.render_widget(Clear, area);
-    // While it is still coming down the box has no foot: the bottom border
-    // belongs to the last frame, not to every one of them.
-    let sides = match shown == full {
+    match shape {
+        Shape::Boxed => bordered(frame, area, shown == full, now),
+        Shape::Band => ruled(frame, area),
+    }
+    body(frame, at, shape, lines, full, area.bottom());
+}
+
+/// The box's own edge. While it is still coming down it has no foot: the
+/// bottom border belongs to the last frame, not to every one of them.
+fn bordered(frame: &mut Frame, area: Rect, whole: bool, now: crate::clock::Now) {
+    let sides = match whole {
         true => Borders::ALL,
         false => Borders::TOP | Borders::LEFT | Borders::RIGHT,
     };
@@ -150,14 +198,40 @@ pub fn card(
             .border_style(theme::attention(now)),
         area,
     );
-    // One cell of padding inside the border, as every box has (§4).
+}
+
+/// The band's own edge: one dim rule the width of the region, where the box's
+/// top border was. The rule that closes the band is a line of the card, so
+/// what hangs under it — the way out and the keys — hangs outside it.
+fn ruled(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(rule(usize::from(area.width))),
+        Rect { height: 1, ..area },
+    );
+}
+
+/// One dim rule `width` cells wide: the stroke a box draws its edge with, so a
+/// band and a box are one line and not two facts (§4).
+pub fn rule(width: usize) -> Line<'static> {
+    Line::from(Span::styled(theme::rule().repeat(width), theme::dim()))
+}
+
+/// The card's own rows, in the room the shape leaves them.
+fn body(
+    frame: &mut Frame,
+    at: Rect,
+    shape: Shape,
+    lines: Vec<Line<'static>>,
+    full: u16,
+    bottom: u16,
+) {
     let inner = Rect {
-        x: at.x + 2,
+        x: at.x + shape.inset(),
         y: at.y + 1,
-        width: at.width.saturating_sub(4),
-        height: full.saturating_sub(2),
+        width: at.width.saturating_sub(2 * shape.inset()),
+        height: full.saturating_sub(shape.chrome()),
     };
-    let rows = inner.height.min(area.bottom().saturating_sub(inner.y));
+    let rows = inner.height.min(bottom.saturating_sub(inner.y));
     if rows == 0 || inner.width == 0 {
         return;
     }
@@ -194,15 +268,6 @@ fn fitted(lines: Vec<Line<'static>>, rows: usize) -> Vec<Line<'static>> {
     let mut out = vec![lines[0].clone()];
     out.extend(lines[lines.len() - (rows - 1)..].iter().cloned());
     out
-}
-
-/// The height a card wants: its lines and two borders, capped by the room it
-/// has.
-fn box_height(lines: &[Line<'static>], at: Rect) -> u16 {
-    u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .min(at.height)
 }
 
 /// A sheet fills `at` from its foot upwards: it comes out of the composer.

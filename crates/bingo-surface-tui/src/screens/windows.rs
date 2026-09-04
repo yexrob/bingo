@@ -204,13 +204,13 @@ fn crowded_question(focus: usize) -> (Tree, Ui, Now) {
     (tree, ui, now)
 }
 
-/// A form of four questions whose first has a dozen options and a mockup on
+/// A form of three questions whose first has `options` of them and a mockup on
 /// each: the tab row, the answers and the one under the cursor all want the
 /// same short screen.
-fn crowded_form(focus: usize) -> (Tree, Ui, Now) {
+fn crowded_form(options: usize, focus: usize) -> (Tree, Ui, Now) {
     let mut open = crate::test_support::form();
     if let bingo_sdk::InteractionKind::Form { questions, .. } = &mut open.kind {
-        questions[0].options = (1..=12)
+        questions[0].options = (1..=options)
             .map(|i| bingo_sdk::QuestionOption {
                 id: format!("o{i}"),
                 label: format!("option {i:02}"),
@@ -225,17 +225,37 @@ fn crowded_form(focus: usize) -> (Tree, Ui, Now) {
     (tree, ui, now)
 }
 
-/// The tab row is the card's title, so it is the row [`layers::card`] keeps
-/// whatever else gives way; the answers keep their window around the cursor,
-/// and the mockup costs no row at all because it stands beside them.
+/// The tab row is the card's first line, so it is the row [`layers::card`]
+/// keeps whatever else gives way. On a screen this short the card gives away
+/// the key line and then the mockup — an answer is what it was opened for
+/// (M57) — and every answer, the one under the cursor included, stays.
 #[test]
 fn a_form_keeps_its_tabs_and_the_answer_the_cursor_is_on() {
-    let (tree, ui, now) = crowded_form(11);
+    let (tree, ui, now) = crowded_form(12, 11);
     let screen = shot("form_end", &tree, &ui, now);
     assert!(marked(&screen).contains("option 12"), "{screen}");
-    assert_eq!(cuts(&screen), 1);
+    assert_eq!(cuts(&screen), 0, "nothing had to be cut: {screen}");
+    assert!(
+        !screen.contains("Enter to select"),
+        "the keys gave way first: {screen}"
+    );
+    assert!(
+        !screen.contains("a mockup of"),
+        "and the mockup whole, never half a frame: {screen}"
+    );
     assert!(screen.contains("Auth method"), "the tabs stay: {screen}");
     assert!(screen.contains("Targets"), "all of them: {screen}");
+}
+
+/// More answers than the room even with the keys and the mockup given away:
+/// the answers keep their window around the cursor and say where they cut it.
+#[test]
+fn a_form_with_more_answers_than_room_windows_them_around_the_cursor() {
+    let (tree, ui, now) = crowded_form(24, 23);
+    let screen = shot("form_crowded", &tree, &ui, now);
+    assert!(marked(&screen).contains("option 24"), "{screen}");
+    assert_eq!(cuts(&screen), 1);
+    assert!(screen.contains("Auth method"), "the tabs stay: {screen}");
 }
 
 /// The answers are what the card was opened for, so they are what keeps the

@@ -1432,7 +1432,14 @@ mod tests {
         let state = folded(vec![frame(1, opened(crate::test_support::form()))]);
         let (mut ui, now) = scene();
         ui.dialog.focus_on(state.interactions.first());
-        for key in [key(KeyCode::Enter), key(KeyCode::Enter), typed(' ')] {
+        // Three questions fixed, and the walk lands on the tab that sends
+        // (M57): nothing leaves the card until `⏎` is pressed there.
+        for key in [
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            typed(' '),
+            key(KeyCode::Enter),
+        ] {
             assert!(
                 press(&mut ui, &state, key, now).is_empty(),
                 "nothing is sent until the whole form is"
