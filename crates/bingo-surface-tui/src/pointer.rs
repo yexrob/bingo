@@ -140,7 +140,7 @@ fn under(ui: &Ui, tree: &Tree, cursor: roster::Cursor) -> Option<SessionId> {
     let Open::Switcher(open) = &ui.layer.open else {
         return None;
     };
-    open.session(tree, cursor)
+    open.session(tree, ui.composer.text(), cursor)
 }
 
 /// The rail card under the pointer, when it is over the rail.

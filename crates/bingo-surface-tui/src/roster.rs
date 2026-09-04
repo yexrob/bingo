@@ -11,9 +11,9 @@
 //!
 //! It is **typed into** (M55, 2026-09-04): a query narrows the column to the
 //! rows [`crate::matching`] ranks for it — a session by its name and by the
-//! room it sits in, a room by its own — and sits at the head of the list as one
-//! dim line of what was typed. An empty query is the whole list, and is no
-//! line at all.
+//! room it sits in, a room by its own. The query is the **input box's own
+//! line** (M58, 2026-09-04), as it is under the `/` and `@` dropdowns, so
+//! nothing of it is drawn here; an empty query is the whole list.
 //!
 //! One [`crate::window`] over the whole list keeps the row the keyboard is on
 //! in view, with a `…` at an end it cut; a label past that end is simply not
@@ -21,8 +21,7 @@
 //!
 //! Nothing here is state. Which rows exist is the tree's, what each says is
 //! read off the reducer and the rooms plugin's own payloads at render time,
-//! and the whole of what the surface remembers is where the cursor is and what
-//! has been typed.
+//! and the whole of what the surface remembers is where the cursor is.
 
 use bingo_sdk::{SessionId, SessionState};
 use ratatui::text::{Line, Span};
@@ -154,8 +153,9 @@ pub struct Roster {
     pub rows: Vec<Option<Cursor>>,
 }
 
-/// The list in the room it has. The one renderer: `↓` and `ctrl+g` open the
-/// same list, so there is one place it is drawn.
+/// The list in the room it has, narrowed by what the input box holds. The one
+/// renderer: `↓` and `ctrl+g` open the same list, so there is one place it is
+/// drawn.
 pub fn lines(
     tree: &Tree,
     rows: &[Row<'_>],
@@ -167,36 +167,7 @@ pub fn lines(
 ) -> Roster {
     let listed = listed(tree, &listing(tree, rows, query), cursor, width, now);
     let at = walked_line(&listed, cursor);
-    match asked(query, width) {
-        Some(line) => headed(windowed(listed, at, room.saturating_sub(1)), line),
-        None => windowed(listed, at, room),
-    }
-}
-
-/// The line the query is typed on: dim, the list's width, and nothing at all
-/// while nothing has been typed. The one-line-of-furniture rule holds because
-/// the line is the person's own typing (§3, 2026-09-04).
-fn asked(query: &str, width: usize) -> Option<Line<'static>> {
-    if query.is_empty() {
-        return None;
-    }
-    let spans = vec![Span::styled(
-        format!("{} {query}{}", theme::find(), theme::caret()),
-        theme::dim(),
-    )];
-    Some(Line::from(status::clip(spans, width)))
-}
-
-/// The query line sits at the head of the list and answers no click — it is
-/// nowhere to land, as a label is.
-fn headed(rows: Roster, asked: Line<'static>) -> Roster {
-    let mut roster = Roster {
-        lines: vec![asked],
-        rows: vec![None],
-    };
-    roster.lines.extend(rows.lines);
-    roster.rows.extend(rows.rows);
-    roster
+    windowed(listed, at, room)
 }
 
 /// Which of the drawn lines the row the keyboard is on became. It is asked of
@@ -704,17 +675,17 @@ mod tests {
     // ---- the query -------------------------------------------------------
 
     /// M55: the list is typed into. What the query does not match is not on
-    /// it, and what a person typed stands at its head.
+    /// it — and the query itself is nowhere here, because it is the input
+    /// box's own line (M58).
     #[test]
-    fn a_query_narrows_the_column_and_says_what_was_typed() {
+    fn a_query_narrows_the_column_to_what_it_matches() {
         let drawn = narrowed_at(&team(), Cursor::default(), "rev", 80, 8);
         assert_eq!(
             drawn,
             vec![
-                "⌕ rev▌",
                 "❯ ~ reviewer  running · in #design · live · owes an answer · 22m · 3 tools · 1.…",
             ],
-            "one row, and no label over the only run left: {drawn:#?}"
+            "one row, no label over the only run left, and no line of its own: {drawn:#?}"
         );
     }
 
@@ -726,7 +697,6 @@ mod tests {
         assert_eq!(
             drawn,
             vec![
-                "⌕ design▌",
                 "Agents",
                 "❯ ~ reviewer  running · in #design · live · owes an answer · 22m · 3 tools · 1.2k tokens",
                 "  ⏺ watcher   idle · in #design · listening · 600s",
@@ -737,18 +707,18 @@ mod tests {
         );
     }
 
-    /// A query nothing matches leaves the line it was typed on and nothing
-    /// else — the list is empty, not wrong.
+    /// A query nothing matches draws nothing at all — the list is empty, not
+    /// wrong, and the box a person is typing in still says what they typed.
     #[test]
-    fn a_query_nothing_matches_is_the_line_alone() {
+    fn a_query_nothing_matches_draws_no_list() {
         let drawn = narrowed_at(&team(), Cursor::default(), "zzz", 80, 8);
-        assert_eq!(drawn, vec!["⌕ zzz▌"]);
+        assert!(drawn.is_empty(), "{drawn:#?}");
     }
 
-    /// The line is the list's, so the window has one row fewer for the rows —
-    /// the room asked for is the room drawn, query line and all.
+    /// A narrowed list has the whole of the room the list has: nothing of the
+    /// query is drawn here, so no row of it is spent (M58).
     #[test]
-    fn the_query_line_takes_a_row_of_the_lists_own_room() {
+    fn a_narrowed_list_keeps_every_row_of_its_own_room() {
         let mut frames = busy_child("reviewer");
         frames
             .extend((20..32).map(|i| agent_frame(i, i, agent_announced(i, &format!("scout {i}")))));
@@ -759,7 +729,6 @@ mod tests {
             6,
             "six rows of room, six rows drawn: {drawn:#?}"
         );
-        assert_eq!(drawn[0], "⌕ scout▌", "and the line is the head of them");
     }
 
     // ---- walking ---------------------------------------------------------

@@ -697,7 +697,8 @@ fn switcher_lines(
         tree,
         &rows,
         switcher.cursor,
-        &switcher.query,
+        // The box is the list's query line (M58).
+        ui.composer.text(),
         usize::from(above.width),
         usize::from(above.height),
         now,

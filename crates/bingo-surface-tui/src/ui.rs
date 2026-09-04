@@ -204,16 +204,19 @@ pub struct Catalogs {
 
 /// The one list of sessions, opened by `↓` on an empty composer or by
 /// `ctrl+g`. Its rows are derived at render time; what is the surface's own is
-/// where the cursor is, what has been typed to narrow it, the one listing the
-/// host answered with when the list opened, and where the gesture started —
-/// nothing here watches the store.
+/// where the cursor is, the line the box was holding when it opened, the one
+/// listing the host answered with, and where the gesture started — nothing
+/// here watches the store.
+///
+/// The query is **not** here (M58): what narrows the list is what is in the
+/// input box, as it is under the `/` and `@` dropdowns.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Switcher {
     pub cursor: roster::Cursor,
-    /// What has been typed into the list (M55): the rows are ranked by it and
-    /// the ones it does not match are not on the list at all. Empty is the
-    /// whole list, and is what `esc` takes it back to.
-    pub query: String,
+    /// The line a person was writing when the list went up, set aside while
+    /// the box is the query line and put back exactly as it was when the list
+    /// goes. A fact about the gesture, not a second composer.
+    pub draft: String,
     /// Empty until the read the opening spawned lands.
     pub stored: Vec<SessionSummary>,
     /// The session the list was opened from: what `esc` gives back after a
@@ -224,12 +227,12 @@ pub struct Switcher {
 
 impl Switcher {
     /// The session a row of this list names. The list is composed here from
-    /// the tree, the store's answer and the query, so a click and a keypress
-    /// cannot be reading two different lists.
-    pub fn session(&self, tree: &Tree, cursor: roster::Cursor) -> Option<SessionId> {
+    /// the tree, the store's answer and the query the box holds, so a click
+    /// and a keypress cannot be reading two different lists.
+    pub fn session(&self, tree: &Tree, query: &str, cursor: roster::Cursor) -> Option<SessionId> {
         let rows = tree::roster(tree, &self.stored);
         cursor
-            .row(&roster::listing(tree, &rows, &self.query))
+            .row(&roster::listing(tree, &rows, query))
             .map(|row| row.session.clone())
     }
 }
@@ -569,7 +572,7 @@ impl Ui {
     /// handed in rather than read here: what is the surface's own is the caret
     /// and the memo of the walk, and neither of those is the tree.
     pub fn suggestions(&self, cwd: &str, mentions: &[String]) -> Vec<Suggestion> {
-        if self.menu.dismissed {
+        if self.menu.dismissed || self.listing() {
             return Vec::new();
         }
         let line = self.composer.text();
@@ -603,6 +606,13 @@ impl Ui {
         let rows = self.suggestions(cwd, mentions);
         rows.get(self.menu.selected.min(rows.len().saturating_sub(1)))
             .cloned()
+    }
+
+    /// Whether the input box is the list's query line rather than a message
+    /// being written (M58). What is typed there names a session, so no `/` or
+    /// `@` dropdown answers it and none is drawn over it.
+    pub fn listing(&self) -> bool {
+        self.layer.captures() && matches!(self.layer.open, Open::Switcher(_))
     }
 
     /// The composer changed: the dropdown reopens and the history walk ends.
