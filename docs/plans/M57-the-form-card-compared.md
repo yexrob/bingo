@@ -39,29 +39,48 @@ What bingo draws today:
 │   3. Other                      │
 ```
 
+**Amended 2026-09-04, at the user's word ("直接对齐claude code的那种交互"):
+the card aligns with Claude Code's interaction outright**, including
+what the first draft kept back. The user's taste rules the surface
+(§10 records it as user-directed); the design doc's §2 border law is
+amended for this one card, with the date.
+
 ## Bricks
 
-1. **Every tab wears its box, and the last tab is Submit.** The tab
-   row becomes `☐ 布局 · ☒ 主题 · ☐ 功能 · Submit`: a box per
-   question (ticked once fixed), and a final `Submit` tab the walk
-   reaches after the last question — `⏎` there sends the form, and
-   the card says which questions are still open if any are (`2 left`
-   in dim beside Submit). Today the head shows one `☒` for the card;
-   a person cannot see which tab they left open. `←`/`→`/`tab` reach
-   Submit like any tab. The row keeps §7's rule: the active tab is
-   the one in `text`, the rest dim.
-2. **The card says its keys.** One dim line inside the box's last
-   row: `⏎ choose · ↑↓ move · tab next · type to answer · esc
-   cancel` (multi-select: `space tick` first). Claude Code puts the
-   hint under its rule; bingo's cards say their keys on the card
-   (the permission card's `y/a/n` precedent) — same place.
-3. **The free-text row says what it is.** `Other` becomes `Type your
-   own answer` — the row's job in words, as Claude Code's `Type
-   something.` does; it stays last and numbered.
-4. **The preview wears a frame.** The pane is drawn inside a dim
-   single-line box the width of the pane, so a mockup made of box
-   characters does not run into the card's own border; stacked
-   (narrow) mode gets the same frame above the options.
+1. **The shape.** No bordered box: the card is a band between two dim
+   rules the transcript's width, like Claude Code's. Row 1 is the tab
+   row `←  ☐ 布局  ☐ 主题  ☐ 功能  ✔ Submit  →` — a box per question
+   (`☒` once fixed), a final `Submit` tab, arrows at both ends that
+   are dim when there is nowhere to go; the active tab in `text`, the
+   rest dim. Then the question, then its options.
+2. **The options.** Numbered; a description under each **except when
+   the active question has previews**, where the options are compact
+   and the preview of the option under the cursor stands beside them
+   (≥ 100 columns) or above them (narrower) inside a dim single-line
+   frame. Multi-select options wear `[ ]`/`[✔]` (ASCII `[ ]`/`[x]`).
+   The last numbered option of every question is `Type something.` —
+   choosing it opens the words row under the options, and `⏎` there
+   fixes the typed answer.
+3. **Chat about this.** Under the band's lower rule, one more numbered
+   row `N. Chat about this`: choosing it cancels the form (`Answer::
+   Cancel`) and puts the caret in the composer with nothing typed, so
+   the person talks to the model instead of answering — the same
+   outcome `esc` has today, named as a choice.
+4. **The Submit tab.** `⏎` on Submit with every question fixed sends
+   the `Form`; with one open it walks to the first open question
+   (Claude Code's behaviour) rather than sending.
+5. **The key line.** One dim line under the lower rule, after the
+   chat row: `Enter to select · ↑/↓ to navigate · Tab to switch
+   questions · Esc to cancel` (multi-select adds `Space to toggle`;
+   a previewed question adds nothing).
+6. **Notes on an answer (`n`).** Claude Code lets a person attach a
+   note to the option under the cursor (`Notes: press n to add
+   notes`); the note travels with the answer. Do this last and only
+   if the `Answer` shape takes it without a wire change (`Answer::
+   Choice { ids }` → a note needs a field: `notes: Option<String>`,
+   serde default, on `Choice` and `Form`'s items — a schema fixture
+   test first). The tool's result line carries it as `header: label
+   — note`. If it does not fit, record it in Verified and skip.
 
 ## Files
 
@@ -71,19 +90,20 @@ What bingo draws today:
 
 ## Exit criteria
 
-- [ ] The tab row shows a box per question and a Submit tab; `⏎` on
-  Submit with an open question says how many are left, not sends.
-- [ ] The key line is the card's last row; the free-text row is
-  named; the preview is framed.
+- [ ] The card is the rule band with the tab row, arrows, boxes and
+  a Submit tab; `⏎` on Submit with an open question walks to it.
+- [ ] `Type something.` opens the words row; `Chat about this`
+  cancels into the composer; the key line stands under the rule.
+- [ ] A previewed question shows compact options and a framed
+  preview; multi-select wears `[ ]`/`[✔]`.
 - [ ] Every AGENTS.md gate; tui-smoke; the three form snapshots
   re-read and accepted.
 - [ ] Hands-on (main session): the same prompt in tmux, captured.
 
 ## Non-goals
 
-Notes on an answer (`n`), "Chat about this" as a separate door (a
-typed answer is that door), hiding descriptions when a preview shows,
-removing the border.
+A note on a free-text answer. Claude Code's rule-band for any *other*
+card (the permission card keeps its border).
 
 ## Risks
 
