@@ -131,7 +131,7 @@ fn composer_rows(state: &SessionState, ui: &Ui, width: usize) -> usize {
 /// (design §4, M48). Asked for twice a frame — once to make room for it and
 /// once to draw it — which costs one walk of the line, the pixels being the
 /// memo's ([`crate::graphics::Decoded`]).
-fn strip(state: &SessionState, ui: &Ui, width: u16) -> strip::Strip {
+fn strip(state: &SessionState, ui: &Ui, width: u16) -> graphics::Band {
     strip::rows(
         &ui.pictures,
         ui.composer.text(),
@@ -822,7 +822,7 @@ fn outline(area: Rect) -> impl Iterator<Item = (u16, u16)> {
 /// the words it belongs to. A frame that cut no rows for it — the screen was
 /// too short — draws none of it: what is being typed matters more than what
 /// was pasted beside it.
-fn render_strip(ui: &Ui, frame: &mut Frame, area: Rect, strip: strip::Strip) {
+fn render_strip(ui: &Ui, frame: &mut Frame, area: Rect, strip: graphics::Band) {
     let rows = strip.height();
     if rows == 0 || area.height < rows {
         ui.painted.borrow_mut().strip.clear();
@@ -2390,7 +2390,7 @@ mod tests {
             assert_eq!(box_rows(&screen).len(), box_rows(&plain).len(), "{screen}");
             assert_eq!(
                 placeholder_rows(&screen),
-                usize::from(strip::ROWS),
+                usize::from(graphics::band::ROWS),
                 "{screen}"
             );
             let lines: Vec<&str> = screen.lines().collect();
@@ -2399,12 +2399,12 @@ mod tests {
                 .rposition(|line| line.contains('╭'))
                 .expect("the input box");
             assert!(
-                lines[top - usize::from(strip::ROWS)..top]
+                lines[top - usize::from(graphics::band::ROWS)..top]
                     .iter()
                     .all(|row| row.contains(crate::graphics::kitty::PLACEHOLDER)),
                 "the cells are the rows right above the border: {screen}"
             );
-            let first = lines[top - usize::from(strip::ROWS)].trim_start_matches('"');
+            let first = lines[top - usize::from(graphics::band::ROWS)].trim_start_matches('"');
             assert!(
                 first.starts_with("  ") && first.chars().nth(2) != Some(' '),
                 "and stand in the prompt's own column: {screen}"
@@ -2444,7 +2444,7 @@ mod tests {
             assert!(screen.contains("+1"), "{screen}");
             assert_eq!(
                 ui.painted.borrow().strip.len(),
-                usize::from(strip::SHOWN as u16),
+                graphics::band::SHOWN,
                 "{screen}"
             );
         });
@@ -2478,7 +2478,7 @@ mod tests {
                 .position(|row| row.contains("#design >"))
                 .unwrap_or_else(|| panic!("the room's own prompt: {screen}"));
             assert_eq!(prompt, 1, "{rows:?}");
-            assert_eq!(placeholder_rows(&screen), usize::from(strip::ROWS));
+            assert_eq!(placeholder_rows(&screen), usize::from(graphics::band::ROWS));
         });
     }
 
