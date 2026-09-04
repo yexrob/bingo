@@ -1,0 +1,64 @@
+{
+  "url": "https://api.github.com/repos/yexrob/bingo/releases/205617331",
+  "html_url": "https://github.com/yexrob/bingo/releases/tag/v0.4.2",
+  "assets_url": "https://api.github.com/repos/yexrob/bingo/releases/205617331/assets",
+  "id": 205617331,
+  "node_id": "RE_kwDOP1x2Ss4MSHqz",
+  "tag_name": "v0.4.2",
+  "target_commitish": "main",
+  "name": "v0.4.2",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-09-03T09:12:44Z",
+  "published_at": "2026-09-03T09:31:02Z",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/yexrob/bingo/releases/assets/301117001",
+      "id": 301117001,
+      "name": "bingo-aarch64-apple-darwin.tar.gz",
+      "content_type": "application/gzip",
+      "state": "uploaded",
+      "size": 18874368,
+      "browser_download_url": "https://github.com/yexrob/bingo/releases/download/v0.4.2/bingo-aarch64-apple-darwin.tar.gz"
+    },
+    {
+      "url": "https://api.github.com/repos/yexrob/bingo/releases/assets/301117002",
+      "id": 301117002,
+      "name": "bingo-x86_64-apple-darwin.tar.gz",
+      "content_type": "application/gzip",
+      "state": "uploaded",
+      "size": 19922944,
+      "browser_download_url": "https://github.com/yexrob/bingo/releases/download/v0.4.2/bingo-x86_64-apple-darwin.tar.gz"
+    },
+    {
+      "url": "https://api.github.com/repos/yexrob/bingo/releases/assets/301117003",
+      "id": 301117003,
+      "name": "bingo-x86_64-pc-windows-msvc.zip",
+      "content_type": "application/zip",
+      "state": "uploaded",
+      "size": 21495808,
+      "browser_download_url": "https://github.com/yexrob/bingo/releases/download/v0.4.2/bingo-x86_64-pc-windows-msvc.zip"
+    },
+    {
+      "url": "https://api.github.com/repos/yexrob/bingo/releases/assets/301117004",
+      "id": 301117004,
+      "name": "bingo-x86_64-unknown-linux-gnu.tar.gz",
+      "content_type": "application/gzip",
+      "state": "uploaded",
+      "size": 20447232,
+      "browser_download_url": "https://github.com/yexrob/bingo/releases/download/v0.4.2/bingo-x86_64-unknown-linux-gnu.tar.gz"
+    },
+    {
+      "url": "https://api.github.com/repos/yexrob/bingo/releases/assets/301117005",
+      "id": 301117005,
+      "name": "checksums.txt",
+      "content_type": "text/plain",
+      "state": "uploaded",
+      "size": 371,
+      "browser_download_url": "https://github.com/yexrob/bingo/releases/download/v0.4.2/checksums.txt"
+    }
+  ],
+  "tarball_url": "https://api.github.com/repos/yexrob/bingo/tarball/v0.4.2",
+  "zipball_url": "https://api.github.com/repos/yexrob/bingo/zipball/v0.4.2",
+  "body": ""
+}

@@ -802,6 +802,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-update"
+version = "0.4.2"
+dependencies = [
+ "jiff",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

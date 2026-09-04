@@ -55,6 +55,17 @@
 # listener is `tokio` `net`, the answer `serde_json`, the token `getrandom` and
 # `base64` — all already in the tree — and its tests speak HTTP by hand rather
 # than pull `reqwest` into a library that has to cross-check for Windows.
-max_dependencies = 332
+# M63 (docs/plans/M63-the-binary-that-replaces-itself.md, ADR-0043) raises
+# 332 → 333 by the one member `bingo-update`. It brings no crate of its own:
+# the release answer is `serde_json`, the stamp's clock `jiff`, the settings
+# schema `schemars`, and the digest is written out in `sha256.rs` — `sha2` is
+# in the lock file only as a dev edge of the pty harness (`portable-pty` →
+# `termwiz`) and `semver` only as a build edge (`rustc_version`), so neither
+# is in the normal tree and taking either would have cost a crate each.
+# `aws-lc-rs` has SHA-256 and is in the tree, but it builds C, which would
+# have cost this crate the Windows cross-check its rename dance needs
+# (ADR-0041's note; ADR-0043 §3). The fetch is the caller's, so `reqwest`
+# stays out of the library as it does out of `bingo-loopback`.
+max_dependencies = 333
 max_core_check_seconds = 20
 max_target_gb = 5
