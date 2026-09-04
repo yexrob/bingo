@@ -86,6 +86,18 @@ fn stepped(from: u16, to: u16, t: f32) -> u16 {
     walked.round().clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
+/// The ten frames the shots are reviewed from.
+#[cfg(test)]
+mod storyboard;
+
+/// One frame of the opening, named — the storyboard's own snapshots land
+/// under this module rather than under the test that writes them, because
+/// they are the record of the shots and not of the test.
+#[cfg(test)]
+fn snapshot(name: &str, drawn: String) {
+    insta::assert_snapshot!(name, drawn);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
