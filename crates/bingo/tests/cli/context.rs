@@ -125,7 +125,7 @@ fn an_overflow_after_many_rounds_is_summarised_and_the_turn_goes_on() {
 }
 
 #[test]
-fn a_working_turn_leaves_facts_in_the_project_memory() {
+fn a_working_turn_leaves_one_file_per_fact_in_the_project_memory() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join("notes.txt"), "alpha\n").unwrap();
     // A tool round and the answer; what the extractor is told at turn end is
@@ -146,21 +146,28 @@ fn a_working_turn_leaves_facts_in_the_project_memory() {
         .arg("what is in notes.txt?"));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(stdout(&out), "One line.\n");
-    let memory_dir = home.path().join(".bingo/data/memory");
-    let files: Vec<_> = std::fs::read_dir(&memory_dir)
-        .expect("a memory directory")
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    assert_eq!(files.len(), 1, "{files:?}");
-    let memory = std::fs::read_to_string(&files[0]).unwrap();
-    assert!(
-        memory.contains("notes.txt holds the alpha list"),
-        "{memory}"
-    );
-    assert!(memory.contains("the project has no build step"), "{memory}");
 
-    // The next run reads it back into the prompt and learns nothing new
+    let scope = only_scope(&home.path().join(".bingo/data/memory"));
+    let index = std::fs::read_to_string(scope.join("MEMORY.md")).unwrap();
+    assert_eq!(index.lines().count(), 2, "{index}");
+    assert!(
+        index.contains("(notes-txt-holds-the-alpha-list.md)"),
+        "{index}"
+    );
+    assert!(
+        index.contains("(the-project-has-no-build-step.md)"),
+        "{index}"
+    );
+
+    let fact = std::fs::read_to_string(scope.join("notes-txt-holds-the-alpha-list.md")).unwrap();
+    assert!(
+        fact.starts_with("---\nname: notes-txt-holds-the-alpha-list\n"),
+        "{fact}"
+    );
+    assert!(fact.contains("\ntype: project\n"), "{fact}");
+    assert!(fact.contains("notes.txt holds the alpha list"), "{fact}");
+
+    // The next run reads the index back into the prompt and learns nothing new
     // from a turn without a tool call.
     let again = script(r#"{"responses":[{"steps":[{"text":"Still one line."}]}]}"#);
     let out = run(bingo()
@@ -170,5 +177,35 @@ fn a_working_turn_leaves_facts_in_the_project_memory() {
         .arg(home.path())
         .arg("and now?"));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), memory);
+    assert_eq!(
+        std::fs::read_to_string(scope.join("MEMORY.md")).unwrap(),
+        index
+    );
+
+    // And `/memory` shows the person the same facts the model reads.
+    let listing = script(r#"{"responses":[]}"#);
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", listing.path())
+        .env("HOME", home.path())
+        .args(["--print", "--cwd"])
+        .arg(home.path())
+        .arg("/memory"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let table = stdout(&out);
+    assert!(table.contains("notes-txt-holds-the-alpha-list"), "{table}");
+    assert!(table.contains("the-project-has-no-build-step"), "{table}");
+    assert!(table.contains("project"), "{table}");
+}
+
+/// The one project directory under `memory/`: a scope is a directory, and
+/// this run only ever worked in one project.
+fn only_scope(memory: &std::path::Path) -> std::path::PathBuf {
+    let mut scopes: Vec<std::path::PathBuf> = std::fs::read_dir(memory)
+        .expect("a memory directory")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(scopes.len(), 1, "{scopes:?}");
+    scopes.remove(0)
 }
