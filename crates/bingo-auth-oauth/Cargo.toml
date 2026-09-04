@@ -17,12 +17,14 @@ workspace = true
 
 [dependencies]
 bingo-sdk.workspace = true
+# The loopback socket the browser flow waits on, and the browser opener
+# (ADR-0042 §1): a library may depend on another library.
+bingo-loopback.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# `net` for the loopback callback listener; the workspace default omits it.
-tokio = { workspace = true, features = ["net"] }
+tokio.workspace = true
 # JWT claims and PKCE values are base64url without padding.
 base64.workspace = true
 # SHA-256 for the PKCE challenge and the system random source for the

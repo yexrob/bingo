@@ -307,7 +307,7 @@ impl OpenAiProvider {
     ) -> Result<String, ProviderError> {
         // A browser the flow cannot open is a flow a person cannot finish, so
         // the opt-out the library reads is read here too.
-        let open_browser = std::env::var_os(bingo_auth_oauth::browser::NO_BROWSER_ENV).is_none();
+        let open_browser = std::env::var_os(bingo_loopback::browser::NO_BROWSER_ENV).is_none();
         let tokens = source
             .login(
                 prompter,

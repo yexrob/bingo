@@ -16,8 +16,10 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │   surfaces    bingo-surface-print · bingo-surface-rpc · bingo-surface-tui · bingo-acp · bingo-channels
 │   demo        bingo-demo-ui               off unless `--demo-ui`: the worked example of ADR-0013's
 │                                           three lanes, and what a plugin author reads first
-├── libraries (`[package.metadata.bingo] tier = "library"`: register nothing, depend on bingo-sdk only)
-│   bingo-auth-oauth            PKCE loopback · device code · auth.json · single-flight refresh (ADR-0012)
+├── libraries (`tier = "library"`: register nothing, depend on bingo-sdk and each other, ADR-0042 §2)
+│   bingo-auth-oauth            PKCE redirect · device code · auth.json · single-flight refresh (ADR-0012)
+│   bingo-loopback              a port on 127.0.0.1 · one request at a time · the page a tool holds open
+│                               until the person answers it · the browser opener (ADR-0042)
 │   bingo-pictures              a picture as pixels: whatever a decoder reads, as the PNG a terminal
 │                               takes and the type a provider accepts · a path or a URL this machine
 │                               fetches · the one place that knows a decoder (ADR-0041)

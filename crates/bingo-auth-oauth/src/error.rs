@@ -36,6 +36,22 @@ impl AuthError {
     }
 }
 
+/// A port that will not bind or a socket that will not read is transport; a
+/// request that is not a redirect is a redirect this flow cannot use.
+impl From<bingo_loopback::LoopbackError> for AuthError {
+    fn from(error: bingo_loopback::LoopbackError) -> Self {
+        use bingo_loopback::LoopbackError;
+        match &error {
+            LoopbackError::NoPort(_) | LoopbackError::Io(_) => {
+                AuthError::Transport(error.to_string())
+            }
+            LoopbackError::Malformed(_) | LoopbackError::TooLarge(_) => {
+                AuthError::Invalid(error.to_string())
+            }
+        }
+    }
+}
+
 impl From<reqwest::Error> for AuthError {
     fn from(error: reqwest::Error) -> Self {
         AuthError::Transport(error.to_string())

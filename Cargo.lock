@@ -296,6 +296,7 @@ dependencies = [
  "async-trait",
  "aws-lc-rs",
  "base64 0.23.1",
+ "bingo-loopback",
  "bingo-sdk",
  "reqwest",
  "serde",
@@ -420,6 +421,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "bingo-loopback"
+version = "0.4.2"
+dependencies = [
+ "base64 0.23.1",
+ "getrandom 0.4.3",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -551,6 +563,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bingo-auth-oauth",
+ "bingo-loopback",
  "bingo-sdk",
  "futures",
  "insta",
