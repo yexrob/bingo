@@ -157,6 +157,26 @@
           "required": [
             "kind"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "answers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Answer"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "form"
+            }
+          },
+          "required": [
+            "kind",
+            "answers"
+          ],
+          "description": "A form's answers, one per question in the order they were asked; a\nquestion nobody answered is [`Answer::Cancel`] in its place (M53)."
         }
       ]
     },
@@ -211,7 +231,8 @@
         "choice",
         "text",
         "confirm",
-        "cancel"
+        "cancel",
+        "form"
       ]
     },
     "CancelReason": {
@@ -1674,42 +1695,38 @@
           ]
         },
         {
+          "$ref": "#/$defs/Question",
           "type": "object",
           "properties": {
-            "question": {
-              "type": "string"
-            },
-            "header": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "description": "A short tag a surface may show before the question (`Auth method`)."
-            },
-            "options": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/QuestionOption"
-              }
-            },
-            "freeText": {
-              "type": "boolean",
-              "default": false
-            },
-            "multi": {
-              "type": "boolean",
-              "default": false
-            },
             "kind": {
               "type": "string",
               "const": "question"
             }
           },
           "required": [
+            "kind"
+          ],
+          "description": "One question on its own. It holds [`Question`] flattened, so the frame\nit makes is the one it always was."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "questions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Question"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "form"
+            }
+          },
+          "required": [
             "kind",
-            "question",
-            "options"
-          ]
+            "questions"
+          ],
+          "description": "A set of questions put at once and answered together (M53). Every\nquestion is the same [`Question`] a lone one is."
         },
         {
           "type": "object",
@@ -2488,6 +2505,40 @@
         }
       ]
     },
+    "Question": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string"
+        },
+        "header": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A short tag a surface may show before the question (`Auth method`)."
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          }
+        },
+        "freeText": {
+          "type": "boolean",
+          "default": false
+        },
+        "multi": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "question",
+        "options"
+      ],
+      "description": "One question put to a person: what is asked, what may be picked, and\nwhether words of one's own or more than one option count. A lone question\nand one of a form are the same thing (M53)."
+    },
     "QuestionOption": {
       "type": "object",
       "properties": {
@@ -2513,6 +2564,13 @@
             }
           ],
           "description": "What picking it would mean to a session that answers for the person\n(ADR-0039 §2). Unmarked options are a person's alone."
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A few lines of monospace shown beside the option while the cursor is\non it — the layout or the snippet picking it would mean (M53)."
         }
       },
       "required": [

@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Answer, AnswerSpec, InteractionKind, QuestionOption, Tool, ToolContext, ToolError, ToolOutput,
-    ToolSpec, ToolTraits, input_schema,
+    Answer, AnswerSpec, InteractionKind, Question, QuestionOption, Tool, ToolContext, ToolError,
+    ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -101,7 +101,7 @@ fn validate_options(question: &AskQuestion) -> Result<(), ToolError> {
 /// The interaction the kernel opens. The option's position is its id, so an
 /// answer maps back to the label the model wrote.
 fn interaction(question: &AskQuestion) -> InteractionKind {
-    InteractionKind::Question {
+    InteractionKind::Question(Question {
         question: question.question.clone(),
         header: Some(question.header.clone()),
         options: question
@@ -114,13 +114,14 @@ fn interaction(question: &AskQuestion) -> InteractionKind {
                 description: option.description.clone(),
                 // A model's question is a person's alone to answer.
                 role: None,
+                preview: None,
             })
             .collect(),
         // A person may always answer in their own words, which is why the
         // model is told not to offer an "Other" option.
         free_text: true,
         multi: question.multi_select,
-    }
+    })
 }
 
 /// The answers the kernel will accept, read off the question rather than
@@ -129,10 +130,10 @@ fn answer_specs(kind: &InteractionKind) -> Vec<AnswerSpec> {
     let mut specs = vec![AnswerSpec::Choice];
     if matches!(
         kind,
-        InteractionKind::Question {
+        InteractionKind::Question(Question {
             free_text: true,
             ..
-        }
+        })
     ) {
         specs.push(AnswerSpec::Text);
     }
@@ -286,13 +287,13 @@ mod tests {
             specs,
             &vec![AnswerSpec::Choice, AnswerSpec::Text, AnswerSpec::Cancel]
         );
-        let InteractionKind::Question {
+        let InteractionKind::Question(Question {
             question,
             header,
             options,
             free_text,
             multi,
-        } = kind
+        }) = kind
         else {
             panic!("expected a question, got {kind:?}");
         };
@@ -307,12 +308,14 @@ mod tests {
                     label: "OAuth".into(),
                     description: Some("Redirect to the provider".into()),
                     role: None,
+                    preview: None,
                 },
                 QuestionOption {
                     id: "1".into(),
                     label: "API key".into(),
                     description: None,
                     role: None,
+                    preview: None,
                 },
             ]
         );
@@ -377,7 +380,7 @@ mod tests {
         let (kind, _) = &host.asked()[0];
         assert!(matches!(
             kind,
-            InteractionKind::Question { multi: true, .. }
+            InteractionKind::Question(Question { multi: true, .. })
         ));
     }
 

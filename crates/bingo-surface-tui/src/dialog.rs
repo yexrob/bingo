@@ -8,7 +8,7 @@
 
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Interaction, InteractionId, InteractionKind, LoginFlow,
-    Preview, QuestionOption,
+    Preview, Question, QuestionOption,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -241,9 +241,12 @@ pub fn options(interaction: &Interaction) -> Vec<Opt> {
         InteractionKind::Permission { session_scope, .. } => {
             permission_options(interaction, session_scope.as_deref())
         }
-        InteractionKind::Question { options, multi, .. } => {
+        InteractionKind::Question(Question { options, multi, .. }) => {
             question_options(interaction, options, *multi)
         }
+        // The form has a card of its own (M53); the dialog answers no key of
+        // it, so `esc` is the only way out of one drawn here.
+        InteractionKind::Form { .. } => Vec::new(),
         InteractionKind::Confirm { .. } => interaction
             .answers
             .iter()
@@ -375,9 +378,10 @@ pub fn rows(
 fn title(interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
     let name = match &interaction.kind {
         InteractionKind::Permission { tool, .. } => tool.clone(),
-        InteractionKind::Question { header, .. } => {
+        InteractionKind::Question(Question { header, .. }) => {
             header.clone().unwrap_or_else(|| "Question".to_string())
         }
+        InteractionKind::Form { .. } => "Questions".to_string(),
         InteractionKind::Confirm { title, .. } => title.clone(),
         InteractionKind::Login { provider, .. } => format!("Sign in to {provider}"),
     };
@@ -395,7 +399,8 @@ fn question(interaction: &Interaction, cwd: &str) -> Option<Line<'static>> {
         InteractionKind::Permission { summary, .. } => {
             format!("Do you want to {}?", opening(&shorten(summary, cwd)))
         }
-        InteractionKind::Question { question, .. } => question.clone(),
+        InteractionKind::Question(Question { question, .. }) => question.clone(),
+        InteractionKind::Form { .. } => return None,
         InteractionKind::Confirm { detail, .. } => detail.clone(),
         InteractionKind::Login { .. } => return None,
     };

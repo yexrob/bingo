@@ -69,19 +69,20 @@ fn option(id: &str, role: Option<AnswerRole>) -> QuestionOption {
         label: format!("the agent's word for {id}"),
         description: None,
         role,
+        preview: None,
     }
 }
 
 /// An asker's own options, two of them marked: this is what a
 /// `session/request_permission` becomes (ADR-0039 §3).
 fn question(options: Vec<QuestionOption>) -> InteractionKind {
-    InteractionKind::Question {
+    InteractionKind::Question(Question {
         question: "may I write to /etc/hosts?".into(),
         header: Some("Permission".into()),
         options,
         free_text: false,
         multi: false,
-    }
+    })
 }
 
 fn marked() -> InteractionKind {

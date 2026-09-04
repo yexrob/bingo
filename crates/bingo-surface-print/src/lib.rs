@@ -27,8 +27,8 @@ use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
     ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId, IntentOutcome,
     Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin, PluginError,
-    PluginManifest, Registrar, SessionHandle, SessionId, SessionState, Surface, SurfaceKind,
-    SurfaceOptions, TurnStatus,
+    PluginManifest, Question, Registrar, SessionHandle, SessionId, SessionState, Surface,
+    SurfaceKind, SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -504,12 +504,12 @@ fn decide(
             session_scope,
             ..
         } => ask_permission(tool, summary, session_scope.as_deref(), console, err)?,
-        InteractionKind::Question {
+        InteractionKind::Question(Question {
             question,
             header,
             options,
             ..
-        } => ask_question(
+        }) => ask_question(
             interaction,
             question,
             header.as_deref(),
@@ -728,7 +728,7 @@ pub(crate) mod tests {
 
     pub(crate) fn question(options: &[(&str, &str)]) -> Interaction {
         Interaction {
-            kind: InteractionKind::Question {
+            kind: InteractionKind::Question(Question {
                 question: "Which file?".into(),
                 header: None,
                 options: options
@@ -738,11 +738,12 @@ pub(crate) mod tests {
                         label: (*label).into(),
                         description: None,
                         role: None,
+                        preview: None,
                     })
                     .collect(),
                 free_text: false,
                 multi: false,
-            },
+            }),
             answers: vec![AnswerSpec::Choice, AnswerSpec::Cancel],
             ..permission(None)
         }

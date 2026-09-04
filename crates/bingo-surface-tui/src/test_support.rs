@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use bingo_sdk::{
     Answer, AnswerSpec, ContentPart, Event, Frame, Interaction, InteractionId, InteractionKind,
-    Item, ItemBody, ItemId, ItemStatus, Level, LoginFlow, Origin, ParentLink, Preview,
+    Item, ItemBody, ItemId, ItemStatus, Level, LoginFlow, Origin, ParentLink, Preview, Question,
     QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId, Usage, View,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
@@ -481,7 +481,7 @@ pub fn question(multi: bool, free_text: bool) -> Interaction {
         answers.push(AnswerSpec::Text);
     }
     interaction(
-        InteractionKind::Question {
+        InteractionKind::Question(Question {
             question: "Which provider?".into(),
             header: Some("Auth".into()),
             options: vec![
@@ -490,17 +490,19 @@ pub fn question(multi: bool, free_text: bool) -> Interaction {
                     label: "Anthropic".into(),
                     description: Some("claude models".into()),
                     role: None,
+                    preview: None,
                 },
                 QuestionOption {
                     id: "o".into(),
                     label: "OpenAI".into(),
                     description: None,
                     role: None,
+                    preview: None,
                 },
             ],
             free_text,
             multi,
-        },
+        }),
         answers,
     )
 }

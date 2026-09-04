@@ -46,12 +46,12 @@ pub fn ladder(interaction: &Interaction) -> Option<Question> {
             format!("{tool}: {summary}"),
             permission(session_scope.as_deref(), &offered),
         ),
-        InteractionKind::Question {
+        InteractionKind::Question(bingo_sdk::Question {
             question,
             header,
             options,
             ..
-        } => (
+        }) => (
             match header {
                 Some(header) => format!("{header}: {question}"),
                 None => question.clone(),
@@ -75,7 +75,9 @@ pub fn ladder(interaction: &Interaction) -> Option<Question> {
                 ("No".to_string(), Answer::Cancel),
             ],
         ),
-        InteractionKind::Login { .. } => return None,
+        // A form is asked one message per question (M53), which is not one
+        // ladder; `form` builds those.
+        InteractionKind::Form { .. } | InteractionKind::Login { .. } => return None,
     };
     answers.retain(|(_, answer)| offered(answer.spec()));
     if answers.is_empty() && !offered(AnswerSpec::Text) {
@@ -199,7 +201,7 @@ impl Question {
             Answer::Deny { .. } => "denied".into(),
             Answer::Confirm => "confirmed".into(),
             Answer::Cancel => "cancelled".into(),
-            Answer::Text { .. } => "answered".into(),
+            Answer::Text { .. } | Answer::Form { .. } => "answered".into(),
             Answer::Choice { ids } => match self.labels(ids) {
                 labels if labels.is_empty() => "answered".into(),
                 labels => format!("chose {}", labels.join(", ")),
@@ -362,7 +364,7 @@ mod tests {
     #[test]
     fn more_choices_than_the_platform_draws_drops_the_whole_question_to_the_lower_rung() {
         let question = ladder(&interaction(
-            InteractionKind::Question {
+            InteractionKind::Question(bingo_sdk::Question {
                 question: "Which file?".into(),
                 header: None,
                 options: ["a", "b", "c", "d"]
@@ -372,11 +374,12 @@ mod tests {
                         label: format!("file {id}"),
                         description: None,
                         role: None,
+                        preview: None,
                     })
                     .collect(),
                 free_text: false,
                 multi: false,
-            },
+            }),
             vec![AnswerSpec::Choice],
         ))
         .unwrap();
@@ -398,13 +401,13 @@ mod tests {
     #[test]
     fn free_text_is_accepted_where_the_spec_allows_it() {
         let question = ladder(&interaction(
-            InteractionKind::Question {
+            InteractionKind::Question(bingo_sdk::Question {
                 question: "What should it be called?".into(),
                 header: Some("Name".into()),
                 options: vec![],
                 free_text: true,
                 multi: false,
-            },
+            }),
             vec![AnswerSpec::Text],
         ))
         .unwrap();
@@ -464,7 +467,7 @@ mod tests {
     #[test]
     fn a_chosen_option_is_named_by_the_label_the_chat_showed() {
         let question = ladder(&interaction(
-            InteractionKind::Question {
+            InteractionKind::Question(bingo_sdk::Question {
                 question: "Which file?".into(),
                 header: None,
                 options: vec![QuestionOption {
@@ -472,10 +475,11 @@ mod tests {
                     label: "Cargo.toml".into(),
                     description: None,
                     role: None,
+                    preview: None,
                 }],
                 free_text: false,
                 multi: false,
-            },
+            }),
             vec![AnswerSpec::Choice],
         ))
         .unwrap();

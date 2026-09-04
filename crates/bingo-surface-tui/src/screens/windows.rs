@@ -186,13 +186,16 @@ fn crowded_panel(cursor: usize) -> (bingo_sdk::SessionState, Ui, Now) {
 /// answers in it than the box has rows to walk them in.
 fn crowded_question(focus: usize) -> (Tree, Ui, Now) {
     let mut open = question(false, false);
-    if let bingo_sdk::InteractionKind::Question { options, .. } = &mut open.kind {
+    if let bingo_sdk::InteractionKind::Question(bingo_sdk::Question { options, .. }) =
+        &mut open.kind
+    {
         *options = (1..=12)
             .map(|i| bingo_sdk::QuestionOption {
                 id: format!("o{i}"),
                 label: format!("option {i:02}"),
                 description: Some(format!("what option {i:02} means")),
                 role: None,
+                preview: None,
             })
             .collect();
     }

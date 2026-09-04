@@ -522,16 +522,13 @@ pub enum InteractionKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_scope: Option<String>,
     },
-    Question {
-        question: String,
-        /// A short tag a surface may show before the question (`Auth method`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        header: Option<String>,
-        options: Vec<QuestionOption>,
-        #[serde(default)]
-        free_text: bool,
-        #[serde(default)]
-        multi: bool,
+    /// One question on its own. It holds [`Question`] flattened, so the frame
+    /// it makes is the one it always was.
+    Question(Question),
+    /// A set of questions put at once and answered together (M53). Every
+    /// question is the same [`Question`] a lone one is.
+    Form {
+        questions: Vec<Question>,
     },
     Confirm {
         title: String,
@@ -545,12 +542,47 @@ pub enum InteractionKind {
 
 impl InteractionKind {
     /// The answer that picks the option in this role, when the question names
-    /// one (ADR-0039 §2): what a door may answer without asking anybody.
+    /// one (ADR-0039 §2): what a door may answer without asking anybody. A
+    /// form is answered only when every one of its questions names the option.
     pub fn answer_for(&self, role: AnswerRole) -> Option<Answer> {
-        let InteractionKind::Question { options, .. } = self else {
-            return None;
-        };
-        let option = options.iter().find(|option| option.role == Some(role))?;
+        match self {
+            InteractionKind::Question(question) => question.answer_for(role),
+            InteractionKind::Form { questions } => Some(Answer::Form {
+                answers: questions
+                    .iter()
+                    .map(|question| question.answer_for(role))
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// One question put to a person: what is asked, what may be picked, and
+/// whether words of one's own or more than one option count. A lone question
+/// and one of a form are the same thing (M53).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    pub question: String,
+    /// A short tag a surface may show before the question (`Auth method`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub free_text: bool,
+    #[serde(default)]
+    pub multi: bool,
+}
+
+impl Question {
+    /// The choice that picks this question's option in the role, when it
+    /// names one (ADR-0039 §2).
+    pub fn answer_for(&self, role: AnswerRole) -> Option<Answer> {
+        let option = self
+            .options
+            .iter()
+            .find(|option| option.role == Some(role))?;
         Some(Answer::Choice {
             ids: vec![option.id.clone()],
         })
@@ -568,6 +600,10 @@ pub struct QuestionOption {
     /// (ADR-0039 §2). Unmarked options are a person's alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<AnswerRole>,
+    /// A few lines of monospace shown beside the option while the cursor is
+    /// on it — the layout or the snippet picking it would mean (M53).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// The two options a session may answer a question with when nobody is asked
@@ -608,6 +644,7 @@ pub enum AnswerSpec {
     Text,
     Confirm,
     Cancel,
+    Form,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -629,6 +666,11 @@ pub enum Answer {
     },
     Confirm,
     Cancel,
+    /// A form's answers, one per question in the order they were asked; a
+    /// question nobody answered is [`Answer::Cancel`] in its place (M53).
+    Form {
+        answers: Vec<Answer>,
+    },
 }
 
 impl Answer {
@@ -641,6 +683,7 @@ impl Answer {
             Answer::Text { .. } => AnswerSpec::Text,
             Answer::Confirm => AnswerSpec::Confirm,
             Answer::Cancel => AnswerSpec::Cancel,
+            Answer::Form { .. } => AnswerSpec::Form,
         }
     }
 }
@@ -918,7 +961,12 @@ mod tests {
                     },
                 },
             ),
-            frame(9, Event::InteractionOpened { interaction }),
+            frame(
+                9,
+                Event::InteractionOpened {
+                    interaction: interaction.clone(),
+                },
+            ),
             frame(
                 10,
                 Event::InteractionResolved {
@@ -1072,6 +1120,61 @@ mod tests {
                     reason: CloseReason::Client,
                 },
             ),
+            frame(
+                26,
+                Event::InteractionOpened {
+                    interaction: Interaction {
+                        id: InteractionId::from_raw("int_3"),
+                        kind: InteractionKind::Form {
+                            questions: vec![
+                                Question {
+                                    question: "Which authentication method?".into(),
+                                    header: Some("Auth method".into()),
+                                    options: vec![QuestionOption {
+                                        id: "0".into(),
+                                        label: "OAuth".into(),
+                                        description: Some("Redirect to the provider".into()),
+                                        role: None,
+                                        preview: Some("GET /authorize\n302 -> /callback".into()),
+                                    }],
+                                    free_text: true,
+                                    multi: false,
+                                },
+                                Question {
+                                    question: "Which targets?".into(),
+                                    header: Some("Targets".into()),
+                                    options: vec![QuestionOption {
+                                        id: "0".into(),
+                                        label: "linux".into(),
+                                        description: None,
+                                        role: None,
+                                        preview: None,
+                                    }],
+                                    free_text: false,
+                                    multi: true,
+                                },
+                            ],
+                        },
+                        answers: vec![AnswerSpec::Form, AnswerSpec::Cancel],
+                        ..interaction.clone()
+                    },
+                },
+            ),
+            frame(
+                27,
+                Event::InteractionResolved {
+                    id: InteractionId::from_raw("int_3"),
+                    answer: Answer::Form {
+                        answers: vec![
+                            Answer::Choice {
+                                ids: vec!["0".into()],
+                            },
+                            Answer::Cancel,
+                        ],
+                    },
+                    by: ResolvedBy::Kernel,
+                },
+            ),
         ];
         insta::assert_json_snapshot!("frames", frames);
         for f in &frames {
@@ -1120,17 +1223,22 @@ mod tests {
             label: id.into(),
             description: None,
             role,
+            preview: None,
         }
     }
 
-    fn question(options: Vec<QuestionOption>) -> InteractionKind {
-        InteractionKind::Question {
+    fn asked(options: Vec<QuestionOption>) -> Question {
+        Question {
             question: "may it?".into(),
             header: None,
             options,
             free_text: false,
             multi: false,
         }
+    }
+
+    fn question(options: Vec<QuestionOption>) -> InteractionKind {
+        InteractionKind::Question(asked(options))
     }
 
     #[test]
@@ -1164,6 +1272,93 @@ mod tests {
             detail: "d".into(),
         };
         assert_eq!(confirm.answer_for(AnswerRole::Allowing), None);
+    }
+
+    #[test]
+    fn a_form_is_answered_by_every_questions_role_option() {
+        let kind = InteractionKind::Form {
+            questions: vec![
+                asked(vec![
+                    option("yes", Some(AnswerRole::Allowing)),
+                    option("no", Some(AnswerRole::Refusing)),
+                ]),
+                asked(vec![
+                    option("go", Some(AnswerRole::Allowing)),
+                    option("stop", Some(AnswerRole::Refusing)),
+                ]),
+            ],
+        };
+        assert_eq!(
+            kind.answer_for(AnswerRole::Allowing),
+            Some(Answer::Form {
+                answers: vec![
+                    Answer::Choice {
+                        ids: vec!["yes".into()]
+                    },
+                    Answer::Choice {
+                        ids: vec!["go".into()]
+                    },
+                ]
+            })
+        );
+        assert_eq!(
+            kind.answer_for(AnswerRole::Refusing),
+            Some(Answer::Form {
+                answers: vec![
+                    Answer::Choice {
+                        ids: vec!["no".into()]
+                    },
+                    Answer::Choice {
+                        ids: vec!["stop".into()]
+                    },
+                ]
+            })
+        );
+        assert_eq!(Answer::Form { answers: vec![] }.spec(), AnswerSpec::Form);
+    }
+
+    #[test]
+    fn a_form_one_of_whose_questions_is_unmarked_is_a_persons_alone() {
+        let kind = InteractionKind::Form {
+            questions: vec![
+                asked(vec![option("yes", Some(AnswerRole::Allowing))]),
+                asked(vec![option("go", None)]),
+            ],
+        };
+        assert_eq!(kind.answer_for(AnswerRole::Allowing), None);
+        assert_eq!(kind.answer_for(AnswerRole::Refusing), None);
+    }
+
+    /// The lone question holds the same struct a form's questions are, so
+    /// every frame written before it was extracted still reads (M53).
+    #[test]
+    fn a_bare_question_on_the_wire_is_the_shape_it_always_was() {
+        let json = serde_json::json!({
+            "kind": "question",
+            "question": "Which authentication method?",
+            "header": "Auth method",
+            "options": [{ "id": "0", "label": "OAuth" }],
+            "freeText": true,
+            "multi": false
+        });
+        let kind: InteractionKind = serde_json::from_value(json.clone()).expect("an old question");
+        assert_eq!(
+            kind,
+            InteractionKind::Question(Question {
+                question: "Which authentication method?".into(),
+                header: Some("Auth method".into()),
+                options: vec![QuestionOption {
+                    id: "0".into(),
+                    label: "OAuth".into(),
+                    description: None,
+                    role: None,
+                    preview: None,
+                }],
+                free_text: true,
+                multi: false,
+            })
+        );
+        assert_eq!(serde_json::to_value(&kind).expect("json"), json);
     }
 
     #[test]

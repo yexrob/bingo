@@ -422,5 +422,81 @@ expression: frames
         "kind": "client"
       }
     }
+  },
+  {
+    "seq": 26,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "interactionOpened",
+      "interaction": {
+        "id": "int_3",
+        "session": "ses_1",
+        "turn": "trn_1",
+        "item": "itm_3",
+        "openedAt": "2023-11-14T22:13:20Z",
+        "kind": {
+          "kind": "form",
+          "questions": [
+            {
+              "question": "Which authentication method?",
+              "header": "Auth method",
+              "options": [
+                {
+                  "id": "0",
+                  "label": "OAuth",
+                  "description": "Redirect to the provider",
+                  "preview": "GET /authorize\n302 -> /callback"
+                }
+              ],
+              "freeText": true,
+              "multi": false
+            },
+            {
+              "question": "Which targets?",
+              "header": "Targets",
+              "options": [
+                {
+                  "id": "0",
+                  "label": "linux"
+                }
+              ],
+              "freeText": false,
+              "multi": true
+            }
+          ]
+        },
+        "answers": [
+          "form",
+          "cancel"
+        ]
+      }
+    }
+  },
+  {
+    "seq": 27,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "interactionResolved",
+      "id": "int_3",
+      "answer": {
+        "kind": "form",
+        "answers": [
+          {
+            "kind": "choice",
+            "ids": [
+              "0"
+            ]
+          },
+          {
+            "kind": "cancel"
+          }
+        ]
+      },
+      "by": {
+        "kind": "kernel"
+      }
+    }
   }
 ]
