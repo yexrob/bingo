@@ -350,6 +350,7 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         lines,
         opening(interaction, now),
         guarded(interaction, now),
+        now,
     );
 }
 

@@ -675,6 +675,33 @@ fn what_wants_a_person_alternates_on_the_second() {
     assert_eq!(at(2_000), theme::presence());
 }
 
+/// The card's border is the fourth place that beat is said, and no longer
+/// the exception: a card is on the screen exactly while it is unanswered, so
+/// it asks for the whole of its life and stops asking by going.
+#[test]
+fn an_unanswered_cards_border_is_on_that_beat_too() {
+    let state = folded(vec![frame(1, opened(permission(Some("Edit(src/)"), None)))]);
+    let (mut ui, now) = settled();
+    ui.dialog.focus_on(state.interactions.first());
+    let tree = solo(&state);
+    let border = |at: Now| leading_style(&tree, &ui, at, "Do you want to");
+    assert_eq!(border(now), theme::as_drawn(theme::presence()));
+    assert_eq!(
+        border(later(now, 1_000)),
+        theme::as_drawn(theme::text()),
+        "on the second, with everything else that wants a person"
+    );
+    assert_eq!(
+        border(later(now, 2_000)),
+        theme::as_drawn(theme::presence())
+    );
+    assert_eq!(
+        border(still(later(now, 1_000))),
+        theme::as_drawn(theme::presence()),
+        "and it rests on bingo's own colour where nothing may move"
+    );
+}
+
 #[test]
 fn a_waiting_childs_row_and_its_switcher_line_pulse_with_it() {
     let mut tree = spawned_tree(vec![

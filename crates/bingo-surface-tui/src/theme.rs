@@ -850,7 +850,6 @@ mod tests {
                 "presence",
                 &[
                     "dialog.rs",
-                    "layers.rs",
                     "panel.rs",
                     "search.rs",
                     "select.rs",
@@ -873,7 +872,12 @@ mod tests {
             ("comet", &["transcript.rs"]),
             ("fading", &["status.rs"]),
             ("warming", &["status.rs"]),
-            ("attention", &["roster.rs", "status.rs", "transcript.rs"]),
+            (
+                "attention",
+                // The card's border is the fourth place one beat says a
+                // thing wants a person, and no longer the exception.
+                &["layers.rs", "roster.rs", "status.rs", "transcript.rs"],
+            ),
             // Highlighted code reaches the table through one door, so no view
             // has to know that a keyword and the mode badge share a colour.
             ("ink", &["highlight.rs"]),
