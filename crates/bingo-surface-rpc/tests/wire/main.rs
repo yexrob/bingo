@@ -341,6 +341,50 @@ async fn a_submitted_image_reaches_the_kernel_beside_the_text() {
     );
 }
 
+/// A host on this wire may ask for a line that waits for the running turn
+/// instead of steering it (ADR-0008 §2, amended M68): the word rides in the
+/// `Input` by serde alone, and a request that says nothing about it is the
+/// request every client has always sent.
+#[tokio::test]
+async fn a_line_may_ask_on_the_wire_to_wait_for_the_turn_to_end() {
+    let (host, session) = TestHost::with(script());
+    let mut wire = Wire::opened(host).await;
+    for (n, delivery) in [json!({}), json!({"delivery": "hold"})]
+        .into_iter()
+        .enumerate()
+    {
+        let mut input = json!({
+            "kind": "text",
+            "text": "and then the docs",
+            "origin": { "surface": "test" },
+        });
+        let (Value::Object(input_map), Value::Object(extra)) = (&mut input, delivery) else {
+            panic!("two objects");
+        };
+        input_map.extend(extra);
+        wire.call(
+            name::SESSION_SUBMIT,
+            json!({
+                "session": json!(session_id()),
+                "intent": json!(IntentId::from_raw(format!("req_{n}"))),
+                "input": input,
+            }),
+        )
+        .await
+        .expect("a submit is accepted");
+    }
+    assert_eq!(wire.finish().await, Exit { code: 0 });
+    let submits = session.submits();
+    assert_eq!(
+        submits
+            .iter()
+            .map(|(_, input)| input.is_held())
+            .collect::<Vec<_>>(),
+        [false, true],
+        "a request with no word for it steers, as every one before this did"
+    );
+}
+
 #[tokio::test]
 async fn a_write_reaches_the_actor_and_answers_nothing() {
     let (host, session) = TestHost::with(script());
