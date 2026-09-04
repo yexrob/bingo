@@ -1,5 +1,5 @@
 //! The thumbnails of the pictures the draft is carrying, standing on the
-//! input box's top border in rows of their own (outside the box since M51,
+//! input box's top border in rows of their own (outside the box since 2026-09-04,
 //! at the user's word: the box keeps its height whatever is pasted).
 //!
 //! `[image 2]` stays in the words — it is the record, and the anchor in the

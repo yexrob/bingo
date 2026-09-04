@@ -2266,7 +2266,7 @@ mod tests {
         );
     }
 
-    // ---- M48/M51: the strip of thumbnails standing on the box -----------
+    // ---- M48: the strip of thumbnails standing on the box -----------
 
     /// A draft carrying pictures, as a person leaves it: the tokens in the
     /// line and the pictures held behind them.

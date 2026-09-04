@@ -26,7 +26,7 @@ pub struct Demand {
     /// Rows of text in the input box, before its border.
     pub composer: u16,
     /// Rows of thumbnails standing on the box, when the draft carries
-    /// pictures a terminal can draw (M48; outside the border since M51).
+    /// pictures a terminal can draw (M48; outside the border since the 2026-09-04 fix).
     pub strip: u16,
     /// Rows between the transcript and the box: the activity row and whatever
     /// is queued behind it.

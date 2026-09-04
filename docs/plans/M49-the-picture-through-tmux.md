@@ -263,3 +263,20 @@ $ cargo check -p bingo-sdk --all-targets --locked \
 ```
 No known flake was hit. No crate joined the tree: the budget is 331 before and
 after.
+
+### Hands-on (main session with the user, 2026-09-04)
+
+In the user's tmux 3.6b under Ghostty, and again in Ghostty without
+tmux, `target/debug/bingo` at dev `75cb4d3`: a pasted screenshot shows
+in the strip; asked to show a `.png`, the model reads it and the
+transcript draws it; a `WebFetch` of an image URL draws too. The user
+reported both routes working in both places ("在tmux和直接在终端我测试
+可以Read展示图片了 webfetch也可以"). One earlier run showed a Read
+picture as bare placeholder cells (tofu) — not reproduced after the
+rebuild; cause not established. Scroll and the passthrough-off notice
+were not driven. Same session, at the user's word after seeing it: the
+strip moved out of the box onto its top border and `[image N]` became
+one thing to the editor (`75cb4d3`).
+
+- [x] Hands-on in the user's tmux: strip, block — seen; scroll and the
+  off case not driven.

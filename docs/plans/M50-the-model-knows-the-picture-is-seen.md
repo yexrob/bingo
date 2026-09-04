@@ -217,3 +217,14 @@ $ cargo check -p bingo-tool-fs -p bingo-core --all-targets --locked \
 (`error occurred in cc-rs`, the jitterentropy translation unit) — the M47 note
 in ADR-0041's consequences, unchanged by this milestone, since the crate
 already depended on `reqwest`. CI's `windows` job is the backstop.
+
+### Hands-on (main session with the user, 2026-09-04)
+
+Asked to show a `.png` in the TUI (tmux and bare Ghostty), the model
+read it and the transcript drew it; a `WebFetch` of an image URL drew
+too — the user's report. The disclaimer that opened this milestone did
+not recur. The user's next ask, recorded as M51: a picture written as
+markdown `![](…)` in the model's own words should draw as well.
+
+- [x] Hands-on after merge: the transcript draws the picture without a
+  disclaimer.
