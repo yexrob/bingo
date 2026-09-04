@@ -257,3 +257,19 @@ advisories ok, bans ok, licenses ok, sources ok
 $ TMUX_TMPDIR=$(mktemp -d) scripts/tui-smoke.sh
 tui-smoke ok
 ```
+
+### Hands-on (main session, 2026-09-04)
+
+`target/debug/bingo` at dev `dac1ef16` in a private tmux (120×40,
+`BINGO_GRAPHICS=off`, the openai provider), the same three-question
+prompt as the Claude Code capture. Drawn: the rule band, the tab row
+`←  ☐ 布局  ☐ 主题  ☐ 功能  ✔ Submit  →`, compact options with the
+framed preview beside them, `Type something.`, `Chat about this`
+under the lower rule, the key line (with `Space to toggle` on the
+multi-select). Walked with `⏎`/`↓`/`space` to the Submit tab
+(`Send the answers.` / `1. Submit`), sent; the model read back
+`布局: 顶栏 + 主区 / 主题: 暗色 / 功能: 仪表盘, 搜索`. Line for line
+the shape of Claude Code's card; bingo's frame is `╭╮` where Claude
+Code's is `┌┐`.
+
+- [x] Hands-on: the same prompt in tmux, captured.
