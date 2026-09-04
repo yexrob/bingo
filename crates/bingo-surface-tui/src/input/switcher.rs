@@ -114,20 +114,25 @@ fn walked(ui: &Ui, tree: &Tree, key: KeyEvent) -> Option<(roster::Cursor, Option
 /// any other, and the list is ranked by whatever the key leaves in it.
 fn typed(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Vec<Effect> {
     let was = on_cursor(ui, tree);
-    if !edits(ui, key) {
+    let Some(mut effects) = edits(ui, key) else {
         return Vec::new();
-    }
+    };
     ui.edited();
-    replaced(ui, tree, was)
+    effects.extend(replaced(ui, tree, was));
+    effects
 }
 
-/// What a key does to the box, and whether it was the box's at all. A word
-/// chord is spelled in one table only ([`super::alt`]); the control chords
-/// never reach here, because [`super::layered`] answers them first.
-fn edits(ui: &mut Ui, key: KeyEvent) -> bool {
+/// What a key does to the box, and what that asks of the loop; `None` says the
+/// key was not the box's at all. A chord is spelled in one table only — the
+/// composer's own ([`super::control`], [`super::alt`]), so `ctrl+w` deletes a
+/// word of the query as it does of any line. The chords that open a layer
+/// never reach here ([`super::LAYERS`]).
+fn edits(ui: &mut Ui, key: KeyEvent) -> Option<Vec<Effect>> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(super::control(ui, key));
+    }
     if key.modifiers.contains(KeyModifiers::ALT) {
-        super::alt(ui, key);
-        return true;
+        return Some(super::alt(ui, key));
     }
     match key.code {
         KeyCode::Char(c) => ui.composer.insert(&c.to_string()),
@@ -137,9 +142,9 @@ fn edits(ui: &mut Ui, key: KeyEvent) -> bool {
         KeyCode::Right => ui.composer.right(),
         KeyCode::Home => ui.composer.home(),
         KeyCode::End => ui.composer.end(),
-        _ => return false,
+        _ => return None,
     }
-    true
+    Some(Vec::new())
 }
 
 /// The session the cursor names on the list as the box leaves it.

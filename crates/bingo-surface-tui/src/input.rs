@@ -82,10 +82,11 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
 
 /// What a layer answers, and the chords that open one.
 ///
-/// A list and the pager own every key while they are up — the chords included,
-/// so `g` is the pager's and not the switcher's for as long as a block is open.
-/// The panel and the switcher leave the chords alone, because the chord that
-/// opened one is what closes it.
+/// A list and the pager own every key while they are up — the layer chords
+/// included, so `g` is the pager's and not the switcher's for as long as a
+/// block is open. The panel and the switcher leave those chords alone, because
+/// the chord that opened one is what closes it; a chord that edits a line
+/// ([`LAYERS`] does not name it) belongs to whoever is being typed into.
 fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effect>> {
     if ui.layer.captures() {
         match &ui.layer.open {
@@ -96,10 +97,10 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
         }
     }
     if let Some(chord) = chorded(key) {
-        // A chord is never the list's own: `ctrl+g` closes it below, and every
-        // other opens something else over it. Either way the list goes, so the
-        // draft it set aside comes back to the box first (M58) — otherwise the
-        // query a person typed would be left there for `⏎` to send.
+        // `ctrl+g` closes the list below; every other chord here opens
+        // something over it. Either way the list goes, so the draft it set
+        // aside comes back to the box first (M58) — otherwise the query a
+        // person typed would be left there for `⏎` to send.
         if chord != switcher::CHORD {
             switcher::put_away(ui, now);
         }
@@ -109,6 +110,7 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
             't' => ui.layer.toggle(Open::Panel, now.instant),
             'o' => deepen(ui, tree, now),
             'b' => return Some(background(ui, tree, now)),
+            // No other chord reaches here: `LAYERS` is what `chorded` answers.
             _ => return None,
         }
         return Some(Vec::new());
@@ -122,10 +124,16 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
     })
 }
 
-/// The letter of a control chord, if that is what this key is.
+/// The control chords that open a layer of their own — the one table there is
+/// of them. Every other control chord is the line's ([`control`]): `ctrl+w`
+/// deletes a word wherever a person is typing, the list's own query included,
+/// so it must not be mistaken for a layer's key.
+const LAYERS: [char; 5] = ['f', switcher::CHORD, 't', 'o', 'b'];
+
+/// The letter of a layer's control chord, if that is what this key is.
 fn chorded(key: KeyEvent) -> Option<char> {
     match (key.code, key.modifiers.contains(KeyModifiers::CONTROL)) {
-        (KeyCode::Char(c), true) => Some(c),
+        (KeyCode::Char(c), true) if LAYERS.contains(&c) => Some(c),
         _ => None,
     }
 }
@@ -1850,6 +1858,22 @@ mod tests {
             "the chord's own layer is what is up"
         );
         assert_eq!(ui.composer.text(), "half a thought");
+    }
+
+    /// A chord that edits a line edits the query, because the query *is* a
+    /// line: `ctrl+w` takes a word of it and leaves the list up, where a
+    /// layer's chord would have taken the list away.
+    #[test]
+    fn a_word_chord_edits_the_query_and_leaves_the_list_up() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        write(&mut ui, tree.viewed(), "half a thought", now);
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "sco ut", now);
+        press_tree(&mut ui, &tree, ctrl('w'), now);
+        assert_eq!(ui.composer.text(), "sco ", "the last word of the query");
+        assert!(ui.layer.showing(), "and the list is still up");
+        assert_eq!(draft(&ui), "half a thought", "with the draft still aside");
     }
 
     /// The box is the list's line while the list is up: nothing it holds
