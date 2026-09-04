@@ -110,6 +110,15 @@ impl Held {
     pub fn clear(&mut self) {
         self.by_token.clear();
     }
+
+    /// A line taken back out of the queue: the pictures it went out with go
+    /// back under the tokens it still names, in the order they were sent
+    /// ([`Held::carried`] is what put them in that order). A picture an
+    /// `@word` named is not held here and needs no place — the word is still
+    /// in the line, and it reads again when the line goes (M68).
+    pub fn restore(&mut self, line: &str, images: Vec<Image>) {
+        self.by_token = tokens(line).into_iter().zip(images).collect();
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +182,26 @@ mod tests {
         let held = Held::default();
         assert!(held.carried("[image 7]").is_empty());
         assert!(held.shown("[image 7]").is_empty());
+    }
+
+    /// A line withdrawn from the queue comes back whole: the tokens are still
+    /// in the words, and the pictures go back under them in the order they
+    /// were sent, so sending it again sends exactly what was queued (M68).
+    /// A picture an `@word` named rides past the tokens and needs no place.
+    #[test]
+    fn a_withdrawn_line_gets_its_pictures_back_under_the_tokens_it_names() {
+        let mut held = Held::default();
+        held.hold("", image("a"));
+        held.hold("[image 1]", image("b"));
+        let line = "look [image 2] and [image 1] and @shot.png";
+        let sent = held.carried(line);
+        assert_eq!(sent, vec![image("b"), image("a")]);
+
+        let mut back = Held::default();
+        back.restore(line, [sent, vec![image("mentioned")]].concat());
+        assert_eq!(back.carried(line), vec![image("b"), image("a")]);
+        assert_eq!(back.under(1), Some(&image("a")));
+        assert_eq!(back.under(3), None, "and nothing is held for the word");
     }
 
     /// The strip draws what the line carries and needs to know each one's

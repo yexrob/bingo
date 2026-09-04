@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use bingo_sdk::{
-    Delivery, Input, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState,
+    Delivery, Input, IntentId, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -681,11 +681,11 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => newline(ui),
         KeyCode::Enter => return enter(ui, tree, now),
         KeyCode::BackTab => return cycle_mode(ui, tree.viewed(), now),
-        KeyCode::Up => history_or_line(ui, Step::Up),
+        KeyCode::Up => return walk_back(ui, tree),
         // The list's other door: `↓` on an empty box opens the same list
         // `ctrl+g` does, with the cursor on the session already in view.
         KeyCode::Down if switcher::opens(ui, tree) => return switcher::toggle(ui, tree, now),
-        KeyCode::Down => history_or_line(ui, Step::Down),
+        KeyCode::Down => walk_forward(ui),
         KeyCode::PageUp => scroll(ui, ui.page() as isize, now),
         KeyCode::PageDown => scroll(ui, -(ui.page() as isize), now),
         KeyCode::Left => ui.composer.left(),
@@ -791,24 +791,46 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now, delivery: Delivery) -> Vec<Effect>
     }
 }
 
-enum Step {
-    Up,
-    Down,
+/// `↑` walks back through what a person has sent: the caret while it can
+/// still move, then the lines of theirs the queue is still holding — newest
+/// first, each taken back out of it and into the box — and only then the
+/// prompt history (M68). A line still queued is still theirs to edit; one a
+/// turn has already taken is in the history like every other line.
+fn walk_back(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
+    if ui.composer.up() {
+        return Vec::new();
+    }
+    if let Some(intent) = newest_of_ours(tree.viewed()) {
+        return vec![Effect::Withdraw(intent)];
+    }
+    let older = ui.history.older(ui.composer.text());
+    recall(ui, older);
+    Vec::new()
 }
 
-/// The arrows walk the buffer until it runs out, then the prompt history.
-fn history_or_line(ui: &mut Ui, step: Step) {
-    let moved = match step {
-        Step::Up => ui.composer.up(),
-        Step::Down => ui.composer.down(),
-    };
-    if moved {
+/// The last line this surface put in the queue, which is the first one `↑`
+/// asks for back. Another surface's is not ours to take (ADR-0008 §2), so it
+/// is not offered here either.
+fn newest_of_ours(state: &SessionState) -> Option<IntentId> {
+    state
+        .queue
+        .iter()
+        .rfind(|entry| entry.origin.surface == SURFACE_ID)
+        .map(|entry| entry.intent.clone())
+}
+
+/// `↓` walks the buffer until it runs out, then forward through the history
+/// and back to the draft the walk set aside. It passes no queue: what came
+/// out of one is in the box, and a line is only ever put back by sending it.
+fn walk_forward(ui: &mut Ui) {
+    if ui.composer.down() {
         return;
     }
-    let recalled = match step {
-        Step::Up => ui.history.older(ui.composer.text()),
-        Step::Down => ui.history.newer(),
-    };
+    let newer = ui.history.newer();
+    recall(ui, newer);
+}
+
+fn recall(ui: &mut Ui, recalled: Option<String>) {
     if let Some(text) = recalled {
         ui.composer.set(&text);
         ui.menu = Default::default();
@@ -3096,6 +3118,31 @@ mod tests {
 
     // ---- the line that waits (M68) --------------------------------------
 
+    /// A queue as the kernel published it, with the surface that put each
+    /// line there and whether the running turn may be steered with it.
+    fn queued(entries: &[(&str, &str)]) -> SessionState {
+        folded(vec![
+            frame(1, started("trn_1")),
+            frame(
+                2,
+                bingo_sdk::Event::QueueChanged {
+                    revision: 1,
+                    entries: entries
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (surface, preview))| bingo_sdk::QueueEntry {
+                            intent: IntentId::from_raw(format!("req_{i}")),
+                            position: i as u32 + 1,
+                            preview: (*preview).to_string(),
+                            steerable: true,
+                            origin: Origin::surface(*surface),
+                        })
+                        .collect(),
+                },
+            ),
+        ])
+    }
+
     fn delivery_of(effects: &[Effect]) -> Option<Delivery> {
         effects.iter().find_map(|effect| match effect {
             Effect::Submit(Input::Text { delivery, .. }) => Some(*delivery),
@@ -3149,5 +3196,43 @@ mod tests {
             "and with nothing running there is nothing to wait for"
         );
         assert_eq!(ui.composer.text(), "no turn is running", "nor is it sent");
+    }
+
+    /// The user's first ask: a queued line comes back to be edited. `↑` walks
+    /// into the person's own entries, newest first, and asks for that one.
+    #[test]
+    fn up_on_an_empty_box_asks_for_the_newest_line_of_ours_that_is_queued() {
+        let (mut ui, now) = scene();
+        let state = queued(&[("tui", "first"), ("tui", "second")]);
+        assert_eq!(
+            press(&mut ui, &state, key(KeyCode::Up), now),
+            vec![Effect::Withdraw(IntentId::from_raw("req_1"))],
+            "the newest, which is the last one queued"
+        );
+        assert!(
+            ui.composer.is_empty(),
+            "the answer fills the box, not the key"
+        );
+    }
+
+    /// Only ours: another surface's queued line is not this one's to take
+    /// back, so `↑` walks past it into the prompt history.
+    #[test]
+    fn up_walks_past_another_surfaces_queued_line_into_the_history() {
+        let (mut ui, now) = scene();
+        ui.history = crate::history::PromptHistory::new(vec!["an older ask".into()]);
+        let state = queued(&[("rpc", "not ours")]);
+        assert!(press(&mut ui, &state, key(KeyCode::Up), now).is_empty());
+        assert_eq!(ui.composer.text(), "an older ask");
+    }
+
+    /// And with nothing of the person's waiting, `↑` is the history key it
+    /// has always been.
+    #[test]
+    fn up_with_an_empty_queue_recalls_the_prompt_history() {
+        let (mut ui, now) = scene();
+        ui.history = crate::history::PromptHistory::new(vec!["an older ask".into()]);
+        assert!(press(&mut ui, &busy(), key(KeyCode::Up), now).is_empty());
+        assert_eq!(ui.composer.text(), "an older ask");
     }
 }

@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use bingo_sdk::{
     Attachment, CatalogKind, ClientIdentity, CloseReason, CommandSpec, Event, Exit, FrameStream,
-    GatewayEvent, GatewayStream, HostHandle, IntentId, IntentOutcome, InterruptScope, KernelError,
-    Level, OpenOptions, SessionFilter, SessionHandle, SessionId, SessionSelector, SessionState,
-    SessionSummary, SurfaceOptions, View,
+    GatewayEvent, GatewayStream, HostHandle, Input, IntentId, IntentOutcome, InterruptScope,
+    KernelError, Level, OpenOptions, SessionFilter, SessionHandle, SessionId, SessionSelector,
+    SessionState, SessionSummary, SurfaceOptions, View,
 };
 use crossterm::event::Event as Term;
 use futures::{Stream, StreamExt};
@@ -29,6 +29,8 @@ mod showing;
 mod submit;
 /// Whether a newer release is out, asked once at start (M63).
 mod updates;
+/// A line on its way back out of the queue and into the composer (M68).
+mod withdraw;
 
 use crate::clock::{self, Now};
 use crate::effect::Effect;
@@ -88,6 +90,10 @@ enum Reply {
     Fitted(Box<decoded::Fitted>),
     /// A newer release than this build, as the start-up check found it (M63).
     Update(String),
+    /// The line the queue gave back, or why it did not (M68). It is carried
+    /// whole rather than through `Failed`, because a line the turn took first
+    /// is a note about a race and not a refusal of anything.
+    Withdrawn(Box<Result<Input, KernelError>>),
     Failed(KernelError),
 }
 
@@ -588,6 +594,7 @@ impl Run {
     fn effect(&mut self, effect: Effect) {
         match effect {
             Effect::Submit(input) => self.submit(input),
+            Effect::Withdraw(intent) => withdraw::ask(self, intent),
             Effect::Interrupt => self.interrupt(),
             Effect::Answer {
                 interaction,
@@ -830,6 +837,7 @@ impl Run {
             Reply::Linked(answer) => self.ui.linked.answered(*answer),
             Reply::Fitted(fitted) => self.ui.decoded.answered(*fitted),
             Reply::Update(version) => self.told_of(version),
+            Reply::Withdrawn(taken) => withdraw::took(self, *taken),
             Reply::Failed(error) => {
                 self.ui.opening = false;
                 self.ui.notify(Level::Error, error.message, Instant::now());
@@ -1667,6 +1675,46 @@ mod tests {
         // scratch directory, not beside the crate's sources.
         run.data_dir = dir.path().to_path_buf();
         (dir, run, session, waiting)
+    }
+
+    /// A line taken back out of the queue lands in the box whole — its words
+    /// and the pictures those words name — so `⏎` or `tab` sends again
+    /// exactly what was queued (M68).
+    #[test]
+    fn a_withdrawn_line_comes_back_to_the_composer_with_its_pictures() {
+        let mut run = idle(Instant::now());
+        let image = Image::from_bytes("image/png", b"png").expect("a small picture");
+        run.reply(
+            Reply::Withdrawn(Box::new(Ok(Input::Text {
+                text: "look at [image 1]".into(),
+                images: vec![image.clone()],
+                origin: bingo_sdk::Origin::surface(SURFACE_ID),
+                delivery: bingo_sdk::Delivery::Hold,
+            }))),
+            &mut None,
+        );
+        assert_eq!(run.ui.composer.text(), "look at [image 1]");
+        assert_eq!(run.ui.pictures.carried(run.ui.composer.text()), vec![image]);
+    }
+
+    /// The race the actor settles: by the time the ask arrives the turn may
+    /// have taken the line. Then the box stays empty and the status line says
+    /// where it went, which is not an error anybody made.
+    #[test]
+    fn a_line_the_turn_took_first_leaves_the_box_empty_and_says_so() {
+        let mut run = idle(Instant::now());
+        run.reply(
+            Reply::Withdrawn(Box::new(Err(KernelError::new(
+                bingo_sdk::ErrorCode::NotFound,
+                "no line of req_1 is waiting in this queue",
+            )))),
+            &mut None,
+        );
+        assert!(run.ui.composer.is_empty());
+        assert_eq!(
+            run.ui.notices.last().map(|notice| notice.text.clone()),
+            Some(withdraw::ALREADY_SENT.to_string())
+        );
     }
 
     /// What the start-up check found, folded in the way the loop folds it.
