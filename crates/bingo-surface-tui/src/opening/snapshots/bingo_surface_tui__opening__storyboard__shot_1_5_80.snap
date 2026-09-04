@@ -1,0 +1,10 @@
+---
+source: crates/bingo-surface-tui/src/opening/storyboard.rs
+expression: "in_look(truecolor(), || drawn(t, width))"
+---
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ ✻ Welcome to bingo!                                                          │"
+"│                                                                              │"
+"│   /help for help · /login codex to use a                                     │"
+"│   cwd                                                                        │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"

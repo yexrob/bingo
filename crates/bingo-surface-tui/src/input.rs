@@ -892,7 +892,7 @@ mod tests {
             let state = state();
             let tree = solo(&state);
             let (mut ui, now) = scene();
-            ui.intro = Some(crate::intro::Playing::from(now.instant));
+            ui.intro = Some(crate::opening::Playing::from(now.instant));
             let effects = on_key(&mut ui, &tree, key, now);
             assert!(ui.intro.is_none(), "{key:?} skipped it");
             assert!(effects.is_empty(), "{key:?} did nothing else: {effects:?}");
@@ -907,7 +907,7 @@ mod tests {
         let state = state();
         let tree = solo(&state);
         let (mut ui, now) = scene();
-        ui.intro = Some(crate::intro::Playing::from(now.instant));
+        ui.intro = Some(crate::opening::Playing::from(now.instant));
         on_key(&mut ui, &tree, typed('h'), now);
         on_key(&mut ui, &tree, typed('i'), now);
         assert_eq!(ui.composer.text(), "i");

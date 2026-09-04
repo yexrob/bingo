@@ -96,10 +96,6 @@ enum Reply {
     Fitted(Box<decoded::Fitted>),
     /// A newer release than this build, as the start-up check found it (M63).
     Update(String),
-    /// One frame of the opening, drawn off the loop's thread (M70): a
-    /// ray-marched picture costs tens of milliseconds in a debug build, and no
-    /// draw may wait for one.
-    Opening(Box<opening::Rendered>),
     /// The line the queue gave back, or why it did not (M68). It is carried
     /// whole rather than through `Failed`, because a line the turn took first
     /// is a note about a race and not a refusal of anything.
@@ -446,7 +442,6 @@ impl Run {
         showing::hand(self, screen)?;
         showing::fit(self);
         showing::read_linked(self);
-        opening::ask(self, now);
         Ok(())
     }
 
@@ -893,7 +888,6 @@ impl Run {
             Reply::Linked(answer) => self.ui.linked.answered(*answer),
             Reply::Fitted(fitted) => self.ui.decoded.answered(*fitted),
             Reply::Update(version) => self.told_of(version),
-            Reply::Opening(frame) => opening::landed(self, *frame),
             Reply::Withdrawn(taken) => withdraw::took(self, *taken),
             Reply::Failed(error) => {
                 self.ui.opening = false;

@@ -66,9 +66,6 @@ mod graphics;
 mod highlight;
 mod history;
 mod input;
-/// The opening shot (M69, M70): the ray-marched world the welcome box plays
-/// before it settles into itself.
-mod intro;
 mod keys;
 /// An answer that came back after the probe that asked for it gave up (M60).
 mod late;
@@ -76,6 +73,9 @@ mod layers;
 mod markdown;
 mod matching;
 mod mentions;
+/// The opening (M72): the welcome box drawing itself, out of the motions the
+/// product already has.
+mod opening;
 mod pager;
 mod panel;
 mod paths;

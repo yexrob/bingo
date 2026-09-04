@@ -169,6 +169,13 @@ fn head(t: f32) -> f32 {
     t.clamp(0.0, 1.0) * (1.0 + CREST)
 }
 
+/// A run that goes there and comes back, eased at both ends: 0 at each end of
+/// `p` and 1 in the middle of it. One breath, whether it is counted off the
+/// wall clock ([`breath`]) or off a beat of its own with a beginning (§11).
+pub fn swell(p: f32) -> f32 {
+    ease_in_out(1.0 - (2.0 * p.clamp(0.0, 1.0) - 1.0).abs())
+}
+
 /// Slow at both ends: what a breath does.
 pub fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -209,8 +216,7 @@ pub fn phase(now: Now, period: Duration) -> f32 {
 /// 1 halfway through it, 0 again at the next. A breath that only rose would
 /// snap back, and a snap is not a breath.
 pub fn breath(now: Now, period: Duration) -> f32 {
-    let there_and_back = 1.0 - (2.0 * phase(now, period) - 1.0).abs();
-    ease_in_out(there_and_back)
+    swell(phase(now, period))
 }
 
 /// A cycle that alternates rather than ramps: what pulses at 1 Hz. Everything
@@ -359,6 +365,18 @@ mod tests {
         for t in [-1.0, 0.5, 2.0] {
             assert!(!swept(t, 0, 0), "a run of no cells reveals nothing");
         }
+    }
+
+    /// The shape of every breath, wherever its `p` came from.
+    #[test]
+    fn a_swell_rises_to_the_middle_of_its_run_and_comes_back() {
+        assert_eq!(swell(0.0), 0.0);
+        assert_eq!(swell(0.25), 0.5);
+        assert_eq!(swell(0.5), 1.0);
+        assert_eq!(swell(0.75), 0.5);
+        assert_eq!(swell(1.0), 0.0);
+        assert_eq!(swell(-1.0), 0.0, "clamped");
+        assert_eq!(swell(2.0), 0.0);
     }
 
     #[test]
