@@ -6,10 +6,16 @@
 //! never names a colour — it names a token — and a test asserts that no
 //! `Color::` or `Modifier::` literal exists outside this file.
 //!
-//! The look is chosen once, from the environment: `NO_COLOR` strips colour,
+//! The look is chosen from the environment: `NO_COLOR` strips colour,
 //! `BINGO_ASCII=1` strips the glyphs, `COLORTERM` says whether 24-bit is safe.
 //! [`choose`] is that decision as a pure function; the tests fix the look to
 //! the ANSI table so a snapshot never depends on the terminal it ran in.
+//!
+//! One part of it is not settled once. Which of the two palettes a terminal
+//! wants is the terminal's own to say, and a terminal that follows the system's
+//! appearance changes its ground under a running surface — so the ground is a
+//! slot a later answer may replace ([`swap`]), every frame after it wears the
+//! other palette, and nothing here caches a `Style` (M71).
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
@@ -174,7 +180,7 @@ pub const SPARKLE_MS: u128 = 150;
 /// Terminal bell, written out of band between frames.
 pub const BELL: &[u8] = b"\x07";
 
-// ---- the look, chosen once ----------------------------------------------
+// ---- the look, and the ground it may change under -----------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
@@ -203,7 +209,8 @@ pub fn look(setting: Option<&str>) -> Look {
     }
 }
 
-/// Everything the look is chosen from, read once at start.
+/// Everything the look is chosen from that no answer can change: what the
+/// environment asks for, read once at start.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Ask {
     /// `NO_COLOR`, which wins over all of it.
@@ -212,16 +219,15 @@ pub struct Ask {
     pub truecolor: bool,
     pub ascii: bool,
     pub look: Look,
-    /// Whether the terminal answered that its background is light. `None`
-    /// where it did not answer or was never asked.
-    pub light: Option<bool>,
 }
 
-/// What the environment asks for. Truecolor is announced by `COLORTERM`; a
-/// terminal that says nothing gets the eight it is sure of. `NO_COLOR` wins
-/// over every other answer, the terminal's own included.
-pub fn choose(ask: Ask) -> Theme {
-    let palette = match (ask.look, ask.light) {
+/// What the environment asks for, over the ground the terminal last said it
+/// has — `None` where it did not answer or was never asked. Truecolor is
+/// announced by `COLORTERM`; a terminal that says nothing gets the eight it is
+/// sure of. `NO_COLOR` wins over every other answer, the terminal's own
+/// included.
+pub fn choose(ask: Ask, light: Option<bool>) -> Theme {
+    let palette = match (ask.look, light) {
         (Look::Light, _) | (Look::Terminal, Some(true)) => LIGHT,
         _ => DARK,
     };
@@ -265,26 +271,116 @@ fn current() -> Theme {
     })
 }
 
-/// The look this run draws in, settled by [`detect`] before the first frame.
+/// What the environment asked for, read once: nothing in it can change while
+/// the run lasts.
 #[cfg(not(test))]
-static CHOSEN: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+static ASK: std::sync::OnceLock<Ask> = std::sync::OnceLock::new();
+
+/// What the terminal last said its ground was — the one part of the look that
+/// may change under a running surface (M71), so the one part that is a slot
+/// rather than a settled value. A number and not a lock: [`current`] is read
+/// on every span of every frame.
+#[cfg(not(test))]
+static GROUND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNASKED);
+
+/// The three things the terminal may have said about its ground, as [`GROUND`]
+/// holds them.
+const UNASKED: u8 = 0;
+const LIGHT_GROUND: u8 = 1;
+const DARK_GROUND: u8 = 2;
+
+/// What one of those numbers says.
+fn ground(said: u8) -> Option<bool> {
+    match said {
+        LIGHT_GROUND => Some(true),
+        DARK_GROUND => Some(false),
+        _ => None,
+    }
+}
+
+/// And the number for one of those answers.
+fn number(ground: Option<bool>) -> u8 {
+    match ground {
+        Some(true) => LIGHT_GROUND,
+        Some(false) => DARK_GROUND,
+        None => UNASKED,
+    }
+}
 
 #[cfg(not(test))]
 fn current() -> Theme {
-    *CHOSEN.get_or_init(|| choose(asked()))
+    let said = GROUND.load(std::sync::atomic::Ordering::Relaxed);
+    choose(*ASK.get_or_init(asked), ground(said))
 }
 
-/// Settle the look, asking the terminal what colour its background is where
-/// that is what decides it. Called once, before the terminal is taken: a probe
-/// writes an escape and waits for the answer, which is not something a draw may
-/// do. A test never reaches it — the suite fixes the look instead.
+/// Settle what the environment says and ask the terminal what colour its
+/// background is, where that is what decides it. Called once, before the
+/// terminal is taken: a probe writes an escape and waits for the answer, which
+/// is not something a draw may do — and, since the answer is a slot of its
+/// own, not something a draw can do either. A test never reaches it — the
+/// suite fixes the look instead.
 #[cfg(not(test))]
 pub fn detect() {
-    let _ = CHOSEN.set(choose(asked()));
+    let _ = ASK.set(asked());
+    if follows() {
+        GROUND.store(number(background()), std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
 pub fn detect() {}
+
+/// The terminal said again ([`crate::run::look`]): `true` where the look
+/// actually changed and the screen is now wearing the wrong ink, `false`
+/// where the answer is the one already standing — or where nothing follows the
+/// terminal at all, which [`follows`] is the question for.
+#[cfg(not(test))]
+pub fn swap(light: bool) -> bool {
+    let before = current();
+    GROUND.store(number(Some(light)), std::sync::atomic::Ordering::Relaxed);
+    current() != before
+}
+
+/// The same under test, on the thread-local look [`with`] fixes, so a swap in
+/// one test is not a swap in another and nothing leaks out of the closure.
+#[cfg(test)]
+pub fn swap(light: bool) -> bool {
+    let before = current();
+    let after = match before.colors {
+        Colors::True(_) => Theme {
+            colors: choose(
+                Ask {
+                    truecolor: true,
+                    ..Ask::default()
+                },
+                Some(light),
+            )
+            .colors,
+            ..before
+        },
+        _ => before,
+    };
+    OVERRIDE.with(|slot| slot.set(Some(after)));
+    after != before
+}
+
+/// Whether the terminal is the one that says what the look is, and so whether
+/// it is worth asking — once before the first frame, and again while the run
+/// lasts. A named look, a terminal of eight colours and `NO_COLOR` all answer
+/// no: there is nothing an answer would change, and a person who named a look
+/// is not asked again.
+#[cfg(not(test))]
+pub fn follows() -> bool {
+    let ask = *ASK.get_or_init(asked);
+    !ask.no_color && ask.truecolor && ask.look == Look::Terminal
+}
+
+/// The same under test, where the look is the one [`with`] fixed: the two
+/// palettes are the truecolor look's, and nothing else has a ground to follow.
+#[cfg(test)]
+pub fn follows() -> bool {
+    matches!(current().colors, Colors::True(_))
+}
 
 /// How long a probe of the terminal is given, this one and the graphics probe
 /// beside it ([`crate::graphics`]). A terminal that has not answered by then is
@@ -312,22 +408,14 @@ pub const PROBE_THROUGH: std::time::Duration =
 
 #[cfg(not(test))]
 fn asked() -> Ask {
-    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-    let truecolor = matches!(
-        std::env::var("COLORTERM").ok().as_deref(),
-        Some("truecolor" | "24bit")
-    );
-    let look = look(std::env::var("BINGO_THEME").ok().as_deref());
     Ask {
-        // The terminal is asked only where its answer would change something:
-        // a probe nobody reads is a probe not worth its milliseconds.
-        light: (!no_color && truecolor && look == Look::Terminal)
-            .then(background)
-            .flatten(),
-        no_color,
-        truecolor,
+        no_color: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+        truecolor: matches!(
+            std::env::var("COLORTERM").ok().as_deref(),
+            Some("truecolor" | "24bit")
+        ),
         ascii: std::env::var_os("BINGO_ASCII").is_some_and(|v| v == "1"),
-        look,
+        look: look(std::env::var("BINGO_THEME").ok().as_deref()),
     }
 }
 
@@ -340,6 +428,93 @@ fn background() -> Option<bool> {
     terminal_colorsaurus::theme_mode(options)
         .ok()
         .map(|mode| mode == terminal_colorsaurus::ThemeMode::Light)
+}
+
+// ---- and asked again (M71) ----------------------------------------------
+
+/// The question, asked again while the run lasts at the moments a change of
+/// ground is likely ([`crate::run::look`]): `OSC 11`, the background colour,
+/// which is what the probe asks for too. The answer comes back through
+/// crossterm's key stream, where [`crate::late`] hears it whole and
+/// [`answered`] reads it.
+pub const QUESTION: &[u8] = b"\x1b]11;?\x1b\\";
+
+/// What an `OSC 11` reply says the ground is: `Some(true)` for a light one.
+/// Anything that is not an answer to that question — the graphics probe's own
+/// replies, an `OSC 10` foreground, a colour spec in a shape `xparsecolor`
+/// never wrote — is `None`, and leaves the look standing.
+pub fn answered(reply: &[u8]) -> Option<bool> {
+    let (red, green, blue) = colour(spec(reply)?)?;
+    Some(background_is_light(red, green, blue))
+}
+
+/// The colour spec inside the reply, between `ESC ] 11 ;` and whichever
+/// terminator the terminal chose.
+fn spec(reply: &[u8]) -> Option<&[u8]> {
+    let body = reply.strip_prefix(b"\x1b]11;")?;
+    let body = body
+        .strip_suffix(b"\x1b\\")
+        .or_else(|| body.strip_suffix(b"\x07"))?;
+    (!body.is_empty()).then_some(body)
+}
+
+/// An X11 colour string as `xparsecolor` reads the ones terminals answer with,
+/// which is the shape `terminal_colorsaurus` accepted for the first answer:
+/// `rgb:` and one to four hex digits a channel, or the older `#` form.
+fn colour(spec: &[u8]) -> Option<(u16, u16, u16)> {
+    let text = std::str::from_utf8(spec).ok()?;
+    match text.strip_prefix("rgb:") {
+        Some(written) => channels(written),
+        None => shifted(text.strip_prefix('#')?),
+    }
+}
+
+/// `rgb:<red>/<green>/<blue>`, each channel scaled from the width it was
+/// written in: `h` is four bits, `hhhh` sixteen. A fourth channel is `rgba:`,
+/// which this question is never answered with.
+fn channels(written: &str) -> Option<(u16, u16, u16)> {
+    let mut parts = written.split('/');
+    let (red, green, blue) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((scale(red)?, scale(green)?, scale(blue)?))
+}
+
+fn scale(digits: &str) -> Option<u16> {
+    let width = u32::try_from(digits.len()).ok()?;
+    if !(1..=4).contains(&width) {
+        return None;
+    }
+    let most = 16u32.pow(width) - 1;
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    u16::try_from(u32::from(u16::MAX) * value / most).ok()
+}
+
+/// The older `#<red><green><blue>`, whose digits are the most significant bits
+/// of each channel rather than a scale: `#3a7` is `#3000a0007000`.
+fn shifted(digits: &str) -> Option<(u16, u16, u16)> {
+    let width = digits.len() / 3;
+    if digits.len() % 3 != 0 || !(1..=4).contains(&width) {
+        return None;
+    }
+    let channel = |n: usize| {
+        let part = digits.get(n * width..(n + 1) * width)?;
+        Some(u16::from_str_radix(part, 16).ok()? << ((4 - width) * 4))
+    };
+    Some((channel(0)?, channel(1)?, channel(2)?))
+}
+
+/// Whether a ground of this colour is a light one, by the lightness
+/// `terminal_colorsaurus` measures — the same maths the first answer went
+/// through, so the probe and a later reply cannot disagree about one colour.
+///
+/// The probe has the ink beside the ground and compares the two; a reply to
+/// this one question carries only the ground, and the threshold is then the
+/// perceptual middle grey the crate falls back to when ink and ground are
+/// worth the same.
+pub fn background_is_light(red: u16, green: u16, blue: u16) -> bool {
+    terminal_colorsaurus::Color::rgb(red, green, blue).perceived_lightness() > 0.5
 }
 
 /// Draw whatever `f` draws in another look.
@@ -1041,30 +1216,36 @@ mod tests {
 
     #[test]
     fn the_environment_picks_the_look_and_no_colour_wins() {
-        assert_eq!(choose(Ask::default()).colors, Colors::Ansi);
-        assert_eq!(choose(asking()).colors, Colors::True(DARK));
+        assert_eq!(choose(Ask::default(), None).colors, Colors::Ansi);
+        assert_eq!(choose(asking(), None).colors, Colors::True(DARK));
         assert_eq!(
-            choose(Ask {
-                no_color: true,
-                ..asking()
-            })
+            choose(
+                Ask {
+                    no_color: true,
+                    ..asking()
+                },
+                None
+            )
             .colors,
             Colors::Plain,
         );
         assert_eq!(
-            choose(Ask {
-                ascii: true,
-                ..Ask::default()
-            })
+            choose(
+                Ask {
+                    ascii: true,
+                    ..Ask::default()
+                },
+                None
+            )
             .glyphs,
             &ASCII,
         );
-        assert_eq!(choose(Ask::default()).glyphs, &UNICODE);
+        assert_eq!(choose(Ask::default(), None).glyphs, &UNICODE);
     }
 
     #[test]
     fn a_terminal_that_answers_light_gets_the_light_palette() {
-        let terminal = |light| choose(Ask { light, ..asking() }).colors;
+        let terminal = |light| choose(asking(), light).colors;
         assert_eq!(terminal(Some(true)), Colors::True(LIGHT));
         assert_eq!(terminal(Some(false)), Colors::True(DARK));
         assert_eq!(terminal(None), Colors::True(DARK), "and silence is dark");
@@ -1072,14 +1253,7 @@ mod tests {
 
     #[test]
     fn a_named_look_outranks_what_the_terminal_answered() {
-        let named = |look, light| {
-            choose(Ask {
-                look,
-                light,
-                ..asking()
-            })
-            .colors
-        };
+        let named = |look, light| choose(Ask { look, ..asking() }, light).colors;
         assert_eq!(named(Look::Dark, Some(true)), Colors::True(DARK));
         assert_eq!(named(Look::Light, Some(false)), Colors::True(LIGHT));
         assert_eq!(look(Some("light")), Look::Light);
@@ -1091,15 +1265,139 @@ mod tests {
     #[test]
     fn no_colour_beats_a_terminal_that_answered_light() {
         assert_eq!(
-            choose(Ask {
-                no_color: true,
-                light: Some(true),
-                look: Look::Light,
-                ..asking()
-            })
+            choose(
+                Ask {
+                    no_color: true,
+                    look: Look::Light,
+                    ..asking()
+                },
+                Some(true)
+            )
             .colors,
             Colors::Plain,
         );
+    }
+
+    // ---- and the ground that may change under it (M71) ------------------
+
+    /// The look follows the terminal: an answer that says the other thing is
+    /// the palette every draw after it wears, and one that says the same thing
+    /// is nothing at all.
+    #[test]
+    fn a_ground_answered_again_swaps_the_palette() {
+        with(crate::painted::truecolor(), || {
+            assert_eq!(current().colors, Colors::True(DARK));
+            assert!(swap(true), "the ground turned light");
+            assert_eq!(current().colors, Colors::True(LIGHT));
+            assert!(!swap(true), "and says so again");
+            assert_eq!(current().colors, Colors::True(LIGHT));
+            assert!(swap(false), "and back");
+            assert_eq!(current().colors, Colors::True(DARK));
+        });
+    }
+
+    /// A swap changes the palette and nothing else: the glyph table a person
+    /// asked for is not the terminal's to say.
+    #[test]
+    fn a_swap_leaves_the_glyphs_where_they_were() {
+        with(
+            Theme {
+                colors: Colors::True(DARK),
+                glyphs: &ASCII,
+            },
+            || {
+                assert!(swap(true));
+                assert_eq!(current().glyphs, &ASCII);
+            },
+        );
+    }
+
+    /// Where there is no ground to follow there is nothing to swap: eight
+    /// colours and `NO_COLOR` both stand still, and say so.
+    #[test]
+    fn a_look_with_no_ground_to_follow_never_swaps() {
+        for look in [crate::painted::no_colour(), crate::painted::ascii()] {
+            with(look, || {
+                assert!(!follows(), "{:?} has no ground", look.colors);
+                assert!(!swap(true));
+                assert_eq!(current().colors, look.colors);
+            });
+        }
+        with(crate::painted::truecolor(), || {
+            assert!(follows(), "and the native look does")
+        });
+    }
+
+    /// What the terminal said, as the one number the slot holds it in.
+    #[test]
+    fn the_ground_survives_the_number_it_is_kept_in() {
+        for said in [Some(true), Some(false), None] {
+            assert_eq!(ground(number(said)), said);
+        }
+        assert_eq!(ground(97), None, "and a number nothing wrote is silence");
+    }
+
+    /// An `OSC 11` reply, read the way `xparsecolor` reads the colour strings
+    /// terminals answer with — both terminators, every channel width, and the
+    /// older `#` form (M71).
+    #[test]
+    fn an_osc_eleven_reply_says_which_ground_the_terminal_has() {
+        for (reply, ground) in [
+            (b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\".as_slice(), Some(false)),
+            (b"\x1b]11;rgb:1e/1e/2e\x07".as_slice(), Some(false)),
+            (b"\x1b]11;rgb:0000/0000/0000\x1b\\".as_slice(), Some(false)),
+            (b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\".as_slice(), Some(true)),
+            (b"\x1b]11;rgb:f/f/f\x1b\\".as_slice(), Some(true)),
+            (b"\x1b]11;rgb:fdfd/f6f6/e3e3\x07".as_slice(), Some(true)),
+            (b"\x1b]11;#fdf6e3\x1b\\".as_slice(), Some(true)),
+            (b"\x1b]11;#1e1e2e\x1b\\".as_slice(), Some(false)),
+        ] {
+            assert_eq!(
+                answered(reply),
+                ground,
+                "{:?}",
+                String::from_utf8_lossy(reply)
+            );
+        }
+    }
+
+    /// And nothing else is one. A reply to another question, a reply cut short
+    /// and a spec in a shape nobody writes all leave the look standing rather
+    /// than guessing at a palette.
+    #[test]
+    fn what_is_not_an_answer_to_that_question_changes_no_look() {
+        for reply in [
+            b"\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\".as_slice(),
+            b"\x1b_Gi=31;OK\x1b\\".as_slice(),
+            b"\x1bP>|ghostty 1.3.1\x1b\\".as_slice(),
+            b"\x1b]11;rgb:1e1e/1e1e/2e2e".as_slice(),
+            b"\x1b]11;\x1b\\".as_slice(),
+            b"\x1b]11;rgb:1e1e/2e2e\x1b\\".as_slice(),
+            b"\x1b]11;rgb:1e1e/1e1e/2e2e/ffff\x1b\\".as_slice(),
+            b"\x1b]11;rgb:zzzz/1e1e/2e2e\x1b\\".as_slice(),
+            b"\x1b]11;rgb:11111/1e1e/2e2e\x1b\\".as_slice(),
+            b"\x1b]11;#ff\x1b\\".as_slice(),
+            b"\x1b]11;teal\x1b\\".as_slice(),
+        ] {
+            assert_eq!(
+                answered(reply),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(reply)
+            );
+        }
+    }
+
+    /// The threshold is the perceptual middle grey `terminal_colorsaurus`
+    /// falls back to, so the probe's own answer and a later reply about the
+    /// same colour cannot disagree. The pivot is a grey either side of `L* 50`.
+    #[test]
+    fn the_ground_is_light_from_the_middle_grey_up() {
+        let grey = |v: u16| background_is_light(v * 0x101, v * 0x101, v * 0x101);
+        assert!(!grey(0x75), "just under the middle");
+        assert!(grey(0x79), "and just over");
+        assert!(!grey(0x00));
+        assert!(grey(0xff));
     }
 
     /// One row of §4's table: its name and the value it takes in a palette.
