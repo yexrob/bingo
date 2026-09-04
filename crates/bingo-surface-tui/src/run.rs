@@ -29,6 +29,8 @@ mod submit;
 use crate::clock::{self, Now};
 use crate::effect::Effect;
 use crate::graphics::picture::Source;
+use bingo_pictures::Cache;
+
 use crate::graphics::{Cell, Graphics, Picture, Stored, Transport, linked};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
@@ -139,6 +141,10 @@ struct Run {
     /// keep in step (design §5). Empty on every run: a terminal taken afresh
     /// holds nothing this surface put there.
     stored: Stored,
+    /// Where a picture fetched from the web is kept, so an address a
+    /// transcript names is read once and not once a session (M61). `None`
+    /// where a person asked for no cache at all.
+    cache: Option<Cache>,
     /// The ear on the key stream, before any binding: a probe's answer that
     /// came back after the probe gave up is a reply, not a keystroke (M60).
     ear: late::Late,
@@ -249,6 +255,7 @@ async fn attach(
         // that happens is drawn.
         painted: older_than_a_frame(),
         stored: Stored::default(),
+        cache: Cache::under(&opts.env.data_dir, cache_days(&opts.args)),
         ear: late::Late::default(),
         behind: false,
         sluggish: false,
@@ -286,6 +293,15 @@ fn placing(
             .thumbnail(picture.id(), image, picture.pixels(cell))
     };
     stored.catch_up(placed, pixels, transport)
+}
+
+/// How many days a fetched picture is kept, as the run was told
+/// (`pictures.cacheDays`, read off the settings layers before any host) — and
+/// the cache's own fortnight where it was told nothing.
+fn cache_days(args: &Value) -> u64 {
+    args.get("pictureCacheDays")
+        .and_then(Value::as_u64)
+        .unwrap_or(bingo_pictures::cache::DAYS)
 }
 
 /// An instant one frame in the past, or this one on a machine that has not
@@ -434,9 +450,12 @@ impl Run {
         let cwd = std::path::PathBuf::from(&self.session.tree.viewed().summary.cwd);
         let reads = self.ui.linked.take_all(wanted, &cwd, crate::paths::home());
         for (dest, source) in reads {
-            self.spawn(
-                async move { Ok(Reply::Linked(Box::new(linked::read(dest, source).await))) },
-            );
+            let cache = self.cache.clone();
+            self.spawn(async move {
+                Ok(Reply::Linked(Box::new(
+                    linked::read(dest, source, cache).await,
+                )))
+            });
         }
     }
 
@@ -1700,6 +1719,7 @@ mod tests {
     fn idle_in(state: SessionState, session: std::sync::Arc<TestSession>, at: Instant) -> Run {
         Run {
             stored: Stored::default(),
+            cache: None,
             ear: late::Late::default(),
             host: TestHost::with(vec![]).0,
             data_dir: std::path::PathBuf::new(),
@@ -2302,6 +2322,26 @@ mod tests {
         assert!(
             !run.animating(after),
             "and once the whole of it has been painted, the loop may sleep"
+        );
+    }
+
+    /// What the run was told about the cache, and what it does when it was
+    /// told nothing: the default is the cache's own, spelled once (M61).
+    #[test]
+    fn the_cache_keeps_a_fortnight_unless_the_settings_said_otherwise() {
+        assert_eq!(
+            cache_days(&serde_json::json!({})),
+            bingo_pictures::cache::DAYS
+        );
+        assert_eq!(
+            cache_days(&serde_json::json!({ "pictureCacheDays": null })),
+            bingo_pictures::cache::DAYS
+        );
+        assert_eq!(cache_days(&serde_json::json!({ "pictureCacheDays": 3 })), 3);
+        assert_eq!(cache_days(&serde_json::json!({ "pictureCacheDays": 0 })), 0);
+        assert!(
+            Cache::under(std::path::Path::new("/data"), 0).is_none(),
+            "and no days is no cache at all"
         );
     }
 
