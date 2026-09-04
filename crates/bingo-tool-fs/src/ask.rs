@@ -1,5 +1,6 @@
-//! `AskUserQuestion`: the model's questions, one interaction each. The kernel
-//! opens and resolves them; the tool only asks and reports what came back.
+//! `AskUserQuestion`: the model's questions, one interaction for all of them.
+//! The kernel opens and resolves it; the tool only asks and reports what came
+//! back — one line per question, in the order they were asked (M53).
 
 use std::collections::HashSet;
 
@@ -21,14 +22,20 @@ Ask the user a multiple-choice question, and wait for the answer. Use it only \
 when the answer would change what you do next: a preference, or an ambiguity \
 you cannot settle from the codebase yourself. When there is a sensible \
 default, take it and say so instead of asking. One to four questions, each \
-with two to four options; put the option you recommend first. Do not offer an \
-\"Other\" option — the user can always type an answer of their own, or \
-decline the question entirely. The result gives back what the user chose, one \
-line per question.";
+with two to four options; put the option you recommend first. All of them are \
+shown together, one tab per question, and answered in one go, so ask \
+everything you need at once rather than in a row of separate calls. Do not \
+offer an \"Other\" option — the user can always type an answer of their own, \
+or decline a question. An option may carry a preview: a few lines of \
+monospace shown beside it while the user is on it, for a choice they want to \
+see rather than read — a layout, a snippet, two configurations to compare. \
+The result gives back what the user chose, one line per question; a question \
+they left alone reads `skipped`.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AskArgs {
-    /// The questions to ask, one to four, put to the user one after another.
+    /// The questions to ask, one to four, all shown together and answered in
+    /// one go.
     pub questions: Vec<AskQuestion>,
 }
 
@@ -51,6 +58,10 @@ pub struct AskOption {
     pub label: String,
     /// What choosing it means, or where it leads.
     pub description: Option<String>,
+    /// A few lines of monospace shown beside the option while the user is on
+    /// it: the layout, snippet or configuration picking it would mean. On
+    /// single-select questions only.
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -94,14 +105,29 @@ fn validate_options(question: &AskQuestion) -> Result<(), ToolError> {
                 option.label
             )));
         }
+        // A preview belongs to the option the cursor is on, and a set has no
+        // one option under the cursor to show one for.
+        if option.preview.is_some() && question.multi_select {
+            return Err(ToolError::InvalidInput(format!(
+                "the option {:?} carries a preview, which a multi-select question cannot show",
+                option.label
+            )));
+        }
     }
     Ok(())
 }
 
-/// The interaction the kernel opens. The option's position is its id, so an
+/// The one interaction the kernel opens for the whole set (M53).
+fn interaction(args: &AskArgs) -> InteractionKind {
+    InteractionKind::Form {
+        questions: args.questions.iter().map(asked).collect(),
+    }
+}
+
+/// One question as the kernel puts it. The option's position is its id, so an
 /// answer maps back to the label the model wrote.
-fn interaction(question: &AskQuestion) -> InteractionKind {
-    InteractionKind::Question(Question {
+fn asked(question: &AskQuestion) -> Question {
+    Question {
         question: question.question.clone(),
         header: Some(question.header.clone()),
         options: question
@@ -114,31 +140,19 @@ fn interaction(question: &AskQuestion) -> InteractionKind {
                 description: option.description.clone(),
                 // A model's question is a person's alone to answer.
                 role: None,
-                preview: None,
+                preview: option.preview.clone(),
             })
             .collect(),
         // A person may always answer in their own words, which is why the
         // model is told not to offer an "Other" option.
         free_text: true,
         multi: question.multi_select,
-    })
+    }
 }
 
-/// The answers the kernel will accept, read off the question rather than
-/// stated a second time beside it.
-fn answer_specs(kind: &InteractionKind) -> Vec<AnswerSpec> {
-    let mut specs = vec![AnswerSpec::Choice];
-    if matches!(
-        kind,
-        InteractionKind::Question(Question {
-            free_text: true,
-            ..
-        })
-    ) {
-        specs.push(AnswerSpec::Text);
-    }
-    specs.push(AnswerSpec::Cancel);
-    specs
+/// The answers the kernel will accept: the whole form, or nothing.
+fn answer_specs() -> Vec<AnswerSpec> {
+    vec![AnswerSpec::Form, AnswerSpec::Cancel]
 }
 
 /// The labels the chosen ids name, in the order the question listed them.
@@ -152,7 +166,8 @@ fn chosen(question: &AskQuestion, ids: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// One answered question, as the model reads it back.
+/// One answered question, as the model reads it back. A question the person
+/// left alone is `skipped` rather than an absence.
 fn answered(question: &AskQuestion, answer: Answer) -> Result<String, ToolError> {
     match answer {
         Answer::Choice { ids } => {
@@ -166,11 +181,30 @@ fn answered(question: &AskQuestion, answer: Answer) -> Result<String, ToolError>
             Ok(format!("{}: {}", question.header, labels.join(", ")))
         }
         Answer::Text { text } => Ok(format!("{}: {text}", question.header)),
+        Answer::Cancel | Answer::Deny { .. } => Ok(format!("{}: skipped", question.header)),
         other => Err(ToolError::Failed(format!(
             "unexpected answer to {:?}: {other:?}",
             question.question
         ))),
     }
+}
+
+/// The form's answers against the questions they belong to. The kernel gives
+/// back one answer per question in order; anything else is a broken door, not
+/// a person's choice.
+fn lines(args: &AskArgs, answers: Vec<Answer>) -> Result<Vec<String>, ToolError> {
+    if answers.len() != args.questions.len() {
+        return Err(ToolError::Failed(format!(
+            "the form came back with {} answers for {} questions",
+            answers.len(),
+            args.questions.len()
+        )));
+    }
+    args.questions
+        .iter()
+        .zip(answers)
+        .map(|(question, answer)| answered(question, answer))
+        .collect()
 }
 
 #[async_trait]
@@ -200,27 +234,27 @@ impl Tool for AskUserQuestionTool {
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         validate(&args)?;
 
-        let mut lines = Vec::new();
-        for question in &args.questions {
-            let kind = interaction(question);
-            let specs = answer_specs(&kind);
-            let answer = cx
-                .call
-                .ask(kind, specs)
-                .await
-                .map_err(|e| ToolError::Failed(format!("the question was not put: {e}")))?;
-            if matches!(answer, Answer::Cancel | Answer::Deny { .. }) {
-                return Ok(ToolOutput::error(format!(
-                    "The user declined to answer: {}",
-                    question.question
-                )));
-            }
-            lines.push(answered(question, answer)?);
-        }
+        let answer = cx
+            .call
+            .ask(interaction(&args), answer_specs())
+            .await
+            .map_err(|e| ToolError::Failed(format!("the questions were not put: {e}")))?;
+        let Answer::Form { answers } = answer else {
+            return Ok(ToolOutput::error(declined(&args)));
+        };
         Ok(ToolOutput::text(format!(
             "The user answered:\n{}",
-            lines.join("\n")
+            lines(&args, answers)?.join("\n")
         )))
+    }
+}
+
+/// Leaving the whole card is declining all of it, in the words of the first
+/// question — the one a person was looking at when they left.
+fn declined(args: &AskArgs) -> String {
+    match args.questions.first() {
+        Some(first) => format!("The user declined to answer: {}", first.question),
+        None => "The user declined to answer.".to_string(),
     }
 }
 
@@ -236,7 +270,8 @@ mod tests {
                 "question": "Which authentication method?",
                 "header": "Auth method",
                 "options": [
-                    { "label": "OAuth", "description": "Redirect to the provider" },
+                    { "label": "OAuth", "description": "Redirect to the provider",
+                  "preview": "GET /authorize" },
                     { "label": "API key" }
                 ]
             }]
@@ -265,13 +300,18 @@ mod tests {
         );
     }
 
+    /// One answer per question, wrapped as the form the card sends back.
+    fn form(answers: Vec<Answer>) -> Vec<Answer> {
+        vec![Answer::Form { answers }]
+    }
+
     #[tokio::test]
     async fn a_question_becomes_an_interaction_and_its_answer_a_label() {
         let (out, host) = ask(
             one_question(),
-            vec![Answer::Choice {
+            form(vec![Answer::Choice {
                 ids: vec!["0".into()],
-            }],
+            }]),
         )
         .await;
         assert_eq!(
@@ -283,19 +323,21 @@ mod tests {
         let asked = host.asked();
         assert_eq!(asked.len(), 1);
         let (kind, specs) = &asked[0];
-        assert_eq!(
-            specs,
-            &vec![AnswerSpec::Choice, AnswerSpec::Text, AnswerSpec::Cancel]
-        );
-        let InteractionKind::Question(Question {
-            question,
-            header,
-            options,
-            free_text,
-            multi,
-        }) = kind
+        assert_eq!(specs, &vec![AnswerSpec::Form, AnswerSpec::Cancel]);
+        let InteractionKind::Form { questions } = kind else {
+            panic!("expected a form, got {kind:?}");
+        };
+        let [
+            Question {
+                question,
+                header,
+                options,
+                free_text,
+                multi,
+            },
+        ] = &questions[..]
         else {
-            panic!("expected a question, got {kind:?}");
+            panic!("expected one question, got {questions:?}");
         };
         assert_eq!(question, "Which authentication method?");
         assert_eq!(header.as_deref(), Some("Auth method"));
@@ -308,7 +350,7 @@ mod tests {
                     label: "OAuth".into(),
                     description: Some("Redirect to the provider".into()),
                     role: None,
-                    preview: None,
+                    preview: Some("GET /authorize".into()),
                 },
                 QuestionOption {
                     id: "1".into(),
@@ -322,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_question_is_asked_in_turn_and_answered_by_its_header() {
+    async fn every_question_is_asked_at_once_and_answered_by_its_header() {
         let input = serde_json::json!({
             "questions": [
                 {
@@ -339,21 +381,75 @@ mod tests {
         });
         let (out, host) = ask(
             input,
-            vec![
+            form(vec![
                 Answer::Choice {
                     ids: vec!["1".into()],
                 },
                 Answer::Text {
                     text: "async-std".into(),
                 },
-            ],
+            ]),
         )
         .await;
         assert_eq!(
             out.parts[0].as_text(),
             Some("The user answered:\nStore: SQLite\nRuntime: async-std")
         );
-        assert_eq!(host.asked().len(), 2);
+        let asked = host.asked();
+        assert_eq!(asked.len(), 1, "one interaction for the whole set");
+        let InteractionKind::Form { questions } = &asked[0].0 else {
+            panic!("expected a form, got {:?}", asked[0].0);
+        };
+        assert_eq!(questions.len(), 2);
+    }
+
+    /// A question the person walked past is `skipped`, and the ones they did
+    /// answer still reach the model.
+    #[tokio::test]
+    async fn a_question_left_alone_reads_as_skipped() {
+        let input = serde_json::json!({
+            "questions": [
+                {
+                    "question": "Which store?",
+                    "header": "Store",
+                    "options": [{ "label": "Postgres" }, { "label": "SQLite" }]
+                },
+                {
+                    "question": "Which runtime?",
+                    "header": "Runtime",
+                    "options": [{ "label": "tokio" }, { "label": "smol" }]
+                }
+            ]
+        });
+        let (out, _) = ask(
+            input,
+            form(vec![
+                Answer::Choice {
+                    ids: vec!["0".into()],
+                },
+                Answer::Cancel,
+            ]),
+        )
+        .await;
+        assert_eq!(
+            out.parts[0].as_text(),
+            Some("The user answered:\nStore: Postgres\nRuntime: skipped")
+        );
+        assert!(!out.is_error);
+    }
+
+    /// A door that gives back the wrong number of answers is a broken door,
+    /// not a person's choice.
+    #[tokio::test]
+    async fn a_form_answered_with_the_wrong_count_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let host = ScriptedHost::new(form(vec![Answer::Cancel, Answer::Cancel]));
+        let cx = context_with(dir.path(), host);
+        let error = AskUserQuestionTool.call(one_question(), &cx).await.err();
+        assert!(
+            matches!(&error, Some(ToolError::Failed(m)) if m.contains("2 answers for 1 questions")),
+            "got {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -368,9 +464,9 @@ mod tests {
         });
         let (out, host) = ask(
             input,
-            vec![Answer::Choice {
+            form(vec![Answer::Choice {
                 ids: vec!["0".into(), "2".into()],
-            }],
+            }]),
         )
         .await;
         assert_eq!(
@@ -378,10 +474,10 @@ mod tests {
             Some("The user answered:\nTargets: linux, windows")
         );
         let (kind, _) = &host.asked()[0];
-        assert!(matches!(
-            kind,
-            InteractionKind::Question(Question { multi: true, .. })
-        ));
+        let InteractionKind::Form { questions } = kind else {
+            panic!("expected a form, got {kind:?}");
+        };
+        assert!(questions[0].multi);
     }
 
     #[tokio::test]
@@ -399,9 +495,9 @@ mod tests {
     #[tokio::test]
     async fn an_answer_naming_no_option_fails() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let host = ScriptedHost::new(vec![Answer::Choice {
+        let host = ScriptedHost::new(form(vec![Answer::Choice {
             ids: vec!["7".into()],
-        }]);
+        }]));
         let cx = context_with(dir.path(), host);
         let error = AskUserQuestionTool.call(one_question(), &cx).await.err();
         assert!(
@@ -417,7 +513,7 @@ mod tests {
         let cx = context_with(dir.path(), host);
         let error = AskUserQuestionTool.call(one_question(), &cx).await.err();
         assert!(
-            matches!(&error, Some(ToolError::Failed(m)) if m.starts_with("the question was not put:")),
+            matches!(&error, Some(ToolError::Failed(m)) if m.starts_with("the questions were not put:")),
             "got {error:?}"
         );
     }
@@ -451,6 +547,15 @@ mod tests {
             (
                 serde_json::json!({ "questions": [question("q?", serde_json::json!([option, option]))] }),
                 "is offered twice",
+            ),
+            (
+                serde_json::json!({ "questions": [{
+                    "question": "q?",
+                    "header": "H",
+                    "options": [{ "label": "a", "preview": "one\ntwo" }, { "label": "b" }],
+                    "multi_select": true,
+                }] }),
+                "which a multi-select question cannot show",
             ),
         ];
         for (input, expected) in cases {
