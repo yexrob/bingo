@@ -80,6 +80,7 @@ pub fn ladder(interaction: &Interaction) -> Option<Question> {
                         option.label.clone(),
                         Answer::Choice {
                             ids: vec![option.id.clone()],
+                            other: None,
                         },
                     )
                 })
@@ -143,6 +144,7 @@ fn asking(id: InteractionId, question: &bingo_sdk::Question, rest: Rest) -> Ques
                         option.label.clone(),
                         Answer::Choice {
                             ids: vec![option.id.clone()],
+                            other: None,
                         },
                     )
                 })
@@ -296,7 +298,7 @@ impl Question {
             Answer::Confirm => "confirmed".into(),
             Answer::Cancel => "cancelled".into(),
             Answer::Text { .. } | Answer::Form { .. } => "answered".into(),
-            Answer::Choice { ids } => match self.labels(ids) {
+            Answer::Choice { ids, .. } => match self.labels(ids) {
                 labels if labels.is_empty() => "answered".into(),
                 labels => format!("chose {}", labels.join(", ")),
             },
@@ -309,7 +311,7 @@ impl Question {
         self.choices
             .iter()
             .filter(|choice| match &choice.answer {
-                Answer::Choice { ids: chosen } => chosen.iter().any(|id| ids.contains(id)),
+                Answer::Choice { ids: chosen, .. } => chosen.iter().any(|id| ids.contains(id)),
                 _ => false,
             })
             .map(|choice| choice.label.clone())
@@ -481,10 +483,12 @@ mod tests {
             Answer::Form {
                 answers: vec![
                     Answer::Choice {
-                        ids: vec!["1".into()]
+                        ids: vec!["1".into()],
+                        other: None,
                     },
                     Answer::Choice {
-                        ids: vec!["0".into()]
+                        ids: vec!["0".into()],
+                        other: None,
                     },
                 ]
             }
@@ -683,7 +687,8 @@ mod tests {
         assert_eq!(
             question.outcome(
                 &Answer::Choice {
-                    ids: vec!["a".into()]
+                    ids: vec!["a".into()],
+                    other: None,
                 },
                 &ResolvedBy::Kernel,
                 "here"

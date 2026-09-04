@@ -172,7 +172,7 @@ fn chosen(question: &AskQuestion, ids: &[String]) -> Vec<String> {
 /// left alone is `skipped` rather than an absence.
 fn answered(question: &AskQuestion, answer: Answer) -> Result<String, ToolError> {
     match answer {
-        Answer::Choice { ids } => {
+        Answer::Choice { ids, .. } => {
             let labels = chosen(question, &ids);
             if labels.is_empty() {
                 return Err(ToolError::Failed(format!(
@@ -313,6 +313,7 @@ mod tests {
             one_question(),
             form(vec![Answer::Choice {
                 ids: vec!["0".into()],
+                other: None,
             }]),
         )
         .await;
@@ -386,6 +387,7 @@ mod tests {
             form(vec![
                 Answer::Choice {
                     ids: vec!["1".into()],
+                    other: None,
                 },
                 Answer::Text {
                     text: "async-std".into(),
@@ -428,6 +430,7 @@ mod tests {
             form(vec![
                 Answer::Choice {
                     ids: vec!["0".into()],
+                    other: None,
                 },
                 Answer::Cancel,
             ]),
@@ -468,6 +471,7 @@ mod tests {
             input,
             form(vec![Answer::Choice {
                 ids: vec!["0".into(), "2".into()],
+                other: None,
             }]),
         )
         .await;
@@ -499,6 +503,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let host = ScriptedHost::new(form(vec![Answer::Choice {
             ids: vec!["7".into()],
+            other: None,
         }]));
         let cx = context_with(dir.path(), host);
         let error = AskUserQuestionTool.call(one_question(), &cx).await.err();

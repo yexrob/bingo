@@ -651,7 +651,8 @@ async fn a_form_is_asked_one_message_at_a_time_and_answered_once() {
         Answer::Form {
             answers: vec![
                 Answer::Choice {
-                    ids: vec!["1".into()]
+                    ids: vec!["1".into()],
+                    other: None,
                 },
                 Answer::Text {
                     text: "async-std".into()

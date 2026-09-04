@@ -156,6 +156,7 @@ impl Dialog {
                 interaction,
                 Some(Answer::Choice {
                     ids: self.chosen.clone(),
+                    other: None,
                 }),
             ),
             None => Vec::new(),
@@ -329,6 +330,7 @@ fn question_options(
             } else {
                 Choice::Send(Answer::Choice {
                     ids: vec![option.id.clone()],
+                    other: None,
                 })
             },
         })

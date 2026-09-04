@@ -100,6 +100,7 @@ fn answers() -> Vec<AnswerSpec> {
 fn picked(id: &str) -> Answer {
     Answer::Choice {
         ids: vec![id.into()],
+        other: None,
     }
 }
 

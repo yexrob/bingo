@@ -313,7 +313,7 @@ fn answer(form: &Form, tab: usize, question: &Question) -> Answer {
     };
     match ids.is_empty() {
         true => Answer::Cancel,
-        false => Answer::Choice { ids },
+        false => Answer::Choice { ids, other: None },
     }
 }
 
@@ -792,6 +792,7 @@ mod tests {
     fn chose(id: &str) -> Answer {
         Answer::Choice {
             ids: vec![id.into()],
+            other: None,
         }
     }
 

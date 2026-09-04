@@ -251,6 +251,7 @@ async fn a_person_answers_the_agents_question_and_the_agent_gets_their_choice() 
         asked.id.clone(),
         Answer::Choice {
             ids: vec!["allow-once".into()],
+            other: None,
         },
         Activation::Pointer,
     );

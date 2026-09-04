@@ -544,7 +544,10 @@ fn ask_question(
 ) -> io::Result<Answer> {
     let chosen = put(question, console, err)?;
     Ok(if question.options.iter().any(|o| o.id == chosen) {
-        Answer::Choice { ids: vec![chosen] }
+        Answer::Choice {
+            ids: vec![chosen],
+            other: None,
+        }
     } else {
         refuse(interaction, "no such option")
     })
@@ -586,7 +589,10 @@ fn put(
 /// words of their own where the question takes them, else a question skipped.
 fn slot(question: &Question, line: String) -> Answer {
     if question.options.iter().any(|o| o.id == line) {
-        return Answer::Choice { ids: vec![line] };
+        return Answer::Choice {
+            ids: vec![line],
+            other: None,
+        };
     }
     match question.free_text && !line.is_empty() {
         true => Answer::Text { text: line },
@@ -1591,7 +1597,8 @@ pub(crate) mod tests {
         assert_eq!(
             run.session.answers()[0].1,
             Answer::Choice {
-                ids: vec!["b".into()]
+                ids: vec!["b".into()],
+                other: None,
             }
         );
         assert!(run.err.contains("[question] Which file?"));
@@ -1609,7 +1616,8 @@ pub(crate) mod tests {
             Answer::Form {
                 answers: vec![
                     Answer::Choice {
-                        ids: vec!["1".into()]
+                        ids: vec!["1".into()],
+                        other: None,
                     },
                     Answer::Text {
                         text: "async-std".into()
@@ -1638,7 +1646,8 @@ pub(crate) mod tests {
                 answers: vec![
                     Answer::Cancel,
                     Answer::Choice {
-                        ids: vec!["0".into()]
+                        ids: vec!["0".into()],
+                        other: None,
                     },
                 ]
             }

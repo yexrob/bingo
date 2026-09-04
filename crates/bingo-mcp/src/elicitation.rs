@@ -233,7 +233,7 @@ impl Field {
     /// hold, which is the same thing to a server that asked for a number.
     fn value(&self, given: &Answer) -> Option<Value> {
         match given {
-            Answer::Choice { ids } => self.chosen(ids.first()?),
+            Answer::Choice { ids, .. } => self.chosen(ids.first()?),
             Answer::Text { text } => self.written(text.trim()),
             _ => None,
         }
@@ -474,6 +474,7 @@ mod tests {
         let form = asked("elicit-choices");
         let chose = |id: &str| Answer::Choice {
             ids: vec![id.into()],
+            other: None,
         };
         let result = form.result(&answered(
             &form,
@@ -501,6 +502,7 @@ mod tests {
         let form = asked("elicit-choices");
         let chose = |id: &str| Answer::Choice {
             ids: vec![id.into()],
+            other: None,
         };
         // `colour` and `sign` are optional; leaving them out is still an answer.
         let kept = form.result(&answered(
@@ -526,6 +528,7 @@ mod tests {
         let form = asked("elicit-choices");
         let chose = |id: &str| Answer::Choice {
             ids: vec![id.into()],
+            other: None,
         };
         let typed = |text: &str| {
             form.result(&answered(

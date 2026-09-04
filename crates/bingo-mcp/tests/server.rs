@@ -374,6 +374,7 @@ async fn a_servers_question_becomes_a_form_card_and_the_answer_reaches_it() {
         answers: vec![
             Answer::Choice {
                 ids: vec!["sqlite".into()],
+                other: None,
             },
             Answer::Text {
                 text: "keep it small".into(),
