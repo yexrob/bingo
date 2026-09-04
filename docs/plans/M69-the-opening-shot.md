@@ -211,6 +211,14 @@ stands and should be taken rather than shrinking her: the real picture through
 the pictures seam on a terminal that draws pictures, and the ASCII silhouette
 — which is already built and snapshotted — everywhere else.
 
+### What became of it
+
+M70 (`docs/plans/M70-the-box-that-opens.md`) is the wiring, and it replaced the
+storyboard while it was there: the piece now plays in half-block pixels inside
+the welcome box, in three shots rather than five. The brick — the marcher, the
+distance fields, the lights, the fog, the `t`-pure frame, the shot table —
+stands.
+
 ### Not done, not verified
 
 - Nothing is wired: `mod intro` carries `#[allow(dead_code)]` and no screen

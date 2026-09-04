@@ -334,73 +334,87 @@ What a change is checked against, in this order: `TestBackend` snapshots for eve
 
 - **2026-09-04, later still** — **A wake wears its own word** (M66, ADR-0019 §8, user-directed: the model may now hand work to a later turn of the same conversation). Two rows of furniture and one rule. The note a turn left itself arrives as a person-role line, so it is drawn on the person's own bar — but under the word `wake` where the `>` would be, and the indent every line beneath it takes is that word's width rather than the mark's, so a wrapped note reads as its own block. It is not one of §5's quiet surfaces: a scheduled turn is the machinery reporting in and is drawn as a tool row, and this is the model's own words, written in a turn the person watched. The one thing a person must never have to work out is which of the two lines on that bar they typed, and a word in the gutter answers it before the eye reaches the text. The status line gains `wake in 4m` in the middle slot, dim like every other count there — the only span on that line the *model* set in motion — read at render time from the kind the schedules plugin publishes and put into words by `clock::span`, the same one every other duration on the screen is said in; a moment already past says nothing rather than a negative. Nothing here holds a wake, a timer or a countdown of its own: `/wake off` takes the kind back and the slot is empty on the next frame.
 - **2026-09-04, evening** — **The countdown counts** (user-reported: `wake in 10s` stood still). The status line reads the wake at render time, as §6 asks, but nothing asked for a render: the frame clock runs while something on screen moves, and a number that changes once a second had no place in that list. `wake::counting` — a wake stands and has not come — now sits beside the other reasons the clock runs, so the words move without an event to move them, and a wake already past stops the clock as it already emptied the slot. The wake itself moved out of the schedules store into the process running the session (ADR-0019 §8, amended); the surface did not notice, which is what reading a published kind rather than a file is for.
+- **2026-09-04, later still** — **The box opens** (M70, at the user's call after M69's storyboard: 在欢迎框里播放、更高分辨率、更有立体感). Three changes to what M69 built, each of them a picture the previous one could not draw. *The piece plays inside the welcome box*, twelve rows while it runs and the box's own height when it lands — so the entrance is where the transcript begins rather than over the whole screen, and it settles into the box a person has always had rather than into a copy of one. *A cell is two pixels*: `▀` with its foreground the top half and its background the bottom, which is what a terminal has for pictures without a graphics protocol, and it makes a pixel square where a cell is not. *`theme::lit` reaches the ground*: it used to bottom out at `dim`, a mid grey, because the glyph ramp carried the brightness and the colour only said where the light came from — with the ramp gone the colour is all there is, and a world whose darkest ink is a mid grey has a grey wash over it and no night in it. It now runs ground → `dim` → `text` and ground → `presence` → `glow`, with `raised` as the ground, the one token that steps towards the terminal's own background in both palettes. Three shots replace five: a ruled floor to a vanishing point, an orbit through a field of dark blocks with her at the end of it, and the box opening out of the corner the block came down to. At the twenty-four pixel rows the box gives her she is a hooded, cat-eared head in profile — a figure, not a face; the same finding as M69's, at the same size, and the reason the ears survive at all is that her reduction keeps the brightest pixel under each sample.
+
 ## 11. The opening
 
-> M69, 2026-09-04. The brick and the storyboard; M70 wires it. The one
+> M69 built the brick and the storyboard; **M70, 2026-09-04**, is the piece as
+> it ships, at the user's call: it plays **inside the welcome box**, at a
+> higher resolution than one glyph per cell, with real depth. The one
 > deliberate exception to `docs/design/effects-research.md`'s refusals — that
 > list is about the *transcript*, which is a record a person reads, searches
 > and copies. This is an **entrance**: it happens once, before there is a
-> transcript at all, it says what bingo is, and it is over in five seconds.
-> It still spends only the tokens of §4, and it still says nothing that
-> `NO_COLOR` or `BINGO_MOTION=off` would lose.
+> transcript at all, it says what bingo is, and it is over in four seconds.
+> It spends only the tokens of §4, and it does not play at all where
+> `NO_COLOR`, ANSI, `BINGO_ASCII` or `BINGO_MOTION=off` would take something
+> away from it.
 
-A five-second story told in **cuts**, in a three-dimensional world drawn as
-characters: a ray-marcher over signed distance fields, one directional light
-and one point light, soft shadows, fog for distance, and a ten-step luminance
-ramp for the ink. Cells are 1:2 and the camera corrects for it, so nothing
-round comes out oval. Every frame is a pure function of one number — the
-second of the piece it is for — so a frame that arrives late is **skipped**
-and never played slowly.
+A four-second story told in **cuts**, in a three-dimensional world drawn as
+**half-block pixels**, playing in the welcome box and landing on it.
+
+**The resolution is rows.** A cell is `▀` with its foreground the pixel in the
+top half and its background the one in the bottom, so a box of `w × h` cells is
+a picture of `w × 2h` truecolor samples — and a pixel is *square*, where a cell
+is twice as tall as it is wide. The box is **twelve rows** while the piece
+plays (the most a composer and a status line can give up on a screen of
+sixteen) and settles to its own height on the last cut. A pixel with no light
+in it is left unpainted, so the terminal's own ground is the night.
+
+**The ink runs to the ground.** `theme::lit` spends three stops and no new
+token: from `raised` — the one token that steps towards the terminal's own
+background in both palettes — through `dim` to `text` for what the world's own
+light reaches, and through `presence` to `glow` for what the block reached. It
+*has* to reach the ground: in a picture drawn out of half blocks the colour is
+the only thing carrying the brightness, and a world whose darkest ink is `dim`
+is a world with a grey wash over it.
+
+**Depth, four ways, all in the scenes.** A floor with a perspective grid that
+runs away to a vanishing point; a camera that moves — a dolly, then an orbit;
+near things large and fast, far things small and slow; and the shadow the block
+throws across the floor. Fog alone is not depth. The floor's rules are drawn a
+constant width *on the screen* rather than in the world, because a rule of a
+fixed world width is a stipple at any distance, and a stipple is not a line.
 
 ### The shots
 
 | from | to | shot | what is on screen |
 |---|---|---|---|
-| 0.0 | 1.0 | **Dark** | A black world. One emissive block — the cursor, a caret six times as tall as it is wide — turning slowly at centre, its halo hanging about it, six embers rising past. A faint pool of light on the ground under it. One character established, and nothing else. |
-| 1.0 | 2.2 | **The lattice** | Cut. Inside an endless repeated lattice of dark square frames — the codebase — dollying forward fast. Their edges catch the light, the fog eats the far end, and the near ones stream past the sides. No warm light anywhere: the cursor block is not here yet. |
-| 2.2 | 3.2 | **The find** | Cut. The dolly stops **dead**. One block down the corridor lights from inside, and over the shot the world's own light dies and the lattice around it goes into fog. Half a second of stillness, which is what makes the next cut land. |
-| 3.2 | 4.5 | **Her** | Cut. The mascot on a billboard in the world — the picture's own pixels, sampled to brightness and warmth, drawn by the ramp and the theme's two inks. The cursor block hangs before her face, much nearer the camera than she is, so the slow parallax drift has something to be parallax *of*. The embers rise between them; the block breathes once. |
-| 4.5 | 5.0 | **The hand-off** | The camera settles frontal and the world goes out. The welcome box opens from its middle outward, the block walks down out of the air to where the composer's cursor will be, and the last frame **is** the welcome box, still. |
+| 0.0 | 1.4 | **The floor** | A dark room. A ruled floor runs away to a vanishing point; the emissive block — the cursor, a caret six times as tall as it is broad — hangs just clear of it, turning slowly, with its shadow across the rules and a halo in the fog. Dust rises through its light. The camera dollies in and comes down. |
+| 1.4 | 2.8 | **The field** | Cut. The camera orbits the block half a turn, from behind it to nearly square on, coming down as it goes. A field of dark blocks floats around it at two depths — the near ones sweep past, the far ones barely move — and the block is the **only** light in this world, so what a person reads is which faces caught it. She comes into view as the turn ends: the mascot on a billboard, her own picture's pixels, cropped to the head, with the block hanging before her face. |
+| 2.8 | 4.0 | **The hand-off** | Cut. The camera settles square on and the world goes out. The block walks down out of the air to the box's own corner and becomes its `✻`; the border walks out of that corner along both edges and closes at the far one; the greeting, the help line and the cwd light in the order they are read; the box settles from twelve rows to its own. |
 
-The cuts are hard — there is no dissolve anywhere in the piece. Five seconds
-has no time to spend on one, and a cut is what says *elsewhere* in the
-language a person already reads films in.
+The cuts are hard — there is no dissolve anywhere in the piece. Four seconds
+has no time to spend on one, and a cut is what says *elsewhere* in the language
+a person already reads films in. Every frame is a pure function of one number,
+the second of the piece it is for, so a frame that arrives late is **skipped**
+and never played slowly.
 
-### The end state
+### How it is wired
 
-The welcome box the piece lands on: **her on the left**, drawn out of the same
-characters the world was, twenty columns by thirteen rows — her own shape,
-since a cell is twice as tall as it is wide. The greeting, the help line and
-the cwd sit beside her; one row under the box is the caret the block became.
-On a terminal that draws pictures the real picture goes through the pictures
-seam (§5's image row), never a route of its own. On a terminal with ASCII
-only, she is a **silhouette**: the punctuation ramp has no shade in it, and a
-rim-lit profile spread over ten steps of it is noise.
+The welcome box is derived at render time from `SessionState`; the opening is a
+**`Ui` fact** — when it started, and the newest frame rendered for it — read by
+that box in the static box's place. Frames are rendered **off the draw thread**,
+one in flight at a time, and the draw takes whichever it has: the first frame
+is the black the piece opens on, and a frame rendered for a width the screen no
+longer has is dropped rather than drawn at the wrong shape.
 
-At thirteen rows she is a hooded, cat-eared head in profile — a figure, not a
-face. That is the size at which the ears and the lit profile survive; below it
-she is a warm smudge, and this is the sizing decision to argue with if the box
-is ever asked to be smaller.
+The moment the piece has run out the fact is taken away, so what lands is the
+box the transcript has always had — there is no last frame that merely looks
+like one, and nothing to keep in step.
 
-### The degrades, and what M70 holds
+### When it plays, and when it does not
 
-- **`NO_COLOR`** — the ramp's glyph carries the whole shape of the world. What
-  is lost is only *where the light came from*, which is what colour is for
-  everywhere else on this surface (§4).
-- **ANSI** — the world is `dim` and `text`, and what the block touched is
-  `presence`; the ramp is unchanged.
-- **Light** — the same ramp over a light ground, so the world reads as ink on
-  paper rather than light in the dark. It is checked in both.
-- **`BINGO_ASCII=1`** — the ramp is `` .:-=+*#%@`` rather than the shade
-  blocks, and she is a silhouette.
-- **`BINGO_MOTION=off` → the end state, drawn once.** No frames.
-- **Any key skips it**, and what is left is the end state.
-- **Under 60 columns → the end state**, drawn once: there is no room for a
-  world.
-- **Never under `--print`, and never on resume.** It is an entrance, and a
-  session that already happened is not entered.
+One pure rule (`welcome::opens`), one table, every reason a fact about *this
+run* rather than about the piece:
 
-M70 owns all seven of those, the daily short form, and the setting that turns
-it off for good. It renders frames **off the draw thread** and the draw takes
-the newest: the piece runs on the wall clock, so a frame that is not ready is
-one that is not shown.
+- this surface opened the session — not a sub-session, not a room;
+- nothing has happened in it yet, so a **resumed** session is never entered;
+- no work came in on the command line;
+- the terminal is at least **80 × 16**;
+- the look draws twenty-four bits, and more than ASCII;
+- `BINGO_MOTION` is not `off`.
+
+**Any key skips it**, and is spent on nothing else: the `/` that cut the piece
+short does not also open the dropdown. It never plays under `--print`, which
+has no screen to enter. The box's M63 update row is drawn on the end state as
+it always was.
