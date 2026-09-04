@@ -136,6 +136,22 @@ fn colour(id: u32) -> Style {
     ))
 }
 
+/// Which picture a run of cells belongs to, read back out of the clothes the
+/// protocol carries the number in — the inverse of [`colour`].
+///
+/// It is why a frame need remember no rectangle for a picture: the cells it
+/// drew already say whose they are, so where a picture is on the screen is
+/// read off the screen ([`super::placed`]).
+pub fn pictured(span: &Span<'_>) -> Option<u32> {
+    if !span.content.contains(PLACEHOLDER) {
+        return None;
+    }
+    match span.style.fg? {
+        Color::Rgb(r, g, b) => Some(u32::from_be_bytes([0, r, g, b])),
+        _ => None,
+    }
+}
+
 fn diacritic(index: u16) -> Option<char> {
     DIACRITICS.get(usize::from(index)).copied()
 }
@@ -155,6 +171,26 @@ mod tests {
         assert_eq!(diacritic(127), Some('\u{082c}'));
         assert_eq!(diacritic(128), None, "and nothing past the end of it");
         assert_eq!(MAX_CELLS, 128);
+    }
+
+    /// The number goes out in a colour and comes back out of it: a cell of a
+    /// picture says which picture, and a cell of text says nothing.
+    #[test]
+    fn a_cell_says_which_picture_it_is_a_cell_of() {
+        let cells = placeholder(0x0a_0b_0c, 0, 3);
+        let span = cells.spans.first().expect("a row of cells");
+        assert_eq!(pictured(span), Some(0x0a_0b_0c));
+        assert_eq!(pictured(&Span::raw("words")), None);
+        assert_eq!(
+            pictured(&Span::styled("words", colour(0x0a_0b_0c))),
+            None,
+            "a colour alone is not a picture"
+        );
+        assert_eq!(
+            pictured(&Span::raw(PLACEHOLDER.to_string())),
+            None,
+            "and neither is a cell with no number in it"
+        );
     }
 
     #[test]
