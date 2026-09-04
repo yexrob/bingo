@@ -739,6 +739,73 @@ async fn a_resumed_session_comes_back_on_the_model_it_was_moved_to() {
     );
 }
 
+/// The level a session was thinking at is in its own config view, and a
+/// resume reads the fold — so it comes back thinking as hard as it was left
+/// (user-reported: "thinking 没有记住, 现在默认貌似是 off"). The settings say
+/// nothing about thinking here, which is what would have made it `off`.
+#[tokio::test]
+async fn a_resumed_session_thinks_as_hard_as_it_was_left() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let host_a = reasoning_host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    let mut a = host_a
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    let id = a.session.clone();
+    a.handle.submit(
+        IntentId::mint(),
+        Input::text("/think high", Origin::surface("test")),
+    );
+    while let Some(frame) = a.events.next().await {
+        a.snapshot.apply(&frame);
+        if matches!(frame.event, Event::IntentAck { .. }) {
+            break;
+        }
+    }
+    assert_eq!(a.snapshot.config.kernel["thinking"], json!("high"));
+
+    let answers = ScriptedProvider::new(vec![Script::Events(text("back"))]);
+    let host_b = reasoning_host_on(store.clone(), answers.clone()).await;
+    let mut b = host_b
+        .open(SessionSelector::ById { id }, who(), OpenOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        b.snapshot.config.kernel["thinking"],
+        json!("high"),
+        "the resumed session says the level it was left at"
+    );
+    one_turn(&mut b, "hello").await;
+    assert_eq!(
+        answers.requests()[0].reasoning,
+        Some(Effort::High),
+        "and it is the level the turn asked for"
+    );
+}
+
+/// [`host_on`] with a model that declares reasoning, and no thinking level
+/// in the settings — what would make a resumed session `off`.
+async fn reasoning_host_on(
+    store: Arc<crate::journal::MemoryStore>,
+    provider: Arc<ScriptedProvider>,
+) -> Arc<Host> {
+    let plugins = vec![
+        TestPlugin::boxed(&PROVIDER, vec![Contribution::Provider(provider)]),
+        TestPlugin::boxed(&STORE, vec![Contribution::Store(store)]),
+    ];
+    let config = HostConfig::new(env()).with_layer(
+        "cli",
+        json!({"model": "m", "models": {"scripted/m": {"reasoning": true}}}),
+    );
+    Host::build(plugins, config).await.unwrap()
+}
+
 /// A name outlives the process that gave it: `/rename` goes onto the summary,
 /// the summary is the journal's, and a resume reads the journal's fold — so
 /// the session comes back called what it was called.

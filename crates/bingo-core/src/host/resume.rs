@@ -78,10 +78,11 @@ impl Host {
         id: &SessionId,
     ) -> Result<Mailbox, KernelError> {
         let frames = store.replay(id, Seq::ZERO).await?;
-        let last = session::replayed(&frames)?.summary;
-        let spec = spec_of(&last);
+        let replayed = session::replayed(&frames)?;
+        let spec = spec_of(&replayed.summary);
         self.check_key_free(spec.key.as_deref())?;
-        let thinking = self.settings.kernel.thinking;
+        let thinking = thinking_of(&replayed).unwrap_or(self.settings.kernel.thinking);
+        let last = replayed.summary;
         let choice = self.model_for(&spec, thinking).await?;
         let summary = crate::turn::runs_on(last, choice.as_ref());
         let mailbox = session::resume(frames, Some(store.clone()), self.services(), |mailbox| {
@@ -95,6 +96,14 @@ impl Host {
         report_lost_turns(store.as_ref(), &live.mailbox).await;
         Ok(live.mailbox)
     }
+}
+
+/// The level the session was thinking at when it was last live, from its own
+/// config view: a resumed session goes on as it was, and only a journal from
+/// before the view carried the level falls back to the settings.
+fn thinking_of(state: &SessionState) -> Option<Option<Effort>> {
+    let level = state.config.kernel.get("thinking")?;
+    serde_json::from_value(level.clone()).ok()
 }
 
 /// The code a client reads a lost child's line by.

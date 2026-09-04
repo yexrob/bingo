@@ -371,6 +371,39 @@ async fn model_is_remembered_in_the_user_settings() {
     assert_eq!(opened.state.summary.provider.as_deref(), Some("scripted"));
 }
 
+/// `/think` outlives the session as `/model` does: the level is written into
+/// the user layer and the next start opens on it (user-reported: "thinking
+/// 没有记住"). `off` is written too — it is a choice, not an absence.
+#[tokio::test]
+async fn thinking_is_remembered_in_the_user_settings() {
+    let home = tempfile::tempdir().expect("a home");
+    // A model that declares reasoning, so the view can show the level asked.
+    let path = settings::user_path(&env_in(home.path()));
+    std::fs::create_dir_all(path.parent().expect("a dir")).expect("the dir");
+    std::fs::write(&path, r#"{"models": {"scripted/m": {"reasoning": true}}}"#)
+        .expect("the models");
+    let host = host_in(home.path(), None).await;
+    let mut client = Client::open(&host).await;
+
+    let (ack, _) = client.ack("/think xhigh").await;
+    assert_eq!(message(&ack), "thinking: xhigh");
+    let written = std::fs::read_to_string(settings::user_path(&env_in(home.path())))
+        .expect("the user settings were written");
+    let document: Value = serde_json::from_str(&written).expect("plain JSON");
+    assert_eq!(document["thinking"], json!("xHigh"));
+
+    let next = host_in(home.path(), None).await;
+    let opened = Client::open(&next).await;
+    assert_eq!(opened.state.config.kernel, json!({ "thinking": "xHigh" }));
+
+    let (ack, _) = client.ack("/think off").await;
+    assert_eq!(message(&ack), "thinking: off");
+    let written =
+        std::fs::read_to_string(settings::user_path(&env_in(home.path()))).expect("rewritten");
+    let document: Value = serde_json::from_str(&written).expect("plain JSON");
+    assert_eq!(document["thinking"], Value::Null);
+}
+
 /// A host reading the settings under `home`. `remembered` is what the user
 /// layer is expected to hold by then: the settings are merged once at build,
 /// so the second host must be built after the first one has written.

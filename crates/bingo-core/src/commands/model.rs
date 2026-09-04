@@ -11,7 +11,6 @@ use bingo_sdk::*;
 use serde_json::json;
 
 use crate::host::{Change, Host};
-use crate::settings;
 use crate::turn::ModelChoice;
 
 const USAGE: &str = "usage: /model [<provider>/]<model>";
@@ -76,27 +75,17 @@ async fn set(
         )
         .await?;
     let mut message = said(&choice);
-    if let Some(refused) = remember(host, &choice) {
+    let keys = [
+        ("provider", json!(choice.provider.id())),
+        ("model", json!(choice.id)),
+    ];
+    if let Some(refused) = super::remember(host, &keys) {
         message.push('\n');
         message.push_str(&refused);
     }
     Ok(CommandOutcome::Applied {
         message: Some(message),
     })
-}
-
-/// Write the choice into the user layer, so the next start opens on it.
-/// The session has already moved; a file that will not take the note says so
-/// out loud rather than undoing what the person asked for. `None` is written.
-fn remember(host: &Host, choice: &ModelChoice) -> Option<String> {
-    let path = settings::user_path(host.env());
-    let keys = [
-        ("provider", json!(choice.provider.id())),
-        ("model", json!(choice.id)),
-    ];
-    settings::remember(&path, &keys)
-        .err()
-        .map(|e| format!("this session has it, but the next will not: {e}"))
 }
 
 /// The three facts a person asked for, in the vocabulary `/think` uses for

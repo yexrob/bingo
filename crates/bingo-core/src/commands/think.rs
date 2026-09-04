@@ -1,4 +1,5 @@
-//! `/think <level|off>`: the reasoning effort the next turn asks for.
+//! `/think <level|off>`: the reasoning effort the next turn asks for, and the
+//! next start — remembered in the user settings layer as `/model` is.
 
 use std::sync::{Arc, Weak};
 
@@ -65,8 +66,13 @@ async fn set(
     let choice = host
         .reconfigure(&cx.session, Change::Thinking(level))
         .await?;
+    let mut message = said(level, Some(&choice));
+    if let Some(refused) = super::remember(host, &[("thinking", serde_json::json!(level))]) {
+        message.push('\n');
+        message.push_str(&refused);
+    }
     Ok(CommandOutcome::Applied {
-        message: Some(said(level, Some(&choice))),
+        message: Some(message),
     })
 }
 

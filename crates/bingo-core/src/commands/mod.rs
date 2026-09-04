@@ -30,6 +30,17 @@ pub(crate) fn builtins(host: Weak<Host>) -> Vec<Arc<dyn Command>> {
     ]
 }
 
+/// Write what a command chose into the user settings layer, so the next start
+/// opens on it (ADR-0003 §5). The session has already moved; a file that will
+/// not take the note says so out loud rather than undoing what the person
+/// asked for. `None` is written.
+fn remember(host: &Host, keys: &[(&str, serde_json::Value)]) -> Option<String> {
+    let path = crate::settings::user_path(host.env());
+    crate::settings::remember(&path, keys)
+        .err()
+        .map(|e| format!("this session has it, but the next will not: {e}"))
+}
+
 fn host(weak: &Weak<Host>) -> Result<Arc<Host>, KernelError> {
     weak.upgrade()
         .ok_or_else(|| KernelError::new(ErrorCode::SessionClosed, "the host is shut down"))
