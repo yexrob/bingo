@@ -17,6 +17,8 @@ use ratatui::text::{Line, Span};
 
 use base64::Engine;
 
+use super::tmux::{self, Transport};
+
 /// The cell that stands in for a piece of a picture.
 pub const PLACEHOLDER: char = '\u{10EEEE}';
 
@@ -55,7 +57,7 @@ pub const MAX_CELLS: u16 = DIACRITICS.len() as u16;
 /// Store this picture and make a virtual placement of it, `cols` by `rows`
 /// cells. `q=2` is what keeps the terminal's answer out of the keyboard:
 /// every byte it would send back would otherwise be read as typing.
-pub fn transmit(id: u32, png: &[u8], cols: u16, rows: u16) -> Vec<u8> {
+pub fn transmit(id: u32, png: &[u8], cols: u16, rows: u16, transport: Transport) -> Vec<u8> {
     let payload = base64::engine::general_purpose::STANDARD.encode(png);
     let mut out = Vec::new();
     let mut chunks = payload.as_bytes().chunks(CHUNK).peekable();
@@ -66,7 +68,7 @@ pub fn transmit(id: u32, png: &[u8], cols: u16, rows: u16) -> Vec<u8> {
             true => opening(id, cols, rows, more),
             false => format!("m={}", u8::from(more)),
         };
-        out.extend_from_slice(&apc(&keys, chunk));
+        out.extend_from_slice(&apc(&keys, chunk, transport));
         first = false;
     }
     out
@@ -85,11 +87,15 @@ fn opening(id: u32, cols: u16, rows: u16, more: bool) -> String {
 
 /// Forget a picture: its placements and its bytes both (`d=I`), which is the
 /// half that gives the terminal its memory back.
-pub fn delete(id: u32) -> Vec<u8> {
-    apc(&format!("a=d,d=I,q=2,i={id}"), b"")
+pub fn delete(id: u32, transport: Transport) -> Vec<u8> {
+    apc(&format!("a=d,d=I,q=2,i={id}"), b"", transport)
 }
 
-fn apc(keys: &str, payload: &[u8]) -> Vec<u8> {
+/// One APC sequence, in whatever envelope reaches the terminal. A chunk is at
+/// most [`CHUNK`] bytes of base64 plus its keys, which is inside any length a
+/// multiplexer holds, so the envelope is per chunk and no chunk waits on
+/// another (M49 brick 1).
+fn apc(keys: &str, payload: &[u8], transport: Transport) -> Vec<u8> {
     let mut out = Vec::with_capacity(keys.len() + payload.len() + 6);
     out.extend_from_slice(b"\x1b_G");
     out.extend_from_slice(keys.as_bytes());
@@ -98,7 +104,7 @@ fn apc(keys: &str, payload: &[u8]) -> Vec<u8> {
         out.extend_from_slice(payload);
     }
     out.extend_from_slice(b"\x1b\\");
-    out
+    tmux::wrapped(out, transport)
 }
 
 /// One row of a picture, as cells the frame draws: `cols` placeholders, each
@@ -154,7 +160,7 @@ mod tests {
     #[test]
     fn one_short_picture_is_one_sequence() {
         assert_eq!(
-            transmit(0x0a_0b_0c, b"png!", 4, 2),
+            transmit(0x0a_0b_0c, b"png!", 4, 2, Transport::Bare),
             b"\x1b_Ga=T,f=100,q=2,U=1,i=658188,c=4,r=2;cG5nIQ==\x1b\\".to_vec()
         );
     }
@@ -165,7 +171,7 @@ mod tests {
     fn a_long_picture_is_chunked_at_four_thousand_and_ninety_six() {
         let png = vec![0xabu8; 4096];
         let payload = base64::engine::general_purpose::STANDARD.encode(&png);
-        let bytes = transmit(7, &png, 10, 5);
+        let bytes = transmit(7, &png, 10, 5, Transport::Bare);
         let text = String::from_utf8(bytes).expect("ascii");
         let chunks: Vec<&str> = text.split("\x1b_G").skip(1).collect();
         assert_eq!(chunks.len(), 2, "5464 base64 bytes is two chunks");
@@ -186,7 +192,32 @@ mod tests {
 
     #[test]
     fn a_delete_takes_the_bytes_with_it() {
-        assert_eq!(delete(0xffffff), b"\x1b_Ga=d,d=I,q=2,i=16777215\x1b\\");
+        assert_eq!(
+            delete(0xffffff, Transport::Bare),
+            b"\x1b_Ga=d,d=I,q=2,i=16777215\x1b\\"
+        );
+    }
+
+    /// M49 brick 1: under tmux every APC is its own envelope — a two-chunk
+    /// picture is two of them, and a delete is one — so tmux is never left
+    /// holding half a sequence.
+    #[test]
+    fn under_tmux_each_chunk_is_its_own_envelope() {
+        assert_eq!(
+            transmit(0x0a_0b_0c, b"png!", 4, 2, Transport::Tmux),
+            b"\x1bPtmux;\x1b\x1b_Ga=T,f=100,q=2,U=1,i=658188,c=4,r=2;cG5nIQ==\x1b\x1b\\\x1b\\"
+                .to_vec()
+        );
+        assert_eq!(
+            delete(7, Transport::Tmux),
+            b"\x1bPtmux;\x1b\x1b_Ga=d,d=I,q=2,i=7\x1b\x1b\\\x1b\\".to_vec()
+        );
+        let long = transmit(7, &vec![0xabu8; 4096], 10, 5, Transport::Tmux);
+        assert_eq!(
+            long.windows(7).filter(|w| *w == b"\x1bPtmux;").count(),
+            2,
+            "one envelope per chunk, not one around the picture"
+        );
     }
 
     /// One row of cells: the placeholder, its row diacritic, its column

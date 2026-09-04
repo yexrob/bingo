@@ -77,7 +77,7 @@ fn drawn(
     fold: Fold,
     rows: &Rows<'_>,
 ) -> Option<(Picture, Vec<Line<'static>>)> {
-    let Graphics::Kitty { cell } = graphics::chosen() else {
+    let Graphics::Kitty { cell, .. } = graphics::chosen() else {
         return None;
     };
     let source = Source::Journal {
