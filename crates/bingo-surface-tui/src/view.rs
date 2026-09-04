@@ -33,8 +33,14 @@ const ACTIVITY_AFTER: std::time::Duration = std::time::Duration::from_millis(300
 /// What the activity row's verb becomes once a person has asked the turn to
 /// stop: bingo's own words are for what it chose to do, and this it did not.
 pub const STOPPING: &str = "Stopping";
-/// One breath of bingo's presence: the sparkle and the box's border (§6).
+/// One breath of bingo's presence while it is thinking: the pace between the
+/// other two, and the one a turn starts at (§6).
 const BREATH: std::time::Duration = std::time::Duration::from_millis(1600);
+/// The breath while words are arriving: quicker, because something is.
+const BREATH_ARRIVING: std::time::Duration = std::time::Duration::from_millis(900);
+/// The breath while a tool holds the turn: slower, because the waiting is
+/// somebody else's and the row says so.
+const BREATH_BLOCKED: std::time::Duration = std::time::Duration::from_millis(2200);
 /// One turn of the sparkle: four glyphs, 150 ms each (§6).
 const SPARKLE: std::time::Duration = std::time::Duration::from_millis(4 * theme::SPARKLE_MS as u64);
 /// bingo's own words for working (§4), one per turn.
@@ -565,7 +571,7 @@ fn working(state: &SessionState, ui: &Ui, now: Now) -> Option<Line<'static>> {
         false => (verb(&turn.id), "esc to interrupt · "),
     };
     let mut spans = vec![
-        Span::styled(format!("{} ", sparkle(now)), breathing(now)),
+        Span::styled(format!("{} ", sparkle(now)), breathing(state, now)),
         Span::styled(format!("{verb}{}", theme::ellipsis()), theme::text()),
         Span::styled(
             format!(" ({hint}{}s{})", elapsed.as_secs(), spent(turn)),
@@ -618,11 +624,42 @@ fn sparkle(now: Now) -> &'static str {
 /// bingo breathing: the sparkle and the input box's border share one clock,
 /// so the whole surface inhales together. Still, it rests at `presence` —
 /// what breathes is the brightness, not the fact that it is working.
-fn breathing(now: Now) -> ratatui::style::Style {
+fn breathing(state: &SessionState, now: Now) -> ratatui::style::Style {
     match now.motion {
-        true => theme::breath(clock::breath(now, BREATH)),
+        true => theme::breath(clock::breath(now, breath_of(state))),
         false => theme::presence(),
     }
+}
+
+/// How fast it breathes: the rhythm is what the turn is *doing*, so a pulse
+/// says more than "a turn is running", which the row's presence already says
+/// (§6). Words arriving are quick, a tool holding the turn is slow, and
+/// thinking is the pace between them.
+///
+/// The phase is the wall clock's own turn of the period ([`clock::breath`]),
+/// so a change of period changes where in the breath this frame lands. That
+/// step is the state change itself, which is the one moment §6 allows a cue
+/// to move — and it happens at most twice in a turn.
+pub(crate) fn breath_of(state: &SessionState) -> std::time::Duration {
+    if state.items.iter().any(arriving) {
+        return BREATH_ARRIVING;
+    }
+    if state.items.iter().any(blocking) {
+        return BREATH_BLOCKED;
+    }
+    BREATH
+}
+
+/// Whether an item is an answer still being said.
+fn arriving(item: &bingo_sdk::Item) -> bool {
+    matches!(item.body, bingo_sdk::ItemBody::Assistant { .. })
+        && item.status == bingo_sdk::ItemStatus::Running
+}
+
+/// Whether an item is a call the turn is waiting on.
+fn blocking(item: &bingo_sdk::Item) -> bool {
+    matches!(item.body, bingo_sdk::ItemBody::ToolCall { .. })
+        && item.status == bingo_sdk::ItemStatus::Running
 }
 
 /// The `?` panel: the one binding table, then the commands this session can
@@ -797,7 +834,7 @@ fn render_draft(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, wi
 /// activity row's own breath while the model works (§4).
 fn border(state: &SessionState, now: Now) -> ratatui::style::Style {
     match state.busy() {
-        true => breathing(now),
+        true => breathing(state, now),
         false => theme::dim(),
     }
 }

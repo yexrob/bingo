@@ -127,6 +127,69 @@ fn the_presence_mark_breathes_between_two_thirds_and_all_of_itself() {
     });
 }
 
+/// A state whose one item is still arriving, and one whose one item is a
+/// call the turn is waiting on.
+fn answering() -> bingo_sdk::SessionState {
+    let mut state = folded(vec![frame(1, started("trn_1"))]);
+    state.apply(&frame(
+        2,
+        Event::ItemStarted {
+            item: assistant("itm_1", "half a sen", ItemStatus::Running),
+        },
+    ));
+    state
+}
+
+fn calling() -> bingo_sdk::SessionState {
+    folded(running_bash())
+}
+
+/// §6's first principle is that every motion reports a state change, and a
+/// breath at one fixed period reports only "a turn is running" — which the
+/// row's presence already says. So the period is what the turn is *doing*.
+#[test]
+fn the_breath_quickens_while_words_arrive_and_slows_while_a_tool_holds_the_turn() {
+    let ms = Duration::from_millis;
+    assert_eq!(crate::view::breath_of(&answering()), ms(900));
+    assert_eq!(crate::view::breath_of(&calling()), ms(2_200));
+    assert_eq!(
+        crate::view::breath_of(&folded(vec![frame(1, started("trn_1"))])),
+        ms(1_600),
+        "thinking is the pace between them, and the one a turn starts at"
+    );
+    assert_eq!(
+        crate::view::breath_of(&state()),
+        ms(1_600),
+        "and an idle session breathes at the same pace it would think at"
+    );
+}
+
+/// The row is drawn on that period and not on a constant, which is the half
+/// of the cue a unit test cannot see.
+#[test]
+fn the_sparkle_is_drawn_on_the_period_the_state_asks_for() {
+    let (ui, now) = mid_turn();
+    let at = later(now, 250);
+    crate::theme::with(crate::painted::truecolor(), || {
+        let drawn = |state: &bingo_sdk::SessionState| {
+            leading_style(&solo(state), &ui, at, "esc to interrupt")
+        };
+        let on = |period| {
+            theme::as_drawn(theme::breath(crate::clock::breath(
+                at,
+                Duration::from_millis(period),
+            )))
+        };
+        assert_eq!(drawn(&answering()), on(900));
+        assert_eq!(drawn(&calling()), on(2_200));
+        assert_ne!(
+            drawn(&answering()),
+            drawn(&calling()),
+            "and the two rhythms are told apart on the screen"
+        );
+    });
+}
+
 #[test]
 fn the_input_box_glows_on_the_same_breath_and_is_dim_when_idle() {
     let (ui, now) = mid_turn();
