@@ -11,10 +11,10 @@ use bingo_sdk::{Effort, SessionState};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::clock::Now;
+use crate::clock::{self, Now};
 use crate::tree::{self, Status, Tree};
 use crate::ui::Ui;
-use crate::{keys, permission, theme};
+use crate::{keys, permission, theme, wake};
 
 /// Cells between two slots.
 const GAP: usize = 2;
@@ -67,6 +67,7 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
     if let Some(running) = count(tree, Wants::Running) {
         parts.push(Span::styled(format!("{running} running"), theme::dim()));
     }
+    parts.extend(waking(tree.viewed(), now));
     parts.extend(context(tree.viewed()));
     parts.extend(notice(ui, now));
     if parts.is_empty() && ui.composer.is_empty() {
@@ -94,6 +95,25 @@ fn count(tree: &Tree, wants: Wants) -> Option<usize> {
         })
         .count();
     (n > 0).then_some(n)
+}
+
+/// The wake the model set on this session, counted down against the frame's
+/// own clock (ADR-0019 §8). It is the one thing on this line the *model* set
+/// in motion, and a person who does not want it types `/wake off`; a moment
+/// already past is a wake on its way in, and says nothing rather than a
+/// negative.
+fn waking(state: &SessionState, now: Now) -> Vec<Span<'static>> {
+    let Some(at) = wake::at(state) else {
+        return Vec::new();
+    };
+    let ahead = at.duration_since(now.wall);
+    if !ahead.is_positive() {
+        return Vec::new();
+    }
+    vec![Span::styled(
+        format!("wake in {}", clock::span(ahead.unsigned_abs())),
+        theme::dim(),
+    )]
 }
 
 /// How full the context is, from [`CONTEXT_FROM`] % of the trigger; it warms
@@ -364,6 +384,54 @@ mod tests {
             !text(&solo(&with_permission_mode("default")), &ui, 80).contains("⏵⏵"),
             "default is what a session already is"
         );
+    }
+
+    /// A wake standing on this session, `n` seconds after the scene's own
+    /// wall clock — the one the line is drawn against.
+    fn with_wake(now: Now, seconds: i64) -> Tree {
+        let at = now.wall + jiff::SignedDuration::from_secs(seconds);
+        solo(&folded(vec![frame(1, pending_wake(&at.to_string()))]))
+    }
+
+    /// The one thing on this line the model set in motion, in the words every
+    /// other span of time on the screen is said in.
+    #[test]
+    fn a_pending_wake_is_counted_down_and_goes_when_it_is_taken_back() {
+        let (ui, now) = scene();
+        for (seconds, said) in [
+            (40, "wake in 40s"),
+            (245, "wake in 4m"),
+            (3600, "wake in 1h"),
+        ] {
+            let drawn = at(&with_wake(now, seconds), &ui, 80, now);
+            assert!(drawn.contains(said), "{seconds}s: {drawn}");
+        }
+        let past = at(&with_wake(now, -5), &ui, 80, now);
+        assert!(
+            !past.contains("wake"),
+            "a wake on its way in says nothing: {past}"
+        );
+        let none = at(&solo(&state()), &ui, 80, now);
+        assert!(!none.contains("wake"), "{none}");
+    }
+
+    #[test]
+    fn a_pending_wake_is_furniture_and_the_whole_line_still_fits() {
+        let (ui, now) = scene();
+        let tree = with_wake(now, 245);
+        let styled = styles(&line(&tree, &ui, 80, now));
+        assert_eq!(
+            styled
+                .iter()
+                .find(|(text, _)| text.starts_with("wake in"))
+                .map(|(_, style)| *style),
+            Some(theme::dim()),
+            "it says what is true, it does not ask for anything"
+        );
+        for width in [40usize, 80, 120] {
+            assert_eq!(at(&tree, &ui, width, now).width(), width);
+        }
+        insta::assert_snapshot!("wake_pending", at(&tree, &ui, 80, now));
     }
 
     #[test]

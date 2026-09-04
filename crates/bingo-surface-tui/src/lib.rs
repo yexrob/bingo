@@ -100,6 +100,7 @@ mod view;
 /// Handing a picture to whatever this system opens pictures with (M56).
 mod viewer;
 mod views;
+mod wake;
 mod welcome;
 mod window;
 mod wrap;

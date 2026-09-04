@@ -1,0 +1,6 @@
+---
+source: crates/bingo-surface-tui/src/status.rs
+assertion_line: 427
+expression: "at(&tree, &ui, 80, now)"
+---
+wake in 4m                                                           fake/fake-1

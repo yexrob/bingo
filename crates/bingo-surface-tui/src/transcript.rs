@@ -1131,6 +1131,25 @@ mod tests {
         }
     }
 
+    /// A wake opens a turn the way typing does, and is not typing: it is on
+    /// the bar, in the gutter its own word stands in, and every line under
+    /// the first hangs past that word rather than past a `>` (ADR-0019 §8).
+    #[test]
+    fn a_wake_is_a_line_on_the_bar_under_a_word_of_its_own() {
+        assert_eq!(
+            drawn(vec![delivered(
+                "itm_1",
+                said::WAKE,
+                None,
+                "check the build again\nand say what you find",
+            )]),
+            vec![
+                "wake check the build again".to_string(),
+                "     and say what you find".to_string(),
+            ],
+        );
+    }
+
     /// A job reporting in: the first line says what happened, and what one
     /// does about it hangs under the row the way a result does.
     #[test]
