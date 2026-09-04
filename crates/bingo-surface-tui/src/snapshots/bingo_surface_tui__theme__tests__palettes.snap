@@ -2,8 +2,6 @@
 source: crates/bingo-surface-tui/src/theme.rs
 expression: rows
 ---
-text       dark #ece7df   light #24201a
-dim        dark #8a847a   light #777167
 raised     dark #211d17   light #eee8dd
 presence   dark #d97757   light #b24f2c
 glow       dark #f2a07c   light #d97757

@@ -4,7 +4,13 @@
 //! read again while the run lasts. Only a terminal can answer that question,
 //! and only a terminal can change its answer under a running surface — so this
 //! is where the whole path is driven: the question out, the answer back, and
-//! the ink on the screen the other colour.
+//! the screen the other palette.
+//!
+//! What is read off the screen is the band a person's own line sits on, and not
+//! the words: since M73 the ink is the terminal's own in every look, so prose
+//! carries nothing for a swap to change and follows a scheme flip with no
+//! question asked at all. That is asserted here too — through a real terminal,
+//! which is the only place SGR 39 can be seen for what it is.
 
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -22,43 +28,53 @@ impl Terminal {
         self.light.store(true, Ordering::SeqCst);
     }
 
-    /// The colour the row carrying `needle` ends in, as the terminal at the
-    /// other end has it. The end of that row is the answer's own last word, so
-    /// what it is drawn in is the palette's plain text ink and not a bullet or
-    /// a band.
-    fn ink(&self, needle: &str) -> Option<(u8, u8, u8)> {
+    /// The band a person's own line sits on, as the terminal at the other end
+    /// has it: the row's own words and the ground under them. That line is the
+    /// one thing on this screen the palette paints (design §4) — since M73 the
+    /// ink is the terminal's own — so it is the row whose cells carry a ground
+    /// at all.
+    fn band(&self) -> Option<(String, (u8, u8, u8))> {
         let parser = self.parser.lock().unwrap();
         let screen = parser.screen();
-        let row = (0..ROWS).find(|y| row_text(screen, *y).contains(needle))?;
-        (0..COLS)
-            .rev()
-            .filter_map(|x| screen.cell(row, x))
-            .filter(|cell| !cell.contents().trim().is_empty())
-            .find_map(|cell| match cell.fgcolor() {
-                vt100::Color::Rgb(red, green, blue) => Some((red, green, blue)),
-                _ => None,
-            })
+        (0..ROWS).find_map(|y| match screen.cell(y, 0)?.bgcolor() {
+            vt100::Color::Rgb(red, green, blue) => Some((row_text(screen, y), (red, green, blue))),
+            _ => None,
+        })
     }
 
-    /// Wait until that row is drawn in ink of the wanted kind: pale, which is
-    /// what a dark ground is written on, or near-black, which is what a light
-    /// one is.
-    fn wait_ink(&self, needle: &str, pale: bool) {
+    /// Wait until that band is drawn on the ground of the wanted palette: the
+    /// dark one's raised tint, or the light one's.
+    fn wait_band(&self, light: bool) {
         let deadline = Instant::now() + LIMIT;
         while Instant::now() < deadline {
-            if self.ink(needle).is_some_and(|ink| bright(ink) == pale) {
+            if self.band().is_some_and(|(_, tint)| bright(tint) == light) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!(
-            "timed out waiting for {needle:?} to be drawn in {} ink; it is {:?}",
-            match pale {
-                true => "pale",
-                false => "near-black",
+            "timed out waiting for the band on the {} tint; it is {:?}",
+            match light {
+                true => "light",
+                false => "dark",
             },
-            self.ink(needle)
+            self.band()
         );
+    }
+
+    /// Whether every cell of the row carrying `needle` is written in the
+    /// terminal's own foreground — SGR 39 and no colour of bingo's, which is
+    /// what body text is drawn in since M73, in every look.
+    fn own_ink(&self, needle: &str) -> bool {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let Some(row) = (0..ROWS).find(|y| row_text(screen, *y).contains(needle)) else {
+            return false;
+        };
+        (0..COLS)
+            .filter_map(|x| screen.cell(row, x))
+            .filter(|cell| !cell.contents().trim().is_empty())
+            .all(|cell| cell.fgcolor() == vt100::Color::Default)
     }
 }
 
@@ -70,11 +86,11 @@ fn row_text(screen: &vt100::Screen, row: u16) -> String {
         .collect()
 }
 
-/// Whether ink of this colour is the pale kind. The two palettes are a warm
-/// off-white over a dark ground and a warm near-black over a light one
-/// (`docs/design/tui.md` §4), so which side of the middle the ink falls on is
+/// Whether a colour of this weight is the light palette's. Its raised tint is
+/// one step down from paper and the dark palette's is one step up from night
+/// (`docs/design/tui.md` §4), so which side of the middle a tint falls on is
 /// the whole of what a test has to know — and it stays true through any later
-/// tuning of the eight.
+/// tuning of either.
 fn bright((red, green, blue): (u8, u8, u8)) -> bool {
     u16::from(red) + u16::from(green) + u16::from(blue) > 3 * 128
 }
@@ -84,29 +100,47 @@ fn bright((red, green, blue): (u8, u8, u8)) -> bool {
 const FOCUS_GAINED: &[u8] = b"\x1b[I";
 
 /// The look follows the terminal for as long as the run lasts. This terminal
-/// says its ground is dark, so the answer is written in pale ink; then its
-/// ground turns light under the running surface, and the question a person's
-/// return to the window puts brings the other palette back with it.
+/// says its ground is dark, so a person's line is banded on the dark tint;
+/// then its ground turns light under the running surface, and the question a
+/// person's return to the window puts brings the other palette back with it.
+///
+/// The answer's own words are the terminal's ink throughout, in both palettes
+/// and at every step between them (M73) — nothing of bingo's is spent on prose,
+/// which is why a scheme flip reaches the words before the question is even
+/// asked.
 #[test]
 fn a_terminal_whose_ground_turns_light_is_followed_within_one_focus() {
     let mut terminal = Terminal::under(&[], SCRIPT, Answers::Da1Only, Ground::Answered);
     terminal.wait_for("? for shortcuts");
     terminal.send(b"say hello\r");
     terminal.wait_for("Hello from the pty.");
-    terminal.wait_ink("Hello from the pty.", true);
+    terminal.wait_band(false);
+    let (line, _) = terminal.band().expect("a person's own line is banded");
+    assert!(
+        line.contains("hello"),
+        "and that band is their line: {line:?}"
+    );
+    assert!(
+        terminal.own_ink("Hello from the pty."),
+        "the answer is written in the terminal's own foreground"
+    );
 
     terminal.turn_light();
     terminal.send(FOCUS_GAINED);
-    terminal.wait_ink("Hello from the pty.", false);
+    terminal.wait_band(true);
     assert!(
         counted(&terminal.written(), GROUND_QUERY) > 1,
         "the question was put again"
+    );
+    assert!(
+        terminal.own_ink("Hello from the pty."),
+        "and the words never changed hands: the terminal remapped them itself"
     );
 
     // And back: the same window, the same run, the ground dark again.
     terminal.light.store(false, Ordering::SeqCst);
     terminal.send(FOCUS_GAINED);
-    terminal.wait_ink("Hello from the pty.", true);
+    terminal.wait_band(false);
 
     terminal.send(&[0x04]);
     terminal.leave();
@@ -127,7 +161,7 @@ fn a_named_look_is_never_asked_what_ground_the_terminal_has() {
         "nothing was asked"
     );
     assert!(
-        terminal.ink("Hello from the pty.").is_some_and(bright),
+        terminal.band().is_some_and(|(_, tint)| !bright(tint)),
         "and the look a person named is the one it drew in"
     );
     terminal.send(&[0x04]);
