@@ -3,7 +3,7 @@
 ## Goal
 
 User, 2026-09-04, after the M69 storyboard: the opening plays **inside
-the welcome box**, not on the whole screen; **no mascot**; a **higher
+the welcome box**, not on the whole screen; a **higher
 resolution** than one glyph per cell; **more depth** — a world a person
 can see into. It plays on **every start**, in that box, and ends as the
 box the transcript has always had (`✻ Welcome to bingo!`, the help line,
@@ -47,6 +47,12 @@ exists — spend it on the floor). Fog alone is not depth.
    turn at a slight tilt; a field of dark blocks floats around it at
    three depths, so the near ones sweep past and the far ones barely
    move. The block is the only light; the field's near faces catch it.
+   She is here (the user's call, 2026-09-04, reversing the "no mascot"
+   above): the mascot as M69's billboard, sampled through
+   `bingo_pictures::pixels` into the half-block grid, cropped to the
+   head, the block hanging before her face as the orbit ends. At 24 px
+   she is a hooded, cat-eared head in profile or she is a silhouette in
+   the far field — the frame decides, and Verified says which.
 3. **2.8–4.0 The hand-off.** Cut. The camera settles frontal. The
    block descends to the box's top-left corner and becomes the `✻` mark
    (one mark on screen at every instant — M69's `descending`); the
@@ -90,11 +96,10 @@ on the end state as today.
    (`welcome::opens(state, screen, env) -> bool`, pure, tested case by
    case), the off-thread frame, the skip, the settle to resting height,
    the end-state identity test.
-4. **Subtract.** `intro/mascot.rs`, `assets/mascot.png`, `end.rs`'s
-   silhouette, and the design doc's §11 mascot paragraphs go. Nothing
-   ships dead. `bingo_pictures::pixels` **stays** (the user's call,
-   2026-09-04): a public seam of the pictures crate, kept for the next
-   caller that draws a picture rather than sends one.
+4. **Subtract.** Only what the rewrite leaves dead: the glyph-ramp
+   silhouette in `end.rs` if nothing draws it, and the §11 paragraphs
+   the new storyboard replaces. `intro/mascot.rs`, `assets/mascot.png`
+   and `bingo_pictures::pixels` **stay** (the user's calls, 2026-09-04).
 
 ## Files
 
@@ -120,7 +125,7 @@ one-line pointer to this plan under Verified.
 
 ## Non-goals
 
-The mascot (gone); a daily short form (every start plays, the user's
+A daily short form (every start plays, the user's
 call); sound; a settings key (`BINGO_MOTION` is the switch);
 graphics-protocol pictures for the opening.
 
