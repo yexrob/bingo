@@ -78,18 +78,19 @@ impl Host {
         id: &SessionId,
     ) -> Result<Mailbox, KernelError> {
         let frames = store.replay(id, Seq::ZERO).await?;
-        let head = session::head_summary(&frames)?;
-        let spec = spec_of(&head);
+        let last = session::replayed(&frames)?.summary;
+        let spec = spec_of(&last);
         self.check_key_free(spec.key.as_deref())?;
         let thinking = self.settings.kernel.thinking;
         let choice = self.model_for(&spec, thinking).await?;
+        let summary = crate::turn::runs_on(last, choice.as_ref());
         let mailbox = session::resume(frames, Some(store.clone()), self.services(), |mailbox| {
-            Arc::new(self.turn_config(&spec, &head, choice, mailbox))
+            Arc::new(self.turn_config(&spec, &summary, choice, mailbox))
         })?;
-        let live = Live::new(mailbox, &head, spec, thinking);
-        self.lock().insert(head.id.clone(), live.clone());
+        let live = Live::new(mailbox, &summary, spec, thinking);
+        self.lock().insert(summary.id.clone(), live.clone());
         let _ = self.gateway.send(GatewayEvent::SessionCreated {
-            summary: Box::new(head),
+            summary: Box::new(summary),
         });
         report_lost_turns(store.as_ref(), &live.mailbox).await;
         Ok(live.mailbox)
@@ -162,8 +163,13 @@ fn lost_line(child: &SessionSummary) -> String {
     )
 }
 
-/// A resumed session runs as it was created: same cwd, key, parent,
-/// provider and model; the tools and the policy are the running host's.
+/// A resumed session runs as it last was: same cwd, key, parent, provider
+/// and model; the tools and the policy are the running host's.
+///
+/// *Last*, not first — this reads the journal's fold, never its head frame.
+/// `/model` rewrites the spec mid-session (ADR-0008 §4) and writes the new
+/// one into the journal, so a resume off the head frame would quietly put the
+/// session back on the model the person moved away from.
 fn spec_of(summary: &SessionSummary) -> SessionSpec {
     SessionSpec {
         driver: summary.driver,

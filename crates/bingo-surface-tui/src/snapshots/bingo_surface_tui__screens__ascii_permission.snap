@@ -1,6 +1,6 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-expression: "in_look(ascii(), || draw_tree(80, 24, &card, &ui, now))"
+expression: "in_look(ascii(), || draw_tree(80, 24, tree, ui, now))"
 ---
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ Edit                                                                         │"
@@ -25,4 +25,4 @@ expression: "in_look(ascii(), || draw_tree(80, 24, &card, &ui, now))"
 "+------------------------------------------------------------------------------+"
 "| > ask anything · / for commands · ! for shell                                |"
 "+------------------------------------------------------------------------------+"
-"? for shortcuts                                                           fake-1"
+"? for shortcuts                                                      fake/fake-1"

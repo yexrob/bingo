@@ -58,7 +58,7 @@ const INSTANCE_KEYS: [&str; 3] = ["anthropic", "codex", "openai"];
 /// name is refused here — before anything is written — as well as at the boot
 /// that would follow (ADR-0017 §2).
 pub async fn add(env: &Env, registered: BTreeSet<String>) -> Result<String, KernelError> {
-    let path = env.config_dir.join("settings.json");
+    let path = bingo_core::settings::user_path(env);
     let mut document = read(&path)?;
     let taken = registered.union(&instances(&document)).cloned().collect();
     let name = ask_name(&taken).await?;
@@ -160,30 +160,10 @@ fn stty(argument: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// The file as JSON, in the order it was written (`serde_json/preserve_order`).
-/// A file that is not plain JSON is not this command's to rewrite: the layers
-/// are read as JSONC, and a round trip would drop the comments in it.
+/// The settings round trip is the kernel's (`bingo_core::settings`); this
+/// says it in the error type the command line reports with.
 pub(crate) fn read(path: &Path) -> Result<Map<String, Value>, KernelError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
-        Err(e) => return Err(invalid(format!("{}: {e}", path.display()))),
-    };
-    if text.trim().is_empty() {
-        return Ok(Map::new());
-    }
-    match serde_json::from_str(&text) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(_) => Err(invalid(format!(
-            "{} holds no settings object",
-            path.display()
-        ))),
-        Err(e) => Err(invalid(format!(
-            "{} is not plain JSON ({e}); add the instance by hand — \
-             a file with comments is read at startup but not rewritten here",
-            path.display()
-        ))),
-    }
+    bingo_core::settings::read_document(path).map_err(|e| invalid(e.to_string()))
 }
 
 /// Every instance the file already names, under any key that holds them.
@@ -225,19 +205,8 @@ fn insert(
     Ok(())
 }
 
-/// Through a temporary file and a rename: a settings file a person wrote is
-/// not something to lose half of.
 pub(crate) fn write(path: &Path, document: &Map<String, Value>) -> Result<(), KernelError> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| internal(format!("{} has no directory", path.display())))?;
-    std::fs::create_dir_all(directory).map_err(|e| internal(format!("{}: {e}", path.display())))?;
-    let json = serde_json::to_string_pretty(document)
-        .map_err(|e| internal(format!("the settings will not encode: {e}")))?;
-    let temporary = directory.join("settings.json.tmp");
-    std::fs::write(&temporary, format!("{json}\n"))
-        .map_err(|e| internal(format!("{}: {e}", temporary.display())))?;
-    std::fs::rename(&temporary, path).map_err(|e| internal(format!("{}: {e}", path.display())))
+    bingo_core::settings::write(path, document).map_err(|e| internal(e.to_string()))
 }
 
 fn store(env: &Env, name: &str, key: String) -> Result<PathBuf, KernelError> {

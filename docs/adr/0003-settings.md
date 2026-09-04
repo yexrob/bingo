@@ -11,6 +11,7 @@ Users edit settings by hand and hosts generate them; the format is consumed inde
 3. Objects merge field by field at every depth; the rule applies to leaves. An explicit `null` in a higher layer clears the value from every layer below it — the tri-state the old project lacked.
 4. `bingo_core::settings::merge(layers, claims)` is a pure function returning the kernel settings, one object slice per plugin holding only its roots, and the unclaimed keys with the layer that set them; the host reports those as notices, never silently.
 5. Runtime changes (`AllowSession` rules, `/model`) are events, never written back. Writing settings is a command's job and always targets one named layer.
+   *(Amended 2026-09-04, user-directed: "应该是记住上次设置的？" — `/model` is both. The change reaches the running session as an event, as it always did, and the same command then writes `provider` and `model` into the **user** layer, so the next start opens on it: a person who picks a model has picked one, not left a note for this process. Claude Code does the same — `/model` "saves your choice as the default for new sessions by writing the `model` field in your user settings" (<https://code.claude.com/docs/en/model-config>), while `--model` "appl[ies] only to the session you launch with", and Codex reads `model`/`model_provider` from `~/.codex/config.toml` with `--model` and `-c key=value` documented as overrides "for a single run" (<https://learn.chatgpt.com/docs/config-file/config-advanced>). So here too: `--model`/`--provider` are the `cli` layer and are never written back. The round trip is `settings::read_document` + `settings::write` — the one settings writer, shared with `bingo provider add` — and it refuses a file with comments in it rather than dropping them.)*
 
 ## Consequences
 
@@ -18,6 +19,7 @@ Users edit settings by hand and hosts generate them; the format is consumed inde
 - Adding a key needs no kernel change and cannot be forgotten by a merge function.
 - Unknown keys are visible at startup (`UNKNOWN_SETTING`), so a typo like `permisions` is caught.
 - Schema validation of a claimed slice is the plugin's responsibility until a JSON Schema validator is adopted (not before M5).
+- A settings file a command rewrites is re-encoded as plain JSON in the order it was read; a JSONC file is read at startup and refused for writing, so the comments in it survive.
 
 ## Supersedes
 

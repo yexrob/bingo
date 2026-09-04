@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 use jiff::Timestamp;
 
-pub use config::{Breaker, ModelChoice, TurnBudget, TurnConfig};
+pub use config::{Breaker, ModelChoice, TurnBudget, TurnConfig, runs_on};
 use late::Late;
 pub use late::{CompactorSet, ContributorSet, HookSet, ProviderSet, ToolSet};
 use ruler::Ruler;

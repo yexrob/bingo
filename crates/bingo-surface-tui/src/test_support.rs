@@ -584,6 +584,17 @@ pub fn with_permission_mode(mode: &str) -> SessionState {
     folded(vec![frame(1, permission_view(mode))])
 }
 
+/// What the kernel publishes about the reasoning effort in force: the one
+/// place a client reads the level (ADR-0008 §4). `None` is off.
+pub fn thinking_view(level: Option<bingo_sdk::Effort>) -> Event {
+    Event::ConfigChanged {
+        config: bingo_sdk::ConfigView {
+            kernel: json!({ "thinking": level }),
+            ..Default::default()
+        },
+    }
+}
+
 pub fn notice(level: Level, text: &str) -> Event {
     Event::Notice {
         level,

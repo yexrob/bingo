@@ -254,6 +254,38 @@ pub enum Effort {
     Max,
 }
 
+impl Effort {
+    /// Lowest first, which is the order a person reads them in.
+    pub const ALL: [Effort; 6] = [
+        Effort::Minimal,
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::XHigh,
+        Effort::Max,
+    ];
+
+    /// The one spelling of a level: what a person types after `/think`, and
+    /// what a status line shows them back. The wire spelling a provider wants
+    /// is that provider's own business (their ladders differ).
+    pub fn name(self) -> &'static str {
+        match self {
+            Effort::Minimal => "minimal",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::XHigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+
+    /// A level by that name, in any case; `None` is not a level.
+    pub fn parse(word: &str) -> Option<Self> {
+        let lower = word.to_ascii_lowercase();
+        Self::ALL.into_iter().find(|e| e.name() == lower)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRequest {
@@ -500,6 +532,23 @@ impl ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A level has two spellings and they are not the same: the wire is
+    /// camelCase, as every enum on it is, while [`Effort::name`] is the word
+    /// a person types and reads. A surface showing a level shows the name.
+    #[test]
+    fn a_level_is_spelled_one_way_for_a_person_and_another_on_the_wire() {
+        for level in Effort::ALL {
+            assert_eq!(Effort::parse(level.name()), Some(level));
+            assert_eq!(Effort::parse(&level.name().to_uppercase()), Some(level));
+        }
+        assert_eq!(Effort::XHigh.name(), "xhigh");
+        assert_eq!(
+            serde_json::to_value(Effort::XHigh).unwrap(),
+            Value::from("xHigh")
+        );
+        assert_eq!(Effort::parse("loud"), None);
+    }
 
     /// The wire shape is load-bearing (ADR-0040): an internally tagged
     /// newtype variant flattens the struct's fields beside the tag, and this

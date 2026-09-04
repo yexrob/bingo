@@ -134,3 +134,81 @@ async fn the_catalogue_lists_a_late_provider_s_models_where_it_lists_every_other
         ids(&models)
     );
 }
+
+/// Two providers, the first of them signed in to nothing. Nobody named one,
+/// so the build picks — and picking by registration order alone would open
+/// every session on credentials the person has never given (user-reported:
+/// "直接运行会报 Anthropic key 不存在 即使有别的 provider").
+#[tokio::test]
+async fn the_default_provider_is_one_that_can_answer() {
+    let host = host_of(vec![
+        ScriptedProvider::named("anthropic", vec![]).missing("Run `bingo login anthropic`."),
+        ScriptedProvider::named("openai", vec![Script::Events(text("hello"))]),
+    ])
+    .await;
+
+    let chosen = host.provider(None).await.expect("one of them can answer");
+    assert_eq!(chosen.id(), "openai");
+    assert_eq!(
+        host.provider(Some("anthropic"))
+            .await
+            .expect("naming one still finds it")
+            .id(),
+        "anthropic",
+        "the fallback picks; it does not overrule a person who named one"
+    );
+
+    let opened = host
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .expect("the session opens on the signed-in provider");
+    assert_eq!(opened.snapshot.summary.provider.as_deref(), Some("openai"));
+}
+
+/// None of them can answer: the refusal is about all of them, so it names
+/// every one and what each wants, rather than the first in the list.
+#[tokio::test]
+async fn with_nobody_signed_in_the_refusal_lists_every_provider() {
+    let host = host_of(vec![
+        ScriptedProvider::named("anthropic", vec![]).missing("Run `bingo login anthropic`."),
+        ScriptedProvider::named("openai", vec![]).expired("Run `bingo login openai`."),
+    ])
+    .await;
+
+    let refused = match host.provider(None).await {
+        Err(refused) => refused,
+        Ok(chosen) => panic!("nobody is signed in, yet {} was picked", chosen.id()),
+    };
+    assert_eq!(refused.code, ErrorCode::AuthRequired);
+    assert!(
+        refused
+            .message
+            .contains("anthropic — Run `bingo login anthropic`."),
+        "{}",
+        refused.message
+    );
+    assert!(
+        refused
+            .message
+            .contains("openai — credentials expired. Run `bingo login openai`."),
+        "{}",
+        refused.message
+    );
+}
+
+/// A host holding the providers given, in the order given.
+async fn host_of(providers: Vec<Arc<ScriptedProvider>>) -> Arc<Host> {
+    let contributions = providers
+        .into_iter()
+        .map(|p| Contribution::Provider(p as Arc<dyn Provider>))
+        .collect();
+    let plugins = vec![TestPlugin::boxed(&PROVIDER, contributions)];
+    let config = HostConfig::new(env()).with_layer("user", json!({ "model": "m" }));
+    Host::build(plugins, config).await.expect("a host")
+}

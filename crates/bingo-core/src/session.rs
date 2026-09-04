@@ -251,14 +251,31 @@ impl Actor {
         }
     }
 
+    /// The summary as it stands, saying what the session runs on now. Every
+    /// head of a segment carries it, so a resumed session names the model
+    /// that will answer it rather than the one that answered it last time.
+    fn restated(&self) -> SessionSummary {
+        SessionSummary {
+            // A rename reaches the actor as a config, like a model does; a
+            // name the session already earned is never taken back by one.
+            title: self
+                .config
+                .session
+                .title
+                .clone()
+                .or_else(|| self.state.summary.title.clone()),
+            updated_at: Timestamp::now(),
+            ..crate::turn::runs_on(self.state.summary.clone(), self.config.model.as_ref())
+        }
+    }
+
     /// The head of this segment of the journal: what the session is now.
     /// The start hooks it hands back run while the session opens for reads.
     async fn open(&mut self) -> Starting {
         let summary = SessionSummary {
             busy: false,
             title: self.title(),
-            updated_at: Timestamp::now(),
-            ..self.state.summary.clone()
+            ..self.restated()
         };
         self.observe_journal();
         self.publish(Event::SessionUpdated { summary }, None).await;
@@ -366,13 +383,7 @@ impl Actor {
     /// keeps its own. The summary says what changed.
     async fn reconfigure(&mut self, config: Arc<TurnConfig>) {
         self.config = config;
-        let model = self.config.model.as_ref();
-        let summary = SessionSummary {
-            model: model.map(|m| m.id.clone()),
-            provider: model.map(|m| m.provider.id().to_string()),
-            updated_at: Timestamp::now(),
-            ..self.state.summary.clone()
-        };
+        let summary = self.restated();
         self.publish(Event::SessionUpdated { summary }, None).await;
         self.refresh_config().await;
     }
