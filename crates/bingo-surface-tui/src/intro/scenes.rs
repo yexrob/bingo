@@ -98,15 +98,14 @@ pub fn staged(t: f32) -> Staged {
 
 // ---- the pieces every shot is built out of ------------------------------
 
-/// The one character: a tall thin slab, the shape of a composer's caret. A
-/// `▌` is half a cell wide and a whole one tall, and a cell is twice as tall
-/// as it is wide, so a caret is three times as tall as it is broad — measured
-/// in the square pixels the world is drawn in, not in cells.
+/// The one character: a tall thin slab, the shape of a composer's caret — six
+/// times as tall as it is broad, measured in the square pixels the world is
+/// drawn in.
 fn block(centre: Vec3, height: f32, spin: f32) -> Solid {
     Solid::of(Shape::Block {
         at: centre,
-        half: at(height / 3.0, height, height / 3.0),
-        round: 0.03,
+        half: at(height / 6.0, height, height / 6.0),
+        round: 0.02,
         spin,
     })
     .lit()
@@ -144,16 +143,17 @@ fn about(pivot: Vec3, angle: f32, high: f32, away: f32) -> Camera {
 // ---- 0.0–1.4 · the floor ------------------------------------------------
 
 /// How far below the block the ground lies, and where the block hangs.
-const GROUND: f32 = -1.1;
-const STANDING: Vec3 = at(0.0, -0.05, 0.0);
-/// How tall the block stands, from its middle.
-const TALL: f32 = 1.0;
+const GROUND: f32 = -1.55;
+const STANDING: Vec3 = at(0.0, -0.30, 0.0);
+/// How tall the block stands, from its middle. Its foot hangs just clear of
+/// the floor, which is what its shadow is a shadow of.
+const TALL: f32 = 1.2;
 
 /// The dust that rises through the block's light.
 const DUST: Rising = Rising {
-    from: at(0.0, -1.0, -0.4),
-    spread: 0.9,
-    span: 2.6,
+    from: at(0.0, -1.4, -0.4),
+    spread: 0.8,
+    span: 2.4,
     rate: 0.3,
 };
 
@@ -169,16 +169,19 @@ fn floor(t: f32, p: f32) -> Staged {
                 Solid::of(Shape::Ground { y: GROUND }).ruled(),
                 block(STANDING, TALL, 0.35 + p * 1.5),
             ],
-            lamp: lamp(STANDING, 2.4, 1.0),
+            lamp: lamp(STANDING, 1.5, 1.0),
             sun: SUN,
-            sky: 0.44,
-            fog: 0.20,
+            sky: 0.5,
+            fog: 0.30,
             embers: embers::at_time(DUST, t),
             ..Scene::default()
         },
+        // High enough over the floor that its rules converge on a vanishing
+        // point rather than closing into one band, and coming down as it
+        // dollies in.
         camera: Camera {
-            eye: at(0.0, 0.34 - dolly * 0.10, -3.4 + dolly * 0.9),
-            at: at(0.0, -0.14, 0.0),
+            eye: at(0.0, 0.75 - dolly * 0.25, -4.2 + dolly * 1.2),
+            at: at(0.0, -0.45, 0.5),
             lens: LENS,
         },
     }
@@ -195,12 +198,13 @@ const HIGH: (f32, f32) = (0.55, 0.12);
 const TURN: (f32, f32) = (-PI, 0.34);
 
 /// The field of dark blocks, at two depths: a near grid the orbit sweeps past
-/// and a coarser, larger one behind it that barely moves. Both are offset half
-/// a cell so no block of either stands where the emissive one does.
+/// and a coarser, larger one behind it that barely moves. Both stand off half
+/// a period, so the air the camera turns through is clear and the emissive
+/// block has the middle of the world to itself.
 fn floating() -> [Solid; 2] {
     [
-        lattice(at(2.5, 2.0, 2.5), 0.28),
-        lattice(at(4.1, 3.1, 4.1), 0.62),
+        lattice(at(5.5, 4.4, 5.5), 0.42),
+        lattice(at(9.0, 7.0, 9.0), 1.10),
     ]
 }
 
@@ -215,7 +219,7 @@ fn lattice(period: Vec3, half: f32) -> Solid {
 
 /// Where she stands: behind the block from the camera's own last position, and
 /// off to the right of it, so the block hangs before her face.
-const HER: Vec3 = at(1.15, 0.06, 2.5);
+const HER: Vec3 = at(1.5, 0.06, 2.5);
 /// How wide the billboard she is on is, from its middle. Her crop is taller
 /// than it is wide ([`mascot::SHAPE`]) and the billboard is built to that, so
 /// she is never stretched — and this is the width at which her head fills the
@@ -228,7 +232,7 @@ const HER_WIDTH: f32 = 2.05;
 /// this world: what a person reads is which faces caught it.
 fn field(p: f32) -> Staged {
     let turned = crate::clock::ease_in_out(p);
-    let mut solids = vec![her(), block(at(0.0, 0.0, 0.0), 0.34, 0.2 + p * 1.1)];
+    let mut solids = vec![her(), block(at(0.0, 0.0, 0.0), 0.75, 0.2 + p * 1.1)];
     solids.extend(floating());
     Staged {
         scene: Scene {
@@ -239,7 +243,7 @@ fn field(p: f32) -> Staged {
             // turned away from it is not there, and every shadow walk the sun
             // would have cost is never taken.
             sky: 0.0,
-            fog: 0.14,
+            fog: 0.10,
             ..Scene::default()
         },
         camera: orbiting(turned),
@@ -418,10 +422,13 @@ mod tests {
         };
         assert!(!pictured(0.7), "not in the floor shot");
         assert!(pictured(2.1), "and in the field");
-        assert!(
-            HER.z > 0.0 && HER.x > 0.0,
-            "behind the block and to its right"
-        );
+        // She stands beyond the block and to one side of it, so the camera
+        // that has come round frontal has the block between it and her face.
+        let her = her().shape;
+        let Shape::Block { at: standing, .. } = her else {
+            panic!("she is a billboard: {her:?}");
+        };
+        assert!(standing.z > 0.0 && standing.x > 0.0, "{standing:?}");
     }
 
     #[test]

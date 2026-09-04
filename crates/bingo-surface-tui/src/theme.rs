@@ -529,14 +529,19 @@ pub fn warming(t: f32) -> Style {
     }
 }
 
-/// One cell of the opening shot, by how much light stands on it and how much
+/// One pixel of the opening shot, by how much light stands on it and how much
 /// of that light came from the block (`docs/design/tui.md` §11).
 ///
-/// It spends the two inks the world is made of — `dim` where a surface barely
-/// catches anything and `text` where it is full in the light — and bingo's own
-/// warm pair where the block reached it. There is no third colour: the ramp's
-/// glyph carries the brightness, so a terminal with no colour at all still has
-/// the whole shape of the world and loses only where the light came from.
+/// Three stops and no new token: from the *ground* a surface with no light on
+/// it is, through `dim` to `text` for what the world's own light reaches, and
+/// through bingo's own `presence` to `glow` for what the block reached. The
+/// ground is `raised`, which is the one token that steps towards the
+/// terminal's own background in both palettes — dark on dark, paper on paper.
+///
+/// It has to reach the ground, because in a picture drawn out of half blocks
+/// the colour is the only thing carrying the brightness: a world whose
+/// darkest ink is `dim` is a world with a grey wash over it and no night in
+/// it at all.
 pub fn lit(level: f32, warm: f32) -> Style {
     let (level, warm) = (settled(level), settled(warm));
     match current().colors {
@@ -547,10 +552,18 @@ pub fn lit(level: f32, warm: f32) -> Style {
             (false, false) => dim(),
         },
         Colors::True(palette) => Style::new().fg(mix(
-            mix(palette.dim, palette.text, level),
-            mix(palette.presence, palette.glow, level),
+            through(palette.raised, palette.dim, palette.text, level),
+            through(palette.raised, palette.presence, palette.glow, level),
             warm,
         )),
+    }
+}
+
+/// A ramp of three stops: nothing, half, whole.
+fn through(ground: Color, half: Color, whole: Color, level: f32) -> Color {
+    match level < 0.5 {
+        true => mix(ground, half, level * 2.0),
+        false => mix(half, whole, level * 2.0 - 1.0),
     }
 }
 

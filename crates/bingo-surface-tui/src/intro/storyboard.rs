@@ -153,7 +153,7 @@ fn in_look_png(look: Theme, t: f32) -> Vec<u8> {
 /// Any drawn frame as a picture: [`PIXELS`] a cell, the ink and the ground
 /// each cell wears, and the ground the terminal would have been showing behind
 /// the ones that wear none.
-fn picture_of(rows: &[Line<'static>]) -> Vec<u8> {
+pub fn picture_of(rows: &[Line<'static>]) -> Vec<u8> {
     let ground = ground();
     let columns = rows.iter().map(|row| cells(row).len()).max().unwrap_or(0);
     let (width, height) = (columns as u32 * PIXELS.0, rows.len() as u32 * PIXELS.1);

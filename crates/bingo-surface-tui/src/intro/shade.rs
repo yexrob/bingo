@@ -51,7 +51,7 @@ const LIFT: f32 = 0.03;
 /// How wide the block's own halo hangs in the air around it, across and up.
 /// Wider up than across, because the block is a caret and a round glow around
 /// an upright bar makes the bar read as a ball.
-const HALO: f32 = 0.30;
+const HALO: f32 = 0.10;
 const HALO_TALL: f32 = 2.8;
 /// How bright that halo is where the ray passes straight through the block.
 const HALO_LIGHT: f32 = 0.85;
@@ -61,16 +61,18 @@ const HALO_LIGHT: f32 = 0.85;
 /// it has must come from which way the face is pointed.
 const EMISSIVE: (f32, f32) = (0.76, 0.24);
 
-/// How far apart the floor's rules stand, and how wide one is at the camera's
-/// own distance.
-const RULE: f32 = 1.0;
-const RULE_WIDTH: f32 = 0.03;
-/// How much wider a rule is drawn for every unit it stands away. A far-off
-/// line thinner than a pixel is a stipple, and a stipple is not a line.
-const RULE_SPREAD: f32 = 0.5;
-/// How much of a ruled floor's light stands between its rules. A floor that
-/// is only rules is a wireframe; one that is only floor has no depth in it.
-const BETWEEN: f32 = 0.16;
+/// How far apart the floor's rules stand.
+const RULE: f32 = 2.5;
+/// How wide one is drawn, as a share of how far away it stands. A rule of a
+/// fixed width in the world projects thinner the further off it is, and a line
+/// thinner than a pixel is a stipple; widening it with the distance keeps it
+/// the same width on the screen wherever it lies, which is what a *line* is.
+const RULE_WIDTH: f32 = 0.07;
+/// How much of a ruled floor's light stands between its rules. Almost none:
+/// the floor is the grid, and the dark between its lines is the terminal's own
+/// ground — which is what makes the lines read as lines and the vanishing
+/// point read as distance.
+const BETWEEN: f32 = 0.10;
 
 /// One pixel, ready for the canvas — or nothing at all where there is no
 /// light in it.
@@ -288,7 +290,7 @@ fn ruling(material: Material, hit: Hit) -> f32 {
 /// The floor's grid at a point: full on a rule and [`BETWEEN`] off one, the
 /// rule widening with distance so a far-off line stays a line.
 fn ruled(point: Vec3, travelled: f32) -> f32 {
-    let width = RULE_WIDTH * (1.0 + travelled * RULE_SPREAD);
+    let width = RULE_WIDTH * travelled.max(1.0);
     let edge = to_a_rule(point.x).min(to_a_rule(point.z));
     let on = 1.0 - (edge / width.max(f32::EPSILON)).min(1.0);
     BETWEEN + (1.0 - BETWEEN) * on

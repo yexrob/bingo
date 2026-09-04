@@ -3,6 +3,6 @@ source: crates/bingo-surface-tui/src/intro/shade.rs
 expression: cells(truecolor())
 ---
   fg None bg None
-▀ fg Some(Rgb(226, 221, 213)) bg None
-▄ fg Some(Rgb(226, 221, 213)) bg None
-▀ fg Some(Rgb(240, 156, 120)) bg Some(Rgb(167, 162, 152))
+▀ fg Some(Rgb(216, 211, 203)) bg None
+▄ fg Some(Rgb(216, 211, 203)) bg None
+▀ fg Some(Rgb(237, 152, 117)) bg Some(Rgb(96, 91, 82))

@@ -8,14 +8,14 @@
 //! is one lookup and not a thousand.
 //!
 //! Two numbers come out of each pixel and no more: how bright it is, and how
-//! warm — which is exactly what [`super::shade::Lit`] spends. The picture is
+//! warm — which is exactly what [`crate::intro::shade::Lit`] spends. The picture is
 //! a rim-lit profile on black, so the bright part *is* the drawing, and the
 //! warm part is the block's light on her. The theme's own two inks draw her
 //! from those, and a terminal with no colour still has the rim.
 
 use std::sync::OnceLock;
 
-use super::shade::Lit;
+use crate::intro::shade::Lit;
 
 /// The picture, as the site draws it: her in profile, the block before her.
 const MASCOT: &[u8] = include_bytes!("../../assets/mascot.png");
@@ -38,13 +38,13 @@ pub const SHAPE: f32 = (CROP.3 - CROP.1) / (CROP.2 - CROP.0);
 /// the screen is a chance to average that rim away. Reducing once, straight to
 /// the size she is seen at, and keeping some of the brightest sample in each
 /// ([`PEAK`]) is what leaves her a face rather than a smudge.
-const ACROSS: usize = 40;
-const DOWN: usize = 52;
+const ACROSS: usize = 56;
+const DOWN: usize = 72;
 
 /// How much of a sample is the brightest pixel under it rather than the mean
 /// of them all. A plain average buries a one-pixel rim under the dark beside
 /// it; the rim is the whole of what makes a face a face.
-const PEAK: f32 = 0.55;
+const PEAK: f32 = 0.30;
 
 /// The window of the picture's own light the ramp is spent on.
 ///
@@ -148,11 +148,17 @@ fn boxed(picture: &bingo_pictures::Pixels, from: (f32, f32), size: (f32, f32)) -
     if taken <= 0.0 {
         return Lit::default();
     }
-    let mean = light / taken;
-    graded(
-        mean * (1.0 - PEAK) + peak * PEAK,
-        warm / light.max(f32::EPSILON),
-    )
+    // Both ends are graded before they are mixed. Mixing first and grading
+    // once would push every sample that touched anything lit through the top
+    // of the window, and a picture whose every sample is at the top of the
+    // ramp is a flat one.
+    let warm = warm / light.max(f32::EPSILON);
+    let mean = graded(light / taken, warm);
+    let brightest = graded(peak, warm);
+    Lit {
+        level: mean.level * (1.0 - PEAK) + brightest.level * PEAK,
+        warm: mean.warm,
+    }
 }
 
 /// One pixel, as brightness and how far towards the warm end of the spectrum
@@ -274,6 +280,37 @@ mod tests {
 #[cfg(test)]
 mod probe {
     use super::*;
+
+    /// Her alone, at the sizes the shots draw her, so the sizing decision is
+    /// made by looking rather than by arguing. The billboard in the world is
+    /// this field and nothing else — what a ray finds on it is one
+    /// [`light`] — so a picture of the field at `w × h` pixels is exactly what
+    /// the shot puts on the screen when she is `w × h` pixels of it.
+    #[test]
+    #[ignore = "writes her at the sizes the shots draw her, to look at"]
+    fn sizes() {
+        let out = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/intro"));
+        std::fs::create_dir_all(out).expect("somewhere to write them");
+        for (across, down) in [(14u16, 18u16), (18, 24), (24, 32), (36, 48)] {
+            let mut field = crate::intro::shade::Pixels::new(across, down);
+            for y in 0..down {
+                for x in 0..across {
+                    let place =
+                        |step: u16, of: u16| (f32::from(step) + 0.5) / f32::from(of) * 2.0 - 1.0;
+                    field.set(x, y, light(place(x, across), place(y, down)));
+                }
+            }
+            let rows = crate::theme::with(crate::painted::truecolor(), || {
+                crate::intro::shade::halves(&field).lines()
+            });
+            let png = crate::theme::with(crate::painted::truecolor(), || {
+                crate::intro::storyboard::picture_of(&rows)
+            });
+            std::fs::write(out.join(format!("her_{across}x{down}.png")), png)
+                .expect("her, at that size");
+        }
+        println!("intro: her written to {}", out.display());
+    }
 
     #[test]
     #[ignore = "prints the crop's own histogram, for grading it"]

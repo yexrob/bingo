@@ -128,11 +128,10 @@ pub enum Casting {
 
 impl Casting {
     fn counts(self, material: Material) -> bool {
-        match (self, material) {
-            (_, Material::Pictured) => false,
-            (Casting::ButTheLamp, Material::Emissive) => false,
-            _ => true,
-        }
+        !matches!(
+            (self, material),
+            (_, Material::Pictured) | (Casting::ButTheLamp, Material::Emissive)
+        )
     }
 }
 
