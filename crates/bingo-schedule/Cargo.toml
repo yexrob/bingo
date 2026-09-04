@@ -37,5 +37,8 @@ bingo-sdk = { workspace = true, features = ["testing"] }
 # M16: the next-fire contract is a property over arbitrary clocks, midnights,
 # month ends and a DST transition (ADR-0019 §2).
 proptest.workspace = true
+# The `Wake` tool's description is a contract with the model: it changes when
+# somebody meant it to, and the snapshot is where that is noticed.
+insta.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

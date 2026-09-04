@@ -1,0 +1,10 @@
+---
+source: crates/bingo-schedule/src/tools/wake.rs
+assertion_line: 365
+expression: spec.description
+---
+Wake yourself later in this same conversation. `after` is how long to wait (10s at the least, 1h at the most; anything outside is clamped and the result says so) and `note` is the line the next turn opens with — your own words to yourself, since nothing else of this turn is repeated for you. One wake stands at a time: setting another replaces it, and `stop: true` cancels the one that stands. It arrives only once this turn has ended, so finish what you are doing.
+
+Use it to pace work you cannot finish now: a build to poll, a job to check on, a review to come back to. Before the first wake, decide three things and write them into the note — what evidence would prove the work done, what the budget is (how many wakes, or by when), and what you will do when the budget is spent. Every wake is bounded and idempotent: it checks and reports, it does not start the work again. A check that fails goes back to diagnosis, not to a shorter interval. When the evidence is there, or the budget is spent, stop — say what you found and set no further wake.
+
+The person sees the wake that stands and can end it at any time.

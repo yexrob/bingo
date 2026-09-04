@@ -18,14 +18,14 @@ use std::time::Duration;
 
 use bingo_sdk::{
     Attachment, CancellationToken, ClientIdentity, Delivery, ErrorCode, HostHandle, Input,
-    IntentId, KernelError, OpenOptions, Origin, SessionSelector, SessionSpec,
+    IntentId, KernelError, OpenOptions, Origin, SessionId, SessionSelector, SessionSpec,
 };
 use jiff::Zoned;
 use tokio::sync::Notify;
 
 use crate::entry::Entry;
-use crate::render;
 use crate::store::Store;
+use crate::{render, wake};
 
 /// The surface a scheduled turn comes from; a person's says `tui` or
 /// `print`.
@@ -140,15 +140,13 @@ impl Runner {
 
     /// One occurrence: the clock first, then the turn.
     async fn fire(&self, entry: &Entry, now: &Zoned) {
-        if let Err(e) = self.store.save(&entry.fired(now.timestamp())) {
-            tracing::warn!(schedule = entry.id, "the fire was not written down: {e}");
-        }
+        self.spend(entry, now);
         if let Err(e) = self.turn(entry).await {
             let said = format!(
                 "{} fired at {} and opened no turn on {}: {}",
                 entry.id,
                 render::when(Some(now)),
-                entry.key(),
+                lands_on(entry),
                 e.message
             );
             tracing::warn!("{said}");
@@ -156,8 +154,30 @@ impl Runner {
         }
     }
 
-    /// The entry's own session, opened or continued, told what to do.
+    /// This occurrence, spent before anything is asked of a host: a schedule
+    /// by having its last fire written down, a wake by being forgotten. Only
+    /// a store that has already moved keeps a fire nobody could deliver from
+    /// being tried again on the very next pass.
+    fn spend(&self, entry: &Entry, now: &Zoned) {
+        let written = match entry.is_wake() {
+            true => self.store.delete(&entry.id),
+            false => self.store.save(&entry.fired(now.timestamp())).map(drop),
+        };
+        if let Err(e) = written {
+            tracing::warn!(schedule = entry.id, "the fire was not written down: {e}");
+        }
+    }
+
+    /// What one fire is, which is a different thing for each of the two forms.
     async fn turn(&self, entry: &Entry) -> Result<(), KernelError> {
+        match &entry.session {
+            Some(session) => self.wake(entry, session).await,
+            None => self.scheduled(entry).await,
+        }
+    }
+
+    /// The entry's own session, opened or continued, told what to do.
+    async fn scheduled(&self, entry: &Entry) -> Result<(), KernelError> {
         let attachment = self.session(entry).await?;
         self.choose_mode(entry, &attachment);
         self.host
@@ -165,6 +185,25 @@ impl Runner {
                 &attachment.session,
                 IntentId::mint(),
                 Input::text(entry.text.clone(), origin()),
+                Delivery::Wake,
+            )
+            .await
+    }
+
+    /// The note, on the conversation that asked for it (ADR-0019 §8): a
+    /// delivery like any other, so a session still in a turn takes it at the
+    /// barrier and one that is idle opens a turn on it.
+    ///
+    /// The pending wake is taken back first. It is gone from the store
+    /// already, and a screen that still counted one down would be the only
+    /// thing left saying so.
+    async fn wake(&self, entry: &Entry, session: &SessionId) -> Result<(), KernelError> {
+        wake::publish(&self.host, session, None).await;
+        self.host
+            .deliver(
+                session,
+                IntentId::mint(),
+                Input::text(entry.text.clone(), wake::origin()),
                 Delivery::Wake,
             )
             .await
@@ -208,6 +247,14 @@ impl Runner {
     }
 }
 
+/// Where a fire was meant to land, as the line a person reads names it.
+fn lands_on(entry: &Entry) -> String {
+    match &entry.session {
+        Some(session) => session.to_string(),
+        None => entry.key(),
+    }
+}
+
 fn spec(entry: &Entry) -> SessionSpec {
     SessionSpec {
         cwd: entry.cwd.clone(),
@@ -238,8 +285,22 @@ fn origin() -> Origin {
 mod tests {
     use super::*;
     use crate::entry::tests::entry;
-    use jiff::Timestamp;
+    use crate::tests::Fixture;
     use jiff::tz::TimeZone;
+    use jiff::{SignedDuration, Timestamp};
+    use serde_json::Value;
+    use std::sync::Mutex;
+
+    /// The runner this process would have, over the fixture's own store.
+    fn runner(fixture: &Fixture, trouble: &Arc<Mutex<Option<String>>>) -> Runner {
+        Runner::new(
+            fixture.store(),
+            fixture.handle(),
+            Arc::new(Notify::new()),
+            Arc::clone(trouble),
+            CancellationToken::new(),
+        )
+    }
 
     fn at(seconds: i64) -> Zoned {
         Timestamp::from_second(seconds)
@@ -316,6 +377,78 @@ mod tests {
             RESCAN,
             "a fire tomorrow is not a day asleep: a file may be edited by hand"
         );
+    }
+
+    /// A wake fires on the conversation it names, and is spent by being
+    /// forgotten: the delivery is `Wake` like any other, so a session still
+    /// in a turn takes it at the barrier.
+    #[tokio::test]
+    async fn a_wake_lands_on_the_session_it_names_and_leaves_no_file_behind() {
+        let fixture = Fixture::new();
+        let woken = bingo_sdk::SessionId::from_raw("ses_woken");
+        let due = crate::wake::entry(
+            "aaaa1111".into(),
+            &woken,
+            &fixture.cwd(),
+            "look at the build again".into(),
+            Timestamp::UNIX_EPOCH,
+            SignedDuration::from_mins(5),
+        );
+        fixture.schedules.store().save(&due).expect("a wake");
+
+        let trouble = Arc::new(Mutex::new(None));
+        let waited = runner(&fixture, &trouble).tick().await;
+        assert_eq!(waited, Duration::ZERO, "a pass that fired reckons again");
+        assert!(fixture.shelf().is_empty(), "a spent wake leaves no file");
+        assert_eq!(*trouble.lock().expect("the trouble"), None);
+
+        assert_eq!(
+            fixture.host.delivered(),
+            vec![(
+                woken.clone(),
+                Input::text("look at the build again", crate::wake::origin()),
+                Delivery::Wake
+            )]
+        );
+        assert_eq!(
+            fixture.host.extended(),
+            vec![(
+                woken,
+                crate::wake::PLUGIN.to_string(),
+                crate::wake::KIND.to_string(),
+                Value::Null
+            )],
+            "the pending wake is taken back before the note lands"
+        );
+    }
+
+    /// The other form, unchanged: a schedule of a person's own is spent by
+    /// having its fire written down, and opens a session of its own — which
+    /// this host has none of, so the fire says so where a person looks.
+    #[tokio::test]
+    async fn a_schedule_of_a_persons_own_is_written_down_rather_than_forgotten() {
+        let fixture = Fixture::new();
+        fixture
+            .schedules
+            .store()
+            .save(&entry())
+            .expect("a schedule");
+
+        let trouble = Arc::new(Mutex::new(None));
+        runner(&fixture, &trouble).tick().await;
+        let shelf = fixture.shelf();
+        assert_eq!(shelf.entries.len(), 1, "the file stays");
+        assert!(shelf.entries[0].last_fired.is_some(), "and its clock moved");
+        assert!(
+            fixture.host.delivered().is_empty(),
+            "a session of its own is opened first, and there is none"
+        );
+        let said = trouble
+            .lock()
+            .expect("the trouble")
+            .clone()
+            .unwrap_or_default();
+        assert!(said.contains("schedule/abcd1234"), "{said}");
     }
 
     #[test]
