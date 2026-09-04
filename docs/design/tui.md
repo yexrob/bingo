@@ -129,21 +129,25 @@ What it still does not do: show a room's roster without being asked for (sketch 
 
 ## 4. Tokens
 
-Truecolor is the native look, chosen after the terminal's background is read (OSC 10/11) and derived for light and dark alike; the eight ANSI colours are the fallback and every rule below holds in both. The palette is not chosen once: the terminal is asked again while the run lasts, so a terminal that follows the system's appearance is followed in turn (**the look that follows**, below). The body background is never painted — the terminal's stays — but cards, sheets and the rail sit on a **raised tint** one step from it, which is what gives the frame depth.
+**The terminal owns the ink** (M73). Body text draws in the terminal's own foreground and secondary text in its own dim — SGR 39 and SGR 2, in every look, the native one included. Nothing about prose is bingo's to choose, so a terminal that flips its scheme remaps every line of it itself, at once and in its scrollback, with no question asked and no frame redrawn. Codex draws prose with no foreground SGR at all and bans `Color::Rgb` in its lints ("use ANSI colors, which work better in various terminal themes"); Claude Code draws it as a bare Ink `<Text>`; that is why the words in both follow a system theme flip on the instant. Colour is spent only where colour is the meaning.
+
+What is left is the **accent palette**. Truecolor is the native look, chosen after the terminal's background is read (OSC 10/11) and derived for light and dark alike; the eight ANSI colours are the fallback and every rule below holds in both. The body background is never painted — the terminal's stays — but cards, sheets and the rail sit on a **raised tint** one step from it, which is what gives the frame depth. The palette is not chosen once: the terminal is asked again while the run lasts, so a terminal that follows the system's appearance is followed in turn (**the look that follows**, below) — and what that following governs is exactly the accents and the tints, because the ink has nothing to follow.
 
 | token | ANSI | truecolor (dark) | where, and only where |
 |---|---|---|---|
-| `text` | default | `#ece7df` | answers, what you type, option labels — warm off-white; and the bright end of the opening's own ramp (§11) |
-| `dim` | DIM | `#8a847a` | results under `⎿`, thinking, hints, the status line, everything behind a card; and the faint end of that ramp |
+| `text` | default | default | answers, what you type, option labels — the terminal's own foreground, spelled `Reset` rather than left unsaid so it can be patched over a colour. The opening's picture keeps two greys of its own (§11): a half block carries its brightness in its colour and has no ink to borrow |
+| `dim` | DIM | DIM | results under `⎿`, thinking, hints, the status line, everything behind a card — and every hairline: a box's border, a band's rule, a table's rule, a tree's guides, a mockup's frame, a diff's hunk header, an idle bullet. A weight and not a hue, so one stroke reads on either ground |
 | `raised` | none | `#211d17` (bg + one step) | the bar behind a `>` line, rail cards, the surface of a sheet; never text |
 | `presence` | yellow | `#d97757`, glow `#f2a07c` | bingo's own colour: the `✻` sparkle, a live `⏺`, the glowing input border, the welcome mark, progress fills, **and every cell of the opening the block's light reaches (§11)** — the one warm colour, and the only one that moves |
 | `good` / `bad` | green / red | `#8fcf8a` / `#e0655a` | a finished `⏺` and a failed one; a failed turn's line; diff tints |
 | `mode` | blue | `#8fb4de` | the `⏵⏵` on the status line and links — the one cool colour |
 | `bold` | BOLD | — | tool names in `⏺ Read(…)`, card titles, markdown headings; the model's own `⏺` is bold white |
 
-Gradients exist in two places only: a progress bar's fill (`presence` → its glow) and the comet tail of streaming text (§6). Diff lines sit on translucent `good`/`bad` tints. Colour never carries a fact alone: every state has a glyph, so `NO_COLOR` and a monochrome terminal lose nothing.
+Gradients exist in two places only: a progress bar's fill (`presence` → its glow) and the comet tail of streaming text (§6). The tail's cold end is the resting ink, which no ramp can reach, so it runs `glow` → `presence` and hands to the terminal's own half-way down. The ramps that used to pass through a grey — the light across a landed name, a failure cooling into the words, a notice arriving, the context notice warming — take their two ends in every look, which is what the eight colours always drew them as. Diff lines sit on translucent `good`/`bad` tints. Colour never carries a fact alone: every state has a glyph, so `NO_COLOR` and a monochrome terminal lose nothing.
 
 ### The look that follows (M71)
+
+Since M73 this governs the accents, the tints and the grounds, and nothing else: prose and secondary text are the terminal's own ink and its own dim, so they follow a flip on their own, ahead of any question and in the scrollback too. What is left below is how the part that *cannot* be "default" — a background, a tint, a blend — is kept in step.
 
 Which of the two palettes is the terminal's own to say, and a terminal set to follow the system's appearance says something different an hour later. So the ground is one fact read at render time and **may change**: the environment settles everything else once, the ground sits in a slot, and every frame after a new answer wears the other palette. `BINGO_THEME=light|dark` pins the look and turns the following off — a person who named one is not asked again — and so do `NO_COLOR` and a terminal of eight colours, which have no ground to follow.
 
@@ -221,21 +225,21 @@ A terminal moves in three ways — a glyph changes, a row appears or leaves, bri
 |---|---|---|
 | presence | the activity row's `✻` sparkles `✻ ✢ ✶ ✽` and breathes between 65 % and 100 % while a turn runs; the input box border glows in step; neither exists when idle. The breath's **period is what the turn is doing** (2026-09-04): a fixed one reported only "a turn is running", which the row's presence already says | 150 ms per glyph; the breath 0.9 s while words arrive, 2.2 s while a tool holds the turn, 1.6 s thinking |
 | thinking | `✻ Thinking…` dim italic over the two dim `⎿` tail rows of what has been thought so far, scrolling up as the deltas arrive; then **closes** to `✻ Thought for 2s` alone as the next block starts — the two rows go, and the transcript is left with the one row that says a thought happened. The tail wears no comet: the glow is for words being said, and thinking is where `dim` lives (§4) | per delta |
-| streaming | text after a `⏺` grows in place with a **comet tail**: the last eight cells fade from `presence`'s glow to `text` | per frame, tail 180 ms |
+| streaming | text after a `⏺` grows in place with a **comet tail**: the last eight cells fade `glow` → `presence`, and the half of the tail behind that is the terminal's own ink (M73) | per frame, tail 180 ms |
 | tool running | the row's `⏺` pulses `presence` ↔ glow; three dim `⎿` tail rows that scroll up as they arrive | 1.2 s pulse |
-| tool done | the `⏺` turns `good` and one light crosses the row's name, `text` → `good`, left to right (2026-09-04, replacing one bold frame: 33 ms is below the threshold at which a person reads it as *something happening*); the tail folds into `⎿ … +N lines (ctrl+o to expand)` | 6 frames |
-| tool failed | the `⏺` turns `bad` and the row's own words land in `bad` and cool into `text` — a flare that settles, never a shake: §3's "nothing jumps" outranks it, and the withdrawn rise is the precedent. The bullet keeps the fact; what cools is how fresh it is (2026-09-04) | 12 frames |
+| tool done | the `⏺` turns `good` and one light crosses the row's name, `good` at the crest and the row's own weight where it has passed, left to right (2026-09-04, replacing one bold frame: 33 ms is below the threshold at which a person reads it as *something happening*); the tail folds into `⎿ … +N lines (ctrl+o to expand)` | 6 frames |
+| tool failed | the `⏺` turns `bad` and the row's own words land in `bad` and cool into the ink behind them — a flare that settles, never a shake: §3's "nothing jumps" outranks it, and the withdrawn rise is the precedent. The bullet keeps the fact; what cools is how fresh it is (2026-09-04) | 12 frames |
 | block arriving | *withdrawn 2026-09-02 (§10)*: a block arrives in place, taking its own room and nothing more | — |
 | activity row | appears only after 300 ms of a turn: `✻ Tinkering… (esc to interrupt · 4s · ↓ 0.4k tokens)`; one verb per turn | 300 ms delay, 1 s clock |
 | card opening | the world dims; the card reveals top-down; rows are dim through the kernel's 400 ms guard and brighten as it lifts, with the bell | 3 frames + guard |
 | card closing | the reverse; the world brightens | 3 frames |
 | sheet | slides up from the composer; `esc` slides it down | 4 frames |
-| notice | fades into the status line's middle slot; holds 4 s; fades to dim and goes | 2 frames in, 2 out |
+| notice | arrives dim in the status line's middle slot, takes its level's colour, holds 4 s, and is dim again as it goes — two stops and no ramp, because the one it would ramp out of is a weight (§4) | 2 frames in, 2 out |
 | needs you | the `1 needs you` notice, the child row's `⎿  Needs you`, its switcher row and an **unanswered card's border** (2026-09-04) pulse `presence` | 1 Hz |
 | scroll | by line with ease-out; the wheel, `pgup/pgdn`, `ctrl+f` hits | 100 ms |
 | session switch | the transcript crossfades through dim; the status line's right slot renames | 2 frames |
 | progress | a bounded bar's fill ramps `presence` → glow across its lit run (§4's second gradient); an unbounded one's three lit cells walk the track and come back round, because there is no fraction to say it with (2026-09-04, M11c's own TODO) | 4 steps a second |
-| context | the `context 84%` notice appears at 70 % of the trigger and warms from `dim` to `bad` across the last 20 %; absent below | per turn |
+| context | the `context 84%` notice appears at 70 % of the trigger, dim while it is only a notice, and turns `bad` at 90 % where ` · /compact` joins it — one turn for the hue and the words both; absent below | per turn |
 | idle | no redraw at all | 0 Hz |
 | reduced motion | `BINGO_MOTION=off`: spinners freeze to `•`, no breath, no tail, no reveals, no pulse — and no light on a sent line, none across a landed name, no flare, the sheen parked at the head (2026-09-04); `NO_COLOR` strips colour, and every cue above it is pure colour, so nothing is lost (§4: colour never carries a fact alone) | — |
 
@@ -360,6 +364,8 @@ What a change is checked against, in this order: `TestBackend` snapshots for eve
 
 - **2026-09-04, later still** — **The box opens** (M70, at the user's call after M69's storyboard: 在欢迎框里播放、更高分辨率、更有立体感). Three changes to what M69 built, each of them a picture the previous one could not draw. *The piece plays inside the welcome box*, twelve rows while it runs and the box's own height when it lands — so the entrance is where the transcript begins rather than over the whole screen, and it settles into the box a person has always had rather than into a copy of one. *A cell is two pixels*: `▀` with its foreground the top half and its background the bottom, which is what a terminal has for pictures without a graphics protocol, and it makes a pixel square where a cell is not. *`theme::lit` reaches the ground*: it used to bottom out at `dim`, a mid grey, because the glyph ramp carried the brightness and the colour only said where the light came from — with the ramp gone the colour is all there is, and a world whose darkest ink is a mid grey has a grey wash over it and no night in it. It now runs ground → `dim` → `text` and ground → `presence` → `glow`, with `raised` as the ground, the one token that steps towards the terminal's own background in both palettes. Three shots replace five: a ruled floor to a vanishing point, an orbit through a field of dark blocks with her at the end of it, and the box opening out of the corner the block came down to. At the twenty-four pixel rows the box gives her she is a hooded, cat-eared head in profile — a figure, not a face; the same finding as M69's, at the same size, and the reason the ears survive at all is that her reduction keeps the brightest pixel under each sample.
 
+- **2026-09-05, later** — **The terminal owns the ink** (M73, user-reported: "look at how Claude Code and Codex do it; your switch is not real-time"). M71 made the palette follow the terminal, but body text was an explicit truecolor (`#ece7df` / `#24201a`) and secondary text an explicit grey, so a scheme flip left the prose wrong until the next question came back — a focus away and back, or thirty seconds. Read from their sources, neither product colours body text at all: Codex draws prose with no foreground SGR and bans `Color::Rgb` in its lints ("use ANSI colors, which work better in various terminal themes"), Claude Code draws it as a bare Ink `<Text>`, and detection is spent only on what cannot be "default". So `text` is `Reset` and `dim` is `Modifier::DIM` in every look, both leave `Palette`, and every hairline that used to be drawn in the grey — a box's border, a band's rule, a table's rule, a tree's guides, a mockup's frame, a diff's hunk header, an idle bullet — is that weight instead, which reads on either ground. The four ramps that passed through the grey or ended in the ink take their two ends, as the eight colours always drew them; the comet keeps its gradient down the warm half of the tail. The opening's picture keeps two greys of its own, because a half block carries its brightness in its colour and has no ink to borrow. What is left of detection is the accents, the tints and the grounds — M71's slot and re-ask stand, and now govern exactly the part a terminal cannot remap for us.
+
 ## 11. The opening
 
 > M69 built the brick and the storyboard; **M70, 2026-09-04**, is the piece as
@@ -384,13 +390,15 @@ plays (the most a composer and a status line can give up on a screen of
 sixteen) and settles to its own height on the last cut. A pixel with no light
 in it is left unpainted, so the terminal's own ground is the night.
 
-**The ink runs to the ground.** `theme::lit` spends three stops and no new
-token: from `raised` — the one token that steps towards the terminal's own
-background in both palettes — through `dim` to `text` for what the world's own
+**The ink runs to the ground.** `theme::lit` spends three stops: from `raised`
+— the one token that steps towards the terminal's own background in both
+palettes — through two greys of the **picture's own** for what the world's own
 light reaches, and through `presence` to `glow` for what the block reached. It
 *has* to reach the ground: in a picture drawn out of half blocks the colour is
-the only thing carrying the brightness, and a world whose darkest ink is `dim`
-is a world with a grey wash over it.
+the only thing carrying the brightness, and a world whose darkest ink is a grey
+wash is a world with no night in it. That is also why the neutral stops are the
+picture's and not §4's `text` and `dim`, which since M73 are the terminal's own
+foreground and its own dim — nothing a half block can mix towards.
 
 **Depth, four ways, all in the scenes.** A floor with a perspective grid that
 runs away to a vanishing point; a camera that moves — a dolly, then an orbit;

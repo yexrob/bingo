@@ -11,6 +11,11 @@ appearance changes its ground under a running bingo, and bingo keeps the
 ink it chose an hour ago. Wanted: the look follows the terminal for as
 long as the run lasts — a theme flip is a redraw, not a restart.
 
+> **Superseded in part by M73** (2026-09-05): body text and secondary text
+> are the terminal's own foreground and its own dim, so they follow a flip
+> with nothing asked. Everything below stands and now governs the accents,
+> the tints and the grounds — the part a terminal cannot remap for us.
+
 ## Shape
 
 The look stays one fact read at render time (`theme::current()`), but
