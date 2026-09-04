@@ -13,6 +13,12 @@
 //! quote it, and the shapes a revision adds are properties to read, not types
 //! to grow.
 //!
+//! A property holds one value, so a question answered both by picking and in
+//! words of one's own reaches the server as the words (M59): the schema has
+//! no room for both, and the words are what the person said last. On an enum
+//! property they are not one of the values the server named — this client
+//! sends what the person said rather than a value they did not choose.
+//!
 //! Nothing nested is answered. The spec keeps the schema flat, so an object,
 //! an array or a property of no type this file knows declines the whole
 //! request — never a half-answer the server would read as the person's.
@@ -233,6 +239,11 @@ impl Field {
     /// hold, which is the same thing to a server that asked for a number.
     fn value(&self, given: &Answer) -> Option<Value> {
         match given {
+            // Words of one's own win over the ticks beside them: the property
+            // has room for one value and the person wrote theirs (M59).
+            Answer::Choice {
+                other: Some(words), ..
+            } => self.written(words.trim()),
             Answer::Choice { ids, .. } => self.chosen(ids.first()?),
             Answer::Text { text } => self.written(text.trim()),
             _ => None,
@@ -259,9 +270,11 @@ impl Field {
                 .ok()
                 .and_then(serde_json::Number::from_f64)
                 .map(Value::Number),
-            // A named value is chosen, never typed: the option's id is what
-            // the server must receive and a person's words are not it.
-            Wants::Bool | Wants::Choice => None,
+            // A named value is usually chosen, but a person may write past
+            // the list; the property still holds a string, so their words go
+            // as they are. A boolean has room for neither.
+            Wants::Choice => Some(Value::String(text.to_string())),
+            Wants::Bool => None,
         }
     }
 }
@@ -550,6 +563,32 @@ mod tests {
             "and neither is a fraction"
         );
         assert_eq!(typed("64").action, ElicitationAction::Accept);
+    }
+
+    /// A property holds one value: where a person both picked and wrote, the
+    /// words are what the server hears (M59).
+    #[test]
+    fn words_beside_the_ticks_are_what_reaches_the_server() {
+        let form = asked("elicit-choices");
+        let both = form.result(&answered(
+            &form,
+            &[
+                (
+                    "channel",
+                    Answer::Choice {
+                        ids: vec!["stable".into()],
+                        other: Some("nightly-2026-09".into()),
+                    },
+                ),
+                ("jobs", Answer::Text { text: "8".into() }),
+            ],
+        ));
+        assert_eq!(both.action, ElicitationAction::Accept);
+        assert_eq!(
+            both.content,
+            Some(serde_json::json!({ "channel": "nightly-2026-09", "jobs": 8 })),
+            "the words the person wrote, not the value they walked past"
+        );
     }
 
     #[test]

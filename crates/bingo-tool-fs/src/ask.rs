@@ -29,8 +29,9 @@ offer an \"Other\" option — the user can always type an answer of their own, \
 or decline a question. An option may carry a preview: a few lines of \
 monospace shown beside it while the user is on it, for a choice they want to \
 see rather than read — a layout, a snippet, two configurations to compare. \
-The result gives back what the user chose, one line per question; a question \
-they left alone reads `skipped`.";
+The result gives back what the user chose, one line per question — the labels \
+they picked and, after them, any words of their own; a question they left \
+alone reads `skipped`.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AskArgs {
@@ -172,16 +173,7 @@ fn chosen(question: &AskQuestion, ids: &[String]) -> Vec<String> {
 /// left alone is `skipped` rather than an absence.
 fn answered(question: &AskQuestion, answer: Answer) -> Result<String, ToolError> {
     match answer {
-        Answer::Choice { ids, .. } => {
-            let labels = chosen(question, &ids);
-            if labels.is_empty() {
-                return Err(ToolError::Failed(format!(
-                    "the answer to {:?} named none of the options",
-                    question.question
-                )));
-            }
-            Ok(format!("{}: {}", question.header, labels.join(", ")))
-        }
+        Answer::Choice { ids, other } => said(question, &ids, other.as_deref()),
         Answer::Text { text } => Ok(format!("{}: {text}", question.header)),
         Answer::Cancel | Answer::Deny { .. } => Ok(format!("{}: skipped", question.header)),
         other => Err(ToolError::Failed(format!(
@@ -189,6 +181,26 @@ fn answered(question: &AskQuestion, answer: Answer) -> Result<String, ToolError>
             question.question
         ))),
     }
+}
+
+/// One choice, as the model reads it: the labels picked, in the order the
+/// question listed them, and then the words the person typed of their own
+/// where they did both (M59). A choice that named neither is a broken door.
+fn said(question: &AskQuestion, ids: &[String], other: Option<&str>) -> Result<String, ToolError> {
+    let mut said = chosen(question, ids);
+    said.extend(
+        other
+            .map(str::trim)
+            .filter(|words| !words.is_empty())
+            .map(str::to_owned),
+    );
+    if said.is_empty() {
+        return Err(ToolError::Failed(format!(
+            "the answer to {:?} named none of the options",
+            question.question
+        )));
+    }
+    Ok(format!("{}: {}", question.header, said.join(", ")))
 }
 
 /// The form's answers against the questions they belong to. The kernel gives
@@ -484,6 +496,62 @@ mod tests {
             panic!("expected a form, got {kind:?}");
         };
         assert!(questions[0].multi);
+    }
+
+    /// The bug M59 was opened for: a set answered with ticks *and* words gave
+    /// the model the words alone, because the wire had room for one of them.
+    #[tokio::test]
+    async fn a_set_ticked_and_typed_on_reads_back_as_both() {
+        let input = serde_json::json!({
+            "questions": [{
+                "question": "Which features?",
+                "header": "Features",
+                "options": [{ "label": "dashboard" }, { "label": "search" }, { "label": "export" }],
+                "multi_select": true
+            }]
+        });
+        let (out, _) = ask(
+            input,
+            form(vec![Answer::Choice {
+                ids: vec!["0".into(), "1".into()],
+                other: Some("  and an audit log  ".into()),
+            }]),
+        )
+        .await;
+        assert_eq!(
+            out.parts[0].as_text(),
+            Some("The user answered:\nFeatures: dashboard, search, and an audit log")
+        );
+        assert!(!out.is_error);
+    }
+
+    /// Words with nothing ticked are still an answer, and words that are only
+    /// blanks are none at all.
+    #[tokio::test]
+    async fn words_alone_answer_a_choice_and_blank_words_do_not() {
+        let (out, _) = ask(
+            one_question(),
+            form(vec![Answer::Choice {
+                ids: Vec::new(),
+                other: Some("neither, use the session cookie".into()),
+            }]),
+        )
+        .await;
+        assert_eq!(
+            out.parts[0].as_text(),
+            Some("The user answered:\nAuth method: neither, use the session cookie")
+        );
+        let dir = tempfile::tempdir().expect("temp dir");
+        let host = ScriptedHost::new(form(vec![Answer::Choice {
+            ids: Vec::new(),
+            other: Some("   ".into()),
+        }]));
+        let cx = context_with(dir.path(), host);
+        let error = AskUserQuestionTool.call(one_question(), &cx).await.err();
+        assert!(
+            matches!(&error, Some(ToolError::Failed(m)) if m.contains("named none of the options")),
+            "got {error:?}"
+        );
     }
 
     #[tokio::test]
