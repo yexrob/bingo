@@ -13,6 +13,8 @@
 //!   through when there is one, and the envelope they travel in.
 //! - [`picture`] is one picture a frame drew: where it came from and how many
 //!   cells it took.
+//! - [`band`] is a few of them side by side, small enough to glance at — the
+//!   one shape the composer's strip and a person's own `>` block both wear.
 //! - [`kitty`] is the protocol as bytes.
 //! - [`placed`] reads back out of a drawn frame where each picture's cells
 //!   landed, which is what a click on one is answered against.
@@ -24,6 +26,7 @@
 //! instead of in the probe's read. [`crate::late`] hears it there, and [`late`]
 //! joins it to what was heard in time (M60).
 
+pub mod band;
 pub mod decoded;
 pub mod kitty;
 pub mod linked;
@@ -34,6 +37,7 @@ pub mod probe;
 pub mod stored;
 pub mod tmux;
 
+pub use band::Band;
 pub use decoded::{Decoded, Pixels};
 pub use linked::Linked;
 pub use picture::Picture;

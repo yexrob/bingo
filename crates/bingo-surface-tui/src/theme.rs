@@ -867,11 +867,14 @@ mod tests {
                 "dim",
                 &[
                     "composer.rs",
-                    "composer/strip.rs",
                     "dialog.rs",
                     // A form's tabs it is not on, the descriptions, and the
                     // preview pane — a mockup is read past, so it is dim.
                     "form.rs",
+                    // The `+N` after the last thumbnail a band of them shows,
+                    // wherever one stands: the composer's strip, and a
+                    // person's own `>` block.
+                    "graphics/band.rs",
                     "keys.rs",
                     "layers.rs",
                     "markdown.rs",

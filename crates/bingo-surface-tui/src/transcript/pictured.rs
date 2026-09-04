@@ -1,11 +1,12 @@
 //! The picture the words carry: design §5's image row, as rows of the
 //! transcript.
 //!
-//! A picture hangs under the block whose item carries it — under the `⎿` when
-//! a tool answered with one, under a person's own line when they handed one
-//! over ([`under_the_words`]) — or under its own chip line, where the words of
-//! an answer named it themselves ([`in_the_words`]). On a terminal that draws
-//! pictures it is the cells its placeholders take
+//! A picture a tool answered with hangs under the `⎿` its result hangs from,
+//! at the size it came back; pictures a person handed over stand as one band
+//! of thumbnails *above* their own words, the way the composer showed them
+//! before `⏎` ([`under_the_words`], M62); and a picture an answer's own words
+//! named stands under the chip line that named it ([`in_the_words`]). On a
+//! terminal that draws pictures it is the cells its placeholders take
 //! ([`crate::graphics::kitty`]); on every other terminal it is the chip that
 //! names it, which is the row's degrade and the only thing `--print` and a
 //! chat channel ever had.
@@ -18,53 +19,90 @@
 use bingo_sdk::{Image, Item, ItemBody};
 use ratatui::text::{Line, Span};
 
-use super::{Block, Rows, returns, speaks_indent, under};
+use super::{Block, Rows, returns, speaks_indent};
 use crate::fold::Fold;
 use crate::graphics::picture::{self, Source};
-use crate::graphics::{self as graphics, Graphics, Picture, kitty};
+use crate::graphics::{self as graphics, Graphics, Picture, band, kitty};
 use crate::{markdown, theme};
 
 /// How many rows of a picture a block that is only peeked at shows — a
 /// glance, not the picture. `ctrl+o` opens it to its whole height (§7).
 const IMAGE_ROWS: u16 = 12;
 
-/// The item's block with the pictures its own parts carry under it.
+/// The item's block with the pictures its own parts carry: a tool's answers
+/// under the mark they came back on, a person's own above the words they came
+/// with. Two shapes, because the two are different things — a picture a tool
+/// returned *is* the result and is read at its size, and a picture a person
+/// handed over is an attachment to a sentence.
 pub(super) fn under_the_words(item: &Item, mut block: Block, fold: Fold, rows: &Rows<'_>) -> Block {
     // A shut block shows nothing of what came back, and a picture is what
     // came back.
     if fold == Fold::Shut {
         return block;
     }
-    let hangs = Hangs::of(item);
-    for (part, image) in picture::pictures_of(&item.body).into_iter().enumerate() {
-        one(&mut block, Where { item, part, hangs }, image, fold, rows);
+    let images = picture::pictures_of(&item.body);
+    match item.body {
+        ItemBody::ToolCall { .. } => returned(&mut block, item, &images, fold, rows),
+        _ => above_the_words(&mut block, item, &images, rows),
     }
     block
 }
 
-/// Where one picture of an item is: which item, which of its pictures, and
-/// under which mark.
-#[derive(Clone, Copy)]
-struct Where<'a> {
-    item: &'a Item,
-    part: usize,
-    hangs: Hangs,
+/// What a tool answered with, under the `⎿` its result hangs from: each
+/// picture at the size the fold allows, and the chip that names it where the
+/// terminal draws none.
+fn returned(block: &mut Block, item: &Item, images: &[&Image], fold: Fold, rows: &Rows<'_>) {
+    for (part, image) in images.iter().enumerate() {
+        let source = Source::Journal {
+            item: item.id.clone(),
+            part,
+        };
+        match drawn(source, image, room(rows.result_width()), height(fold), rows) {
+            Some((picture, cells)) => {
+                block.lines.extend(returns(cells, rows));
+                block.pictures.push(picture);
+            }
+            None => block.lines.extend(returns(vec![chip(image)], rows)),
+        }
+    }
 }
 
-/// One picture: its cells where the terminal can draw it, the chip that names
-/// it where it cannot.
-fn one(block: &mut Block, at: Where<'_>, image: &Image, fold: Fold, rows: &Rows<'_>) {
-    let source = Source::Journal {
-        item: at.item.id.clone(),
-        part: at.part,
+/// The pictures a person handed over, as one band of thumbnails above their
+/// own line — the band the composer had them in before `⏎`, so the record and
+/// its preview are the same shape (M62). It stands in the block's own column,
+/// above rows the block has already been given: the `>` mark keeps its place
+/// on the row of their first words, and nothing here moves it.
+///
+/// A terminal that draws no picture draws nothing at all. The line itself
+/// carries the `[image 1]` token, or the path they typed, which is already the
+/// word for what is attached (M45) — so what is left is exactly the block
+/// `--print` and a chat channel have always had.
+fn above_the_words(block: &mut Block, item: &Item, images: &[&Image], rows: &Rows<'_>) {
+    let Graphics::Kitty { cell, .. } = graphics::chosen() else {
+        return;
     };
-    match drawn(source, image, at.hangs.room(rows), height(fold), rows) {
-        Some((picture, cells)) => {
-            block.lines.extend(at.hangs.under(cells, rows));
-            block.pictures.push(picture);
-        }
-        None => block.lines.extend(at.hangs.chip(image, rows)),
-    }
+    let thumbnails: Vec<(Source, &Image)> = images
+        .iter()
+        .enumerate()
+        .map(|(part, image)| {
+            (
+                Source::Journal {
+                    item: item.id.clone(),
+                    part,
+                },
+                *image,
+            )
+        })
+        .collect();
+    let indent = speaks_indent();
+    let band = band::of(
+        &thumbnails,
+        cell,
+        rows.pictures,
+        room(rows.measure().saturating_sub(indent)),
+    );
+    block.lines.splice(0..0, at_column(band.lines, indent));
+    block.pictures.extend(band.pictures);
 }
 
 /// The pictures an answer's own words named (M51): under each chip line the
@@ -105,11 +143,11 @@ fn named(block: &mut Block, image: &markdown::Linked, fold: Fold, rows: &Rows<'_
     };
     // The chip's own column, so the picture stands where the words it belongs
     // to stand rather than at the block's edge (M56).
-    let hangs = Hangs::Said {
-        indent: image.indent,
-    };
-    let Some((picture, cells)) = drawn(source, read_in, hangs.room(rows), height(fold), rows)
-    else {
+    let room = room(
+        rows.measure()
+            .saturating_sub(speaks_indent() + image.indent),
+    );
+    let Some((picture, cells)) = drawn(source, read_in, room, height(fold), rows) else {
         return;
     };
     let under = (image.line + 1).min(block.lines.len());
@@ -185,67 +223,21 @@ fn height(fold: Fold) -> u16 {
     }
 }
 
-/// Which mark a picture hangs from, and the column it stands in past that
-/// mark — the two places one can be.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Hangs {
-    /// Under a `⎿`: a tool answered with it, in the gutter's own column.
-    Returned,
-    /// Under the `⏺` indent, `indent` columns further in: the indent of the
-    /// markdown construct an answer wrote it in — a list item's marker, a
-    /// quote's bar — and nothing at all for a picture a person handed over,
-    /// which stands where their words do (M56).
-    Said { indent: usize },
+/// A count of columns as a width to draw in: never nothing, and never more
+/// than a rectangle can be asked for. What is left of the measure once the
+/// mark and the column a picture stands in have taken theirs, so a picture is
+/// fitted to the room it has and never pushed past the right margin.
+fn room(columns: usize) -> u16 {
+    u16::try_from(columns).unwrap_or(u16::MAX).max(1)
 }
 
-impl Hangs {
-    fn of(item: &Item) -> Self {
-        match item.body {
-            ItemBody::ToolCall { .. } => Hangs::Returned,
-            _ => Hangs::Said { indent: 0 },
-        }
-    }
-
-    /// How many columns the picture has to draw in: what is left of the
-    /// measure once the mark and the column have taken theirs, so a picture is
-    /// fitted to the room it has and never pushed past the right margin.
-    fn room(self, rows: &Rows<'_>) -> u16 {
-        let room = match self {
-            Hangs::Returned => rows.result_width(),
-            Hangs::Said { indent } => rows.measure().saturating_sub(speaks_indent() + indent),
-        };
-        u16::try_from(room).unwrap_or(u16::MAX).max(1)
-    }
-
-    /// The rows, under the mark they belong to.
-    fn under(self, cells: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
-        match self {
-            Hangs::Returned => returns(cells, rows),
-            // No glyph: the line above it is the person's own, and the
-            // picture is part of what they said rather than an answer to it.
-            Hangs::Said { indent } => {
-                let lead = speaks_indent() + indent;
-                under(Span::raw(" ".repeat(lead)), cells, lead, rows.measure())
-            }
-        }
-    }
-
-    /// What a terminal that cannot draw the picture draws instead. A person's
-    /// own line already carries the word for what they handed over — the
-    /// `[image 1]` token or the path they typed (M45) — so nothing is added
-    /// under it; a tool's answer has no such word, and says what was there.
-    fn chip(self, image: &Image, rows: &Rows<'_>) -> Vec<Line<'static>> {
-        match self {
-            Hangs::Said { .. } => Vec::new(),
-            Hangs::Returned => returns(
-                vec![Line::from(Span::styled(
-                    format!("[image: {}]", image.media_type),
-                    theme::dim(),
-                ))],
-                rows,
-            ),
-        }
-    }
+/// What a terminal that cannot draw a tool's picture draws instead: the row's
+/// degrade of §5, which says what was there.
+fn chip(image: &Image) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("[image: {}]", image.media_type),
+        theme::dim(),
+    ))
 }
 
 #[cfg(test)]
@@ -284,17 +276,31 @@ mod tests {
 
     /// A person's line with a picture behind its token (M45).
     fn pasted(image: &bingo_sdk::Image) -> Item {
+        carrying(std::slice::from_ref(image))
+    }
+
+    /// The same, with as many pictures behind it as they handed over.
+    fn carrying(images: &[bingo_sdk::Image]) -> Item {
+        let mut parts = vec![ContentPart::text("what is this? [image 1]")];
+        parts.extend(images.iter().cloned().map(ContentPart::Image));
         item(
             "itm_1",
             ItemStatus::Completed,
             ItemBody::User {
-                parts: vec![
-                    ContentPart::text("what is this? [image 1]"),
-                    ContentPart::Image(image.clone()),
-                ],
+                parts,
                 origin: Origin::surface("tui"),
             },
         )
+    }
+
+    /// The rows of a block that carry placeholder cells, by their index.
+    fn cell_rows(block: &Block) -> Vec<usize> {
+        text(block)
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(PLACEHOLDER))
+            .map(|(row, _)| row)
+            .collect()
     }
 
     /// One item's block, on a terminal of this kind and at this fold.
@@ -420,16 +426,101 @@ mod tests {
         assert!(block.pictures.is_empty());
     }
 
-    /// A picture a person handed over draws under their own line, at the
-    /// indent their words are at, with no `⎿`: it is part of what they said.
+    // ---- the band above the words (M62) ---------------------------------
+
+    /// A picture a person handed over stands in a band *above* their own line,
+    /// in the block's own column and at the band's own size — the shape the
+    /// composer's strip had it in before the line was sent, not a wall of
+    /// pictures under the words.
     #[test]
-    fn a_picture_a_person_pasted_draws_under_their_line() {
+    fn a_picture_a_person_pasted_stands_in_a_band_above_their_line() {
         let block = block(&pasted(&png(100, 200)), graphics::drawing(), Fold::Peek);
-        assert_eq!(block.pictures.len(), 1);
+        assert_eq!(
+            block.pictures,
+            vec![Picture {
+                source: Source::Journal {
+                    item: bingo_sdk::ItemId::from_raw("itm_1"),
+                    part: 0,
+                },
+                cols: 3,
+                rows: 3,
+            }],
+            "the band's box, not the block's"
+        );
         let drawn = text(&block);
-        assert!(drawn[0].contains("what is this? [image 1]"));
-        assert!(!drawn[1].contains('⎿'), "no answer's mark: {drawn:?}");
-        assert_eq!(drawn[1].matches(PLACEHOLDER).count(), 10);
+        assert_eq!(drawn.len(), usize::from(band::ROWS) + 1);
+        assert_eq!(cell_rows(&block), vec![0, 1, 2], "the band comes first");
+        assert!(
+            drawn[usize::from(band::ROWS)].contains("what is this? [image 1]"),
+            "and the words under it, on the row that carries the mark: {drawn:?}"
+        );
+        assert_eq!(
+            cells_at(&drawn[2]),
+            Some(speaks_indent()),
+            "in the block's own column: {drawn:?}"
+        );
+    }
+
+    /// Three of them stand side by side on one band, not one under another.
+    #[test]
+    fn three_pictures_stand_side_by_side_on_one_band() {
+        let block = block(
+            &carrying(&[png(100, 100), png(200, 100), png(100, 200)]),
+            graphics::drawing(),
+            Fold::Peek,
+        );
+        assert_eq!(block.pictures.len(), 3);
+        assert_eq!(text(&block).len(), usize::from(band::ROWS) + 1);
+        assert_eq!(
+            block.pictures.iter().map(|p| p.cols).collect::<Vec<_>>(),
+            vec![6, 12, 3],
+            "each fitted into the band's own box, each keeping its shape"
+        );
+    }
+
+    /// Past the fourth they are counted, as the composer counted them.
+    #[test]
+    fn six_pictures_show_four_and_count_the_rest() {
+        let block = block(
+            &carrying(&std::array::from_fn::<_, 6, _>(|_| png(100, 100))),
+            graphics::drawing(),
+            Fold::Peek,
+        );
+        assert_eq!(block.pictures.len(), band::SHOWN);
+        let floor = &text(&block)[usize::from(band::ROWS) - 1];
+        assert!(floor.contains("+2"), "{floor:?}");
+    }
+
+    /// The fold shuts the band away with everything else and opens it to
+    /// exactly what it was: a thumbnail has no taller form, so `ctrl+o` on a
+    /// person's own line has nothing about it to open. The picture itself is
+    /// one click away, in the viewer (M56).
+    #[test]
+    fn the_fold_hides_the_band_and_never_grows_it() {
+        let item = pasted(&png(100, 400));
+        let peeked = block(&item, graphics::drawing(), Fold::Peek);
+        let opened = block(&item, graphics::drawing(), Fold::Open);
+        assert_eq!(peeked.pictures, opened.pictures, "one size, both folds");
+        assert_eq!(text(&peeked), text(&opened));
+        assert_eq!(peeked.pictures[0].rows, band::ROWS);
+        let shut = block(&item, graphics::drawing(), Fold::Shut);
+        assert!(shut.pictures.is_empty());
+        assert_eq!(text(&shut).len(), 1, "the line they typed, and no more");
+    }
+
+    /// The whole way through, on a real buffer: the band is above the person's
+    /// own row on the screen, by exactly its own rows.
+    #[test]
+    fn the_frame_draws_the_band_above_the_persons_row() {
+        let state = folded(vec![said(pasted(&png(100, 200)))]);
+        let (ui, now) = scene();
+        let screen = graphics::with(graphics::drawing(), || {
+            crate::test_support::draw_tree(80, 24, &solo(&state), &ui, now)
+        });
+        let cells = crate::test_support::row_carrying(&screen, &PLACEHOLDER.to_string());
+        let words = crate::test_support::row_carrying(&screen, "what is this?");
+        assert!(cells < words, "the band is above the words:\n{screen}");
+        assert_eq!(words - cells, band::ROWS, "by the band's own rows");
     }
 
     /// And on a terminal that cannot draw it, nothing at all: the line above

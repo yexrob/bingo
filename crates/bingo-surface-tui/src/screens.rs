@@ -25,6 +25,8 @@ mod acp;
 mod colours;
 /// The screens a set of questions asked together is read through (§2's band).
 mod forms;
+/// The band above a line somebody sent with pictures (§5's image row, M62).
+mod pictures;
 /// A question alone (M43).
 mod questions;
 /// The screens one skill run is read through (§4's skill row).
