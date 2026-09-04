@@ -99,11 +99,23 @@ pub fn dim(frame: &mut Frame) {
 
 /// The same pass over one region: what a transcript being stepped into
 /// crossfades through (§6).
+///
+/// A picture's cells are passed over. Their foreground colour is the number
+/// the terminal draws the picture by ([`crate::graphics::kitty`]), so dimming
+/// one is not a dimmer picture but no picture — and its return two frames
+/// later is a flicker. A photograph does not recede; the words around it do.
 pub fn hush(frame: &mut Frame, area: Rect) {
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            buffer[(x, y)].set_style(theme::dim());
+            let cell = &mut buffer[(x, y)];
+            if cell
+                .symbol()
+                .starts_with(crate::graphics::kitty::PLACEHOLDER)
+            {
+                continue;
+            }
+            cell.set_style(theme::dim());
         }
     }
 }
@@ -306,6 +318,36 @@ mod tests {
 
     fn now() -> Instant {
         Instant::now()
+    }
+
+    /// A picture's cells keep the colour that names the picture: the dim pass
+    /// over a transcript being stepped into, or under a sheet, does not make
+    /// the picture vanish and come back.
+    #[test]
+    fn a_pictures_cells_are_not_dimmed() {
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::Paragraph;
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(12, 2)).expect("a terminal");
+        terminal
+            .draw(|frame| {
+                let line = crate::graphics::kitty::placeholder(7, 0, 2);
+                let words = ratatui::text::Line::from("hi");
+                frame.render_widget(Paragraph::new(vec![line, words]), frame.area());
+                let before = frame.buffer_mut()[(0, 0)].style();
+                hush(frame, frame.area());
+                assert_eq!(
+                    frame.buffer_mut()[(0, 0)].style(),
+                    before,
+                    "the picture's cell"
+                );
+                assert!(
+                    frame.buffer_mut()[(0, 1)].style().add_modifier
+                        == ratatui::style::Modifier::DIM
+                        || frame.buffer_mut()[(0, 1)].style().fg == theme::dim().fg,
+                    "the words recede"
+                );
+            })
+            .expect("a frame");
     }
 
     #[test]
