@@ -91,3 +91,27 @@ fn layout() -> bingo_sdk::Interaction {
 const LEFT: &str = "┌──────┬─────────────┐\n│ nav  │ content     │\n│      │             │\n└──────┴─────────────┘";
 const RIGHT: &str = "┌─────────────┬──────┐\n│ content     │ nav  │\n│             │      │\n└─────────────┴──────┘";
 const PLAIN: &str = "┌────────────────────┐\n│ content            │\n│                    │\n└────────────────────┘";
+
+/// A set answered both ways at once (M59): two boxes ticked and the person's
+/// own words in the row under them. Before M59 the card sent the words alone
+/// and the ticks were lost; now the model reads one answer with both halves.
+#[test]
+fn form_set_ticked_and_typed_on() {
+    let (tree, mut ui, now) = asked(crate::test_support::form());
+    // To the set, tick two of its three, then open the words row and write.
+    let walk = [
+        key(KeyCode::Tab),
+        key(KeyCode::Tab),
+        typed(' '),
+        key(KeyCode::Down),
+        typed(' '),
+        key(KeyCode::Down),
+        key(KeyCode::Down),
+        key(KeyCode::Enter),
+    ];
+    let words = "and freebsd".chars().map(typed);
+    for key in walk.into_iter().chain(words) {
+        crate::input::on_key(&mut ui, &tree, key, now);
+    }
+    both("form_set_ticked_and_typed_on", &tree, &ui, now);
+}

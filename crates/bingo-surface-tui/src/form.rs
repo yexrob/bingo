@@ -290,31 +290,45 @@ fn fix(form: &mut Form, focus: &mut usize, questions: &[Question]) -> Option<Ans
     None
 }
 
-/// One question's answer, read off what the person left on it. A question
-/// nobody settled — or settled on nothing — is a cancel in its place.
+/// One question's answer, read off what the person left on it: what the card
+/// shows is what it sends, so a set with boxes ticked *and* words written under
+/// them answers with both (M59). Words with nothing ticked are the `Text` a
+/// question answered in words alone has always been, and a question nobody
+/// settled — or settled on nothing at all — is a cancel in its place.
 fn answer(form: &Form, tab: usize, question: &Question) -> Answer {
     let Some(slot) = form.slot(tab).filter(|slot| slot.fixed) else {
         return Answer::Cancel;
     };
-    if on_words(question, slot.cursor) {
-        let text = slot.words.as_ref().map_or("", |w| w.text()).trim();
-        return match text.is_empty() {
-            true => Answer::Cancel,
-            false => Answer::Text { text: text.into() },
-        };
+    let other = written(slot);
+    let ids = ticked_ids(slot, question);
+    if !ids.is_empty() {
+        return Answer::Choice { ids, other };
     }
-    let ids = match question.multi {
+    match other {
+        Some(text) => Answer::Text { text },
+        None => Answer::Cancel,
+    }
+}
+
+/// The ids a question was answered with: every box a set has ticked, or the one
+/// option a single choice's cursor was left on — none, where it was left on the
+/// words row.
+fn ticked_ids(slot: &Slot, question: &Question) -> Vec<String> {
+    match question.multi {
         true => slot.chosen.clone(),
         false => question
             .options
             .get(slot.cursor)
             .map(|option| vec![option.id.clone()])
             .unwrap_or_default(),
-    };
-    match ids.is_empty() {
-        true => Answer::Cancel,
-        false => Answer::Choice { ids, other: None },
     }
+}
+
+/// What stands in the words row, where it was opened and written in. Blanks are
+/// nothing said.
+fn written(slot: &Slot) -> Option<String> {
+    let text = slot.words.as_ref()?.text().trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// A bare digit, not a chord.
@@ -970,6 +984,76 @@ mod tests {
             press(&mut form, &mut focus, &questions, &[KeyCode::Enter]),
             Some(Answer::Cancel),
             "and the Submit tab has the same way out"
+        );
+    }
+
+    /// The bug M59 was opened for, at the card's own end: a set ticked and then
+    /// written under keeps both halves, and opening the words row unticks
+    /// nothing.
+    #[test]
+    fn a_set_ticked_and_written_under_answers_with_both() {
+        let questions = three();
+        let (mut form, mut focus) = (Form::default(), 0);
+        press(
+            &mut form,
+            &mut focus,
+            &questions,
+            &[KeyCode::Tab, KeyCode::Tab],
+        );
+        // Both boxes ticked, then down to the words row and opened.
+        press(
+            &mut form,
+            &mut focus,
+            &questions,
+            &[
+                KeyCode::Char(' '),
+                KeyCode::Down,
+                KeyCode::Char(' '),
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
+        assert_eq!(
+            form.slot(2).map(|slot| slot.chosen.clone()),
+            Some(vec!["first".to_string(), "second".to_string()]),
+            "opening the words row unticks nothing"
+        );
+        for c in "and one more".chars() {
+            press(&mut form, &mut focus, &questions, &[KeyCode::Char(c)]);
+        }
+        press(&mut form, &mut focus, &questions, &[KeyCode::Enter]);
+        assert!(
+            form.fixed(2),
+            "however it was given, it is one answered question"
+        );
+        assert_eq!(
+            answer(&form, 2, &questions[2]),
+            Answer::Choice {
+                ids: vec!["first".into(), "second".into()],
+                other: Some("and one more".into()),
+            }
+        );
+    }
+
+    /// The words row is read whatever row the answer was fixed on — a click
+    /// may leave the cursor on an option with words already written — because
+    /// what the card shows is what it sends.
+    #[test]
+    fn the_words_row_is_read_wherever_the_cursor_was_fixed() {
+        let questions = [question("Auth", false, false)];
+        let mut form = Form::default();
+        let mut typed = Composer::default();
+        typed.insert("or neither");
+        let slot = form.slot_mut(0);
+        slot.words = Some(typed);
+        slot.cursor = 1;
+        slot.fixed = true;
+        assert_eq!(
+            answer(&form, 0, &questions[0]),
+            Answer::Choice {
+                ids: vec!["second".into()],
+                other: Some("or neither".into()),
+            }
         );
     }
 
