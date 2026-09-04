@@ -133,10 +133,10 @@ Truecolor is the native look, chosen after the terminal's background is read (OS
 
 | token | ANSI | truecolor (dark) | where, and only where |
 |---|---|---|---|
-| `text` | default | `#ece7df` | answers, what you type, option labels — warm off-white |
-| `dim` | DIM | `#8a847a` | results under `⎿`, thinking, hints, the status line, everything behind a card |
+| `text` | default | `#ece7df` | answers, what you type, option labels — warm off-white; and the bright end of the opening's own ramp (§11) |
+| `dim` | DIM | `#8a847a` | results under `⎿`, thinking, hints, the status line, everything behind a card; and the faint end of that ramp |
 | `raised` | none | `#211d17` (bg + one step) | the bar behind a `>` line, rail cards, the surface of a sheet; never text |
-| `presence` | yellow | `#d97757`, glow `#f2a07c` | bingo's own colour: the `✻` sparkle, a live `⏺`, the glowing input border, the welcome mark, progress fills — the one warm colour, and the only one that moves |
+| `presence` | yellow | `#d97757`, glow `#f2a07c` | bingo's own colour: the `✻` sparkle, a live `⏺`, the glowing input border, the welcome mark, progress fills, **and every cell of the opening the block's light reaches (§11)** — the one warm colour, and the only one that moves |
 | `good` / `bad` | green / red | `#8fcf8a` / `#e0655a` | a finished `⏺` and a failed one; a failed turn's line; diff tints |
 | `mode` | blue | `#8fb4de` | the `⏵⏵` on the status line and links — the one cool colour |
 | `bold` | BOLD | — | tool names in `⏺ Read(…)`, card titles, markdown headings; the model's own `⏺` is bold white |
@@ -334,3 +334,73 @@ What a change is checked against, in this order: `TestBackend` snapshots for eve
 
 - **2026-09-04, later still** — **A wake wears its own word** (M66, ADR-0019 §8, user-directed: the model may now hand work to a later turn of the same conversation). Two rows of furniture and one rule. The note a turn left itself arrives as a person-role line, so it is drawn on the person's own bar — but under the word `wake` where the `>` would be, and the indent every line beneath it takes is that word's width rather than the mark's, so a wrapped note reads as its own block. It is not one of §5's quiet surfaces: a scheduled turn is the machinery reporting in and is drawn as a tool row, and this is the model's own words, written in a turn the person watched. The one thing a person must never have to work out is which of the two lines on that bar they typed, and a word in the gutter answers it before the eye reaches the text. The status line gains `wake in 4m` in the middle slot, dim like every other count there — the only span on that line the *model* set in motion — read at render time from the kind the schedules plugin publishes and put into words by `clock::span`, the same one every other duration on the screen is said in; a moment already past says nothing rather than a negative. Nothing here holds a wake, a timer or a countdown of its own: `/wake off` takes the kind back and the slot is empty on the next frame.
 - **2026-09-04, evening** — **The countdown counts** (user-reported: `wake in 10s` stood still). The status line reads the wake at render time, as §6 asks, but nothing asked for a render: the frame clock runs while something on screen moves, and a number that changes once a second had no place in that list. `wake::counting` — a wake stands and has not come — now sits beside the other reasons the clock runs, so the words move without an event to move them, and a wake already past stops the clock as it already emptied the slot. The wake itself moved out of the schedules store into the process running the session (ADR-0019 §8, amended); the surface did not notice, which is what reading a published kind rather than a file is for.
+## 11. The opening
+
+> M69, 2026-09-04. The brick and the storyboard; M70 wires it. The one
+> deliberate exception to `docs/design/effects-research.md`'s refusals — that
+> list is about the *transcript*, which is a record a person reads, searches
+> and copies. This is an **entrance**: it happens once, before there is a
+> transcript at all, it says what bingo is, and it is over in five seconds.
+> It still spends only the tokens of §4, and it still says nothing that
+> `NO_COLOR` or `BINGO_MOTION=off` would lose.
+
+A five-second story told in **cuts**, in a three-dimensional world drawn as
+characters: a ray-marcher over signed distance fields, one directional light
+and one point light, soft shadows, fog for distance, and a ten-step luminance
+ramp for the ink. Cells are 1:2 and the camera corrects for it, so nothing
+round comes out oval. Every frame is a pure function of one number — the
+second of the piece it is for — so a frame that arrives late is **skipped**
+and never played slowly.
+
+### The shots
+
+| from | to | shot | what is on screen |
+|---|---|---|---|
+| 0.0 | 1.0 | **Dark** | A black world. One emissive block — the cursor, a caret six times as tall as it is wide — turning slowly at centre, its halo hanging about it, six embers rising past. A faint pool of light on the ground under it. One character established, and nothing else. |
+| 1.0 | 2.2 | **The lattice** | Cut. Inside an endless repeated lattice of dark square frames — the codebase — dollying forward fast. Their edges catch the light, the fog eats the far end, and the near ones stream past the sides. No warm light anywhere: the cursor block is not here yet. |
+| 2.2 | 3.2 | **The find** | Cut. The dolly stops **dead**. One block down the corridor lights from inside, and over the shot the world's own light dies and the lattice around it goes into fog. Half a second of stillness, which is what makes the next cut land. |
+| 3.2 | 4.5 | **Her** | Cut. The mascot on a billboard in the world — the picture's own pixels, sampled to brightness and warmth, drawn by the ramp and the theme's two inks. The cursor block hangs before her face, much nearer the camera than she is, so the slow parallax drift has something to be parallax *of*. The embers rise between them; the block breathes once. |
+| 4.5 | 5.0 | **The hand-off** | The camera settles frontal and the world goes out. The welcome box opens from its middle outward, the block walks down out of the air to where the composer's cursor will be, and the last frame **is** the welcome box, still. |
+
+The cuts are hard — there is no dissolve anywhere in the piece. Five seconds
+has no time to spend on one, and a cut is what says *elsewhere* in the
+language a person already reads films in.
+
+### The end state
+
+The welcome box the piece lands on: **her on the left**, drawn out of the same
+characters the world was, twenty columns by thirteen rows — her own shape,
+since a cell is twice as tall as it is wide. The greeting, the help line and
+the cwd sit beside her; one row under the box is the caret the block became.
+On a terminal that draws pictures the real picture goes through the pictures
+seam (§5's image row), never a route of its own. On a terminal with ASCII
+only, she is a **silhouette**: the punctuation ramp has no shade in it, and a
+rim-lit profile spread over ten steps of it is noise.
+
+At thirteen rows she is a hooded, cat-eared head in profile — a figure, not a
+face. That is the size at which the ears and the lit profile survive; below it
+she is a warm smudge, and this is the sizing decision to argue with if the box
+is ever asked to be smaller.
+
+### The degrades, and what M70 holds
+
+- **`NO_COLOR`** — the ramp's glyph carries the whole shape of the world. What
+  is lost is only *where the light came from*, which is what colour is for
+  everywhere else on this surface (§4).
+- **ANSI** — the world is `dim` and `text`, and what the block touched is
+  `presence`; the ramp is unchanged.
+- **Light** — the same ramp over a light ground, so the world reads as ink on
+  paper rather than light in the dark. It is checked in both.
+- **`BINGO_ASCII=1`** — the ramp is `` .:-=+*#%@`` rather than the shade
+  blocks, and she is a silhouette.
+- **`BINGO_MOTION=off` → the end state, drawn once.** No frames.
+- **Any key skips it**, and what is left is the end state.
+- **Under 60 columns → the end state**, drawn once: there is no room for a
+  world.
+- **Never under `--print`, and never on resume.** It is an entrance, and a
+  session that already happened is not entered.
+
+M70 owns all seven of those, the daily short form, and the setting that turns
+it off for good. It renders frames **off the draw thread** and the draw takes
+the newest: the piece runs on the wall clock, so a frame that is not ready is
+one that is not shown.

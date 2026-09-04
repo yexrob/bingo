@@ -14,7 +14,8 @@
 //! (M61). [`sniffed`] and [`accepted`] answer with the one [`Image`] the
 //! journal keeps. [`load`] reads a [`Source`] — a path on this machine or a
 //! URL this machine fetches (ADR-0041 §3), kept on disk by [`cache`] — and
-//! hands the bytes to the first two.
+//! hands the bytes to the first two. [`pixels`] answers with the samples
+//! themselves, for a caller that draws a picture rather than sends one.
 //!
 //! A PNG passes through untouched — its size is in its header, so nothing is
 //! decoded and nothing is re-encoded. Everything else is decoded once and
@@ -27,11 +28,13 @@ use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 mod accepted;
 pub mod cache;
 mod load;
+mod pixels;
 mod source;
 
 pub use accepted::{accepted, sniffed};
 pub use cache::Cache;
 pub use load::load;
+pub use pixels::{Pixels, pixels};
 pub use source::{Source, names_a_picture};
 
 /// A picture in the one format a terminal takes, and the size it draws at.

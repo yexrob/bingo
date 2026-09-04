@@ -529,6 +529,40 @@ pub fn warming(t: f32) -> Style {
     }
 }
 
+/// One cell of the opening shot, by how much light stands on it and how much
+/// of that light came from the block (`docs/design/tui.md` §11).
+///
+/// It spends the two inks the world is made of — `dim` where a surface barely
+/// catches anything and `text` where it is full in the light — and bingo's own
+/// warm pair where the block reached it. There is no third colour: the ramp's
+/// glyph carries the brightness, so a terminal with no colour at all still has
+/// the whole shape of the world and loses only where the light came from.
+pub fn lit(level: f32, warm: f32) -> Style {
+    let (level, warm) = (settled(level), settled(warm));
+    match current().colors {
+        Colors::Plain => Style::new(),
+        Colors::Ansi => match (warm >= 0.5, level >= 0.5) {
+            (true, _) => presence(),
+            (false, true) => text(),
+            (false, false) => dim(),
+        },
+        Colors::True(palette) => Style::new().fg(mix(
+            mix(palette.dim, palette.text, level),
+            mix(palette.presence, palette.glow, level),
+            warm,
+        )),
+    }
+}
+
+/// A share of something, held to 0 and 1 — and to 0 where the arithmetic it
+/// came out of had nothing to divide, so no `NaN` ever reaches a colour.
+fn settled(share: f32) -> f32 {
+    match share.is_nan() {
+        true => 0.0,
+        false => share.clamp(0.0, 1.0),
+    }
+}
+
 /// A ramp the eight colours cannot draw collapses to its two ends, and the
 /// halfway mark is where it changes over.
 fn two_ways(level: f32, low: Style, high: Style) -> Style {
@@ -787,6 +821,10 @@ mod tests {
                         // clothing, and the one place outside this table
                         // that has to spell one.
                         | "graphics/kitty.rs"
+                        // The storyboard turns a drawn cell back into pixels
+                        // and into an escape, so it reads colours off the
+                        // tokens rather than naming any (M69).
+                        | "intro/storyboard.rs"
                         | "motion.rs"
                         | "motion/landing.rs"
                         | "painted.rs"
@@ -835,6 +873,8 @@ mod tests {
                     // The question a form is on, and the option under its
                     // cursor: the same weight the dialog's rows wear.
                     "form.rs",
+                    // The greeting in the box the opening lands on (M69).
+                    "intro/end.rs",
                     "markdown.rs",
                     "pager.rs",
                     "panel.rs",
@@ -877,6 +917,8 @@ mod tests {
                     // wherever one stands: the composer's strip, and a
                     // person's own `>` block.
                     "graphics/band.rs",
+                    // That box's border, its help line and its cwd (M69).
+                    "intro/end.rs",
                     "keys.rs",
                     "layers.rs",
                     "markdown.rs",
@@ -930,6 +972,9 @@ mod tests {
                     // Which session asked, named after a card's own title —
                     // every card's head is written in one place (ADR-0010 §3).
                     "form.rs",
+                    // The mark on that box's greeting, and the caret the
+                    // opening's block came down to be (M69).
+                    "intro/end.rs",
                     "panel.rs",
                     "search.rs",
                     "select.rs",
@@ -963,6 +1008,13 @@ mod tests {
                 // The card's border is the fourth place one beat says a
                 // thing wants a person, and no longer the exception.
                 &["layers.rs", "roster.rs", "status.rs", "transcript.rs"],
+            ),
+            // Every cell of the opening shot, and nothing else on the
+            // surface: the ramp `dim` → `text` for what the world's own light
+            // reaches and `presence` → glow for what the block does (§11).
+            (
+                "lit",
+                &["intro/mascot.rs", "intro/mod.rs", "intro/shade.rs"],
             ),
             // Highlighted code reaches the table through one door, so no view
             // has to know that a keyword and the mode badge share a colour.

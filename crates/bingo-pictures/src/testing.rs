@@ -84,3 +84,21 @@ fn mixed(x: u32, y: u32, channel: u32) -> u8 {
 pub fn unreadable() -> Image {
     Image::from_bytes("image/png", b"not a picture at all").expect("a small payload")
 }
+
+/// The bytes of a PNG of these pixels, for a test that writes a picture out
+/// to look at it.
+///
+/// The pixels are four bytes each, row by row from the top left, as
+/// [`crate::Pixels`] carries them; a run too short for the size is padded
+/// with transparent black rather than refused, because a test that miscounts
+/// should see the picture it drew and not an error about it.
+pub fn png_of(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut rgba = rgba.to_vec();
+    rgba.resize(width as usize * height as usize * 4, 0);
+    let picture = image::RgbaImage::from_raw(width, height, rgba).expect("pixels for the size");
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(picture)
+        .write_to(&mut bytes, ImageFormat::Png)
+        .expect("a picture this crate can write");
+    bytes.into_inner()
+}
