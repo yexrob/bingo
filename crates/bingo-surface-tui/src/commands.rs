@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 
 use bingo_sdk::{ArgSpec, Catalog, CommandSpec};
 
+use crate::matching;
+
 /// The surface a command's own prompt carries (ADR-0008 §3): what re-enters
 /// the session when a `/name` answers with a prompt, rather than the surface
 /// the person typed at. Written down once, because two readers ask about it —
@@ -135,34 +137,44 @@ pub fn suggestions(line: &str, specs: &[CommandSpec], catalogues: &Catalogues) -
 /// its `ArgSpec::Catalog` gives (`models`, `providers`), read once at start.
 pub type Catalogues = BTreeMap<String, Vec<String>>;
 
-/// Prefix matches first, then substring matches, each in catalogue order.
+/// The commands that match, best first: [`crate::matching`]'s order, which is
+/// the one every list in this surface is narrowed by. A command is offered once
+/// however many of its spellings match, under the one that matched best.
 fn rank(partial: &str, specs: &[CommandSpec]) -> Vec<Suggestion> {
-    let partial = partial.to_lowercase();
-    let mut prefix = Vec::new();
-    let mut substring = Vec::new();
-    for spec in specs {
-        let names = std::iter::once(&spec.name).chain(spec.aliases.iter());
-        let Some(name) = names
-            .clone()
-            .find(|n| n.to_lowercase().starts_with(&partial))
-            .or_else(|| names.clone().find(|n| n.to_lowercase().contains(&partial)))
-        else {
+    let spelled = spellings(specs);
+    let mut offered: Vec<&str> = Vec::new();
+    let mut rows = Vec::new();
+    for (name, spec) in matching::rank(partial, &spelled, |(name, _)| name.as_str()) {
+        if offered.contains(&spec.name.as_str()) {
             continue;
-        };
-        let row = Suggestion {
-            value: format!("/{name} "),
-            label: format!("/{name}"),
-            hint: spec.hint.clone(),
-            group: Group::Commands,
-        };
-        if name.to_lowercase().starts_with(&partial) {
-            prefix.push(row);
-        } else {
-            substring.push(row);
         }
+        offered.push(&spec.name);
+        rows.push(named(name, spec));
     }
-    prefix.extend(substring);
-    prefix
+    rows
+}
+
+/// Every way a command may be typed — its own name, then each of its aliases —
+/// beside the command it names, so one ranking sees all of them.
+fn spellings(specs: &[CommandSpec]) -> Vec<(String, &CommandSpec)> {
+    specs
+        .iter()
+        .flat_map(|spec| {
+            std::iter::once(&spec.name)
+                .chain(spec.aliases.iter())
+                .map(move |name| (name.clone(), spec))
+        })
+        .collect()
+}
+
+/// One row of the `/` menu: the spelling that matched, and what it does.
+fn named(name: &str, spec: &CommandSpec) -> Suggestion {
+    Suggestion {
+        value: format!("/{name} "),
+        label: format!("/{name}"),
+        hint: spec.hint.clone(),
+        group: Group::Commands,
+    }
 }
 
 /// Values for a command whose argument names a catalogue.
@@ -181,8 +193,8 @@ fn arguments(
     let Some(ids) = catalogues.get(source) else {
         return Vec::new();
     };
-    ids.iter()
-        .filter(|id| id.to_lowercase().contains(&partial.to_lowercase()))
+    matching::rank(partial, ids, String::as_str)
+        .into_iter()
         .map(|id| Suggestion {
             value: format!("/{name} {id}"),
             label: id.clone(),
@@ -224,20 +236,40 @@ mod tests {
         assert_eq!(local("hello"), None);
     }
 
+    fn labels(line: &str, specs: &[CommandSpec]) -> Vec<String> {
+        suggestions(line, specs, &Catalogues::new())
+            .iter()
+            .map(|row| row.label.clone())
+            .collect()
+    }
+
+    /// M55: the dropdown is ranked, not prefix-tested. A name a person typed
+    /// the bones of is the name they meant.
     #[test]
-    fn the_dropdown_ranks_prefixes_before_substrings() {
+    fn a_subsequence_of_a_command_offers_it() {
         let specs = vec![spec("compact", ArgSpec::None), spec("model", ArgSpec::None)];
-        let rows = suggestions("/co", &specs, &Catalogues::new());
+        assert_eq!(labels("/mo", &specs), vec!["/model"]);
+        assert_eq!(labels("/mdl", &specs), vec!["/model"], "no prefix at all");
+        assert_eq!(labels("/co", &specs), vec!["/compact"]);
         assert_eq!(
-            rows.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
-            vec!["/compact"]
-        );
-        let rows = suggestions("/o", &specs, &Catalogues::new());
-        assert_eq!(
-            rows.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
+            labels("/o", &specs),
             vec!["/compact", "/model"],
-            "both only contain it, so catalogue order decides"
+            "the one letter says nothing to tell them apart, so catalogue \
+             order decides"
         );
+        assert!(labels("/mdoel", &specs).is_empty(), "a typo is a typo");
+    }
+
+    /// A command with aliases is one row however many of its spellings match,
+    /// and the row is the spelling that matched.
+    #[test]
+    fn an_alias_offers_the_command_once_under_the_name_that_matched() {
+        let mut spec = spec("permission", ArgSpec::None);
+        spec.aliases = vec!["mode".to_string()];
+        let specs = vec![spec];
+        assert_eq!(labels("/perm", &specs), vec!["/permission"]);
+        assert_eq!(labels("/mode", &specs), vec!["/mode"]);
+        assert_eq!(labels("/m", &specs), vec!["/mode"], "one row, the best of");
     }
 
     #[test]
@@ -259,6 +291,31 @@ mod tests {
                 hint: String::new(),
                 group: Group::Commands,
             }]
+        );
+    }
+
+    /// The values of a catalogue are ranked by the same matcher the names are,
+    /// so `son` finds the model whose family it names, tightest first.
+    #[test]
+    fn a_catalogue_value_is_ranked_and_not_substring_tested() {
+        let specs = vec![spec(
+            "model",
+            ArgSpec::Catalog {
+                source: "models".into(),
+            },
+        )];
+        let models = ["openai/gpt-5.4", "anthropic/claude-sonnet-5", "some/on-1"]
+            .map(str::to_string)
+            .to_vec();
+        let catalogues = Catalogues::from([("models".to_string(), models)]);
+        let labels: Vec<String> = suggestions("/model son", &specs, &catalogues)
+            .iter()
+            .map(|row| row.label.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["anthropic/claude-sonnet-5", "some/on-1"],
+            "the contiguous match leads, and the one with a gap follows"
         );
     }
 

@@ -68,6 +68,7 @@ mod input;
 mod keys;
 mod layers;
 mod markdown;
+mod matching;
 mod mentions;
 mod opening;
 mod pager;
