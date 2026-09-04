@@ -702,13 +702,21 @@ fn a_waiting_childs_row_and_its_switcher_line_pulse_with_it() {
     tree.show(&root);
     let switcher = |at: Now| {
         let rows = tree.rows();
-        crate::roster::lines(&tree, &rows, crate::roster::Cursor::default(), 80, 8, at)
-            .lines
-            .iter()
-            .flat_map(|line| line.spans.clone())
-            .find(|span| span.content.contains("needs you"))
-            .map(|span| span.style)
-            .expect("the row that is asking")
+        crate::roster::lines(
+            &tree,
+            &rows,
+            crate::roster::Cursor::default(),
+            "",
+            80,
+            8,
+            at,
+        )
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.clone())
+        .find(|span| span.content.contains("needs you"))
+        .map(|span| span.style)
+        .expect("the row that is asking")
     };
     assert_eq!(switcher(now), theme::presence());
     assert_eq!(

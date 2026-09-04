@@ -527,6 +527,26 @@ fn the_switcher_dropdown() {
     both("switcher", &tree, &ui, now);
 }
 
+/// M55: the list is typed into. The query stands at its head as one dim line
+/// of what a person typed, and only the rows it matches are under it.
+#[test]
+fn the_switcher_dropdown_narrowed_by_a_query() {
+    let mut frames = busy_child("reviewer");
+    frames.push(log_frame(9, log_announced("#design")));
+    let tree = spawned_tree(frames);
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Switcher(Switcher {
+            cursor: on(0),
+            query: "rev".into(),
+            ..Default::default()
+        }),
+        now,
+    );
+    both("switcher_query", &tree, &ui, now);
+}
+
 /// What was spawned in an earlier process is in the store and not here
 /// (M31): its row sits under the live ones, dim, and says so in a word.
 #[test]

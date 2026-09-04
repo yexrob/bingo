@@ -128,7 +128,7 @@ fn in_line(line: usize, text: &str, needle: &str) -> Vec<Hit> {
 
 /// The one row a search takes, in the status line's place.
 pub fn row(search: &Search) -> Line<'static> {
-    let caret = if search.typing { "▌" } else { "" };
+    let caret = if search.typing { theme::caret() } else { "" };
     Line::from(vec![
         Span::styled(format!("{PROMPT}{}{caret}", search.query), theme::text()),
         Span::styled(format!("  {}", search.tally()), theme::dim()),

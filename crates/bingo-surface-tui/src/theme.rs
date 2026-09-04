@@ -93,14 +93,18 @@ pub struct Glyphs {
     pub user: &'static str,
     /// The row a card or a dropdown is talking to.
     pub cursor: &'static str,
+    /// What a list is being searched with: the mark on the query line the one
+    /// list of sessions is narrowed by (§3's Teams list).
+    pub find: &'static str,
+    /// Where typing lands, in a row the terminal's own cursor is not parked
+    /// on — a query line.
+    pub caret: &'static str,
     /// bingo at work, one frame every [`SPARKLE_MS`].
     pub sparkles: [&'static str; 4],
     pub todo: &'static str,
     pub todo_done: &'static str,
     /// The permission mode on the status line.
     pub mode: &'static str,
-    /// A rule between blocks, and the fill of a box's edge.
-    pub rule: &'static str,
     /// A tree node with siblings under it, and the last one.
     pub branch: &'static str,
     pub corner: &'static str,
@@ -117,11 +121,12 @@ pub const UNICODE: Glyphs = Glyphs {
     connector: "⎿",
     user: ">",
     cursor: "❯",
+    find: "⌕",
+    caret: "▌",
     sparkles: ["✻", "✢", "✶", "✽"],
     todo: "☐",
     todo_done: "☒",
     mode: "⏵⏵",
-    rule: "─",
     branch: "├",
     corner: "└",
     ellipsis: "…",
@@ -129,9 +134,10 @@ pub const UNICODE: Glyphs = Glyphs {
     border: border::ROUNDED,
 };
 
-/// `BINGO_ASCII=1`: the six characters of §7, each doing the job its shape
+/// `BINGO_ASCII=1`: the seven characters of §7, each doing the job its shape
 /// suggests — `>` says you, `*` is a bullet, `+` sparkles and turns a corner,
-/// `x` crosses a box off, `-` connects and rules, `|` stands a wall up.
+/// `x` crosses a box off, `-` connects and rules, `|` stands a wall up and
+/// stands where typing lands, `/` opens a query as vim's does.
 ///
 /// A skill spends no seventh character: the row says `Skill(guide)` in words,
 /// so the glyph is what a glance finds and never the only place the fact is.
@@ -141,11 +147,13 @@ pub const ASCII: Glyphs = Glyphs {
     connector: "-",
     user: ">",
     cursor: ">",
+    // vim's own, and the transcript search's row already opens with it.
+    find: "/",
+    caret: "|",
     sparkles: ["+", "+", "+", "+"],
     todo: "-",
     todo_done: "x",
     mode: ">>",
-    rule: "-",
     branch: "+",
     corner: "+",
     ellipsis: "...",
@@ -649,6 +657,16 @@ pub fn cursor() -> &'static str {
     glyphs().cursor
 }
 
+/// The mark a query line opens with: `⌕ sonn▌` over the one list of sessions.
+pub fn find() -> &'static str {
+    glyphs().find
+}
+
+/// Where typing lands on a row the terminal's own cursor is not parked on.
+pub fn caret() -> &'static str {
+    glyphs().caret
+}
+
 /// `❯` marks what the keyboard talks to (design §7), and the rows it does not
 /// talk to keep its width so nothing shifts when the focus moves.
 pub fn cursor_span(focused: bool) -> ratatui::text::Span<'static> {
@@ -663,8 +681,10 @@ pub fn todo(done: bool) -> &'static str {
     if done { glyphs.todo_done } else { glyphs.todo }
 }
 
+/// A rule between blocks: the same stroke a box draws its edge with, because
+/// they are one line and not two facts.
 pub fn rule() -> &'static str {
-    glyphs().rule
+    glyphs().border.horizontal_top
 }
 
 /// A tree node that has siblings under it; [`corner`] is the last of them.
@@ -1103,6 +1123,9 @@ mod tests {
             assert_eq!(border().top_left, "+");
             assert_eq!(ellipsis(), "...");
             assert_eq!(skill(), "*", "and a skill says so in words instead");
+            assert_eq!(find(), "/");
+            assert_eq!(caret(), "|");
+            assert_eq!(rule(), "-", "the rule is the box's own stroke");
         });
     }
 

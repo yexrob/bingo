@@ -696,6 +696,7 @@ fn switcher_lines(
         tree,
         &rows,
         switcher.cursor,
+        &switcher.query,
         usize::from(above.width),
         usize::from(above.height),
         now,

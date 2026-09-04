@@ -577,7 +577,8 @@ fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     let rows = tree::roster(tree, &[]);
     ui.layer.show(
         Open::Switcher(Switcher {
-            cursor: roster::Cursor::on(&roster::listing(&rows), tree.view()),
+            cursor: roster::Cursor::on(&roster::listing(tree, &rows, ""), tree.view()),
+            query: String::new(),
             stored: Vec::new(),
             // Where the walk started, so `esc` can put it back.
             from: Some(tree.view().clone()),
@@ -589,12 +590,17 @@ fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
 
 /// The list owns the keyboard while it is up: `↑`/`↓` walk the one column,
 /// labels and all, and the view goes with the cursor — walking the list *is*
-/// the switch, as the strip's walk was (§3). `⏎` settles on where the walk
-/// landed and `esc` gives back where it started.
+/// the switch, as the strip's walk was (§3). A printable key narrows the list
+/// instead (M55) and moves the cursor the same way. `⏎` settles on where the
+/// walk landed; `esc` takes the query back, and with none gives back where the
+/// list was opened from.
 fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    match walked(ui, tree, key) {
-        Some((cursor, chosen)) => walk_to(ui, tree, cursor, chosen),
-        None => settle(ui, key, now),
+    if let Some((cursor, chosen)) = walked(ui, tree, key) {
+        return walk_to(ui, tree, cursor, chosen);
+    }
+    match queried(ui, key) {
+        Some(query) => narrow(ui, tree, query),
+        None => settle(ui, tree, key, now),
     }
 }
 
@@ -605,13 +611,61 @@ fn walked(ui: &Ui, tree: &Tree, key: KeyEvent) -> Option<(roster::Cursor, Option
         return None;
     };
     let rows = tree::roster(tree, &open.stored);
-    let listing = roster::listing(&rows);
+    let listing = roster::listing(tree, &rows, &open.query);
     let cursor = match key.code {
         KeyCode::Up => open.cursor.step(&listing, -1),
         KeyCode::Down => open.cursor.step(&listing, 1),
         _ => return None,
     };
     Some((cursor, cursor.row(&listing).map(|row| row.session.clone())))
+}
+
+/// What a key leaves the query as: a printable character appends to it,
+/// backspace takes one back. `None` says the key was not the query's — an
+/// empty query has no backspace to answer, so `esc esc` is not stolen from it.
+fn queried(ui: &Ui, key: KeyEvent) -> Option<String> {
+    let Open::Switcher(open) = &ui.layer.open else {
+        return None;
+    };
+    let mut query = open.query.clone();
+    match key.code {
+        KeyCode::Char(c) => query.push(c),
+        KeyCode::Backspace if !query.is_empty() => {
+            query.pop();
+        }
+        _ => return None,
+    }
+    Some(query)
+}
+
+/// The list once the query is this. The cursor keeps the session it was on
+/// where the query left that row on the list, and takes the first row there is
+/// where it did not; the view follows the cursor as it does on a walk, so `⏎`
+/// keeps what a person is looking at.
+fn narrow(ui: &mut Ui, tree: &Tree, query: String) -> Vec<Effect> {
+    let Open::Switcher(open) = &ui.layer.open else {
+        return Vec::new();
+    };
+    let was = open.session(tree, open.cursor);
+    if let Open::Switcher(open) = &mut ui.layer.open {
+        open.query = query;
+    }
+    let (cursor, chosen) = placed(ui, tree, was.as_ref());
+    walk_to(ui, tree, cursor, chosen)
+}
+
+/// Where the cursor sits on the list as it stands, for the session it was on:
+/// that row where the query left it, and the first row where it did not.
+fn placed(ui: &Ui, tree: &Tree, was: Option<&SessionId>) -> (roster::Cursor, Option<SessionId>) {
+    let Open::Switcher(open) = &ui.layer.open else {
+        return (roster::Cursor::default(), None);
+    };
+    let rows = tree::roster(tree, &open.stored);
+    let listing = roster::listing(tree, &rows, &open.query);
+    let cursor = was
+        .map(|id| roster::Cursor::on(&listing, id))
+        .unwrap_or_default();
+    (cursor, cursor.row(&listing).map(|row| row.session.clone()))
 }
 
 /// Put the cursor there and show what it names. A session already on screen
@@ -633,15 +687,18 @@ pub(crate) fn walk_to(
 }
 
 /// `⏎` keeps the session the walk landed on — it is already the one on screen,
-/// so settling is only closing the list. `esc` puts back the one it was opened
-/// from.
-fn settle(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
+/// so settling is only closing the list. `esc` is §7's stack: the query a
+/// person typed is the first thing it takes back, and the list itself the next,
+/// putting back the session it was opened from.
+fn settle(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     let Open::Switcher(open) = &ui.layer.open else {
         return Vec::new();
     };
     let opened_from = open.from.clone();
+    let queried = !open.query.is_empty();
     match key.code {
         KeyCode::Enter => ui.layer.close(now.instant),
+        KeyCode::Esc if queried => return narrow(ui, tree, String::new()),
         KeyCode::Esc => {
             ui.layer.close(now.instant);
             return opened_from
@@ -1720,7 +1777,133 @@ mod tests {
         );
     }
 
+    // ---- the list is typed into (M55) -----------------------------------
+
+    /// A root with two sub-agents under it, so a query has rows to leave out:
+    /// `project`, `reviewer`, `scout`.
+    fn with_agents() -> Tree {
+        folded_tree(vec![
+            child_frame(1, announced("reviewer")),
+            agent_frame(3, 2, agent_announced(3, "scout")),
+        ])
+    }
+
+    /// What has been typed into the list.
+    fn query(ui: &Ui) -> String {
+        match &ui.layer.open {
+            Open::Switcher(switcher) => switcher.query.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn typing(ui: &mut Ui, tree: &Tree, text: &str, now: Now) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for c in text.chars() {
+            effects = press_tree(ui, tree, key(KeyCode::Char(c)), now);
+        }
+        effects
+    }
+
+    /// The ask M55 answers: the list narrows as it is typed into, the cursor
+    /// lands on what is left, and the view follows the cursor as it does on a
+    /// walk — so `⏎` keeps what a person is looking at.
+    #[test]
+    fn a_typed_query_narrows_the_list_and_the_view_follows_it() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        assert_eq!(selected(&ui), at(0), "it opens on the session in view");
+        let effects = typing(&mut ui, &tree, "sco", now);
+        assert_eq!(query(&ui), "sco");
+        assert_eq!(selected(&ui), at(0), "the one row left is the first row");
+        assert_eq!(
+            effects,
+            vec![Effect::View(agent_id(3))],
+            "and the row the cursor landed on is the view"
+        );
+    }
+
+    /// `esc` is one ordered stack (§7): the query a person typed is the first
+    /// thing it takes back, and the list itself the next.
+    #[test]
+    fn esc_takes_the_query_back_before_it_closes_the_list() {
+        let mut tree = with_agents();
+        let root = tree.root_id().clone();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "sco", now);
+        // The loop applied the `View` the narrowing asked for.
+        tree.show(&agent_id(3));
+
+        let effects = press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(ui.layer.showing(), "the first `esc` is the query's");
+        assert_eq!(query(&ui), "");
+        assert_eq!(
+            selected(&ui),
+            at(2),
+            "and the cursor keeps the session it was on"
+        );
+        assert!(effects.is_empty(), "nothing moved, so nothing is asked for");
+
+        let effects = press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(!ui.layer.showing(), "the second closes the list");
+        assert_eq!(
+            effects,
+            vec![Effect::View(root)],
+            "and gives back the session it was opened from"
+        );
+    }
+
+    /// Backspace gives the rows back, and an empty query has no backspace to
+    /// answer — the key is not the query's, so the list keeps it for nobody.
+    #[test]
+    fn backspace_gives_the_rows_back_letter_by_letter() {
+        let mut tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "sco", now);
+        tree.show(&agent_id(3));
+        for _ in 0..3 {
+            press_tree(&mut ui, &tree, key(KeyCode::Backspace), now);
+        }
+        assert_eq!(query(&ui), "");
+        assert_eq!(selected(&ui), at(2), "still on the row it narrowed to");
+        press_tree(&mut ui, &tree, key(KeyCode::Backspace), now);
+        assert!(ui.layer.showing(), "and the list is still up");
+    }
+
+    /// A second opening starts with nothing typed: the query is a fact about
+    /// this gesture, like where it started from.
+    #[test]
+    fn the_list_opens_with_nothing_typed_into_it() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "sco", now);
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        assert_eq!(query(&ui), "");
+    }
+
     // ---- one list, two doors --------------------------------------------
+
+    /// `↓` means two things and a query changes neither: on an empty composer
+    /// it opens the list, and inside it it walks — the rows the query left.
+    #[test]
+    fn down_opens_the_list_and_then_walks_what_the_query_left() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        // `o` is in `project` and in `scout` and in neither's way.
+        typing(&mut ui, &tree, "o", now);
+        assert_eq!(selected(&ui), at(0), "the root is still the row in view");
+        assert_eq!(
+            walked_to(&mut ui, &tree, key(KeyCode::Down), now),
+            Some(agent_id(3)),
+            "and the step goes to the next row the query left, not the tree's"
+        );
+        assert_eq!(selected(&ui), at(1));
+    }
 
     /// `↓` on an empty composer opens the same list `ctrl+g` does, and asks
     /// the store the same question: they are one gesture with two keys, so

@@ -18,7 +18,7 @@ use crate::input::{item_of, scroll, walk_to};
 use crate::rail::CardId;
 use crate::roster;
 use crate::select::Cell;
-use crate::tree::{self, Tree};
+use crate::tree::Tree;
 use crate::ui::{Open, Ui};
 
 /// Lines one notch of the wheel moves the transcript.
@@ -134,15 +134,13 @@ fn listed_row(ui: &Ui, mouse: MouseEvent) -> Option<roster::Cursor> {
     painted.list.as_ref()?.at(mouse.row)
 }
 
-/// The session a row of the list names.
+/// The session a row of the list names — the list as the query left it, so a
+/// click lands on the row a person can see.
 fn under(ui: &Ui, tree: &Tree, cursor: roster::Cursor) -> Option<SessionId> {
     let Open::Switcher(open) = &ui.layer.open else {
         return None;
     };
-    let rows = tree::roster(tree, &open.stored);
-    cursor
-        .row(&roster::listing(&rows))
-        .map(|row| row.session.clone())
+    open.session(tree, cursor)
 }
 
 /// The rail card under the pointer, when it is over the rail.

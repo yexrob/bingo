@@ -2,8 +2,8 @@
 //! directory.
 //!
 //! The walk obeys `.gitignore` — a repository offers its sources and not its
-//! build — and the ranking is `nucleo`'s, the one a person's editor and their
-//! fuzzy finder already use, applied to the names and the paths alike. The rows
+//! build — and the ranking is [`crate::matching`]'s, the one every list in this
+//! surface is narrowed by, applied to the names and the paths alike. The rows
 //! ride the same dropdown as `/` (design §4: one dropdown above the input box,
 //! whatever it is offering).
 //!
@@ -14,10 +14,9 @@
 use std::path::Path;
 
 use ignore::WalkBuilder;
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher};
 
 use crate::commands::{Group, Suggestion};
+use crate::matching;
 
 /// How many paths the dropdown offers (design §4: eight rows).
 pub const ROWS: usize = 8;
@@ -72,14 +71,13 @@ pub fn completed(line: &str, path: &str) -> String {
     format!("{head}@{path} ")
 }
 
-/// The paths that match, best first, at most [`ROWS`] of them.
+/// The paths that match, best first, at most [`ROWS`] of them: the one
+/// matcher's order ([`crate::matching`]), cut to the room the dropdown has.
 pub fn rank(partial: &str, paths: &[String]) -> Vec<String> {
-    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    Pattern::parse(partial, CaseMatching::Ignore, Normalization::Smart)
-        .match_list(paths, &mut matcher)
+    matching::rank(partial, paths, String::as_str)
         .into_iter()
         .take(ROWS)
-        .map(|(path, _)| path.clone())
+        .cloned()
         .collect()
 }
 
