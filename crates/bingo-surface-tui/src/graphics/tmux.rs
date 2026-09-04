@@ -45,6 +45,103 @@ pub fn transport(term: Option<&str>, tmux: bool) -> Option<Transport> {
     (!crate::terminal::multiplexed(term, tmux)).then_some(Transport::Bare)
 }
 
+/// What tmux says about `allow-passthrough`, which is the difference between
+/// a question that reaches the terminal in front and one tmux drops on the
+/// floor. It is asked rather than guessed: the answer costs one short process
+/// and saves a whole probe window when it is `off` (M60 brick 3).
+///
+/// A platform that asks a terminal nothing asks tmux nothing either, so there
+/// only `Unknown` is ever built ([`super::exchange`]).
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Passthrough {
+    /// Nobody was asked, or the asking failed: the probe goes ahead on the
+    /// bare window, as it did before it knew to ask.
+    #[default]
+    Unknown,
+    /// `off`: the envelope is dropped whole, so none is sent.
+    Off,
+    /// `on` or `all`: the envelope is carried, and the answers to it have
+    /// further to come than a bare terminal's.
+    On,
+}
+
+/// What tmux's answer means. Anything but the words tmux itself prints is no
+/// answer: an empty line is what a tmux too old to know the option gives, and
+/// a guess from it would be worse than the probe going ahead.
+///
+/// Only a unix terminal ever asks tmux ([`super::exchange`]), so the reading
+/// carries that platform's gate and the `test` arm keeps it asserted wherever
+/// the suite runs — the same shape [`super::probe::query`] has.
+#[cfg(any(unix, test))]
+pub fn allows(said: &str) -> Passthrough {
+    match said.trim() {
+        "off" => Passthrough::Off,
+        "on" | "all" => Passthrough::On,
+        _ => Passthrough::Unknown,
+    }
+}
+
+/// Ask the tmux this run is inside. `display-message -p` prints one format and
+/// exits; the pane is not touched and nothing is written to the terminal.
+///
+/// The wait is bounded because a tmux client talking to a wedged server would
+/// otherwise hold the whole start-up: a local server answers in milliseconds,
+/// and one that has not answered in a probe's own window is one whose answer
+/// is not worth waiting for.
+#[cfg(all(unix, not(test)))]
+pub fn passthrough(transport: Transport) -> Passthrough {
+    if transport == Transport::Bare {
+        return Passthrough::Unknown;
+    }
+    match asked() {
+        Some(said) => allows(&said),
+        None => Passthrough::Unknown,
+    }
+}
+
+/// No Windows console draws pictures and none is asked ([`super::exchange`]),
+/// so there is no tmux to ask either.
+#[cfg(all(not(unix), not(test)))]
+pub fn passthrough(_transport: Transport) -> Passthrough {
+    Passthrough::Unknown
+}
+
+/// What `tmux display-message` printed, or nothing at all when it could not be
+/// run, took too long, or failed.
+#[cfg(all(unix, not(test)))]
+fn asked() -> Option<String> {
+    let mut child = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{allow-passthrough}"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if !ended(&mut child) {
+        let _ = child.kill();
+        return None;
+    }
+    let said = child.wait_with_output().ok()?;
+    said.status
+        .success()
+        .then(|| String::from_utf8_lossy(&said.stdout).into_owned())
+}
+
+/// Whether the process ended inside the window a probe is given.
+#[cfg(all(unix, not(test)))]
+fn ended(child: &mut std::process::Child) -> bool {
+    let deadline = std::time::Instant::now() + crate::theme::PROBE;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 /// One sequence, in the envelope this transport wants. `Bare` is the sequence
 /// itself; tmux wants the `ESC` of every escape inside doubled, or its own
 /// parser would end the envelope at the first one.
@@ -144,6 +241,19 @@ mod tests {
             !carries_pictures(&tmux("next")),
             "a version nobody can read"
         );
+    }
+
+    /// M60 brick 3: the three words tmux prints for the option, and the
+    /// silence a tmux too old to know it prints instead — which is not an
+    /// answer, so the probe goes ahead rather than guessing.
+    #[test]
+    fn the_passthrough_is_read_from_what_tmux_says_and_nothing_else() {
+        assert_eq!(allows("on\n"), Passthrough::On);
+        assert_eq!(allows("all\n"), Passthrough::On, "`all` carries it too");
+        assert_eq!(allows("off\n"), Passthrough::Off);
+        assert_eq!(allows(""), Passthrough::Unknown, "an option it never knew");
+        assert_eq!(allows("#{allow-passthrough}"), Passthrough::Unknown);
+        assert_eq!(allows("1"), Passthrough::Unknown, "not a flag, a choice");
     }
 
     /// Only tmux is tmux: the outer terminal's own reply is a name beside it,
