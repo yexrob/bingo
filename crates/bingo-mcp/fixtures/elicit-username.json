@@ -1,0 +1,16 @@
+{
+  "comment": "modelcontextprotocol.io/specification/2025-06-18/client/elicitation — Simple Text Request, params quoted verbatim.",
+  "method": "elicitation/create",
+  "params": {
+    "message": "Please provide your GitHub username",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": ["name"]
+    }
+  }
+}

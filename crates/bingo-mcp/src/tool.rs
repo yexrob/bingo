@@ -14,6 +14,7 @@ use bingo_sdk::{
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject};
 use serde_json::Value;
 
+use crate::client::Asker;
 use crate::dial::Service;
 
 /// The model-visible name of a server's tool.
@@ -34,10 +35,17 @@ pub struct McpTool {
     description: String,
     input_schema: Value,
     service: Arc<Service>,
+    /// Who a question this server raises mid-call reaches (ADR-0039 §1).
+    asker: Arc<Asker>,
 }
 
 impl McpTool {
-    pub fn new(server: &str, listed: &rmcp::model::Tool, service: Arc<Service>) -> Self {
+    pub fn new(
+        server: &str,
+        listed: &rmcp::model::Tool,
+        service: Arc<Service>,
+        asker: Arc<Asker>,
+    ) -> Self {
         Self {
             server: server.to_string(),
             tool: listed.name.to_string(),
@@ -48,6 +56,7 @@ impl McpTool {
                 .to_string(),
             input_schema: input_schema(&listed.input_schema),
             service,
+            asker,
         }
     }
 }
@@ -142,6 +151,9 @@ impl Tool for McpTool {
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let mut params = CallToolRequestParams::new(self.tool.clone());
         params.arguments = arguments(input)?;
+        // A question this server raises while it answers reaches the session
+        // waiting on this call, and only for as long as it waits.
+        let _asking = self.asker.during(Arc::clone(&cx.call), cx.host.clone());
         let answered = tokio::select! {
             biased;
             () = cx.cancel.cancelled() => return Err(ToolError::Cancelled),

@@ -56,7 +56,7 @@ pub enum Settled {
 /// The interaction as a chat can answer it, or `None` when this surface has
 /// no rung for it — a browser login is nobody's chat message.
 pub fn ladder(interaction: &Interaction) -> Option<Question> {
-    if let InteractionKind::Form { questions } = &interaction.kind {
+    if let InteractionKind::Form { questions, .. } = &interaction.kind {
         return form(interaction, questions);
     }
     let offered = |spec: AnswerSpec| interaction.answers.contains(&spec);
@@ -451,6 +451,7 @@ mod tests {
     fn a_form_is_one_ladder_per_question_and_the_last_settles_them_all() {
         let first = ladder(&interaction(
             InteractionKind::Form {
+                title: None,
                 questions: vec![
                     asked("Store", &["Postgres", "SQLite"]),
                     asked("Runtime", &["tokio"]),
@@ -506,6 +507,7 @@ mod tests {
         assert!(
             ladder(&interaction(
                 InteractionKind::Form {
+                    title: None,
                     questions: vec![asked("Store", &["Postgres"])],
                 },
                 vec![AnswerSpec::Cancel],
@@ -514,7 +516,10 @@ mod tests {
         );
         assert!(
             ladder(&interaction(
-                InteractionKind::Form { questions: vec![] },
+                InteractionKind::Form {
+                    title: None,
+                    questions: vec![],
+                },
                 vec![AnswerSpec::Form],
             ))
             .is_none(),

@@ -1711,6 +1711,13 @@
         {
           "type": "object",
           "properties": {
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What the whole set is about, in the asker's own words: an MCP\nserver's elicitation says which server is asking. A set the model\nopened has nothing to add to its own questions and names none."
+            },
             "questions": {
               "type": "array",
               "items": {

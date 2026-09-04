@@ -5,17 +5,20 @@
 //! build script and no second manifest: `target/<profile>/examples/echo_server`
 //! next to `target/<profile>/deps/<test>`.
 //!
-//! Three tools, one for each thing a client has to get right: `echo` returns
-//! what it was given, `noisy` writes to stderr (which must reach a log and
-//! never the screen), and `boom` answers with `isError`.
+//! One tool for each thing a client has to get right: `echo` returns what it
+//! was given, `noisy` writes to stderr (which must reach a log and never the
+//! screen), `boom` answers with `isError`, `whereami` reports where it was
+//! spawned, and `ask` raises an `elicitation/create` back at the client mid-call
+//! and answers with whatever came back (M53).
 
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ElicitRequestParams,
+    ErrorData, JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::io::stdio;
@@ -56,7 +59,55 @@ fn tools() -> Vec<Tool> {
             "Return the working directory and the environment it was spawned with.",
             one_string("text"),
         ),
+        Tool::new(
+            "ask",
+            "Ask the person two questions, and answer with what they said.",
+            one_string("text"),
+        ),
     ]
+}
+
+/// The schema `ask` elicits: an enum property the server named the values of,
+/// and a string one answered in words. Flat and primitive, as the spec's
+/// `requestedSchema` must be.
+fn requested() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "store": {
+                "type": "string",
+                "title": "Store",
+                "description": "Which store should it use?",
+                "enum": ["postgres", "sqlite"],
+                "enumNames": ["Postgres", "SQLite"]
+            },
+            "note": {
+                "type": "string",
+                "title": "Note",
+                "description": "Anything to add?"
+            }
+        },
+        "required": ["store"]
+    })
+}
+
+/// Raise the question at the client and report what it answered, so a test can
+/// read the whole round trip off the tool result.
+async fn asked(context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {
+    let requested_schema = serde_json::from_value(requested())
+        .map_err(|e| ErrorData::internal_error(format!("the schema: {e}"), None))?;
+    let result = context
+        .peer
+        .create_elicitation(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "Please say how it should be built".to_string(),
+            requested_schema,
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("asking: {e}"), None))?;
+    let said = serde_json::to_string(&result)
+        .map_err(|e| ErrorData::internal_error(format!("the result: {e}"), None))?;
+    Ok(CallToolResult::success(vec![ContentBlock::text(said)]).into())
 }
 
 /// The environment variable `whereami` reports, so a test can tell whether a
@@ -111,12 +162,15 @@ impl ServerHandler for EchoServer {
         std::future::ready(Ok(ListToolsResult::with_all_items(tools())))
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResponse, ErrorData>> + Send + '_ {
-        std::future::ready(answer(request))
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        match request.name.as_ref() {
+            "ask" => asked(context).await,
+            _ => answer(request),
+        }
     }
 }
 

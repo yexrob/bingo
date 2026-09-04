@@ -17,6 +17,8 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use rmcp::{RoleClient, serve_client};
+
+use crate::client::{Asker, Client};
 use tokio::process::Command;
 
 use crate::config::Server;
@@ -28,13 +30,17 @@ use crate::config::Server;
 /// deadline is a failure a person retries with `/mcp reconnect`.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The client side of one live server.
-pub type Service = RunningService<RoleClient, ()>;
+/// The client side of one live server. The handler is this client's own
+/// [`Client`], because a server may ask *us* something (`elicitation/create`)
+/// while it answers a call.
+pub type Service = RunningService<RoleClient, Client>;
 
-/// What a handshake leaves behind: the running service, and what it said it can do.
+/// What a handshake leaves behind: the running service, what it said it can do,
+/// and who a question from it reaches while a call is in flight.
 pub struct Connection {
     pub service: Arc<Service>,
     pub tools: Vec<rmcp::model::Tool>,
+    pub asker: Arc<Asker>,
 }
 
 /// `<data_dir>/logs/mcp-<server>.log`.
@@ -63,6 +69,7 @@ async fn connect(
     server: &Server,
     data_dir: &Path,
 ) -> Result<Connection, String> {
+    let asker = Arc::new(Asker::new(server_name));
     match server {
         Server::Stdio {
             command,
@@ -70,24 +77,37 @@ async fn connect(
             env,
             cwd,
         } => {
-            let service =
-                spawn_child(server_name, command, args, env, cwd.as_deref(), data_dir).await?;
-            list_tools(service).await
+            let service = spawn_child(
+                server_name,
+                command,
+                args,
+                env,
+                cwd.as_deref(),
+                data_dir,
+                Arc::clone(&asker),
+            )
+            .await?;
+            list_tools(service, asker).await
         }
         // Every failure of an HTTP dial goes through one place, because every
         // one of them may print the URI that was dialled.
-        Server::Http { url, headers } => over_http(url, headers)
+        Server::Http { url, headers } => over_http(url, headers, asker)
             .await
             .map_err(|why| redact(&why, url)),
     }
 }
 
-async fn over_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Connection, String> {
-    list_tools(open_http(url, headers).await?).await
+async fn over_http(
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    asker: Arc<Asker>,
+) -> Result<Connection, String> {
+    let service = open_http(url, headers, Arc::clone(&asker)).await?;
+    list_tools(service, asker).await
 }
 
 /// What the server says it can do, asked once, at the end of the handshake.
-async fn list_tools(service: Service) -> Result<Connection, String> {
+async fn list_tools(service: Service, asker: Arc<Asker>) -> Result<Connection, String> {
     let tools = service
         .list_all_tools()
         .await
@@ -95,6 +115,7 @@ async fn list_tools(service: Service) -> Result<Connection, String> {
     Ok(Connection {
         service: Arc::new(service),
         tools,
+        asker,
     })
 }
 
@@ -105,6 +126,7 @@ async fn spawn_child(
     env: &BTreeMap<String, String>,
     cwd: Option<&Path>,
     data_dir: &Path,
+    asker: Arc<Asker>,
 ) -> Result<Service, String> {
     let mut child = Command::new(command);
     child.args(args).envs(env);
@@ -115,17 +137,24 @@ async fn spawn_child(
         .stderr(stderr_sink(data_dir, server_name))
         .spawn()
         .map_err(|e| format!("spawning {command}: {e}"))?;
-    serve_client((), transport)
+    serve_client(Client::new(asker), transport)
         .await
         .map_err(|e| format!("handshake: {e}"))
 }
 
-async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Service, String> {
+async fn open_http(
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    asker: Arc<Asker>,
+) -> Result<Service, String> {
     let config =
         StreamableHttpClientTransportConfig::with_uri(url).custom_headers(http_headers(headers)?);
-    serve_client((), StreamableHttpClientTransport::from_config(config))
-        .await
-        .map_err(|e| format!("handshake: {e}"))
+    serve_client(
+        Client::new(asker),
+        StreamableHttpClientTransport::from_config(config),
+    )
+    .await
+    .map_err(|e| format!("handshake: {e}"))
 }
 
 /// A header value is where a person keeps their token, so a value this crate

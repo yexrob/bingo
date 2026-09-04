@@ -39,4 +39,7 @@ proptest.workspace = true
 insta.workspace = true
 # M7: the scripted server the tests dial is an example binary of this crate,
 # speaking the protocol with the same implementation the plugin dials.
-rmcp = { workspace = true, features = ["server", "transport-io"] }
+# M53: `elicitation` is what lets that server raise `elicitation/create` back
+# at the client. It adds `url`, which reqwest already brings, so the tree is
+# the size it was.
+rmcp = { workspace = true, features = ["server", "transport-io", "elicitation"] }

@@ -504,7 +504,7 @@ fn decide(
             ..
         } => ask_permission(tool, summary, session_scope.as_deref(), console, err)?,
         InteractionKind::Question(question) => ask_question(interaction, question, console, err)?,
-        InteractionKind::Form { questions } => ask_form(questions, console, err)?,
+        InteractionKind::Form { questions, .. } => ask_form(questions, console, err)?,
         _ => refuse(interaction, "this surface cannot answer that"),
     };
     Ok((answer, Activation::Keyboard))
@@ -1219,6 +1219,7 @@ pub(crate) mod tests {
         };
         Interaction {
             kind: InteractionKind::Form {
+                title: None,
                 questions: vec![
                     asked("store", &[("0", "Postgres"), ("1", "SQLite")]),
                     asked("runtime", &[("0", "tokio"), ("1", "smol")]),

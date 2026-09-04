@@ -120,6 +120,8 @@ fn validate_options(question: &AskQuestion) -> Result<(), ToolError> {
 /// The one interaction the kernel opens for the whole set (M53).
 fn interaction(args: &AskArgs) -> InteractionKind {
     InteractionKind::Form {
+        // The model's questions say what they are about themselves.
+        title: None,
         questions: args.questions.iter().map(asked).collect(),
     }
 }
@@ -324,7 +326,7 @@ mod tests {
         assert_eq!(asked.len(), 1);
         let (kind, specs) = &asked[0];
         assert_eq!(specs, &vec![AnswerSpec::Form, AnswerSpec::Cancel]);
-        let InteractionKind::Form { questions } = kind else {
+        let InteractionKind::Form { questions, .. } = kind else {
             panic!("expected a form, got {kind:?}");
         };
         let [
@@ -397,7 +399,7 @@ mod tests {
         );
         let asked = host.asked();
         assert_eq!(asked.len(), 1, "one interaction for the whole set");
-        let InteractionKind::Form { questions } = &asked[0].0 else {
+        let InteractionKind::Form { questions, .. } = &asked[0].0 else {
             panic!("expected a form, got {:?}", asked[0].0);
         };
         assert_eq!(questions.len(), 2);
@@ -474,7 +476,7 @@ mod tests {
             Some("The user answered:\nTargets: linux, windows")
         );
         let (kind, _) = &host.asked()[0];
-        let InteractionKind::Form { questions } = kind else {
+        let InteractionKind::Form { questions, .. } = kind else {
             panic!("expected a form, got {kind:?}");
         };
         assert!(questions[0].multi);

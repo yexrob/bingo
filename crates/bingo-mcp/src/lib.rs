@@ -12,9 +12,11 @@
 //! Nothing a server says about itself is believed: an MCP tool's traits are
 //! the fail-closed default, so the gate asks about every call (ADR-0009 §2).
 
+pub mod client;
 pub mod command;
 pub mod config;
 pub mod dial;
+pub mod elicitation;
 pub mod manager;
 pub mod rows;
 pub mod source;
@@ -28,6 +30,7 @@ use bingo_sdk::{
     Registrar, ServiceHandle, ToolSource, WireService,
 };
 
+pub use client::{Asker, Client};
 pub use command::McpCommand;
 pub use config::{Server, Settings};
 pub use dial::CONNECT_TIMEOUT;
@@ -123,9 +126,53 @@ fn service(manager: Arc<Manager>) -> Contribution {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A door that answers from a script: a question put where no surface is
+    /// listening.
+    #[derive(Debug, Default)]
+    pub(crate) struct Scripted {
+        answers: std::sync::Mutex<std::collections::VecDeque<bingo_sdk::Answer>>,
+    }
+
+    impl Scripted {
+        pub(crate) fn new(answers: Vec<bingo_sdk::Answer>) -> Arc<Self> {
+            Arc::new(Self {
+                answers: std::sync::Mutex::new(answers.into()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl bingo_sdk::Prompter for Scripted {
+        async fn ask(
+            &self,
+            _kind: bingo_sdk::InteractionKind,
+            _answers: Vec<bingo_sdk::AnswerSpec>,
+        ) -> Result<bingo_sdk::Answer, bingo_sdk::KernelError> {
+            let next = self.answers.lock().ok().and_then(|mut a| a.pop_front());
+            next.ok_or_else(|| {
+                bingo_sdk::KernelError::new(
+                    bingo_sdk::ErrorCode::Internal,
+                    "nobody is at this session",
+                )
+            })
+        }
+    }
+
+    #[async_trait]
+    impl bingo_sdk::ToolHost for Scripted {
+        fn progress(&self, _item: &bingo_sdk::ItemId, _tail: String) {}
+
+        async fn record(
+            &self,
+            _body: bingo_sdk::ItemBody,
+        ) -> Result<bingo_sdk::ItemId, bingo_sdk::KernelError> {
+            Ok(bingo_sdk::ItemId::from_raw("itm_test"))
+        }
+    }
 
     fn registrar(config: serde_json::Value) -> Registrar {
         Registrar::new("bingo.mcp", config, bingo_sdk::Env::rooted("/tmp"))

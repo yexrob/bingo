@@ -512,6 +512,7 @@ pub fn question(multi: bool, free_text: bool) -> Interaction {
 pub fn form() -> Interaction {
     interaction(
         InteractionKind::Form {
+            title: None,
             questions: vec![
                 asked_with(
                     "Auth method",

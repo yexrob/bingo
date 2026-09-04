@@ -855,7 +855,9 @@ mod tests {
             (
                 "presence",
                 &[
-                    "dialog.rs",
+                    // Which session asked, named after a card's own title —
+                    // every card's head is written in one place (ADR-0010 §3).
+                    "form.rs",
                     "layers.rs",
                     "panel.rs",
                     "search.rs",

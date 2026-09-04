@@ -78,7 +78,7 @@ impl Dialog {
         if key.code == KeyCode::Esc {
             return self.send(interaction, cancel(interaction));
         }
-        if let InteractionKind::Form { questions } = &interaction.kind {
+        if let InteractionKind::Form { questions, .. } = &interaction.kind {
             let answer = form::on_key(&mut self.form, &mut self.focus, questions, key);
             return self.send(interaction, answer);
         }
@@ -355,12 +355,21 @@ pub fn rows(
     cwd: &str,
     width: usize,
 ) -> Vec<(Line<'static>, Option<usize>)> {
-    let mut out = vec![(title(dialog, interaction, agent), None)];
-    if let InteractionKind::Form { questions } = &interaction.kind {
-        out.extend(form::rows(&dialog.form, dialog.focus, questions, width));
+    if let InteractionKind::Form { questions, title } = &interaction.kind {
+        let mut out = form::rows(
+            &dialog.form,
+            dialog.focus,
+            questions,
+            form::Head {
+                title: title.as_deref(),
+                agent,
+                width,
+            },
+        );
         out.extend(answering(dialog));
         return out;
     }
+    let mut out = vec![(title(dialog, interaction, agent), None)];
     out.extend(
         body(dialog, interaction)
             .into_iter()
@@ -396,17 +405,10 @@ fn answering(dialog: &Dialog) -> Vec<(Line<'static>, Option<usize>)> {
     )]
 }
 
-/// What kind of card this is, in one word a person reads first — for a form,
-/// the tab row, which is the one row that may never give way.
-fn title(dialog: &Dialog, interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
-    let mut spans = match &interaction.kind {
-        InteractionKind::Form { questions } => form::tabs(&dialog.form, questions),
-        _ => vec![Span::styled(named(interaction), theme::bold())],
-    };
-    if let Some(agent) = agent {
-        spans.push(Span::styled(format!(" · {agent}"), theme::presence()));
-    }
-    Line::from(spans)
+/// What kind of card this is, in one word a person reads first. A form draws
+/// its own head, which is the tab row (see [`form::rows`]).
+fn title(_dialog: &Dialog, interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
+    Line::from(form::head(&named(interaction), agent))
 }
 
 fn named(interaction: &Interaction) -> String {

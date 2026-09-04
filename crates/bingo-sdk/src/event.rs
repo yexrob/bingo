@@ -528,6 +528,11 @@ pub enum InteractionKind {
     /// A set of questions put at once and answered together (M53). Every
     /// question is the same [`Question`] a lone one is.
     Form {
+        /// What the whole set is about, in the asker's own words: an MCP
+        /// server's elicitation says which server is asking. A set the model
+        /// opened has nothing to add to its own questions and names none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
         questions: Vec<Question>,
     },
     Confirm {
@@ -547,7 +552,7 @@ impl InteractionKind {
     pub fn answer_for(&self, role: AnswerRole) -> Option<Answer> {
         match self {
             InteractionKind::Question(question) => question.answer_for(role),
-            InteractionKind::Form { questions } => Some(Answer::Form {
+            InteractionKind::Form { questions, .. } => Some(Answer::Form {
                 answers: questions
                     .iter()
                     .map(|question| question.answer_for(role))
@@ -1126,6 +1131,7 @@ mod tests {
                     interaction: Interaction {
                         id: InteractionId::from_raw("int_3"),
                         kind: InteractionKind::Form {
+                            title: None,
                             questions: vec![
                                 Question {
                                     question: "Which authentication method?".into(),
@@ -1277,6 +1283,7 @@ mod tests {
     #[test]
     fn a_form_is_answered_by_every_questions_role_option() {
         let kind = InteractionKind::Form {
+            title: None,
             questions: vec![
                 asked(vec![
                     option("yes", Some(AnswerRole::Allowing)),
@@ -1320,6 +1327,7 @@ mod tests {
     #[test]
     fn a_form_one_of_whose_questions_is_unmarked_is_a_persons_alone() {
         let kind = InteractionKind::Form {
+            title: None,
             questions: vec![
                 asked(vec![option("yes", Some(AnswerRole::Allowing))]),
                 asked(vec![option("go", None)]),

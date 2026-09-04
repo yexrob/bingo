@@ -237,7 +237,7 @@ fn a_form_crosses_the_json_wire_as_one_frame() {
             _ => None,
         })
         .expect("the form was opened");
-    let bingo_sdk::InteractionKind::Form { questions } = &opened.kind else {
+    let bingo_sdk::InteractionKind::Form { questions, .. } = &opened.kind else {
         panic!("expected one form, got {:?}", opened.kind);
     };
     assert_eq!(questions.len(), 2, "one interaction for both questions");

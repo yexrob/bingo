@@ -155,6 +155,7 @@ pub fn form() -> Interaction {
     };
     Interaction {
         kind: InteractionKind::Form {
+            title: None,
             questions: vec![
                 asked("Store", "Which store?", ["Postgres", "SQLite"]),
                 asked("Runtime", "Which runtime?", ["tokio", "smol"]),

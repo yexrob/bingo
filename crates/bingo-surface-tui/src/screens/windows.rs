@@ -209,7 +209,7 @@ fn crowded_question(focus: usize) -> (Tree, Ui, Now) {
 /// same short screen.
 fn crowded_form(focus: usize) -> (Tree, Ui, Now) {
     let mut open = crate::test_support::form();
-    if let bingo_sdk::InteractionKind::Form { questions } = &mut open.kind {
+    if let bingo_sdk::InteractionKind::Form { questions, .. } = &mut open.kind {
         questions[0].options = (1..=12)
             .map(|i| bingo_sdk::QuestionOption {
                 id: format!("o{i}"),

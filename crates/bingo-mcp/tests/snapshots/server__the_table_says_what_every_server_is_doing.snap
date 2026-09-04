@@ -17,7 +17,7 @@ expression: "json!({ \"headers\": headers, \"rows\": rows })"
     [
       "test",
       "connected",
-      "4"
+      "5"
     ],
     [
       "waiting",

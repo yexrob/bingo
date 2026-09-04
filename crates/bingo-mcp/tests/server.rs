@@ -79,8 +79,8 @@ async fn connected() -> (Arc<Manager>, tempfile::TempDir) {
     manager.dial_enabled().await;
     assert_eq!(
         manager.statuses().await,
-        vec![("test".to_string(), Status::Connected { tools: 4 })],
-        "the example server offers echo, noisy, boom and whereami"
+        vec![("test".to_string(), Status::Connected { tools: 5 })],
+        "the example server offers echo, noisy, boom, whereami and ask"
     );
     (manager, data)
 }
@@ -212,6 +212,50 @@ impl HostApi for UnusedHost {
     }
 }
 
+/// A door that answers one question from a script and keeps the interaction it
+/// was put through, so a test reads both halves of the round trip (M53).
+#[derive(Debug)]
+struct ScriptedDoor {
+    answer: Answer,
+    asked: std::sync::Mutex<Vec<InteractionKind>>,
+}
+
+impl ScriptedDoor {
+    fn new(answer: Answer) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            asked: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn asked(&self) -> Vec<InteractionKind> {
+        self.asked.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl Prompter for ScriptedDoor {
+    async fn ask(
+        &self,
+        kind: InteractionKind,
+        _answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError> {
+        if let Ok(mut asked) = self.asked.lock() {
+            asked.push(kind);
+        }
+        Ok(self.answer.clone())
+    }
+}
+
+#[async_trait]
+impl ToolHost for ScriptedDoor {
+    fn progress(&self, _item: &ItemId, _tail: String) {}
+
+    async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
+        Ok(ItemId::from_raw("itm_test"))
+    }
+}
+
 fn tool_context(cancel: CancellationToken) -> ToolContext {
     ToolContext {
         call_id: "call_1".into(),
@@ -231,6 +275,27 @@ fn command_context() -> CommandContext {
         session: SessionId::from_raw("ses_test"),
         cwd: PathBuf::from("/work"),
         host: HostHandle(Arc::new(UnusedHost)),
+    }
+}
+
+/// One call whose door answers the server's question with `answer`; the tool
+/// result is the `ElicitResult` the server received, as JSON.
+async fn elicited(answer: Answer) -> (Value, Vec<InteractionKind>) {
+    let (manager, _data) = connected().await;
+    let tool = tool_named(&manager, "mcp__test__ask").await;
+    let door = ScriptedDoor::new(answer);
+    let context = ToolContext {
+        call: Arc::clone(&door) as Arc<dyn ToolHost>,
+        ..tool_context(CancellationToken::new())
+    };
+    let output = match tool.call(json!({ "text": "go" }), &context).await {
+        Ok(output) => output,
+        Err(error) => panic!("the ask tool answered: {error}"),
+    };
+    let text = text_of(&output);
+    match serde_json::from_str(&text) {
+        Ok(result) => (result, door.asked()),
+        Err(error) => panic!("the server's result is json ({error}): {text}"),
     }
 }
 
@@ -284,7 +349,8 @@ async fn a_connected_server_s_tools_carry_its_name_and_its_schema() {
             "mcp__test__echo",
             "mcp__test__noisy",
             "mcp__test__boom",
-            "mcp__test__whereami"
+            "mcp__test__whereami",
+            "mcp__test__ask"
         ],
         "in the order the server listed them"
     );
@@ -297,6 +363,93 @@ async fn calling_a_tool_returns_what_the_server_answered() {
     let output = call(&tool, json!({ "text": "hello from the other side" })).await;
     assert_eq!(text_of(&output), "hello from the other side");
     assert!(!output.is_error);
+}
+
+/// A server's `elicitation/create` reaches the session waiting on the call
+/// that raised it, as one form card naming the server, and what the person
+/// chose reaches the server as `accept` with the content (M53).
+#[tokio::test]
+async fn a_servers_question_becomes_a_form_card_and_the_answer_reaches_it() {
+    let (result, asked) = elicited(Answer::Form {
+        answers: vec![
+            Answer::Choice {
+                ids: vec!["sqlite".into()],
+            },
+            Answer::Text {
+                text: "keep it small".into(),
+            },
+        ],
+    })
+    .await;
+    assert_eq!(
+        result,
+        json!({
+            "action": "accept",
+            "content": { "store": "sqlite", "note": "keep it small" }
+        })
+    );
+
+    assert_eq!(asked.len(), 1, "one card for the whole schema");
+    let InteractionKind::Form { title, questions } = &asked[0] else {
+        panic!("expected a form, got {:?}", asked[0]);
+    };
+    assert_eq!(
+        title.as_deref(),
+        Some("test: Please say how it should be built"),
+        "the card names the server that is asking"
+    );
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0].header.as_deref(), Some("Store"));
+    assert_eq!(
+        questions[0]
+            .options
+            .iter()
+            .map(|option| (option.id.as_str(), option.label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("postgres", "Postgres"), ("sqlite", "SQLite")]
+    );
+    assert!(
+        !questions[0].free_text,
+        "a named value is chosen, never typed"
+    );
+    assert!(
+        questions[1].free_text && questions[1].options.is_empty(),
+        "a plain string is answered in words"
+    );
+}
+
+/// Leaving the card is `cancel`; a question the server required and nobody
+/// answered is `decline`. Both reach the server, which is what lets it decide
+/// whether to offer an alternative or ask again later.
+#[tokio::test]
+async fn leaving_the_card_cancels_and_an_unanswered_requirement_declines() {
+    let (cancelled, _) = elicited(Answer::Cancel).await;
+    assert_eq!(cancelled, json!({ "action": "cancel" }));
+
+    let (declined, _) = elicited(Answer::Form {
+        answers: vec![Answer::Cancel, Answer::Cancel],
+    })
+    .await;
+    assert_eq!(
+        declined,
+        json!({ "action": "decline" }),
+        "the store was required"
+    );
+}
+
+/// Nobody at the session is the fail-closed fate a question already meets
+/// there (ADR-0039 §2): the server hears a decline rather than waiting.
+#[tokio::test]
+async fn a_call_with_nobody_to_ask_declines() {
+    let (manager, _data) = connected().await;
+    let tool = tool_named(&manager, "mcp__test__ask").await;
+    let output = call(&tool, json!({ "text": "go" })).await;
+    let text = text_of(&output);
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).ok(),
+        Some(json!({ "action": "cancel" })),
+        "the null door leaves the card: {text}"
+    );
 }
 
 #[tokio::test]
@@ -429,7 +582,7 @@ async fn a_server_that_hangs_holds_up_neither_the_others_nor_the_source() {
 
     assert_eq!(
         source.tools().await.len(),
-        4,
+        5,
         "the server that answered is offered while the other is still dialling"
     );
     assert_eq!(
@@ -475,7 +628,7 @@ async fn a_server_that_never_answers_fails_at_the_deadline() {
 async fn disabling_a_server_takes_its_tools_out_of_the_source() {
     let (manager, _data) = connected().await;
     let source = McpSource::new(Arc::clone(&manager));
-    assert_eq!(source.tools().await.len(), 4);
+    assert_eq!(source.tools().await.len(), 5);
 
     let command = McpCommand::new(Arc::clone(&manager));
     let outcome = command
@@ -510,7 +663,7 @@ async fn reconnecting_dials_the_server_again() {
     );
     assert_eq!(
         settles(&manager, "test", connected_status).await,
-        Status::Connected { tools: 4 }
+        Status::Connected { tools: 5 }
     );
 }
 
@@ -546,7 +699,7 @@ async fn a_disabled_server_is_enabled_before_it_is_dialled_again() {
     );
     assert_eq!(
         settles(&manager, "test", connected_status).await,
-        Status::Connected { tools: 4 }
+        Status::Connected { tools: 5 }
     );
 }
 

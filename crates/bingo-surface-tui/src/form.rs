@@ -232,20 +232,38 @@ fn bare(key: KeyEvent) -> bool {
     (key.modifiers - KeyModifiers::SHIFT).is_empty()
 }
 
+/// What the card is asked under: what the whole set is about where the asker
+/// said, who asked where it was not this session, and the room inside the box.
+#[derive(Clone, Copy, Debug)]
+pub struct Head<'a> {
+    pub title: Option<&'a str>,
+    pub agent: Option<&'a str>,
+    pub width: usize,
+}
+
 /// The card, as the lines inside it. Every row carries the option it belongs
 /// to, as the dialog's do, so a click lands where the eye is.
 ///
-/// `width` is the room inside the box. The preview stands beside the options
-/// when there is width for it and above them when there is not — never below,
-/// because what gives way on a short screen is whatever sits above the
-/// answers (design §2).
+/// The first row is what [`crate::layers::card`] keeps whatever else gives
+/// way: the title where the asker gave one, else the tabs. The preview stands
+/// beside the options where there is width for it and above them where there
+/// is not — never below, because what gives way on a short screen is whatever
+/// sits above the answers (design §2).
 pub fn rows(
     form: &Form,
     focus: usize,
     questions: &[Question],
-    width: usize,
+    at: Head<'_>,
 ) -> Vec<(Line<'static>, Option<usize>)> {
-    let mut out = Vec::new();
+    let width = at.width;
+    let tabs = tabs(form, questions);
+    let mut out = match at.title {
+        Some(title) => vec![
+            (Line::from(head(title, at.agent)), None),
+            (Line::from(tabs), None),
+        ],
+        None => vec![(Line::from(with_agent(tabs, at.agent)), None)],
+    };
     let Some(question) = questions.get(form.tab) else {
         return out;
     };
@@ -271,10 +289,22 @@ pub fn rows(
     out
 }
 
-/// The card's own title: the headers, the one on screen bright and the ones
-/// already settled ticked. Spans rather than a line, because what asked is
-/// named after them and that is the dialog's to add.
-pub fn tabs(form: &Form, questions: &[Question]) -> Vec<Span<'static>> {
+/// One card's head: what it is, and who asked where that was not the session
+/// on screen (ADR-0010 §3). Every card's, so a form's title and a permission's
+/// tool name are named the same way.
+pub fn head(title: &str, agent: Option<&str>) -> Vec<Span<'static>> {
+    with_agent(vec![Span::styled(title.to_string(), theme::bold())], agent)
+}
+
+fn with_agent(mut spans: Vec<Span<'static>>, agent: Option<&str>) -> Vec<Span<'static>> {
+    if let Some(agent) = agent {
+        spans.push(Span::styled(format!(" · {agent}"), theme::presence()));
+    }
+    spans
+}
+
+/// The headers, the one on screen bright and the ones already settled ticked.
+fn tabs(form: &Form, questions: &[Question]) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (tab, question) in questions.iter().enumerate() {
         if tab > 0 {
@@ -717,10 +747,19 @@ mod tests {
 
     /// One row per line of the card, as a person reads them.
     fn drawn(form: &Form, focus: usize, questions: &[Question], width: usize) -> Vec<String> {
-        rows(form, focus, questions, width)
-            .into_iter()
-            .map(|(line, _)| line.spans.iter().map(|s| s.content.to_string()).collect())
-            .collect()
+        rows(
+            form,
+            focus,
+            questions,
+            Head {
+                title: None,
+                agent: None,
+                width,
+            },
+        )
+        .into_iter()
+        .map(|(line, _)| line.spans.iter().map(|s| s.content.to_string()).collect())
+        .collect()
     }
 
     #[test]

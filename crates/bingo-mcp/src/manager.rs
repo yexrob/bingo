@@ -268,6 +268,7 @@ fn tools_of(server: &str, state: &State) -> Vec<Arc<dyn Tool>> {
                 server,
                 listed,
                 Arc::clone(&connection.service),
+                Arc::clone(&connection.asker),
             )) as Arc<dyn Tool>
         })
         .collect()
