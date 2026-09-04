@@ -342,6 +342,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let config = host_config(&cli, &cwd)?;
     let demo = demo_ui(&cli, &config.layers);
     let listening = channels_wanted(&cli, &config.layers);
+    let cache_days = picture_cache_days(&config.layers)?;
     let host = Host::build(plugins(demo)?, config)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
@@ -353,15 +354,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
         return code;
     }
     let env = Arc::new(environment(&cwd));
-    let (id, options) = match work {
-        Work::Rpc { stdio } => ("rpc", serve_options(stdio, cwd.clone(), env.clone())?),
-        Work::Channels | Work::Gateway => (
-            bingo_channels::SURFACE_ID,
-            channel_options(cwd.clone(), env.clone()),
-        ),
-        Work::Session if interactive => ("tui", surface_options(cli, cwd.clone(), env.clone())),
-        Work::Session => ("print", surface_options(cli, cwd.clone(), env.clone())),
-    };
+    let (id, options) = surface_for(work, cli, &cwd, &env, interactive, cache_days)?;
     let beside = match listening && id != bingo_channels::SURFACE_ID {
         true => start_channels(&host, channel_options(cwd, env)),
         false => None,
@@ -386,6 +379,24 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     }
     host.shutdown().await;
     exit.map(|e| e.code)
+}
+
+/// Which surface does the work, and what it is handed.
+fn surface_for(
+    work: Work,
+    cli: Cli,
+    cwd: &std::path::Path,
+    env: &Arc<Env>,
+    interactive: bool,
+    cache_days: Option<u64>,
+) -> Result<(&'static str, SurfaceOptions), KernelError> {
+    let (cwd, env) = (cwd.to_path_buf(), env.clone());
+    Ok(match work {
+        Work::Rpc { stdio } => ("rpc", serve_options(stdio, cwd, env)?),
+        Work::Channels | Work::Gateway => (bingo_channels::SURFACE_ID, channel_options(cwd, env)),
+        Work::Session if interactive => ("tui", surface_options(cli, cwd, env, cache_days)),
+        Work::Session => ("print", surface_options(cli, cwd, env, cache_days)),
+    })
 }
 
 /// What this command line is for, decided before anything is built.
@@ -680,7 +691,12 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     Ok(config)
 }
 
-fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
+fn surface_options(
+    cli: Cli,
+    cwd: PathBuf,
+    env: Arc<Env>,
+    cache_days: Option<u64>,
+) -> SurfaceOptions {
     SurfaceOptions {
         selector: selector(&cli, cwd.clone()),
         cwd,
@@ -691,9 +707,18 @@ fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
             "permissionPromptTool": cli.permission_prompt_tool.map(PromptTool::as_str),
             "noPrintOnExit": cli.no_print_on_exit,
             "images": cli.image,
+            "pictureCacheDays": cache_days,
         }),
         env,
     }
+}
+
+/// How long a fetched picture is kept, as the settings layers have it (M61).
+/// The surface that builds a loader reads it out of its own options; the
+/// default is the cache's, so a run that is told nothing is told nothing.
+fn picture_cache_days(layers: &[settings::Layer]) -> Result<Option<u64>, KernelError> {
+    settings::picture_cache_days(layers)
+        .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))
 }
 
 /// Which session the run is about: a new one unless told to reopen.
