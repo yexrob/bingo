@@ -16,6 +16,7 @@ use ratatui::text::{Line, Span};
 use crate::clock::Now;
 use crate::composer::Composer;
 use crate::effect::Effect;
+use crate::form::{self, Form};
 use crate::{preview, theme};
 
 /// What one row of the dialog does when it is chosen.
@@ -48,6 +49,10 @@ pub struct Dialog {
     pub chosen: Vec<String>,
     /// Answered, waiting for the frame that closes it.
     pub answered: bool,
+    /// A form's own state: which question is on screen, and what each of the
+    /// others was left on. `focus` is still the cursor of the one on screen,
+    /// so every key, click and window here works on a form unchanged.
+    pub form: Form,
 }
 
 impl Dialog {
@@ -72,6 +77,10 @@ impl Dialog {
         }
         if key.code == KeyCode::Esc {
             return self.send(interaction, cancel(interaction));
+        }
+        if let InteractionKind::Form { questions } = &interaction.kind {
+            let answer = form::on_key(&mut self.form, &mut self.focus, questions, key);
+            return self.send(interaction, answer);
         }
         if self.words.is_some() {
             let done = self
@@ -344,8 +353,14 @@ pub fn rows(
     interaction: &Interaction,
     agent: Option<&str>,
     cwd: &str,
+    width: usize,
 ) -> Vec<(Line<'static>, Option<usize>)> {
-    let mut out = vec![(title(interaction, agent), None)];
+    let mut out = vec![(title(dialog, interaction, agent), None)];
+    if let InteractionKind::Form { questions } = &interaction.kind {
+        out.extend(form::rows(&dialog.form, dialog.focus, questions, width));
+        out.extend(answering(dialog));
+        return out;
+    }
     out.extend(
         body(dialog, interaction)
             .into_iter()
@@ -362,34 +377,48 @@ pub fn rows(
                 .map(|line| (line, Some(index))),
         );
     }
-    if dialog.answered {
-        out.push((
-            Line::from(Span::styled(
-                format!("  {} waiting for the kernel", theme::ellipsis()),
-                theme::dim(),
-            )),
-            None,
-        ));
-    }
+    out.extend(answering(dialog));
     out
 }
 
-/// What kind of card this is, in one word a person reads first.
-fn title(interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
-    let name = match &interaction.kind {
-        InteractionKind::Permission { tool, .. } => tool.clone(),
-        InteractionKind::Question(Question { header, .. }) => {
-            header.clone().unwrap_or_else(|| "Question".to_string())
-        }
-        InteractionKind::Form { .. } => "Questions".to_string(),
-        InteractionKind::Confirm { title, .. } => title.clone(),
-        InteractionKind::Login { provider, .. } => format!("Sign in to {provider}"),
+/// The mark of an answer already sent: it stays on screen until the frame that
+/// closes the card arrives.
+fn answering(dialog: &Dialog) -> Vec<(Line<'static>, Option<usize>)> {
+    if !dialog.answered {
+        return Vec::new();
+    }
+    vec![(
+        Line::from(Span::styled(
+            format!("  {} waiting for the kernel", theme::ellipsis()),
+            theme::dim(),
+        )),
+        None,
+    )]
+}
+
+/// What kind of card this is, in one word a person reads first — for a form,
+/// the tab row, which is the one row that may never give way.
+fn title(dialog: &Dialog, interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
+    let mut spans = match &interaction.kind {
+        InteractionKind::Form { questions } => form::tabs(&dialog.form, questions),
+        _ => vec![Span::styled(named(interaction), theme::bold())],
     };
-    let mut spans = vec![Span::styled(name, theme::bold())];
     if let Some(agent) = agent {
         spans.push(Span::styled(format!(" · {agent}"), theme::presence()));
     }
     Line::from(spans)
+}
+
+fn named(interaction: &Interaction) -> String {
+    match &interaction.kind {
+        InteractionKind::Permission { tool, .. } => tool.clone(),
+        InteractionKind::Question(Question { header, .. }) => {
+            header.clone().unwrap_or_else(|| "Question".to_string())
+        }
+        InteractionKind::Confirm { title, .. } => title.clone(),
+        InteractionKind::Login { provider, .. } => format!("Sign in to {provider}"),
+        InteractionKind::Form { .. } => "Questions".to_string(),
+    }
 }
 
 /// The one line that asks. A permission asks about the call the kernel

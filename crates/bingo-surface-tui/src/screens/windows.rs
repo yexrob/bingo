@@ -204,6 +204,40 @@ fn crowded_question(focus: usize) -> (Tree, Ui, Now) {
     (tree, ui, now)
 }
 
+/// A form of four questions whose first has a dozen options and a mockup on
+/// each: the tab row, the answers and the one under the cursor all want the
+/// same short screen.
+fn crowded_form(focus: usize) -> (Tree, Ui, Now) {
+    let mut open = crate::test_support::form();
+    if let bingo_sdk::InteractionKind::Form { questions } = &mut open.kind {
+        questions[0].options = (1..=12)
+            .map(|i| bingo_sdk::QuestionOption {
+                id: format!("o{i}"),
+                label: format!("option {i:02}"),
+                description: Some(format!("what option {i:02} means")),
+                role: None,
+                preview: Some(format!("a mockup of {i:02}\nover two rows")),
+            })
+            .collect();
+    }
+    let (tree, mut ui, now) = super::asked(open);
+    ui.dialog.focus = focus;
+    (tree, ui, now)
+}
+
+/// The tab row is the card's title, so it is the row [`layers::card`] keeps
+/// whatever else gives way; the answers keep their window around the cursor,
+/// and the mockup costs no row at all because it stands beside them.
+#[test]
+fn a_form_keeps_its_tabs_and_the_answer_the_cursor_is_on() {
+    let (tree, ui, now) = crowded_form(11);
+    let screen = shot("form_end", &tree, &ui, now);
+    assert!(marked(&screen).contains("option 12"), "{screen}");
+    assert_eq!(cuts(&screen), 1);
+    assert!(screen.contains("Auth method"), "the tabs stay: {screen}");
+    assert!(screen.contains("Targets"), "all of them: {screen}");
+}
+
 /// The answers are what the card was opened for, so they are what keeps the
 /// room: the preview above them still gives way first (§10, 2026-08-31).
 #[test]

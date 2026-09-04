@@ -769,6 +769,9 @@ mod tests {
                 &[
                     "composer.rs",
                     "dialog.rs",
+                    // The question a form is on, and the option under its
+                    // cursor: the same weight the dialog's rows wear.
+                    "form.rs",
                     "markdown.rs",
                     "pager.rs",
                     "panel.rs",
@@ -803,6 +806,9 @@ mod tests {
                     "composer.rs",
                     "composer/strip.rs",
                     "dialog.rs",
+                    // A form's tabs it is not on, the descriptions, and the
+                    // preview pane — a mockup is read past, so it is dim.
+                    "form.rs",
                     "keys.rs",
                     "layers.rs",
                     "markdown.rs",

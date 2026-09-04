@@ -507,6 +507,73 @@ pub fn question(multi: bool, free_text: bool) -> Interaction {
     )
 }
 
+/// Three questions asked together, the first with a mockup on each option
+/// (M53). What one `AskUserQuestion` call opens.
+pub fn form() -> Interaction {
+    interaction(
+        InteractionKind::Form {
+            questions: vec![
+                asked_with(
+                    "Auth method",
+                    "Which authentication method?",
+                    &[
+                        ("OAuth", Some("Redirect to the provider"), Some(OAUTH)),
+                        ("API key", Some("A key in the header"), Some(KEY)),
+                    ],
+                    false,
+                ),
+                asked_with(
+                    "Library",
+                    "Which HTTP library?",
+                    &[("reqwest", None, None), ("hyper", None, None)],
+                    false,
+                ),
+                asked_with(
+                    "Targets",
+                    "Which targets should the release build?",
+                    &[
+                        ("linux", None, None),
+                        ("macos", None, None),
+                        ("windows", None, None),
+                    ],
+                    true,
+                ),
+            ],
+        },
+        vec![AnswerSpec::Form, AnswerSpec::Cancel],
+    )
+}
+
+const OAUTH: &str = "GET  /authorize?client_id=…\n302  /callback?code=…\nPOST /token";
+const KEY: &str = "Authorization: Bearer <key>";
+
+/// One question of a form: its header, its words, and its options as
+/// (label, description, preview).
+fn asked_with(
+    header: &str,
+    question: &str,
+    options: &[(&str, Option<&str>, Option<&str>)],
+    multi: bool,
+) -> bingo_sdk::Question {
+    bingo_sdk::Question {
+        question: question.into(),
+        header: Some(header.into()),
+        options: options
+            .iter()
+            .enumerate()
+            .map(|(index, (label, description, preview))| QuestionOption {
+                id: index.to_string(),
+                label: (*label).into(),
+                description: description.map(str::to_owned),
+                role: None,
+                preview: preview.map(str::to_owned),
+            })
+            .collect(),
+        free_text: true,
+        multi,
+    }
+}
+
 pub fn confirm() -> Interaction {
     interaction(
         InteractionKind::Confirm {

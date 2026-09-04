@@ -61,13 +61,15 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if key.code == KeyCode::Esc {
         return escape(ui, tree, now);
     }
-    if key.code == KeyCode::Tab && suggestions(ui, tree).is_empty() && cycle_focus(ui, tree) {
-        return Vec::new();
-    }
     // A prompt raised anywhere in the tree is answered from wherever the
-    // person is looking; the handle routes the answer back to who asked.
+    // person is looking; the handle routes the answer back to who asked. It
+    // comes before the chords a card has a use of its own for — a form's
+    // `tab` walks its questions (M53) — as every layer that captures does.
     if let Some((_, interaction)) = tree.open_interaction() {
         return ui.dialog.on_key(interaction, key, now);
+    }
+    if key.code == KeyCode::Tab && suggestions(ui, tree).is_empty() && cycle_focus(ui, tree) {
+        return Vec::new();
     }
     if let Some(effects) = menu(ui, tree, key) {
         return effects;
@@ -1360,6 +1362,59 @@ mod tests {
         assert!(
             press(&mut ui, &state, typed('1'), now).is_empty(),
             "an answered dialog sends nothing more"
+        );
+    }
+
+    /// One card, one key path (M53): the same routing that answers a
+    /// permission walks a form's tabs and sends every answer at once.
+    #[test]
+    fn a_form_is_answered_once_for_all_of_its_questions() {
+        let state = folded(vec![frame(1, opened(crate::test_support::form()))]);
+        let (mut ui, now) = scene();
+        ui.dialog.focus_on(state.interactions.first());
+        for key in [key(KeyCode::Enter), key(KeyCode::Enter), typed(' ')] {
+            assert!(
+                press(&mut ui, &state, key, now).is_empty(),
+                "nothing is sent until the whole form is"
+            );
+        }
+        assert_eq!(
+            press(&mut ui, &state, key(KeyCode::Enter), now),
+            vec![Effect::Answer {
+                interaction: state.interactions[0].id.clone(),
+                answer: Answer::Form {
+                    answers: vec![
+                        Answer::Choice {
+                            ids: vec!["0".into()]
+                        },
+                        Answer::Choice {
+                            ids: vec!["0".into()]
+                        },
+                        Answer::Choice {
+                            ids: vec!["0".into()]
+                        },
+                    ],
+                },
+                activation: Activation::Keyboard,
+            }]
+        );
+    }
+
+    /// `esc` is the card's rung of the one stack, and a form's whole set is
+    /// what it leaves (§7).
+    #[test]
+    fn esc_leaves_the_whole_form() {
+        let state = folded(vec![frame(1, opened(crate::test_support::form()))]);
+        let (mut ui, now) = scene();
+        ui.dialog.focus_on(state.interactions.first());
+        press(&mut ui, &state, key(KeyCode::Enter), now);
+        assert_eq!(
+            press(&mut ui, &state, key(KeyCode::Esc), now),
+            vec![Effect::Answer {
+                interaction: state.interactions[0].id.clone(),
+                answer: Answer::Cancel,
+                activation: Activation::Keyboard,
+            }]
         );
     }
 
