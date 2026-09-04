@@ -11,6 +11,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{theme, views};
 
+mod spaced;
+
 /// What this renderer understands beyond CommonMark: GFM's strikethrough and
 /// its tables, which go to the one table renderer (design §5).
 const GFM: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TABLES);
@@ -25,8 +27,9 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
 /// one caller that can draw them ([`crate::transcript`]). Every other caller
 /// wants the lines alone, and gets the chip that names each picture in them.
 pub fn rendered(text: &str, width: usize) -> Rendered {
+    let text = spaced::mended(text);
     let mut out = Writer::new(width);
-    for event in Parser::new_ext(text, GFM) {
+    for event in Parser::new_ext(&text, GFM) {
         out.event(event);
     }
     out.finish()
@@ -672,6 +675,15 @@ mod tests {
         let spaced = rendered("![two words](<my shots/a b.png>)", 40);
         assert_eq!(spaced.images[0].dest, "my shots/a b.png");
         assert_eq!(text(&spaced.lines), vec!["[image: two words]"]);
+    }
+
+    /// The same path written bare, the way a shell shows it, is the same
+    /// picture: the brackets CommonMark wants are supplied before it reads.
+    #[test]
+    fn a_bare_path_with_spaces_is_still_a_picture() {
+        let bare = rendered("![two words](my shots/a b.png)", 40);
+        assert_eq!(bare.images[0].dest, "my shots/a b.png");
+        assert_eq!(text(&bare.lines), vec!["[image: two words]"]);
     }
 
     /// A picture nobody named is named by where it is: an empty alt would
