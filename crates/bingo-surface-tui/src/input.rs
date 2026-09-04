@@ -20,11 +20,14 @@ use crate::mentions;
 use crate::pager;
 use crate::rail::{self, CardId, Pin};
 use crate::rewind::{self, Rewind};
-use crate::roster;
 use crate::search::Search;
-use crate::tree::{self, Tree};
-use crate::ui::{Open, Pending, Switcher, Ui};
+use crate::tree::Tree;
+use crate::ui::{Open, Pending, Ui};
 use crate::{panel, permission, views};
+
+mod switcher;
+
+pub(crate) use switcher::walk_to;
 
 /// What the first ctrl+c on an empty composer says.
 pub const ARM_HINT: &str = "press ctrl+c again to exit";
@@ -79,10 +82,11 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
 
 /// What a layer answers, and the chords that open one.
 ///
-/// A list and the pager own every key while they are up — the chords included,
-/// so `g` is the pager's and not the switcher's for as long as a block is open.
-/// The panel and the switcher leave the chords alone, because the chord that
-/// opened one is what closes it.
+/// A list and the pager own every key while they are up — the layer chords
+/// included, so `g` is the pager's and not the switcher's for as long as a
+/// block is open. The panel and the switcher leave those chords alone, because
+/// the chord that opened one is what closes it; a chord that edits a line
+/// ([`LAYERS`] does not name it) belongs to whoever is being typed into.
 fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effect>> {
     if ui.layer.captures() {
         match &ui.layer.open {
@@ -93,12 +97,20 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
         }
     }
     if let Some(chord) = chorded(key) {
+        // `ctrl+g` closes the list below; every other chord here opens
+        // something over it. Either way the list goes, so the draft it set
+        // aside comes back to the box first (M58) — otherwise the query a
+        // person typed would be left there for `⏎` to send.
+        if chord != switcher::CHORD {
+            switcher::put_away(ui, now);
+        }
         match chord {
             'f' => ui.search = Some(Search::open()),
-            'g' => return Some(toggle_switcher(ui, tree, now)),
+            switcher::CHORD => return Some(switcher::toggle(ui, tree, now)),
             't' => ui.layer.toggle(Open::Panel, now.instant),
             'o' => deepen(ui, tree, now),
             'b' => return Some(background(ui, tree, now)),
+            // No other chord reaches here: `LAYERS` is what `chorded` answers.
             _ => return None,
         }
         return Some(Vec::new());
@@ -108,14 +120,20 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
     }
     Some(match ui.layer.open {
         Open::Panel => panel_keys(ui, tree, key, now),
-        _ => switcher(ui, tree, key, now),
+        _ => switcher::keys(ui, tree, key, now),
     })
 }
 
-/// The letter of a control chord, if that is what this key is.
+/// The control chords that open a layer of their own — the one table there is
+/// of them. Every other control chord is the line's ([`control`]): `ctrl+w`
+/// deletes a word wherever a person is typing, the list's own query included,
+/// so it must not be mistaken for a layer's key.
+const LAYERS: [char; 5] = ['f', switcher::CHORD, 't', 'o', 'b'];
+
+/// The letter of a layer's control chord, if that is what this key is.
 fn chorded(key: KeyEvent) -> Option<char> {
     match (key.code, key.modifiers.contains(KeyModifiers::CONTROL)) {
-        (KeyCode::Char(c), true) => Some(c),
+        (KeyCode::Char(c), true) if LAYERS.contains(&c) => Some(c),
         _ => None,
     }
 }
@@ -560,158 +578,6 @@ fn step(ui: &mut Ui, by: isize, now: Now) {
     ui.scroll.show(hit.line, total, rows, now.instant);
 }
 
-/// `↓` on an empty composer is the list's other door — but only where there is
-/// somewhere to go. Alone in the tree the key keeps the meaning it has always
-/// had rather than putting up a list of one.
-fn opens_the_roster(ui: &Ui, tree: &Tree) -> bool {
-    ui.composer.is_empty() && tree.rows().len() > 1
-}
-
-/// Open the list on the session in view, or close it again. What this
-/// attachment carries is on the list at once; what is only in the store lands
-/// when the read the opening spawns comes back, which is why it goes up even
-/// where the tree is the root alone.
-fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
-    if ui.layer.showing() {
-        ui.layer.close(now.instant);
-        return Vec::new();
-    }
-    let rows = tree::roster(tree, &[]);
-    ui.layer.show(
-        Open::Switcher(Switcher {
-            cursor: roster::Cursor::on(&roster::listing(tree, &rows, ""), tree.view()),
-            query: String::new(),
-            stored: Vec::new(),
-            // Where the walk started, so `esc` can put it back.
-            from: Some(tree.view().clone()),
-        }),
-        now.instant,
-    );
-    vec![Effect::ListStored]
-}
-
-/// The list owns the keyboard while it is up: `↑`/`↓` walk the one column,
-/// labels and all, and the view goes with the cursor — walking the list *is*
-/// the switch, as the strip's walk was (§3). A printable key narrows the list
-/// instead (M55) and moves the cursor the same way. `⏎` settles on where the
-/// walk landed; `esc` takes the query back, and with none gives back where the
-/// list was opened from.
-fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    if let Some((cursor, chosen)) = walked(ui, tree, key) {
-        return walk_to(ui, tree, cursor, chosen);
-    }
-    match queried(ui, key) {
-        Some(query) => narrow(ui, tree, query),
-        None => settle(ui, tree, key, now),
-    }
-}
-
-/// Where the arrows move the cursor, and the session that lands under it.
-/// `None` says the key was not one of the list's own.
-fn walked(ui: &Ui, tree: &Tree, key: KeyEvent) -> Option<(roster::Cursor, Option<SessionId>)> {
-    let Open::Switcher(open) = &ui.layer.open else {
-        return None;
-    };
-    let rows = tree::roster(tree, &open.stored);
-    let listing = roster::listing(tree, &rows, &open.query);
-    let cursor = match key.code {
-        KeyCode::Up => open.cursor.step(&listing, -1),
-        KeyCode::Down => open.cursor.step(&listing, 1),
-        _ => return None,
-    };
-    Some((cursor, cursor.row(&listing).map(|row| row.session.clone())))
-}
-
-/// What a key leaves the query as: a printable character appends to it,
-/// backspace takes one back. `None` says the key was not the query's — an
-/// empty query has no backspace to answer, so `esc esc` is not stolen from it.
-fn queried(ui: &Ui, key: KeyEvent) -> Option<String> {
-    let Open::Switcher(open) = &ui.layer.open else {
-        return None;
-    };
-    let mut query = open.query.clone();
-    match key.code {
-        KeyCode::Char(c) => query.push(c),
-        KeyCode::Backspace if !query.is_empty() => {
-            query.pop();
-        }
-        _ => return None,
-    }
-    Some(query)
-}
-
-/// The list once the query is this. The cursor keeps the session it was on
-/// where the query left that row on the list, and takes the first row there is
-/// where it did not; the view follows the cursor as it does on a walk, so `⏎`
-/// keeps what a person is looking at.
-fn narrow(ui: &mut Ui, tree: &Tree, query: String) -> Vec<Effect> {
-    let Open::Switcher(open) = &ui.layer.open else {
-        return Vec::new();
-    };
-    let was = open.session(tree, open.cursor);
-    if let Open::Switcher(open) = &mut ui.layer.open {
-        open.query = query;
-    }
-    let (cursor, chosen) = placed(ui, tree, was.as_ref());
-    walk_to(ui, tree, cursor, chosen)
-}
-
-/// Where the cursor sits on the list as it stands, for the session it was on:
-/// that row where the query left it, and the first row where it did not.
-fn placed(ui: &Ui, tree: &Tree, was: Option<&SessionId>) -> (roster::Cursor, Option<SessionId>) {
-    let Open::Switcher(open) = &ui.layer.open else {
-        return (roster::Cursor::default(), None);
-    };
-    let rows = tree::roster(tree, &open.stored);
-    let listing = roster::listing(tree, &rows, &open.query);
-    let cursor = was
-        .map(|id| roster::Cursor::on(&listing, id))
-        .unwrap_or_default();
-    (cursor, cursor.row(&listing).map(|row| row.session.clone()))
-}
-
-/// Put the cursor there and show what it names. A session already on screen
-/// asks for no switch: the crossfade reports a change of place, and there was
-/// none.
-pub(crate) fn walk_to(
-    ui: &mut Ui,
-    tree: &Tree,
-    cursor: roster::Cursor,
-    chosen: Option<SessionId>,
-) -> Vec<Effect> {
-    if let Open::Switcher(open) = &mut ui.layer.open {
-        open.cursor = cursor;
-    }
-    chosen
-        .filter(|id| id != tree.view())
-        .map(|id| vec![Effect::View(id)])
-        .unwrap_or_default()
-}
-
-/// `⏎` keeps the session the walk landed on — it is already the one on screen,
-/// so settling is only closing the list. `esc` is §7's stack: the query a
-/// person typed is the first thing it takes back, and the list itself the next,
-/// putting back the session it was opened from.
-fn settle(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    let Open::Switcher(open) = &ui.layer.open else {
-        return Vec::new();
-    };
-    let opened_from = open.from.clone();
-    let queried = !open.query.is_empty();
-    match key.code {
-        KeyCode::Enter => ui.layer.close(now.instant),
-        KeyCode::Esc if queried => return narrow(ui, tree, String::new()),
-        KeyCode::Esc => {
-            ui.layer.close(now.instant);
-            return opened_from
-                .map(|id| vec![Effect::View(id)])
-                .unwrap_or_default();
-        }
-        _ => {}
-    }
-    Vec::new()
-}
-
 /// The dropdown owns the arrows and the completion keys while it is open.
 fn menu(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
     let rows = suggestions(ui, tree);
@@ -793,7 +659,7 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Up => history_or_line(ui, Step::Up),
         // The list's other door: `↓` on an empty box opens the same list
         // `ctrl+g` does, with the cursor on the session already in view.
-        KeyCode::Down if opens_the_roster(ui, tree) => return toggle_switcher(ui, tree, now),
+        KeyCode::Down if switcher::opens(ui, tree) => return switcher::toggle(ui, tree, now),
         KeyCode::Down => history_or_line(ui, Step::Down),
         KeyCode::PageUp => scroll(ui, ui.page() as isize, now),
         KeyCode::PageDown => scroll(ui, -(ui.page() as isize), now),
@@ -939,6 +805,7 @@ fn edit(ui: &mut Ui, change: impl FnOnce(&mut crate::composer::Composer)) {
 mod tests {
     use super::*;
     use crate::pointer::{WHEEL, on_mouse};
+    use crate::roster;
     use crate::test_support::*;
     use bingo_sdk::{Activation, Answer, SessionId, TurnId, TurnStatus};
     use crossterm::event::KeyCode;
@@ -1839,7 +1706,7 @@ mod tests {
         );
     }
 
-    // ---- the list is typed into (M55) -----------------------------------
+    // ---- the list is typed into (M55, re-cut by M58) ---------------------
 
     /// A root with two sub-agents under it, so a query has rows to leave out:
     /// `project`, `reviewer`, `scout`.
@@ -1850,10 +1717,10 @@ mod tests {
         ])
     }
 
-    /// What has been typed into the list.
-    fn query(ui: &Ui) -> String {
+    /// The line the list set aside when it went up, if it is up.
+    fn draft(ui: &Ui) -> String {
         match &ui.layer.open {
-            Open::Switcher(switcher) => switcher.query.clone(),
+            Open::Switcher(switcher) => switcher.draft.clone(),
             _ => String::new(),
         }
     }
@@ -1866,9 +1733,10 @@ mod tests {
         effects
     }
 
-    /// The ask M55 answers: the list narrows as it is typed into, the cursor
-    /// lands on what is left, and the view follows the cursor as it does on a
-    /// walk — so `⏎` keeps what a person is looking at.
+    /// The ask M55 answers, in the shape M58 gave it: what is typed lands in
+    /// the **input box**, the list narrows on it, the cursor lands on what is
+    /// left, and the view follows the cursor as it does on a walk — so `⏎`
+    /// keeps what a person is looking at.
     #[test]
     fn a_typed_query_narrows_the_list_and_the_view_follows_it() {
         let tree = with_agents();
@@ -1876,7 +1744,7 @@ mod tests {
         press_tree(&mut ui, &tree, ctrl('g'), now);
         assert_eq!(selected(&ui), at(0), "it opens on the session in view");
         let effects = typing(&mut ui, &tree, "sco", now);
-        assert_eq!(query(&ui), "sco");
+        assert_eq!(ui.composer.text(), "sco", "the query is the box's line");
         assert_eq!(selected(&ui), at(0), "the one row left is the first row");
         assert_eq!(
             effects,
@@ -1899,7 +1767,7 @@ mod tests {
 
         let effects = press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
         assert!(ui.layer.showing(), "the first `esc` is the query's");
-        assert_eq!(query(&ui), "");
+        assert!(ui.composer.is_empty(), "and it takes the box's line back");
         assert_eq!(
             selected(&ui),
             at(2),
@@ -1916,8 +1784,8 @@ mod tests {
         );
     }
 
-    /// Backspace gives the rows back, and an empty query has no backspace to
-    /// answer — the key is not the query's, so the list keeps it for nobody.
+    /// Backspace gives the rows back a letter at a time, and one on an empty
+    /// box is the box's own no-op — it never reaches the `esc` stack.
     #[test]
     fn backspace_gives_the_rows_back_letter_by_letter() {
         let mut tree = with_agents();
@@ -1928,7 +1796,7 @@ mod tests {
         for _ in 0..3 {
             press_tree(&mut ui, &tree, key(KeyCode::Backspace), now);
         }
-        assert_eq!(query(&ui), "");
+        assert!(ui.composer.is_empty());
         assert_eq!(selected(&ui), at(2), "still on the row it narrowed to");
         press_tree(&mut ui, &tree, key(KeyCode::Backspace), now);
         assert!(ui.layer.showing(), "and the list is still up");
@@ -1944,13 +1812,163 @@ mod tests {
         typing(&mut ui, &tree, "sco", now);
         press_tree(&mut ui, &tree, ctrl('g'), now);
         press_tree(&mut ui, &tree, ctrl('g'), now);
-        assert_eq!(query(&ui), "");
+        assert!(ui.composer.is_empty());
+    }
+
+    /// M58's own ask: the box is the query line, so the line a person was
+    /// writing is set aside while the list is up and is back in the box —
+    /// caret at its end — the moment the list goes, whichever key took it.
+    #[test]
+    fn the_line_being_written_is_set_aside_and_given_back() {
+        let tree = with_agents();
+        // `esc` is a stack: the first press is the query's, the second the
+        // list's (§7).
+        for (closing, presses) in [
+            (key(KeyCode::Enter), 1),
+            (key(KeyCode::Esc), 2),
+            (ctrl('g'), 1),
+        ] {
+            let (mut ui, now) = scene();
+            write(&mut ui, tree.viewed(), "half a thought", now);
+            press_tree(&mut ui, &tree, ctrl('g'), now);
+            assert!(ui.composer.is_empty(), "the box opens the list empty");
+            assert_eq!(draft(&ui), "half a thought", "and the line is kept");
+
+            typing(&mut ui, &tree, "sco", now);
+            assert_eq!(ui.composer.text(), "sco");
+
+            for _ in 0..presses {
+                press_tree(&mut ui, &tree, closing, now);
+            }
+            assert!(!ui.layer.showing());
+            assert_eq!(
+                ui.composer.text(),
+                "half a thought",
+                "the draft is back exactly as it was"
+            );
+        }
+    }
+
+    /// A chord is never the list's own, so it takes the list away and gives
+    /// the draft back before it opens what it opens — a query left in the box
+    /// would be a line `⏎` sends.
+    #[test]
+    fn a_chord_that_opens_something_else_puts_the_list_away() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        write(&mut ui, tree.viewed(), "half a thought", now);
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "sco", now);
+        press_tree(&mut ui, &tree, ctrl('t'), now);
+        assert!(
+            ui.layer.is(&Open::Panel),
+            "the chord's own layer is what is up"
+        );
+        assert_eq!(ui.composer.text(), "half a thought");
+    }
+
+    /// A chord that edits a line edits the query, because the query *is* a
+    /// line: `ctrl+w` takes a word of it and leaves the list up, where a
+    /// layer's chord would have taken the list away.
+    #[test]
+    fn a_word_chord_edits_the_query_and_leaves_the_list_up() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        write(&mut ui, tree.viewed(), "half a thought", now);
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "sco ut", now);
+        press_tree(&mut ui, &tree, ctrl('w'), now);
+        assert_eq!(ui.composer.text(), "sco ", "the last word of the query");
+        assert!(ui.layer.showing(), "and the list is still up");
+        assert_eq!(draft(&ui), "half a thought", "with the draft still aside");
+    }
+
+    /// The box is the list's line while the list is up: nothing it holds
+    /// offers a command or a mention, so no second dropdown is drawn over the
+    /// one that is open.
+    #[test]
+    fn the_query_offers_no_command_of_its_own() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "/mo", now);
+        assert_eq!(ui.composer.text(), "/mo");
+        assert!(
+            ui.suggestions(&tree.viewed().summary.cwd, &[]).is_empty(),
+            "the list owns the line"
+        );
+    }
+
+    // ---- `tab` completes (M58) ------------------------------------------
+
+    /// `tab` completes the name the cursor is on into the box, the way `tab`
+    /// on the `/` dropdown completes a command; the list then holds the one
+    /// row the completed name leaves.
+    #[test]
+    fn tab_completes_the_name_the_cursor_is_on() {
+        let mut tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        assert_eq!(
+            walked_to(&mut ui, &tree, key(KeyCode::Down), now),
+            Some(child_id()),
+        );
+        // The loop applied the `View` the walk asked for.
+        tree.show(&child_id());
+
+        let effects = press_tree(&mut ui, &tree, key(KeyCode::Tab), now);
+        assert_eq!(ui.composer.text(), "reviewer", "the name is in the box");
+        assert_eq!(
+            selected(&ui),
+            at(0),
+            "and the list is the one row it narrowed to"
+        );
+        assert!(
+            effects.is_empty(),
+            "the walk already showed it, so nothing is asked for"
+        );
+        assert!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now).is_empty(),
+            "`⏎` keeps the session the completed name named"
+        );
+        assert!(!ui.layer.showing());
+        assert!(ui.composer.is_empty(), "and the box is the draft's again");
+    }
+
+    /// A room completes as its own `#name`: the sigil is part of what it is
+    /// called, and it is by that name the list finds it again.
+    #[test]
+    fn tab_completes_a_rooms_name_with_its_sigil() {
+        let tree = folded_tree(vec![
+            child_frame(1, announced("reviewer")),
+            log_frame(2, log_announced("#design")),
+        ]);
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "des", now);
+        press_tree(&mut ui, &tree, key(KeyCode::Tab), now);
+        assert_eq!(ui.composer.text(), "#design");
+        assert_eq!(selected(&ui), at(0));
+    }
+
+    /// A list with nothing left on it has no name to complete, and `tab`
+    /// leaves the line a person is typing exactly as it is.
+    #[test]
+    fn tab_completes_nothing_where_the_query_left_no_row() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "zzz", now);
+        press_tree(&mut ui, &tree, key(KeyCode::Tab), now);
+        assert_eq!(ui.composer.text(), "zzz");
+        assert!(ui.layer.showing(), "and the list is still up");
     }
 
     // ---- one list, two doors --------------------------------------------
 
-    /// `↓` means two things and a query changes neither: on an empty composer
-    /// it opens the list, and inside it it walks — the rows the query left.
+    /// `↓` means two things and the box holding a query changes neither: on an
+    /// empty box it opens the list, and inside it it walks — the rows the
+    /// query left — while the line a person typed stays where it was put.
     #[test]
     fn down_opens_the_list_and_then_walks_what_the_query_left() {
         let tree = with_agents();
@@ -1958,6 +1976,7 @@ mod tests {
         press_tree(&mut ui, &tree, key(KeyCode::Down), now);
         // `o` is in `project` and in `scout` and in neither's way.
         typing(&mut ui, &tree, "o", now);
+        assert_eq!(ui.composer.text(), "o", "the box is holding the query");
         assert_eq!(selected(&ui), at(0), "the root is still the row in view");
         assert_eq!(
             walked_to(&mut ui, &tree, key(KeyCode::Down), now),
@@ -1965,6 +1984,11 @@ mod tests {
             "and the step goes to the next row the query left, not the tree's"
         );
         assert_eq!(selected(&ui), at(1));
+        assert_eq!(
+            ui.composer.text(),
+            "o",
+            "the walk is the list's; the box keeps the line it was given"
+        );
     }
 
     /// `↓` on an empty composer opens the same list `ctrl+g` does, and asks

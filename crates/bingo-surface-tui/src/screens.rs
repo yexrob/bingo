@@ -520,8 +520,9 @@ fn the_switcher_dropdown() {
     both("switcher", &tree, &ui, now);
 }
 
-/// M55: the list is typed into. The query stands at its head as one dim line
-/// of what a person typed, and only the rows it matches are under it.
+/// M55, re-cut by M58: the list is typed into and what is typed is in the
+/// **input box**, not on a line of the list's own. Only the rows the box
+/// matches are drawn, and the box under them holds the query.
 #[test]
 fn the_switcher_dropdown_narrowed_by_a_query() {
     let mut frames = busy_child("reviewer");
@@ -532,11 +533,11 @@ fn the_switcher_dropdown_narrowed_by_a_query() {
         &mut ui,
         Open::Switcher(Switcher {
             cursor: on(0),
-            query: "rev".into(),
             ..Default::default()
         }),
         now,
     );
+    ui.composer.set("rev");
     both("switcher_query", &tree, &ui, now);
 }
 
