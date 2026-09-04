@@ -87,7 +87,9 @@ pty.rs` if a scene fits without a network (a temp PNG on disk does).
 
 Pictures in a person's `--print` output (text is text there). Sending a
 markdown picture out through Feishu. Animated GIF. Images inside table
-cells (the chip line falls after the table). A cache across sessions.
+cells (the chip line falls after the table). A cache across sessions —
+*done in M61: a fetched URL is kept under `<data_dir>/pictures/cache`
+for a fortnight, so the same address across sessions is one fetch.*
 
 ## Risks
 

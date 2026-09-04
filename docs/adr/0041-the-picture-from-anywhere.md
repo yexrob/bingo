@@ -63,4 +63,17 @@ the sixel quantiser; `image` alone with ten decoders measures +20.
   `windows` job is the backstop; a `ring`-backed rustls would give the
   local check back and is recorded, not decided.
 
-Refs: ADR-0040, ADR-0001 (library tier), M11e; Plans: M46, M47
+- *2026-09-04, M61:* a picture fetched from the web is kept under
+  `<data_dir>/pictures/cache/<hash of the address>` — beside the file a
+  click hands a viewer (M56), and named by a 128-bit FNV-1a written in
+  `cache.rs` because no digest of that width is in the tree and one
+  crate over the budget is one too many. When it was fetched is the
+  file's own mtime; a write is a temporary name and a rename, so
+  processes sharing the directory are safe. Two weeks by default,
+  `pictures.cacheDays` to change it (a kernel key, ADR-0003 §2), `0`
+  for never. A path is never cached: the file is the cache. And the
+  crate now answers two questions where it answered one — `size` off
+  the header for the frame that has to measure a picture, `fitted` off
+  a thread for the pixels a rectangle of cells holds. No frame decodes.
+
+Refs: ADR-0040, ADR-0001 (library tier), M11e; Plans: M46, M47, M61
