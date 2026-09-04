@@ -407,3 +407,192 @@ fn a_second_process_runs_with_the_schedules_dormant_and_says_who_has_them() {
     );
     holder.stop();
 }
+
+// ---- the wake the model sets (ADR-0019 §8) ------------------------------
+
+/// The one session a run left behind, by the id its directory is named for.
+fn only_session(home: &Path) -> String {
+    let mut ids: Vec<String> = std::fs::read_dir(sessions(home))
+        .unwrap()
+        .flatten()
+        .map(|dir| dir.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ses_"))
+        .collect();
+    assert_eq!(ids.len(), 1, "one session, not {ids:?}");
+    ids.remove(0)
+}
+
+/// A wake standing on `session`, coming at `due`. The store is
+/// hand-editable, which is what lets a test say "the moment came" without
+/// waiting for it, and "it has not yet" without waiting either.
+fn write_wake(home: &Path, id: &str, session: &str, note: &str, due: Timestamp) {
+    let dir = schedules(home);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = serde_json::json!({
+        "spec": format!("once at {due}"),
+        "text": note,
+        "cwd": home,
+        "session": session,
+        "enabled": true,
+        "created": (Timestamp::now() - SignedDuration::from_hours(1)).to_string(),
+    });
+    std::fs::write(
+        dir.join(format!("{id}.json")),
+        serde_json::to_string_pretty(&entry).unwrap(),
+    )
+    .unwrap();
+}
+
+/// The tool is trusted and read-only, so this run allows nothing by hand: a
+/// wake that had to be approved could not pace a loop.
+#[test]
+fn the_wake_tool_writes_one_entry_bound_to_the_session_that_set_it() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Wake","input":{
+                "after":"5m",
+                "note":"check whether the build went green"
+            }}}]},
+            {"steps":[{"text":"I will look again in five minutes."}]}
+        ]}"#,
+    );
+    let out = scripted_run(home.path(), &script, &[], "watch the build");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let entry = only_entry(home.path());
+    assert_eq!(entry["session"], only_session(home.path()));
+    assert_eq!(entry["text"], "check whether the build went green");
+    assert!(
+        entry["spec"].as_str().unwrap().starts_with("once at "),
+        "a wake is the model's own once: {entry}"
+    );
+    assert!(
+        entry.get("permissionMode").is_none(),
+        "it wakes a session already in a mode: {entry}"
+    );
+}
+
+/// The other half: the runner delivers the note to that session, marked as a
+/// wake, and the entry is gone once it has.
+#[test]
+fn a_wake_fires_on_the_session_that_set_it_and_leaves_no_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let first = script(r#"{"responses":[{"steps":[{"text":"I will look again."}]}]}"#);
+    let out = scripted_run(home.path(), &first, &[], "watch the build");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let session = only_session(home.path());
+    write_wake(
+        home.path(),
+        "aaaa1111",
+        &session,
+        "look at the build again",
+        Timestamp::now() - SignedDuration::from_mins(1),
+    );
+
+    let woken = script(r#"{"responses":[{"steps":[{"text":"still red, one more look"}]}]}"#);
+    let running = Running::start(home.path(), &woken);
+    let journal = until("the wake opened a turn on the same session", || {
+        std::fs::read_to_string(sessions(home.path()).join(&session).join("journal.jsonl"))
+            .ok()
+            .filter(|j| j.contains("still red, one more look"))
+    });
+    assert!(
+        journal.contains("look at the build again"),
+        "the note is the turn's own input: {journal}"
+    );
+    assert!(
+        journal.contains("\"surface\":\"wake\""),
+        "and it says it is a wake, not a person: {journal}"
+    );
+    until("the spent wake was forgotten", || {
+        (!schedules(home.path()).join("aaaa1111.json").exists()).then_some(())
+    });
+    running.stop();
+}
+
+/// What a person types to see the wake and to end it, through the binary: the
+/// same session, resumed, so `/wake` is asked of the session the wake stands
+/// on rather than a fresh one.
+#[test]
+fn the_wake_command_shows_what_stands_and_off_ends_it() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(r#"{"responses":[{"steps":[{"text":"I will look again."}]}]}"#);
+    let out = scripted_run(home.path(), &script, &[], "watch the build");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let session = only_session(home.path());
+    write_wake(
+        home.path(),
+        "bbbb2222",
+        &session,
+        "look at the build again",
+        // Still to come, so no runner in these processes fires it first.
+        Timestamp::now() + SignedDuration::from_mins(5),
+    );
+
+    let asked = |args: &str| {
+        let out = run_within(
+            bingo()
+                .env("BINGO_FAKE_SCRIPT", script.path())
+                .env("HOME", home.path())
+                .args(["--print", "--resume", &session, "--cwd"])
+                .arg(home.path())
+                .arg(args),
+            PATIENCE,
+        );
+        assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+        stdout(&out)
+    };
+
+    let shown = asked("/wake");
+    assert!(shown.contains("look at the build again"), "{shown}");
+    let ended = asked("/wake off");
+    assert!(ended.contains("the wake set for"), "{ended}");
+    assert!(
+        !schedules(home.path()).join("bbbb2222.json").exists(),
+        "the file is gone: {ended}"
+    );
+    assert!(
+        asked("/wake").contains("no wake is standing"),
+        "and it says so"
+    );
+}
+
+/// The bound a person sets (ADR-0019 §8): the tool is still offered, so a
+/// model that reaches for it is told whose decision it was, and nothing is
+/// written.
+#[test]
+fn wakes_a_person_turned_off_are_refused_and_the_run_still_ends_well() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".bingo");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("settings.json"),
+        r#"{ "schedule": { "wakes": false } }"#,
+    )
+    .unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Wake","input":{
+                "after":"5m",
+                "note":"check the build"
+            }}}]},
+            {"steps":[{"text":"I cannot wake myself here."}]}
+        ]}"#,
+    );
+    let out = scripted_run(home.path(), &script, &[], "watch the build");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !schedules(home.path()).exists()
+            || std::fs::read_dir(schedules(home.path()))
+                .unwrap()
+                .flatten()
+                .all(|f| f.path().extension().is_none_or(|e| e != "json")),
+        "nothing was written"
+    );
+    let said = stdout(&out);
+    assert!(
+        said.contains("schedule.wakes"),
+        "the model is told why: {said}"
+    );
+}
