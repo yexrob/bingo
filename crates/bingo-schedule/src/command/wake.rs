@@ -1,9 +1,9 @@
 //! `/wake`: what the model set itself to come back to, and the person's way
 //! to end it (ADR-0019 §8).
 //!
-//! The store is the record: this reads it, and `off` takes one file away.
-//! There is nothing here to keep in step with the status line, which reads
-//! the same pending wake published from the same entry.
+//! The plugin's own shelf is the record: this reads it, and `off` takes the
+//! wake off it. There is nothing here to keep in step with the status line,
+//! which reads the same pending wake published from the same value.
 
 use std::sync::Arc;
 
@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use bingo_sdk::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, KernelError, View};
 use jiff::tz::TimeZone;
 
-use crate::entry::Entry;
+use crate::render;
 use crate::schedules::Schedules;
-use crate::{render, wake};
+use crate::wake::{self, Wake};
 
 /// The one word this command takes.
 const OFF: &str = "off";
@@ -31,45 +31,35 @@ impl WakeCommand {
         Self { schedules }
     }
 
-    /// The wake standing on this session, read from the store every time.
-    fn standing(&self, cx: &CommandContext) -> Option<Entry> {
-        let shelf = self.schedules.store().load();
-        wake::pending(&shelf, &cx.session).cloned()
+    /// The wake standing on this session, read every time.
+    fn standing(&self, cx: &CommandContext) -> Option<Wake> {
+        self.schedules.wakes().pending(&cx.session)
     }
 
     /// When it comes and what it will say — the two things a person wants of
     /// a wake they did not set themselves.
-    fn shown(&self, standing: Option<Entry>) -> View {
-        let Some(entry) = standing else {
+    fn shown(&self, standing: Option<Wake>) -> View {
+        let Some(wake) = standing else {
             return View::Text { text: NONE.into() };
         };
         View::KeyValue {
-            rows: vec![
-                (
-                    "when".into(),
-                    render::when(entry.next_fire(&TimeZone::system()).as_ref()),
-                ),
-                ("note".into(), entry.text),
-            ],
+            rows: vec![("when".into(), when(&wake)), ("note".into(), wake.note)],
         }
     }
 
-    /// End it: one file goes, and the pending wake is taken back from every
-    /// surface reading it.
+    /// End it, and take the pending wake back from every surface reading it.
     async fn off(&self, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
-        let Some(entry) = self.standing(cx) else {
+        let Some(wake) = self.schedules.wakes().take(&cx.session) else {
             return Ok(applied(NONE.to_string()));
         };
-        if let Err(e) = self.schedules.store().delete(&entry.id) {
-            return Ok(applied(format!("the wake is still there: {e}")));
-        }
-        self.schedules.changed();
         wake::publish(&cx.host, &cx.session, None).await;
-        Ok(applied(format!(
-            "the wake set for {} is off",
-            render::when(entry.next_fire(&TimeZone::system()).as_ref())
-        )))
+        Ok(applied(format!("the wake set for {} is off", when(&wake))))
     }
+}
+
+/// The moment a wake comes, in the person's own zone.
+fn when(wake: &Wake) -> String {
+    render::when(Some(&wake.at.to_zoned(TimeZone::system())))
 }
 
 fn applied(message: String) -> CommandOutcome {
@@ -89,8 +79,7 @@ impl Command for WakeCommand {
             // Not read-only, and instant anyway: a person ending a loop must
             // be able to end it while the loop is running, and waiting for
             // the turn to end is exactly the moment the next wake comes. What
-            // it touches is one file in the agent's own store, which no turn
-            // holds open.
+            // it touches is the plugin's own shelf, which no turn holds open.
             instant: true,
             family: "schedule".into(),
         }
@@ -113,23 +102,23 @@ impl Command for WakeCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entry::tests::entry;
     use crate::tests::Fixture;
     use bingo_sdk::SessionId;
     use jiff::{SignedDuration, Timestamp};
 
-    /// A wake standing on the fixture's own session, five minutes out.
-    fn standing(fixture: &Fixture) -> Entry {
-        let entry = wake::entry(
-            "aaaa1111".into(),
-            &fixture.command().session,
-            &fixture.cwd(),
-            "look at the build again".into(),
+    /// A wake standing on `session`, five minutes out.
+    fn standing(fixture: &Fixture, session: &SessionId) -> Wake {
+        let wake = wake::set(
             Timestamp::now(),
             SignedDuration::from_mins(5),
+            "look at the build again".into(),
         );
-        fixture.schedules.store().save(&entry).expect("a wake");
-        entry
+        fixture.schedules.wakes().set(session, wake.clone());
+        wake
+    }
+
+    fn mine(fixture: &Fixture) -> SessionId {
+        fixture.command().session
     }
 
     async fn run(fixture: &Fixture, args: &str) -> CommandOutcome {
@@ -157,27 +146,24 @@ mod tests {
     #[tokio::test]
     async fn the_pending_wake_is_shown_with_when_it_comes_and_what_it_says() {
         let fixture = Fixture::new();
-        standing(&fixture);
+        standing(&fixture, &mine(&fixture));
         let shown = folded(run(&fixture, "").await);
         assert!(shown.contains("look at the build again"), "{shown}");
         assert!(shown.contains("when"), "{shown}");
     }
 
     #[tokio::test]
-    async fn off_takes_the_file_away_and_leaves_the_rest_of_the_store_alone() {
+    async fn off_ends_the_wake_and_leaves_another_sessions_standing() {
         let fixture = Fixture::new();
-        standing(&fixture);
-        fixture
-            .schedules
-            .store()
-            .save(&entry())
-            .expect("a schedule of a person's own");
+        standing(&fixture, &mine(&fixture));
+        let theirs = SessionId::from_raw("ses_elsewhere");
+        standing(&fixture, &theirs);
         let said = folded(run(&fixture, " off ").await);
         assert!(said.starts_with("the wake set for"), "{said}");
-        assert_eq!(
-            fixture.shelf().ids(),
-            ["abcd1234"],
-            "a person's own schedule is not a wake"
+        assert_eq!(fixture.schedules.wakes().pending(&mine(&fixture)), None);
+        assert!(
+            fixture.schedules.wakes().pending(&theirs).is_some(),
+            "another session's wake is not this one's"
         );
         assert_eq!(
             fixture.host.extended().last().map(|told| told.3.clone()),
@@ -189,26 +175,26 @@ mod tests {
     #[tokio::test]
     async fn another_sessions_wake_is_not_this_ones() {
         let fixture = Fixture::new();
-        let theirs = wake::entry(
-            "bbbb2222".into(),
-            &SessionId::from_raw("ses_elsewhere"),
-            &fixture.cwd(),
-            "not yours".into(),
-            Timestamp::now(),
-            SignedDuration::from_mins(5),
-        );
-        fixture.schedules.store().save(&theirs).expect("a wake");
+        let theirs = SessionId::from_raw("ses_elsewhere");
+        standing(&fixture, &theirs);
         assert_eq!(folded(run(&fixture, "").await), NONE);
-        assert_eq!(fixture.shelf().ids(), ["bbbb2222"], "and off leaves it");
+        assert_eq!(folded(run(&fixture, OFF).await), NONE);
+        assert!(
+            fixture.schedules.wakes().pending(&theirs).is_some(),
+            "and off leaves it"
+        );
     }
 
     #[tokio::test]
     async fn a_word_it_does_not_know_changes_nothing_and_says_what_it_takes() {
         let fixture = Fixture::new();
-        standing(&fixture);
+        standing(&fixture, &mine(&fixture));
         let said = folded(run(&fixture, "never").await);
         assert!(said.contains("/wake off"), "{said}");
-        assert_eq!(fixture.shelf().ids(), ["aaaa1111"], "nothing was ended");
+        assert!(
+            fixture.schedules.wakes().pending(&mine(&fixture)).is_some(),
+            "nothing was ended"
+        );
     }
 
     #[test]

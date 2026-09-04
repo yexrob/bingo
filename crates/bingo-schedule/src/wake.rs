@@ -1,21 +1,15 @@
 //! The wake a model sets on its own session (ADR-0019 §8): the bounds it is
-//! held to, the entry it becomes, and the words a surface reads it by.
+//! held to, what one is, and the words a surface reads it by.
 //!
-//! A wake is the fourth form of a schedule and not a fourth kind of thing: an
-//! entry whose spec is a `once at` and whose `session` names a conversation
-//! that already exists. Everything anyone can say about a pending wake is
-//! read from that entry — there is no second record of one.
-
-use std::path::Path;
+//! A wake is not a schedule. A schedule is a file in a store that one
+//! process per store runs; a wake is the session's own, held and delivered
+//! by the process running that session ([`crate::wakes`]), and it never
+//! touches the store. Everything anyone can say about a pending wake is
+//! read from the one value this module defines — there is no second record.
 
 use bingo_sdk::{HostHandle, Origin, SessionId};
-use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
-
-use crate::entry::Entry;
-use crate::spec::Spec;
-use crate::store::Shelf;
 
 /// The least a wake may be. Anything shorter is a busy loop wearing a
 /// schedule's clothes: the turn that set it has barely ended.
@@ -41,6 +35,13 @@ pub const AT: &str = "at";
 /// What it will say when it does.
 pub const NOTE: &str = "note";
 
+/// One wake: when it comes, and what the next turn opens with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wake {
+    pub at: Timestamp,
+    pub note: String,
+}
+
 /// A wake's interval, held inside the bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Held {
@@ -60,63 +61,31 @@ pub fn hold(asked: SignedDuration) -> Held {
     }
 }
 
-/// The wake standing on `session`, if one does. One per session is the rule,
-/// and the store is where it is read: a second call finds this one and takes
-/// its place.
-pub fn pending<'a>(shelf: &'a Shelf, session: &SessionId) -> Option<&'a Entry> {
-    shelf
-        .entries
-        .iter()
-        .find(|entry| entry.session.as_ref() == Some(session))
-}
-
-/// The entry a wake is: a `once at` this long from now, bound to the session
-/// that asked for it. It carries no permission mode — it wakes a session that
-/// is already in one.
-pub fn entry(
-    id: String,
-    session: &SessionId,
-    cwd: &Path,
-    note: String,
-    now: Timestamp,
-    after: SignedDuration,
-) -> Entry {
-    Entry {
-        id,
+/// The wake that comes `after` now and says `note`.
+pub fn set(now: Timestamp, after: SignedDuration, note: String) -> Wake {
+    Wake {
         // `after` is held to an hour at the most, so this reaches past the
         // end of time only on a clock that is already there; a wake due now
         // is the honest reading of that, and one that never comes is not.
-        spec: Spec::OnceAt(now.checked_add(after).unwrap_or(now)),
-        text: note,
-        cwd: cwd.to_path_buf(),
-        session: Some(session.clone()),
-        permission_mode: None,
-        enabled: true,
-        created: now,
-        last_fired: None,
+        at: now.checked_add(after).unwrap_or(now),
+        note,
     }
 }
 
-/// When a pending wake comes. `None` once it has nothing left to give, which
-/// is what a spent or hand-disabled one has.
-pub fn at(entry: &Entry) -> Option<Timestamp> {
-    Some(entry.next_fire(&TimeZone::UTC)?.timestamp())
-}
-
 /// What a surface is told about the wake that stands: when it comes, and what
-/// it will say. Derived from the entry every time it is published, so the
-/// screen cannot disagree with the store; `Null` where nothing is pending,
+/// it will say. Derived from the wake every time it is published, so the
+/// screen cannot disagree with the plugin; `Null` where nothing is pending,
 /// which is how a kind is taken back (ADR-0011 §2).
-pub fn payload(pending: Option<&Entry>) -> Value {
-    match pending.and_then(|entry| Some((entry, at(entry)?))) {
-        Some((entry, at)) => json!({ AT: at.to_string(), NOTE: entry.text }),
+pub fn payload(pending: Option<&Wake>) -> Value {
+    match pending {
+        Some(wake) => json!({ AT: wake.at.to_string(), NOTE: wake.note }),
         None => Value::Null,
     }
 }
 
 /// Put the pending wake where the person's surface reads it. A session that
 /// is gone cannot be told, and there is nobody left to tell.
-pub async fn publish(host: &HostHandle, session: &SessionId, pending: Option<&Entry>) {
+pub async fn publish(host: &HostHandle, session: &SessionId, pending: Option<&Wake>) {
     if let Err(error) = host.extend(session, PLUGIN, KIND, payload(pending)).await {
         tracing::debug!(%error, "the pending wake was not published");
     }
@@ -131,22 +100,6 @@ pub fn origin() -> Origin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entry::tests::entry as schedule;
-
-    fn session() -> SessionId {
-        SessionId::from_raw("ses_test")
-    }
-
-    fn wake(after: SignedDuration) -> Entry {
-        entry(
-            "aaaa1111".into(),
-            &session(),
-            Path::new("/work/project"),
-            "look at the build again".into(),
-            Timestamp::UNIX_EPOCH,
-            after,
-        )
-    }
 
     #[test]
     fn an_interval_inside_the_bounds_is_the_one_that_was_asked_for() {
@@ -177,44 +130,26 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_is_a_once_at_bound_to_the_session_that_asked() {
-        let wake = wake(SignedDuration::from_mins(5));
-        assert!(wake.is_wake());
-        assert_eq!(wake.session, Some(session()));
-        assert_eq!(wake.spec.to_string(), "once at 1970-01-01T00:05:00Z");
-        assert_eq!(
-            wake.permission_mode, None,
-            "it wakes a session already in one"
+    fn a_wake_comes_this_long_from_now_and_says_the_note() {
+        let wake = set(
+            Timestamp::UNIX_EPOCH,
+            SignedDuration::from_mins(5),
+            "look at the build again".into(),
         );
         assert_eq!(
-            at(&wake),
-            Some(Timestamp::UNIX_EPOCH + SignedDuration::from_mins(5))
+            wake.at,
+            Timestamp::UNIX_EPOCH + SignedDuration::from_mins(5)
         );
-    }
-
-    #[test]
-    fn the_wake_on_a_session_is_the_one_that_names_it() {
-        let mine = wake(SignedDuration::from_mins(5));
-        let theirs = Entry {
-            id: "bbbb2222".into(),
-            session: Some(SessionId::from_raw("ses_other")),
-            ..mine.clone()
-        };
-        let shelf = Shelf {
-            entries: vec![schedule(), theirs, mine.clone()],
-            unreadable: Vec::new(),
-        };
-        assert_eq!(pending(&shelf, &session()).map(|e| &e.id), Some(&mine.id));
-        assert_eq!(
-            pending(&shelf, &SessionId::from_raw("ses_nobody")),
-            None,
-            "a schedule of a person's own is nobody's wake"
-        );
+        assert_eq!(wake.note, "look at the build again");
     }
 
     #[test]
     fn what_a_surface_is_told_is_when_it_comes_and_what_it_says() {
-        let wake = wake(SignedDuration::from_mins(5));
+        let wake = set(
+            Timestamp::UNIX_EPOCH,
+            SignedDuration::from_mins(5),
+            "look at the build again".into(),
+        );
         assert_eq!(
             payload(Some(&wake)),
             json!({ "at": "1970-01-01T00:05:00Z", "note": "look at the build again" })
@@ -223,14 +158,6 @@ mod tests {
             payload(None),
             Value::Null,
             "nothing pending takes the kind back"
-        );
-        assert_eq!(
-            payload(Some(&Entry {
-                enabled: false,
-                ..wake
-            })),
-            Value::Null,
-            "a wake with nothing left to give is not pending"
         );
     }
 

@@ -12,10 +12,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::entry::Entry;
+use crate::render;
 use crate::schedules::Schedules;
-use crate::wake::{self, Held, WAKE_LEAST, WAKE_MOST};
-use crate::{render, tools};
+use crate::wake::{self, Held, WAKE_LEAST, WAKE_MOST, Wake};
 
 /// The whole of the loop discipline the harness asks for, said where the
 /// model reads it rather than in a document it may never see.
@@ -99,7 +98,7 @@ impl Ask {
     }
 }
 
-/// Writes the one wake this session has, or takes it away.
+/// Sets the one wake this session has, or takes it away.
 #[derive(Debug)]
 pub struct WakeTool {
     schedules: Arc<Schedules>,
@@ -112,65 +111,44 @@ impl WakeTool {
         Self { schedules, wakes }
     }
 
-    /// A wake takes the place of the one that stood, under its id: the id is
-    /// the file name, so writing over it is how one replaces the other.
-    async fn set(
-        &self,
-        standing: Option<Entry>,
-        held: Held,
-        note: String,
-        cx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let entry = wake::entry(
-            standing.map_or_else(|| self.schedules.store().mint(), |had| had.id),
-            &cx.session,
-            &cx.cwd,
-            note,
-            Timestamp::now(),
-            held.after,
-        );
-        self.schedules.store().save(&entry).map_err(tools::failed)?;
-        self.schedules.changed();
-        wake::publish(&cx.host, &cx.session, Some(&entry)).await;
-        Ok(ToolOutput::text(self.receipt(&entry, held)))
+    /// A wake takes the place of the one that stood. It is this process's
+    /// own, delivered by the process running this session, so whether the
+    /// store's schedules fire here has no bearing on it.
+    async fn set(&self, held: Held, note: String, cx: &ToolContext) -> ToolOutput {
+        let wake = wake::set(Timestamp::now(), held.after, note);
+        self.schedules.wakes().set(&cx.session, wake.clone());
+        wake::publish(&cx.host, &cx.session, Some(&wake)).await;
+        ToolOutput::text(receipt(&wake, held))
     }
 
     /// Nothing pending is an answer, not a failure: a model that stopped a
     /// wake it had already spent is where it wanted to be.
-    async fn stop(
-        &self,
-        standing: Option<Entry>,
-        cx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let Some(entry) = standing else {
-            return Ok(ToolOutput::text("No wake was standing; nothing to cancel."));
+    async fn stop(&self, cx: &ToolContext) -> ToolOutput {
+        let Some(wake) = self.schedules.wakes().take(&cx.session) else {
+            return ToolOutput::text("No wake was standing; nothing to cancel.");
         };
-        self.schedules
-            .store()
-            .delete(&entry.id)
-            .map_err(tools::failed)?;
-        self.schedules.changed();
         wake::publish(&cx.host, &cx.session, None).await;
-        Ok(ToolOutput::text(format!(
+        ToolOutput::text(format!(
             "The wake set for {} is cancelled; none stands.",
-            render::when(entry.next_fire(&TimeZone::system()).as_ref())
-        )))
+            when(&wake)
+        ))
     }
+}
 
-    /// When it comes, what it will say, and — where the bounds moved it —
-    /// what was asked for instead.
-    fn receipt(&self, entry: &Entry, held: Held) -> String {
-        format!(
-            "Waking you at {} with: {}{}{}",
-            render::when(entry.next_fire(&TimeZone::system()).as_ref()),
-            render::head(&entry.text, 60),
-            clamp(held),
-            match self.schedules.held() {
-                true => String::new(),
-                false => format!(" Schedules here are {}.", self.schedules.holder()),
-            }
-        )
-    }
+/// When it comes, what it will say, and — where the bounds moved it — what
+/// was asked for instead.
+fn receipt(wake: &Wake, held: Held) -> String {
+    format!(
+        "Waking you at {} with: {}{}",
+        when(wake),
+        render::head(&wake.note, 60),
+        clamp(held),
+    )
+}
+
+/// The moment a wake comes, in the person's own zone.
+fn when(wake: &Wake) -> String {
+    render::when(Some(&wake.at.to_zoned(TimeZone::system())))
 }
 
 /// What the bounds did, said in the same breath as the wake that was set.
@@ -210,11 +188,11 @@ impl Tool for WakeTool {
         }
     }
 
-    /// A wake writes one file of the agent's own and posts into this very
-    /// session's queue when it comes — the reach `SendMessage` already has
-    /// under the same traits (`bingo-tasks`), and what the woken turn then
-    /// does is gated in that turn. It is not concurrency-safe: one wake
-    /// stands per session, and two calls at once would each write theirs
+    /// A wake touches nothing but this plugin's own memory and posts into
+    /// this very session's queue when it comes — the reach `SendMessage`
+    /// already has under the same traits (`bingo-tasks`), and what the woken
+    /// turn then does is gated in that turn. It is not concurrency-safe: one
+    /// wake stands per session, and two calls at once would each set theirs
     /// without the other's.
     fn traits(&self, _input: &Value) -> ToolTraits {
         ToolTraits {
@@ -236,19 +214,17 @@ impl Tool for WakeTool {
             // Words the tool cannot read are something the model rewrites.
             Err(message) => return Ok(ToolOutput::error(message)),
         };
-        let shelf = self.schedules.store().load();
-        let standing = wake::pending(&shelf, &cx.session).cloned();
-        match wanted {
-            Wanted::Set { held, note } => self.set(standing, held, note, cx).await,
-            Wanted::Stop => self.stop(standing, cx).await,
-        }
+        Ok(match wanted {
+            Wanted::Set { held, note } => self.set(held, note, cx).await,
+            Wanted::Stop => self.stop(cx).await,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{Fixture, files, text};
+    use crate::tests::{Fixture, text};
     use serde_json::json;
 
     fn tool(fixture: &Fixture) -> WakeTool {
@@ -262,24 +238,29 @@ mod tests {
             .expect("an answer")
     }
 
-    fn only(fixture: &Fixture) -> Entry {
-        let mut shelf = fixture.shelf();
-        assert_eq!(shelf.entries.len(), 1, "{:?}", shelf.ids());
-        shelf.entries.remove(0)
+    /// The wake standing on the fixture's session.
+    fn standing(fixture: &Fixture) -> Wake {
+        fixture
+            .schedules
+            .wakes()
+            .pending(&fixture.context().session)
+            .expect("a wake stands")
     }
 
     #[tokio::test]
-    async fn a_wake_is_one_entry_bound_to_the_calling_session() {
+    async fn a_wake_stands_on_the_calling_session_and_touches_no_file() {
         let fixture = Fixture::new();
+        let before = Timestamp::now();
         let out = wake_call(&fixture, json!({"after": "5m", "note": "look again"})).await;
         assert!(!out.is_error, "{out:?}");
-        let entry = only(&fixture);
-        assert_eq!(entry.session.as_ref(), Some(&fixture.context().session));
-        assert_eq!(entry.text, "look again");
-        assert_eq!(entry.cwd, fixture.cwd());
-        assert!(entry.is_wake() && entry.enabled);
-        assert!(entry.spec.is_once(), "{}", entry.spec);
+        let wake = standing(&fixture);
+        assert_eq!(wake.note, "look again");
+        assert!(wake.at >= before + SignedDuration::from_mins(5), "{wake:?}");
         assert!(text(&out).contains("look again"), "{}", text(&out));
+        assert!(
+            !fixture.dir().exists(),
+            "a wake is the session's own, not the store's"
+        );
 
         let published = fixture.host.extended();
         assert_eq!(published.len(), 1, "{published:?}");
@@ -294,12 +275,8 @@ mod tests {
     async fn a_second_call_takes_the_first_wakes_place() {
         let fixture = Fixture::new();
         wake_call(&fixture, json!({"after": "5m", "note": "the first"})).await;
-        let first = only(&fixture).id;
         wake_call(&fixture, json!({"after": "10m", "note": "the second"})).await;
-        let second = only(&fixture);
-        assert_eq!(second.id, first, "one wake per session, under one id");
-        assert_eq!(second.text, "the second");
-        assert_eq!(files(&fixture.dir()), [format!("{first}.json")]);
+        assert_eq!(standing(&fixture).note, "the second");
     }
 
     #[tokio::test]
@@ -309,7 +286,14 @@ mod tests {
         let out = wake_call(&fixture, json!({"stop": true})).await;
         assert!(!out.is_error, "{out:?}");
         assert!(text(&out).contains("cancelled"), "{}", text(&out));
-        assert!(fixture.shelf().is_empty(), "the file is gone");
+        assert_eq!(
+            fixture
+                .schedules
+                .wakes()
+                .pending(&fixture.context().session),
+            None,
+            "none stands"
+        );
         assert_eq!(
             fixture.host.extended().last().map(|told| told.3.clone()),
             Some(Value::Null),
@@ -343,7 +327,7 @@ mod tests {
             text(&brief)
         );
         assert!(
-            wake::at(&only(&fixture)).is_some(),
+            standing(&fixture).at <= Timestamp::now() + WAKE_LEAST + SignedDuration::from_secs(1),
             "it was still set, at the bound"
         );
 
@@ -370,7 +354,14 @@ mod tests {
             assert!(out.is_error, "{input}");
             assert!(text(&out).contains(expected), "{input}: {}", text(&out));
         }
-        assert!(fixture.shelf().is_empty(), "nothing was written");
+        assert_eq!(
+            fixture
+                .schedules
+                .wakes()
+                .pending(&fixture.context().session),
+            None,
+            "nothing was set"
+        );
     }
 
     #[tokio::test]
@@ -382,7 +373,13 @@ mod tests {
             .expect("an answer");
         assert!(out.is_error);
         assert!(text(&out).contains("schedule.wakes"), "{}", text(&out));
-        assert!(fixture.shelf().is_empty());
+        assert_eq!(
+            fixture
+                .schedules
+                .wakes()
+                .pending(&fixture.context().session),
+            None
+        );
     }
 
     #[test]

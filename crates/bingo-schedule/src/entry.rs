@@ -7,7 +7,6 @@
 
 use std::path::PathBuf;
 
-use bingo_sdk::SessionId;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 use serde::{Deserialize, Serialize};
@@ -29,14 +28,8 @@ pub struct Entry {
     /// A prompt or a `/command` line, delivered as the turn's text.
     pub text: String,
     pub cwd: PathBuf,
-    /// The session a fire lands on (ADR-0019 §8): a wake the model set on a
-    /// conversation that already exists. A schedule of a person's own names
-    /// none and opens one of its own, keyed [`Entry::key`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<SessionId>,
     /// `default | acceptEdits | plan | bypassPermissions | dontAsk`; the
-    /// configured mode when absent. A wake never carries one: it runs in the
-    /// mode the session it wakes is already in.
+    /// configured mode when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     pub enabled: bool,
@@ -47,16 +40,9 @@ pub struct Entry {
 
 impl Entry {
     /// The session a fire opens or continues (ADR-0019 §3). One key per
-    /// entry, so every one of its turns lands in one transcript. A wake has
-    /// no session of its own and never asks for this one.
+    /// entry, so every one of its turns lands in one transcript.
     pub fn key(&self) -> String {
         format!("{OWNER}/{}", self.id)
-    }
-
-    /// Whether this is a wake the model set on a conversation that already
-    /// exists, rather than a schedule that opens a session of its own.
-    pub fn is_wake(&self) -> bool {
-        self.session.is_some()
     }
 
     /// What the next fire is reckoned from: the last one, else the day the
@@ -102,7 +88,6 @@ pub(crate) mod tests {
             spec: "every 30m".parse().expect("a spec"),
             text: "check whether the nightly build is green".into(),
             cwd: PathBuf::from("/work/project"),
-            session: None,
             permission_mode: None,
             enabled: true,
             created: Timestamp::UNIX_EPOCH,
@@ -148,36 +133,25 @@ pub(crate) mod tests {
         assert_eq!(read.last_fired, None);
     }
 
-    /// The one key the format gained (ADR-0019 §8), and the fixture that
-    /// proves a file written before it still reads: a schedule of a person's
-    /// own names no session, and a file with no `session` is one.
+    /// A wake was a key of this format for one day (ADR-0019 §8, 2026-09-04)
+    /// and is the session's own now; a file from that day still reads, and
+    /// the key means nothing.
     #[test]
-    fn a_wake_names_its_session_and_a_file_without_one_still_reads() {
-        let written = Entry {
-            session: Some(SessionId::from_raw("ses_01j0")),
-            spec: "once at 1970-01-01T00:10:00Z".parse().expect("a spec"),
-            ..entry()
-        }
-        .document()
-        .expect("json");
-        assert!(written.contains(r#""session": "ses_01j0""#), "{written}");
-        let read: Entry = serde_json::from_str(&written).expect("it reads back");
-        assert!(read.is_wake());
-
-        let older = r#"{
-  "spec": "every 30m",
-  "text": "check whether the nightly build is green",
+    fn a_file_that_names_a_session_still_reads_and_the_key_means_nothing() {
+        let dated = r#"{
+  "spec": "once at 1970-01-01T00:10:00Z",
+  "text": "look at the build again",
   "cwd": "/work/project",
-  "enabled": true,
+  "session": "ses_01j0",
+  "enabled": false,
   "created": "1970-01-01T00:00:00Z"
 }
 "#;
-        let read: Entry = serde_json::from_str(older).expect("an older file still reads");
-        assert_eq!(read.session, None);
-        assert!(!read.is_wake(), "a schedule of a person's own");
+        let read: Entry = serde_json::from_str(dated).expect("it still reads");
+        assert_eq!(read.text, "look at the build again");
         assert!(
-            !entry().document().expect("json").contains("session"),
-            "and one is not written where there is none"
+            !read.document().expect("json").contains("session"),
+            "and is not written back"
         );
     }
 

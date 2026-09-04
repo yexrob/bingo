@@ -1,5 +1,6 @@
-//! What this process has of the store: the entries, the claim on running
-//! them, and the bell the tools ring when they write.
+//! What this process has: the store's entries, the claim on running them,
+//! the bell the tools ring when they write — and the wakes of the sessions
+//! it runs, which are no part of the store.
 //!
 //! One of these is built when the plugin registers and shared by the tools,
 //! the command and the runner, so "do schedules fire here?" has one answer
@@ -14,6 +15,7 @@ use tokio::sync::Notify;
 use crate::lock::{self, Claim};
 use crate::runner::Runner;
 use crate::store::Store;
+use crate::wakes::{self, Wakes};
 
 #[derive(Debug)]
 pub struct Schedules {
@@ -22,6 +24,9 @@ pub struct Schedules {
     trouble: Arc<Mutex<Option<String>>>,
     /// Held from `start` to `stop`; `None` in a process that came second.
     claim: Mutex<Option<Claim>>,
+    /// The wakes standing on this process's sessions (ADR-0019 §8). Every
+    /// process delivers its own, claim or no claim.
+    wakes: Arc<Wakes>,
     cancel: CancellationToken,
 }
 
@@ -32,6 +37,7 @@ impl Schedules {
             changed: Arc::new(Notify::new()),
             trouble: Arc::new(Mutex::new(None)),
             claim: Mutex::new(None),
+            wakes: Arc::default(),
             cancel: CancellationToken::new(),
         }
     }
@@ -54,6 +60,10 @@ impl Schedules {
         &self.store
     }
 
+    pub fn wakes(&self) -> &Arc<Wakes> {
+        &self.wakes
+    }
+
     /// Whether schedules fire in this process.
     pub fn held(&self) -> bool {
         self.claim().is_some()
@@ -70,9 +80,15 @@ impl Schedules {
         self.changed.notify_one();
     }
 
-    /// Take the store's claim and run the loop behind it, or leave the
-    /// schedules dormant and say who has them (ADR-0019 §5).
+    /// Deliver this process's wakes whatever else is true; then take the
+    /// store's claim and run the loop behind it, or leave the schedules
+    /// dormant and say who has them (ADR-0019 §5).
     pub fn start(self: &Arc<Self>, host: HostHandle) {
+        tokio::spawn(wakes::run(
+            Arc::clone(&self.wakes),
+            host.clone(),
+            self.cancel.clone(),
+        ));
         match Claim::take(self.store.dir()) {
             Ok(claim) => {
                 *self.claim() = Some(claim);

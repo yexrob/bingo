@@ -359,6 +359,11 @@ impl Run {
             || self.ui.sending(screen).is_some()
             || self.ui.painted.borrow().blocks.moving()
             || self.ui.exit_armed(screen.instant)
+            || self
+                .session
+                .tree
+                .sessions()
+                .any(|s| crate::wake::counting(s, screen))
     }
 
     /// The way out. Whatever arrived in the last tick is drawn first, so the

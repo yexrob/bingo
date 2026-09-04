@@ -10,6 +10,8 @@
 use bingo_sdk::SessionState;
 use jiff::Timestamp;
 
+use crate::clock::Now;
+
 /// The plugin whose extension carries the wake, and the kind, by the words it
 /// publishes them under. A surface may not import a plugin (ADR-0001), so the
 /// two words are the whole of the contract.
@@ -28,10 +30,28 @@ pub fn at(state: &SessionState) -> Option<Timestamp> {
         .ok()
 }
 
+/// Whether the status line has a wake to count down: one stands and has not
+/// come. The frame clock runs while it does, so the words move without an
+/// event to move them; a moment already past is a wake on its way in and
+/// nothing to count.
+pub fn counting(state: &SessionState, now: Now) -> bool {
+    at(state).is_some_and(|at| at > now.wall)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::*;
+
+    #[test]
+    fn a_wake_still_to_come_is_counted_down_and_one_that_came_is_not() {
+        let (_, now) = scene();
+        let ahead = later(now, 40_000);
+        let state = folded(vec![frame(1, pending_wake(&ahead.wall.to_string()))]);
+        assert!(counting(&state, now));
+        assert!(!counting(&state, later(ahead, 1)));
+        assert!(!counting(&folded(vec![]), now), "nothing stands");
+    }
 
     #[test]
     fn the_moment_is_read_from_the_kind_the_plugin_published() {

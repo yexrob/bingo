@@ -16,7 +16,8 @@
 //! - [`lock`] — one runner per store, the channels plugin's claim.
 //! - [`runner`] — the timer loop, and the pure pass that decides it.
 //! - [`schedules`] — what this process has: the store, the claim, the bell.
-//! - [`wake`] — the fourth form: the model's own `once`, bound to a session.
+//! - [`wake`] and [`wakes`] — the model's own `once` on its own session:
+//!   what one is, and the process-local shelf and loop that deliver it.
 //! - [`tools`] and [`command`] — four tools, `/schedule` and `/wake`.
 //!
 //! Schedules fire only while a bingo process runs. There is no daemon and no
@@ -34,6 +35,7 @@ pub mod spec;
 pub mod store;
 pub mod tools;
 pub mod wake;
+pub mod wakes;
 
 use std::sync::{Arc, OnceLock};
 
