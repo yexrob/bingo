@@ -9,19 +9,27 @@
 //! whole of it and step over the labels, which are furniture and nowhere to
 //! land.
 //!
+//! It is **typed into** (M55, 2026-09-04): a query narrows the column to the
+//! rows [`crate::matching`] ranks for it — a session by its name and by the
+//! room it sits in, a room by its own — and sits at the head of the list as one
+//! dim line of what was typed. An empty query is the whole list, and is no
+//! line at all.
+//!
 //! One [`crate::window`] over the whole list keeps the row the keyboard is on
 //! in view, with a `…` at an end it cut; a label past that end is simply not
 //! drawn, and one at the window's own edge stays.
 //!
 //! Nothing here is state. Which rows exist is the tree's, what each says is
 //! read off the reducer and the rooms plugin's own payloads at render time,
-//! and the whole of what the surface remembers is where the cursor is.
+//! and the whole of what the surface remembers is where the cursor is and what
+//! has been typed.
 
 use bingo_sdk::{SessionId, SessionState};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::{self, Now};
+use crate::matching;
 use crate::seats::{self, Ear, Owes, Seat};
 use crate::status;
 use crate::theme;
@@ -54,10 +62,43 @@ pub struct Listing<'r, 'a> {
 }
 
 /// The sessions that answer a model, then the ones that answer nobody: the
-/// same fact `Status::of` reports, which is what makes a room a room.
-pub fn listing<'r, 'a>(rows: &'r [Row<'a>]) -> Listing<'r, 'a> {
-    let (agents, rooms) = rows.iter().partition(|row| row.status.is_some());
-    Listing { agents, rooms }
+/// same fact `Status::of` reports, which is what makes a room a room. Each run
+/// is narrowed to what the query matches, so the two are ranked apart and a
+/// label still stands over the run it names.
+pub fn listing<'r, 'a>(tree: &Tree, rows: &'r [Row<'a>], query: &str) -> Listing<'r, 'a> {
+    let (agents, rooms): (Vec<_>, Vec<_>) = rows.iter().partition(|row| row.status.is_some());
+    Listing {
+        agents: narrowed(tree, agents, query),
+        rooms: narrowed(tree, rooms, query),
+    }
+}
+
+/// One run of the list, narrowed to the rows the query matches and in the
+/// order it ranks them. An empty query is every row in the tree's own order —
+/// the matcher's answer, not a case of its own.
+fn narrowed<'r, 'a>(tree: &Tree, run: Vec<&'r Row<'a>>, query: &str) -> Vec<&'r Row<'a>> {
+    let searched: Vec<(String, &'r Row<'a>)> = run
+        .into_iter()
+        .map(|row| (searched(tree, row), row))
+        .collect();
+    matching::rank(query, &searched, |(words, _)| words.as_str())
+        .into_iter()
+        .map(|(_, row)| *row)
+        .collect()
+}
+
+/// The words a row is found by: its own name, and the room it sits in, so a
+/// person who knows where somebody is can type that instead of who. A room is
+/// found by its name alone — the seats in it are rows of their own, and typing
+/// the room brings every one of them up beside it.
+fn searched(tree: &Tree, row: &Row<'_>) -> String {
+    let seat = tree
+        .state(row.session)
+        .and_then(|state| seats::seat(tree, state));
+    match seat {
+        Some(seat) => format!("{} {}", row.name, seat.room),
+        None => row.name.clone(),
+    }
 }
 
 impl<'r, 'a> Listing<'r, 'a> {
@@ -119,13 +160,43 @@ pub fn lines(
     tree: &Tree,
     rows: &[Row<'_>],
     cursor: Cursor,
+    query: &str,
     width: usize,
     room: usize,
     now: Now,
 ) -> Roster {
-    let listed = listed(tree, &listing(rows), cursor, width, now);
+    let listed = listed(tree, &listing(tree, rows, query), cursor, width, now);
     let at = walked_line(&listed, cursor);
-    windowed(listed, at, room)
+    match asked(query, width) {
+        Some(line) => headed(windowed(listed, at, room.saturating_sub(1)), line),
+        None => windowed(listed, at, room),
+    }
+}
+
+/// The line the query is typed on: dim, the list's width, and nothing at all
+/// while nothing has been typed. The one-line-of-furniture rule holds because
+/// the line is the person's own typing (§3, 2026-09-04).
+fn asked(query: &str, width: usize) -> Option<Line<'static>> {
+    if query.is_empty() {
+        return None;
+    }
+    let spans = vec![Span::styled(
+        format!("{} {query}{}", theme::find(), theme::caret()),
+        theme::dim(),
+    )];
+    Some(Line::from(status::clip(spans, width)))
+}
+
+/// The query line sits at the head of the list and answers no click — it is
+/// nowhere to land, as a label is.
+fn headed(rows: Roster, asked: Line<'static>) -> Roster {
+    let mut roster = Roster {
+        lines: vec![asked],
+        rows: vec![None],
+    };
+    roster.lines.extend(rows.lines);
+    roster.rows.extend(rows.rows);
+    roster
 }
 
 /// Which of the drawn lines the row the keyboard is on became. It is asked of
@@ -476,7 +547,18 @@ mod tests {
     }
 
     fn drawn_at(tree: &Tree, cursor: Cursor, width: usize, room: usize) -> Vec<String> {
-        lines(tree, &tree.rows(), cursor, width, room, scene().1)
+        narrowed_at(tree, cursor, "", width, room)
+    }
+
+    /// The list as one query narrows it, drawn.
+    fn narrowed_at(
+        tree: &Tree,
+        cursor: Cursor,
+        query: &str,
+        width: usize,
+        room: usize,
+    ) -> Vec<String> {
+        lines(tree, &tree.rows(), cursor, query, width, room, scene().1)
             .lines
             .iter()
             .map(|line| line.to_string().trim_end().to_string())
@@ -506,7 +588,7 @@ mod tests {
     fn a_live_seat_wears_the_sigil_and_keeps_its_own_colour() {
         let tree = team();
         let rows = tree.rows();
-        let listed = listing(&rows);
+        let listed = listing(&tree, &rows, "");
         let reviewer = listed
             .agents
             .iter()
@@ -603,7 +685,7 @@ mod tests {
         let tree = Tree::new(state());
         let stored = [stored_summary("ses_3", "archivist")];
         let rows = tree::roster(&tree, &stored);
-        let drawn: Vec<String> = lines(&tree, &rows, Cursor::default(), 80, 8, scene().1)
+        let drawn: Vec<String> = lines(&tree, &rows, Cursor::default(), "", 80, 8, scene().1)
             .lines
             .iter()
             .map(|line| line.to_string().trim_end().to_string())
@@ -619,11 +701,72 @@ mod tests {
         assert!(drawn[0].starts_with("❯ ⏺ project"), "{drawn:#?}");
     }
 
+    // ---- the query -------------------------------------------------------
+
+    /// M55: the list is typed into. What the query does not match is not on
+    /// it, and what a person typed stands at its head.
+    #[test]
+    fn a_query_narrows_the_column_and_says_what_was_typed() {
+        let drawn = narrowed_at(&team(), Cursor::default(), "rev", 80, 8);
+        assert_eq!(
+            drawn,
+            vec![
+                "⌕ rev▌",
+                "❯ ~ reviewer  running · in #design · live · owes an answer · 22m · 3 tools · 1.…",
+            ],
+            "one row, and no label over the only run left: {drawn:#?}"
+        );
+    }
+
+    /// A room is found by its name, and so is every seat sitting in it: a
+    /// person who knows where somebody is types that instead of who.
+    #[test]
+    fn a_room_and_the_seats_in_it_answer_to_the_rooms_name() {
+        let drawn = narrowed_at(&team(), Cursor::default(), "design", 120, 8);
+        assert_eq!(
+            drawn,
+            vec![
+                "⌕ design▌",
+                "Agents",
+                "❯ ~ reviewer  running · in #design · live · owes an answer · 22m · 3 tools · 1.2k tokens",
+                "  ⏺ watcher   idle · in #design · listening · 600s",
+                "Rooms",
+                "  #design  2 seats · 1 owed",
+            ],
+            "the room, and the two seats in it: {drawn:#?}"
+        );
+    }
+
+    /// A query nothing matches leaves the line it was typed on and nothing
+    /// else — the list is empty, not wrong.
+    #[test]
+    fn a_query_nothing_matches_is_the_line_alone() {
+        let drawn = narrowed_at(&team(), Cursor::default(), "zzz", 80, 8);
+        assert_eq!(drawn, vec!["⌕ zzz▌"]);
+    }
+
+    /// The line is the list's, so the window has one row fewer for the rows —
+    /// the room asked for is the room drawn, query line and all.
+    #[test]
+    fn the_query_line_takes_a_row_of_the_lists_own_room() {
+        let mut frames = busy_child("reviewer");
+        frames
+            .extend((20..32).map(|i| agent_frame(i, i, agent_announced(i, &format!("scout {i}")))));
+        let tree = folded_tree(frames);
+        let drawn = narrowed_at(&tree, Cursor { at: 6 }, "scout", 120, 6);
+        assert_eq!(
+            drawn.len(),
+            6,
+            "six rows of room, six rows drawn: {drawn:#?}"
+        );
+        assert_eq!(drawn[0], "⌕ scout▌", "and the line is the head of them");
+    }
+
     // ---- walking ---------------------------------------------------------
 
     fn walk(tree: &Tree, from: Cursor, by: isize) -> Cursor {
         let rows = tree.rows();
-        from.step(&listing(&rows), by)
+        from.step(&listing(tree, &rows, ""), by)
     }
 
     #[test]
@@ -642,7 +785,7 @@ mod tests {
     fn the_walk_steps_over_the_label_between_the_runs() {
         let tree = team();
         let rows = tree.rows();
-        let listed = listing(&rows);
+        let listed = listing(&tree, &rows, "");
         let last_agent = Cursor { at: 2 };
         let next = last_agent.step(&listed, 1);
         assert_eq!(
@@ -656,12 +799,12 @@ mod tests {
         let mut tree = team();
         tree.show(&log_id());
         let rows = tree.rows();
-        let listed = listing(&rows);
+        let listed = listing(&tree, &rows, "");
         assert_eq!(Cursor::on(&listed, tree.view()), Cursor { at: 3 });
 
         tree.show(&child_id());
         let rows = tree.rows();
-        let listed = listing(&rows);
+        let listed = listing(&tree, &rows, "");
         assert_eq!(Cursor::on(&listed, tree.view()), Cursor { at: 1 });
     }
 
@@ -718,7 +861,7 @@ mod tests {
     fn every_drawn_row_says_which_row_of_the_list_it_is() {
         let tree = team();
         let rows = tree.rows();
-        let roster = lines(&tree, &rows, Cursor::default(), 80, 8, scene().1);
+        let roster = lines(&tree, &rows, Cursor::default(), "", 80, 8, scene().1);
         assert_eq!(roster.rows.len(), roster.lines.len());
         assert_eq!(roster.rows[0], None, "a label answers nothing");
         assert_eq!(roster.rows[1], Some(Cursor { at: 0 }));
@@ -730,8 +873,20 @@ mod tests {
     fn no_width_makes_a_row_wider_than_the_list() {
         let tree = team();
         for width in [8usize, 20, 40, 80, 120] {
-            for line in lines(&tree, &tree.rows(), Cursor::default(), width, 8, scene().1).lines {
-                assert!(line.width() <= width, "at {width}: {line:?}");
+            for query in ["", "a long query nobody would type"] {
+                for line in lines(
+                    &tree,
+                    &tree.rows(),
+                    Cursor::default(),
+                    query,
+                    width,
+                    8,
+                    scene().1,
+                )
+                .lines
+                {
+                    assert!(line.width() <= width, "at {width} for {query:?}: {line:?}");
+                }
             }
         }
     }

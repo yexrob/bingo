@@ -33,6 +33,7 @@ use crate::roster;
 use crate::scroll::Scroll;
 use crate::search::Search;
 use crate::select::Select;
+use crate::tree::{self, Tree};
 use crate::views::Marks;
 
 /// How long a transient notice holds the status line's middle slot (§3),
@@ -203,17 +204,34 @@ pub struct Catalogs {
 
 /// The one list of sessions, opened by `↓` on an empty composer or by
 /// `ctrl+g`. Its rows are derived at render time; what is the surface's own is
-/// where the cursor is, the one listing the host answered with when the list
-/// opened, and where the gesture started — nothing here watches the store.
+/// where the cursor is, what has been typed to narrow it, the one listing the
+/// host answered with when the list opened, and where the gesture started —
+/// nothing here watches the store.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Switcher {
     pub cursor: roster::Cursor,
+    /// What has been typed into the list (M55): the rows are ranked by it and
+    /// the ones it does not match are not on the list at all. Empty is the
+    /// whole list, and is what `esc` takes it back to.
+    pub query: String,
     /// Empty until the read the opening spawned lands.
     pub stored: Vec<SessionSummary>,
     /// The session the list was opened from: what `esc` gives back after a
     /// walk has switched the view. A fact about the gesture, like
     /// [`Ui::esc_armed`] — not a second copy of what the tree is showing.
     pub from: Option<SessionId>,
+}
+
+impl Switcher {
+    /// The session a row of this list names. The list is composed here from
+    /// the tree, the store's answer and the query, so a click and a keypress
+    /// cannot be reading two different lists.
+    pub fn session(&self, tree: &Tree, cursor: roster::Cursor) -> Option<SessionId> {
+        let rows = tree::roster(tree, &self.stored);
+        cursor
+            .row(&roster::listing(tree, &rows, &self.query))
+            .map(|row| row.session.clone())
+    }
 }
 
 /// What is over the frame. One at a time: focus moves into a layer and back
