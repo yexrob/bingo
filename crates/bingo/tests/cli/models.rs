@@ -170,3 +170,22 @@ fn models_refuses_an_argument_it_does_not_know() {
     let err = stderr(&out);
     assert!(err.contains("unknown argument `everything`"), "{err}");
 }
+
+/// `--model` is a layer, not a decision. `/model` inside a session writes the
+/// user settings so the next start opens on it; a flag names the model for
+/// this run and leaves the file exactly as it found it — the same bargain
+/// Claude Code's `--model` and Codex's `-c model=…` make.
+#[test]
+fn a_model_flag_is_not_remembered() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(r#"{"responses":[{"steps":[{"text":"ok"}]}]}"#);
+    let out = scripted_run(home.path(), &script, &["--model", "fake-1"], "hello");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let settings = home.path().join(".bingo/settings.json");
+    assert!(
+        !settings.exists(),
+        "a one-run override wrote {}: {}",
+        settings.display(),
+        std::fs::read_to_string(&settings).unwrap_or_default()
+    );
+}

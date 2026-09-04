@@ -52,7 +52,7 @@ pub async fn add(env: &Env, adapter: &str) -> Result<String, KernelError> {
 /// `provider add` uses; the spelling of the key is the plugin's
 /// (`from_flags`), so this file never learns how a channel is written down.
 fn configured(env: &Env, adapter: &str, app_id: &str) -> Result<std::path::PathBuf, KernelError> {
-    let path = env.config_dir.join("settings.json");
+    let path = bingo_core::settings::user_path(env);
     let mut document = crate::provider::read(&path)?;
     let layer = bingo_channels::from_flags(&[format!("{adapter}={app_id}")])
         .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e))?;
