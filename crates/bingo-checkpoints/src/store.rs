@@ -132,6 +132,13 @@ impl Checkpoints {
         turn: &TurnId,
         path: &Path,
     ) -> Result<bool, KernelError> {
+        // A path the index cannot write back byte for byte is one this cannot
+        // put back either: `Display` replaces whatever is not UTF-8. Keeping
+        // nothing is better than restoring a file nobody named.
+        if path.to_str().is_none() {
+            tracing::warn!(path = %path.display(), "no checkpoint: that path is not utf-8");
+            return Ok(false);
+        }
         let dir = self.turn_dir(session, turn);
         let held = self.writing.lock().unwrap_or_else(|held| held.into_inner());
         let entries = index(&dir);
@@ -368,6 +375,24 @@ mod tests {
         assert_eq!(store.sessions(), ["ses_one", "ses_two"]);
         assert_eq!(store.collect(&["ses_two".to_string()]), ["ses_one"]);
         assert_eq!(store.sessions(), ["ses_two"]);
+    }
+
+    /// Only a unix path can hold bytes that are not UTF-8; on Windows every
+    /// path is UTF-16 and this cannot arise. The file need not exist — the
+    /// path is refused before anything on disk is looked at, because it is
+    /// the *name* that could not be written back.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf_8_is_not_kept_rather_than_kept_wrongly() {
+        use std::os::unix::ffi::OsStrExt;
+        let (dir, store) = store();
+        let path = dir.path().join(std::ffi::OsStr::from_bytes(b"bad\xff.txt"));
+        assert!(
+            !store
+                .snapshot(&session(), &turn("trn_1"), &path)
+                .expect("no snapshot, and no failure")
+        );
+        assert!(store.entries(&session(), &turn("trn_1")).is_empty());
     }
 
     #[test]
