@@ -2624,6 +2624,63 @@ mod tests {
         });
     }
 
+    /// The column a row's placeholder cells start in.
+    fn cells_column(screen: &str, row: u16) -> u16 {
+        let line = screen.lines().nth(usize::from(row)).expect("that row");
+        let before = line
+            .chars()
+            .take_while(|c| *c != crate::graphics::kitty::PLACEHOLDER)
+            .count();
+        u16::try_from(before).expect("a column of the screen")
+    }
+
+    /// A person's own line with a picture behind its token (M45).
+    fn sent_a_picture() -> SessionState {
+        folded(vec![frame(
+            1,
+            bingo_sdk::Event::ItemCompleted {
+                item: item(
+                    "itm_1",
+                    bingo_sdk::ItemStatus::Completed,
+                    bingo_sdk::ItemBody::User {
+                        parts: vec![
+                            bingo_sdk::ContentPart::text("what is this? [image 1]"),
+                            bingo_sdk::ContentPart::Image(bingo_pictures::testing::png(100, 200)),
+                        ],
+                        origin: bingo_sdk::Origin::surface("tui"),
+                    },
+                ),
+            },
+        )])
+    }
+
+    /// The band above a person's own line answers the same way (M62): the
+    /// thumbnail is a smaller rectangle of the very same picture, so the cells
+    /// under the pointer still say which one, and the click still opens it.
+    #[test]
+    fn a_click_on_the_band_above_a_persons_line_opens_it() {
+        let state = sent_a_picture();
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            let screen = render(&state, &ui, now);
+            let row = cells_row(&screen);
+            let column = cells_column(&screen, row);
+            assert!(
+                row < row_carrying(&screen, "what is this?"),
+                "the band is above the words:\n{screen}"
+            );
+            let effects = on_mouse(&mut ui, &solo(&state), click(column, row), now);
+            assert_eq!(effects, vec![Effect::OpenPicture(journal_picture())]);
+            assert!(ui.folds.is_empty(), "and it is not the block's fold");
+            // The thumbnail is three cells wide; past it the band is air, and
+            // a click there is the block's as it always was.
+            assert!(
+                on_mouse(&mut ui, &solo(&state), click(column + 6, row), now).is_empty(),
+                "and beside the thumbnail it is the block's again:\n{screen}"
+            );
+        });
+    }
+
     /// While a sheet is over the frame the cells under it are the sheet's: a
     /// click cannot open a picture the screen is not showing.
     #[test]
