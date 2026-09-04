@@ -30,7 +30,7 @@ impl Kind {
         }
     }
 
-    fn of(word: &str) -> Option<Self> {
+    pub fn of(word: &str) -> Option<Self> {
         [Kind::User, Kind::Feedback, Kind::Project, Kind::Reference]
             .into_iter()
             .find(|kind| kind.as_str() == word)

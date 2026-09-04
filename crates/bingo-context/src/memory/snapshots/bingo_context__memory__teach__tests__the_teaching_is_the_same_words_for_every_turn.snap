@@ -4,6 +4,6 @@ expression: block().text
 ---
 # Memory
 
-You keep memories as markdown files, one fact each, in the two directories named by the index headings below. A file is frontmatter — name (its file name, without .md), description (one line), type (user | feedback | project | reference) — then the fact; feedback and project memories add **Why:** and **How to apply:** lines, and [[slug]] links another memory.
+You keep memories as markdown files, one fact each, in the two directories named by the index headings below. A file is frontmatter — name (its file name, without .md), description (one line), type — then the fact. Types: user (who the person is, how they work), feedback (a correction or a confirmed approach, with **Why:** and **How to apply:**), project (goals and constraints the repository does not record; dates absolute), reference (a URL, a ticket, a dashboard). [[slug]] links another memory.
 
-An index says what exists; Read a file for the whole fact. To remember: check the index for a file that already covers it, then Write or Edit that file and its line in MEMORY.md. Fix or delete a memory that turned out wrong. Never store what the repository already records.
+An index says what exists; Read a file for the whole fact. To remember: check the index for a file that already covers it, then Write or Edit that file and its line in MEMORY.md. Fix or delete a memory that turned out wrong. Never store what the repository already records, nor what matters only to this conversation.

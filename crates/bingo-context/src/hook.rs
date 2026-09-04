@@ -15,14 +15,15 @@ use crate::memory::{dir, migrate, store};
 use crate::{root, stream, tail, transcript};
 
 const EXTRACT: &str = "\
-You are a memory extractor. Extract project facts worth remembering long-term from the agent \
-conversation below:
-- Project structure conventions and key file paths
-- Architecture decisions and their rationale
-- Build/test commands and conventions
-- User preferences and constraints
-Output only a fact list, one per line: no numbering, no pleasantries. Output nothing when no \
-fact is worth remembering.";
+You are a memory extractor. From the agent conversation below, extract only what is worth \
+remembering across sessions and is not already recorded in the repository (its files, \
+instructions, commit history):
+- user: who the person is, how they work, what they prefer
+- feedback: a correction they made or an approach they confirmed, and why
+- project: a goal, decision or constraint the repository does not record (dates absolute)
+- reference: a URL, ticket or dashboard worth finding again
+Output one fact per line as `<type>: <fact>`, no numbering, no pleasantries. Leave out what \
+matters only to this conversation. Output nothing when no fact is worth remembering.";
 
 /// What the extractor may say. A fact is a line, and a page of them is more
 /// than one turn learned.
@@ -58,9 +59,14 @@ impl MemoryHook {
         };
         let root = root::of(&cx.cwd).await;
         migrate::once(&self.data_dir, &root).await;
-        let scope = dir::project(&self.data_dir, &root);
-        for fact in facts.lines().map(str::trim).filter(|line| !line.is_empty()) {
-            if let Err(error) = keep(&scope, fact).await {
+        for line in facts.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let (kind, fact) = typed(line);
+            // What is true of the person is true in every project.
+            let scope = match kind {
+                Kind::User => dir::user(&self.data_dir),
+                _ => dir::project(&self.data_dir, &root),
+            };
+            if let Err(error) = keep(&scope, kind, fact).await {
                 tracing::warn!(%error, path = %scope.display(), "memory: a fact was not written");
             }
         }
@@ -151,21 +157,30 @@ fn body(items: &[Item]) -> String {
 /// One fact as one file, named after its first words. A name the scope
 /// already holds is left alone: whoever wrote that file knew more than a
 /// line, and a lost extraction is the cheap side of the collision.
-async fn keep(scope: &Path, fact: &str) -> std::io::Result<()> {
+async fn keep(scope: &Path, kind: Kind, fact: &str) -> std::io::Result<()> {
     let Some(name) = file::slug(fact) else {
         return Ok(());
     };
     if store::holds(scope, &name).await {
         return Ok(());
     }
-    store::save(scope, &remembered(name, fact)).await
+    store::save(scope, &remembered(name, kind, fact)).await
 }
 
-fn remembered(name: String, fact: &str) -> Memory {
+/// The type the extractor named and the fact after it; a line with no type
+/// it was asked for is a project fact, which is what an untyped line was.
+fn typed(line: &str) -> (Kind, &str) {
+    line.split_once(':')
+        .and_then(|(word, rest)| Some((Kind::of(word.trim())?, rest.trim())))
+        .filter(|(_, fact)| !fact.is_empty())
+        .unwrap_or((Kind::Project, line))
+}
+
+fn remembered(name: String, kind: Kind, fact: &str) -> Memory {
     Memory {
         name,
         description: cut(fact, DESCRIPTION_CHARS),
-        kind: Kind::Project,
+        kind,
         body: format!("{fact}\n"),
     }
 }
@@ -222,6 +237,10 @@ mod tests {
 
         async fn memories(&self) -> Vec<Memory> {
             store::list(&self.scope()).await
+        }
+
+        async fn user_memories(&self) -> Vec<Memory> {
+            store::list(&dir::user(self.data.path())).await
         }
 
         async fn index(&self) -> String {
@@ -304,6 +323,40 @@ mod tests {
                 .starts_with("You are a memory extractor")
         );
         assert_eq!(request.max_tokens, MAX_TOKENS);
+    }
+
+    /// The extractor names the type of each fact, and a fact about the
+    /// person goes where every project reads it. A line with no type it was
+    /// asked for is a project fact, as every line was before.
+    #[tokio::test]
+    async fn a_typed_fact_goes_to_its_scope_and_an_untyped_one_is_the_projects() {
+        let session = Session::new();
+        let provider = Arc::new(Scripted::saying(
+            "user: prefers short answers\nfeedback: never push without a word\nbare fact\n",
+        ));
+        end(&session, &working_turn(), Some(provider)).await;
+        let project = session.memories().await;
+        assert_eq!(
+            project
+                .iter()
+                .map(|m| (m.name.as_str(), m.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("bare-fact", Kind::Project),
+                ("never-push-without-a-word", Kind::Feedback),
+            ]
+        );
+        let user = session.user_memories().await;
+        assert_eq!(
+            user.iter()
+                .map(|m| (m.name.as_str(), m.kind, m.body.as_str()))
+                .collect::<Vec<_>>(),
+            [(
+                "prefers-short-answers",
+                Kind::User,
+                "prefers short answers\n"
+            )]
+        );
     }
 
     #[tokio::test]
