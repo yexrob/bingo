@@ -1647,13 +1647,17 @@ mod tests {
     }
 
     /// A run with nothing happening in it, whose one painted frame is `at`.
-    fn idle(at: Instant) -> Run {
+    pub(super) fn idle(at: Instant) -> Run {
         idle_in(state(), std::sync::Arc::new(TestSession::default()), at)
     }
 
     /// `idle`, over a session of one's choosing — its directory is where a
     /// mentioned picture is looked for, and its handle is what is submitted.
-    fn idle_in(state: SessionState, session: std::sync::Arc<TestSession>, at: Instant) -> Run {
+    pub(super) fn idle_in(
+        state: SessionState,
+        session: std::sync::Arc<TestSession>,
+        at: Instant,
+    ) -> Run {
         Run {
             stored: Stored::default(),
             cache: None,

@@ -877,6 +877,42 @@ mod tests {
         (dir, state)
     }
 
+    /// Any key skips the opening, and does nothing else with itself: the `/`
+    /// that cut the piece short does not also open the dropdown, and the `d`
+    /// that cut it short is not typed (M70, design §11).
+    #[test]
+    fn any_key_skips_the_opening_and_is_spent_on_nothing_else() {
+        for key in [
+            typed('/'),
+            typed('d'),
+            key(KeyCode::Esc),
+            key(KeyCode::Enter),
+            ctrl('c'),
+        ] {
+            let state = state();
+            let tree = solo(&state);
+            let (mut ui, now) = scene();
+            ui.intro = Some(crate::intro::Playing::from(now.instant));
+            let effects = on_key(&mut ui, &tree, key, now);
+            assert!(ui.intro.is_none(), "{key:?} skipped it");
+            assert!(effects.is_empty(), "{key:?} did nothing else: {effects:?}");
+            assert_eq!(ui.composer.text(), "", "{key:?} typed nothing");
+            assert!(ui.suggestions(&state.summary.cwd, &[]).is_empty());
+        }
+    }
+
+    /// And the next key is a key again.
+    #[test]
+    fn the_key_after_the_skip_is_typed() {
+        let state = state();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        ui.intro = Some(crate::intro::Playing::from(now.instant));
+        on_key(&mut ui, &tree, typed('h'), now);
+        on_key(&mut ui, &tree, typed('i'), now);
+        assert_eq!(ui.composer.text(), "i");
+    }
+
     #[test]
     fn an_at_sign_offers_the_paths_under_the_session_and_enter_takes_one() {
         let (_dir, state) = with_files();
