@@ -83,10 +83,14 @@ fn fitting(width: u16) -> usize {
 /// One held picture, fitted into the strip's own box. `None` where no decoder
 /// read it — the token in the line is what says it is there, and a chip in
 /// the box would say it twice.
+///
+/// Measured, never decoded: a paste puts its `[image N]` in the line and the
+/// strip stands under it on the same frame, and the pixels come when the run
+/// has fitted them (M61).
 fn thumbnail(token: u32, image: &Image, cell: Cell, decoded: &Decoded) -> Option<Picture> {
     let source = Source::Draft { token };
-    let png = decoded.png(source.id(), image)?;
-    let (cols, rows) = picture::fit((png.width, png.height), cell, COLS, ROWS);
+    let size = decoded.size(source.id(), image)?;
+    let (cols, rows) = picture::fit(size, cell, COLS, ROWS);
     Some(Picture { source, cols, rows })
 }
 

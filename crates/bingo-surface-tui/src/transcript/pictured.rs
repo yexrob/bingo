@@ -162,8 +162,9 @@ fn drawn(
         return None;
     };
     let id = source.id();
-    let png = rows.pictures.png(id, image)?;
-    let (cols, tall) = picture::fit((png.width, png.height), cell, room, tall);
+    // Measured, never decoded: how many cells a picture takes is where every
+    // row under it goes, so a frame must have the answer now (M61).
+    let (cols, tall) = picture::fit(rows.pictures.size(id, image)?, cell, room, tall);
     let cells = (0..tall)
         .map(|row| kitty::placeholder(id, row, cols))
         .collect();

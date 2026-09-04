@@ -15,10 +15,9 @@
 //! flickers. With no cells to draw into, a held picture costs the terminal
 //! nothing but the memory the cap bounds.
 
-use std::sync::Arc;
-
 use bingo_pictures::Png;
 
+use super::decoded::Pixels;
 use super::kitty;
 use super::picture::Picture;
 use super::tmux::Transport;
@@ -38,11 +37,15 @@ impl Stored {
     /// The bytes that make the terminal hold `placed` and nothing else.
     ///
     /// `pixels` is asked only for a picture the terminal has not got: a
-    /// redraw of one it already has costs no decode and no bytes.
+    /// redraw of one it already has costs no fitting and no bytes. It may
+    /// answer *not yet* — fitting a picture to its cells is a decode, and it
+    /// is done off the loop (M61) — and then this frame sends nothing and
+    /// changes nothing: whatever the terminal holds of that picture it goes on
+    /// holding, and the frame after the answer sends it.
     pub fn catch_up(
         &mut self,
         placed: &[Picture],
-        pixels: impl Fn(&Picture) -> Option<Arc<Png>>,
+        pixels: impl Fn(&Picture) -> Pixels,
         transport: Transport,
     ) -> Vec<u8> {
         let mut out = Vec::new();
@@ -51,11 +54,16 @@ impl Stored {
             // Already there at this very rectangle — from an earlier frame,
             // or from a block earlier in this one — costs nothing.
             if !held.contains(picture) && !self.held.contains(picture) {
-                match transmitted(picture, &pixels, transport) {
-                    Some(bytes) => out.extend_from_slice(&bytes),
-                    // Nothing to send it with, so the terminal does not hold
+                match pixels(picture) {
+                    Pixels::Ready(png) => {
+                        out.extend_from_slice(&transmitted(picture, &png, transport));
+                    }
+                    // Still being fitted: nothing is claimed, nothing is
+                    // forgotten, and nothing flickers on the way.
+                    Pixels::NotYet => continue,
+                    // Nothing will ever draw it, so the terminal does not hold
                     // it and nobody may believe it does.
-                    None => {
+                    Pixels::Never => {
                         held.retain(|kept| kept.id() != picture.id());
                         continue;
                     }
@@ -92,19 +100,14 @@ impl Stored {
 }
 
 /// The pixels of one picture's rectangle, as the terminal is given them.
-fn transmitted(
-    picture: &Picture,
-    pixels: &impl Fn(&Picture) -> Option<Arc<Png>>,
-    transport: Transport,
-) -> Option<Vec<u8>> {
-    let png = pixels(picture)?;
-    Some(kitty::transmit(
+fn transmitted(picture: &Picture, png: &Png, transport: Transport) -> Vec<u8> {
+    kitty::transmit(
         picture.id(),
         &png.bytes,
         picture.cols,
         picture.rows,
         transport,
-    ))
+    )
 }
 
 /// The last [`KEPT`] of what the frame placed. They are handed over in the
@@ -131,8 +134,8 @@ mod tests {
         }
     }
 
-    fn pixels(_: &Picture) -> Option<Arc<Png>> {
-        Some(Arc::new(Png {
+    fn pixels(_: &Picture) -> Pixels {
+        Pixels::Ready(std::sync::Arc::new(Png {
             bytes: b"png!".to_vec(),
             width: 4,
             height: 2,
@@ -242,7 +245,40 @@ mod tests {
     #[test]
     fn a_picture_without_pixels_is_never_claimed_to_be_held() {
         let mut stored = Stored::default();
-        let bytes = stored.catch_up(&[picture("itm_1", 4, 2)], |_| None, Transport::Bare);
+        let never = |_: &Picture| Pixels::Never;
+        let bytes = stored.catch_up(&[picture("itm_1", 4, 2)], never, Transport::Bare);
+        assert!(bytes.is_empty());
+        assert!(stored.held.is_empty());
+    }
+
+    /// A picture still being fitted sends nothing this frame — and takes
+    /// nothing away either. A fold opening under one asks for a bigger
+    /// rectangle than the terminal was given, and deleting the smaller one
+    /// while the bigger is on its way is the flicker M61 is about: the
+    /// terminal goes on holding what it has until the pixels arrive.
+    #[test]
+    fn a_picture_still_being_fitted_is_neither_sent_nor_taken_away() {
+        let mut stored = Stored::default();
+        let small = picture("itm_1", 4, 2);
+        stored.catch_up(std::slice::from_ref(&small), pixels, Transport::Bare);
+        let not_yet = |_: &Picture| Pixels::NotYet;
+        let grown = stored.catch_up(&[picture("itm_1", 40, 12)], not_yet, Transport::Bare);
+        assert!(grown.is_empty(), "nothing went out: {grown:?}");
+        assert_eq!(stored.held, vec![small], "and nothing was let go");
+        let sent = text(stored.catch_up(&[picture("itm_1", 40, 12)], pixels, Transport::Bare));
+        assert!(
+            sent.contains("c=40,r=12"),
+            "the frame after sends it: {sent:?}"
+        );
+    }
+
+    /// The same, for a picture the terminal has never had: nothing is sent and
+    /// nothing is claimed, so the next frame asks again.
+    #[test]
+    fn a_first_picture_still_being_fitted_is_not_claimed_held() {
+        let mut stored = Stored::default();
+        let not_yet = |_: &Picture| Pixels::NotYet;
+        let bytes = stored.catch_up(&[picture("itm_1", 4, 2)], not_yet, Transport::Bare);
         assert!(bytes.is_empty());
         assert!(stored.held.is_empty());
     }

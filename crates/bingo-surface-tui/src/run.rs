@@ -23,15 +23,16 @@ use futures::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+/// The pictures a frame drew, on their way to the terminal.
+mod showing;
 /// A line on its way out of the composer, and the pictures it named.
 mod submit;
 
 use crate::clock::{self, Now};
 use crate::effect::Effect;
-use crate::graphics::picture::Source;
 use bingo_pictures::Cache;
 
-use crate::graphics::{Cell, Graphics, Picture, Stored, Transport, linked};
+use crate::graphics::{Stored, decoded, linked};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
@@ -80,6 +81,9 @@ enum Reply {
     Mentioned(Box<submit::Mentioned>),
     /// A picture an answer's own words named, read in the same way (M51).
     Linked(Box<linked::Answer>),
+    /// One picture fitted to the cells it was drawn into (M61): a decode and a
+    /// resize, done on a blocking thread so no frame paid for it.
+    Fitted(Box<decoded::Fitted>),
     Failed(KernelError),
 }
 
@@ -255,7 +259,7 @@ async fn attach(
         // that happens is drawn.
         painted: older_than_a_frame(),
         stored: Stored::default(),
-        cache: Cache::under(&opts.env.data_dir, cache_days(&opts.args)),
+        cache: Cache::under(&opts.env.data_dir, showing::cache_days(&opts.args)),
         ear: late::Late::default(),
         behind: false,
         sluggish: false,
@@ -270,38 +274,6 @@ async fn attach(
         )));
     }
     Ok((run, Some(attachment.events)))
-}
-
-/// The bytes that make the terminal hold the pictures this frame placed, cut
-/// to the cells each of them covers.
-///
-/// A picture the terminal has not got is resolved back to where it came from
-/// — the journal, or the composer's own held pictures — and decoded and
-/// shrunk once ([`crate::graphics::Decoded`]); one it already has costs
-/// nothing at all.
-fn placing(
-    ui: &Ui,
-    state: &SessionState,
-    cell: Cell,
-    stored: &mut Stored,
-    placed: &[Picture],
-    transport: Transport,
-) -> Vec<u8> {
-    let pixels = |picture: &Picture| {
-        let image = picture.source.image_in(state, &ui.pictures, &ui.linked)?;
-        ui.decoded
-            .thumbnail(picture.id(), image, picture.pixels(cell))
-    };
-    stored.catch_up(placed, pixels, transport)
-}
-
-/// How many days a fetched picture is kept, as the run was told
-/// (`pictures.cacheDays`, read off the settings layers before any host) — and
-/// the cache's own fortnight where it was told nothing.
-fn cache_days(args: &Value) -> u64 {
-    args.get("pictureCacheDays")
-        .and_then(Value::as_u64)
-        .unwrap_or(bingo_pictures::cache::DAYS)
 }
 
 /// An instant one frame in the past, or this one on a machine that has not
@@ -393,7 +365,7 @@ impl Run {
         now: Now,
     ) -> Result<Farewell, KernelError> {
         self.paint(screen, Wake::Frame, now)?;
-        self.forget_pictures(screen)?;
+        showing::forget(self, screen)?;
         let root = self.session.tree.root_id().clone();
         let _ = self.host.close(&root, CloseReason::Client).await;
         Ok(Farewell {
@@ -428,67 +400,10 @@ impl Run {
             .draw(&self.session.tree, &self.ui, now)
             .map_err(stdio)?;
         self.grumble(began.elapsed());
-        self.hand_pictures(screen)?;
-        self.read_linked();
+        showing::hand(self, screen)?;
+        showing::fit(self);
+        showing::read_linked(self);
         Ok(())
-    }
-
-    /// The pictures this frame's words named that nobody has been sent after
-    /// yet (M51), read in off the loop's thread — a path on this machine's
-    /// disk, a URL this machine fetches (ADR-0041 §3). Each destination is
-    /// asked for once a session, whatever the answer was, so a transcript of
-    /// them costs one read each and a redraw costs none.
-    fn read_linked(&mut self) {
-        // A terminal that draws no picture is sent after none. The chip is
-        // the whole of what it will ever show, so a file read or an address
-        // fetched for it would be bytes taken and thrown away — and model
-        // text is not a reason to reach the network on its own.
-        if crate::graphics::chosen() == Graphics::Off {
-            return;
-        }
-        let wanted = self.ui.painted.borrow().blocks.wanted();
-        let cwd = std::path::PathBuf::from(&self.session.tree.viewed().summary.cwd);
-        let reads = self.ui.linked.take_all(wanted, &cwd, crate::paths::home());
-        for (dest, source) in reads {
-            let cache = self.cache.clone();
-            self.spawn(async move {
-                Ok(Reply::Linked(Box::new(
-                    linked::read(dest, source, cache).await,
-                )))
-            });
-        }
-    }
-
-    /// Give the terminal its memory back on the way out: a picture it is
-    /// holding for this surface outlives the run otherwise, and nothing will
-    /// ever place it again.
-    fn forget_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
-        let transport = crate::graphics::chosen().transport();
-        let bytes = self.stored.forget_all(transport);
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        screen.place(&bytes).map_err(stdio)
-    }
-
-    /// The pictures the frame drew placeholders for, after the frame: the
-    /// cells are on the screen and these are what the terminal draws into
-    /// them, so they go out of band as the title and the clipboard do.
-    ///
-    /// A terminal that draws no pictures is asked for none, and neither is a
-    /// frame whose pictures the terminal is already holding: the whole cost
-    /// of a redraw is one walk of the blocks.
-    fn hand_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
-        let Graphics::Kitty { cell, transport } = crate::graphics::chosen() else {
-            return Ok(());
-        };
-        let placed = self.ui.painted.borrow().placed();
-        let state = self.session.tree.viewed();
-        let bytes = placing(&self.ui, state, cell, &mut self.stored, &placed, transport);
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        screen.place(&bytes).map_err(stdio)
     }
 
     /// Own up, once per run, when drawing itself is the latency a person
@@ -680,7 +595,7 @@ impl Run {
             Effect::ListStored => self.list_stored(),
             Effect::Copy(text) => self.clipboard = Some(text),
             Effect::PasteImage => self.paste_image(),
-            Effect::OpenPicture(source) => self.open_picture(&source),
+            Effect::OpenPicture(source) => showing::open(self, &source),
             Effect::Exit => self.exit = Some(Exit { code: 0 }),
         }
     }
@@ -702,36 +617,6 @@ impl Run {
                     .notify(Level::Warn, format!("clipboard: {error}"), Instant::now())
             }
         }
-    }
-
-    /// A click on a drawn picture hands it to whatever this system opens
-    /// pictures with (M56) — always a file on this machine, never an address —
-    /// and the notice says what was opened, or, when nothing would, what it was
-    /// handed.
-    fn open_picture(&mut self, source: &Source) {
-        let opened = self.hand_to_viewer(source);
-        let now = Instant::now();
-        match opened {
-            Ok(word) => self.ui.notify(Level::Info, format!("opened {word}"), now),
-            Err(why) => self.ui.notify(Level::Warn, why, now),
-        }
-    }
-
-    /// The picture behind the click, read out of wherever it came from and
-    /// handed over as a file ([`viewer`]).
-    fn hand_to_viewer(&self, source: &Source) -> Result<String, String> {
-        let state = self.session.tree.viewed();
-        let image = source.image_in(state, &self.ui.pictures, &self.ui.linked);
-        viewer::open(
-            &self.opener,
-            source,
-            image,
-            viewer::Where {
-                cwd: std::path::Path::new(&state.summary.cwd),
-                home: crate::paths::home(),
-                data_dir: &self.data_dir,
-            },
-        )
     }
 
     fn interrupt(&mut self) {
@@ -919,6 +804,7 @@ impl Run {
             }
             Reply::Mentioned(waiting) => self.mentioned(*waiting),
             Reply::Linked(answer) => self.ui.linked.answered(*answer),
+            Reply::Fitted(fitted) => self.ui.decoded.answered(*fitted),
             Reply::Failed(error) => {
                 self.ui.opening = false;
                 self.ui.notify(Level::Error, error.message, Instant::now());
@@ -1758,11 +1644,33 @@ mod tests {
         (dir, run, session, waiting)
     }
 
-    /// The hop the loop makes: the pictures are read on a task and folded
-    /// back in when they land.
+    /// The hop the loop makes: the work a frame owed is done on a task of its
+    /// own and folded back in when it lands.
     async fn settle(run: &mut Run, waiting: &mut mpsc::Receiver<Reply>) {
-        let reply = waiting.recv().await.expect("the mentions came back");
+        let reply = waiting.recv().await.expect("the task came back");
         run.reply(reply, &mut None);
+    }
+
+    /// A run with the loop's own reply lane open, so a test can take the hop
+    /// the loop takes.
+    fn replying(state: SessionState) -> (Run, mpsc::Receiver<Reply>) {
+        let mut run = idle_in(
+            state,
+            std::sync::Arc::new(TestSession::default()),
+            Instant::now(),
+        );
+        let (replies, waiting) = mpsc::channel(8);
+        run.replies = replies;
+        (run, waiting)
+    }
+
+    /// The bytes the terminal was handed for pictures, one write per call.
+    fn places(recorder: &Recorder) -> Vec<String> {
+        recorder
+            .places
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect()
     }
 
     fn prose(text: &str) -> Input {
@@ -2055,9 +1963,14 @@ mod tests {
     /// A picture goes to the terminal once, however many frames draw it: the
     /// cells are redrawn from the block cache and the bytes behind them are
     /// already there (design §5).
-    #[test]
-    fn a_picture_is_handed_to_the_terminal_once_and_not_again() {
-        let picture = bingo_pictures::testing::png(100, 200);
+    ///
+    /// And the frame that first drew it fitted nothing (M61): its cells are on
+    /// the screen — the rows under a picture depend on how many it takes, so
+    /// that much is measured, not decoded — while the pixels are the run's
+    /// work on another thread, and the frame after the reply is what sends.
+    #[tokio::test]
+    async fn a_picture_is_handed_to_the_terminal_once_and_not_again() {
+        let picture = bingo_pictures::testing::noisy(100, 200);
         let read = tool(
             "itm_1",
             "Read",
@@ -2069,26 +1982,38 @@ mod tests {
             }),
             ItemStatus::Completed,
         );
-        let at = Instant::now();
-        let mut run = idle_in(
-            folded(vec![frame(1, Event::ItemCompleted { item: read })]),
-            std::sync::Arc::new(TestSession::default()),
-            at,
-        );
+        let (mut run, mut waiting) =
+            replying(folded(vec![frame(1, Event::ItemCompleted { item: read })]));
         let mut recorder = Recorder::default();
         let now = crate::test_support::scene().1;
         crate::graphics::with(crate::graphics::drawing(), || {
             run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
-            run.paint(&mut recorder, Wake::Frame, now).expect("another");
         });
-        let sent: Vec<String> = recorder
-            .places
-            .iter()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .collect();
+        assert!(
+            recorder.places.is_empty(),
+            "nothing was fitted on the frame's own thread: {:?}",
+            places(&recorder)
+        );
+        assert_eq!(
+            recorder
+                .last()
+                .matches(crate::graphics::kitty::PLACEHOLDER)
+                .count(),
+            100,
+            "and the ten by ten cells are already drawn: {}",
+            recorder.last()
+        );
+
+        settle(&mut run, &mut waiting).await;
+        crate::graphics::with(crate::graphics::drawing(), || {
+            run.paint(&mut recorder, Wake::Frame, now).expect("another");
+            run.paint(&mut recorder, Wake::Frame, now).expect("a third");
+        });
+        let sent = places(&recorder);
         assert_eq!(sent.len(), 1, "one write, not one per frame: {sent:?}");
         assert!(sent[0].starts_with("\x1b_Ga=T,f=100,q=2,U=1,"), "{sent:?}");
         assert!(sent[0].contains("c=10,r=10"), "{sent:?}");
+        assert!(waiting.try_recv().is_err(), "and nothing was fitted twice");
     }
 
     /// The pictures behind the composer's line go to the terminal like any
@@ -2096,10 +2021,15 @@ mod tests {
     /// leaves the line the terminal keeps holding it, as it keeps every
     /// picture until the cap pushes it out: nothing is deleted for a frame
     /// that did not place it, so nothing flickers on the way back.
-    #[test]
-    fn a_carried_picture_is_sent_small_and_kept_when_its_token_goes() {
+    ///
+    /// And a paste waits for nothing (M61, the user's word after seeing it):
+    /// the frame it lands on has the `[image 1]` in the line and the strip's
+    /// slot under the box, and fits no picture at all — the thumbnail arrives
+    /// on the frame after the run has fitted it off its own thread.
+    #[tokio::test]
+    async fn a_carried_picture_is_sent_small_and_kept_when_its_token_goes() {
         use base64::Engine;
-        let mut run = idle(Instant::now());
+        let (mut run, mut waiting) = replying(state());
         let mut recorder = Recorder::default();
         let now = crate::test_support::scene().1;
         crate::graphics::with(crate::graphics::drawing(), || {
@@ -2109,17 +2039,28 @@ mod tests {
                 .hold("", bingo_pictures::testing::png(400, 300));
             run.ui.composer.insert(&pictures::placeholder(token));
             run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
+        });
+        assert!(
+            recorder.places.is_empty(),
+            "the paste fitted nothing on the loop's thread: {:?}",
+            places(&recorder)
+        );
+        assert!(
+            recorder.last().contains("[image 1]"),
+            "and the token is in the line at once: {}",
+            recorder.last()
+        );
+
+        settle(&mut run, &mut waiting).await;
+        crate::graphics::with(crate::graphics::drawing(), || {
+            run.paint(&mut recorder, Wake::Frame, now).expect("another");
             // What a submit leaves behind: the line taken and the pictures
             // let go (`input::submit`, `Run::send_text`).
             run.ui.composer.take();
             run.ui.pictures.clear();
-            run.paint(&mut recorder, Wake::Frame, now).expect("another");
+            run.paint(&mut recorder, Wake::Frame, now).expect("a third");
         });
-        let sent: Vec<String> = recorder
-            .places
-            .iter()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .collect();
+        let sent = places(&recorder);
         assert_eq!(sent.len(), 1, "one send and nothing else: {sent:?}");
         // 400×300 pixels of a 10×20 cell is 40 by 15 cells, and the strip's
         // three rows cut that to eight by three.
@@ -2143,7 +2084,8 @@ mod tests {
 
     /// A picture an answer's own words named, through the whole seam (M51):
     /// the first frame draws the chip and sends the loop after the file, the
-    /// reply lands, and the frame after it puts the picture on the wire.
+    /// read comes back, the frame after it measures the picture and owes the
+    /// fitting, and the frame after *that* puts it on the wire (M61).
     #[tokio::test]
     async fn a_picture_an_answer_named_is_read_in_between_frames_and_sent() {
         let dir = tempfile::tempdir().expect("a directory");
@@ -2176,25 +2118,30 @@ mod tests {
             "the chip is drawn and nothing is sent until the picture is in"
         );
 
-        let reply = waiting.recv().await.expect("the picture came back");
-        run.reply(reply, &mut None);
+        settle(&mut run, &mut waiting).await;
         crate::graphics::with(crate::graphics::drawing(), || {
             run.paint(&mut recorder, Wake::Frame, now).expect("another");
         });
-        let sent: Vec<String> = recorder
-            .places
-            .iter()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .collect();
+        assert!(
+            recorder.places.is_empty(),
+            "the cells are drawn and the fitting is owed, not done here"
+        );
+        settle(&mut run, &mut waiting).await;
+        crate::graphics::with(crate::graphics::drawing(), || {
+            run.paint(&mut recorder, Wake::Frame, now).expect("a third");
+        });
+        let sent = places(&recorder);
         assert_eq!(sent.len(), 1, "{sent:?}");
         assert!(sent[0].starts_with("\x1b_Ga=T,f=100,q=2,U=1,"), "{sent:?}");
         assert!(sent[0].contains("c=10,r=10"), "{sent:?}");
 
-        // And the file is not read again, however many frames draw it.
+        // And neither the file nor the decoder is asked again, however many
+        // frames draw it.
         crate::graphics::with(crate::graphics::drawing(), || {
-            run.paint(&mut recorder, Wake::Frame, now).expect("a third");
+            run.paint(&mut recorder, Wake::Frame, now)
+                .expect("a fourth");
         });
-        assert_eq!(recorder.places.len(), 1, "one send, one read");
+        assert_eq!(recorder.places.len(), 1, "one send, one read, one fitting");
         assert!(waiting.try_recv().is_err(), "and nobody was sent again");
     }
 
@@ -2330,15 +2277,21 @@ mod tests {
     #[test]
     fn the_cache_keeps_a_fortnight_unless_the_settings_said_otherwise() {
         assert_eq!(
-            cache_days(&serde_json::json!({})),
+            showing::cache_days(&serde_json::json!({})),
             bingo_pictures::cache::DAYS
         );
         assert_eq!(
-            cache_days(&serde_json::json!({ "pictureCacheDays": null })),
+            showing::cache_days(&serde_json::json!({ "pictureCacheDays": null })),
             bingo_pictures::cache::DAYS
         );
-        assert_eq!(cache_days(&serde_json::json!({ "pictureCacheDays": 3 })), 3);
-        assert_eq!(cache_days(&serde_json::json!({ "pictureCacheDays": 0 })), 0);
+        assert_eq!(
+            showing::cache_days(&serde_json::json!({ "pictureCacheDays": 3 })),
+            3
+        );
+        assert_eq!(
+            showing::cache_days(&serde_json::json!({ "pictureCacheDays": 0 })),
+            0
+        );
         assert!(
             Cache::under(std::path::Path::new("/data"), 0).is_none(),
             "and no days is no cache at all"
