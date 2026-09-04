@@ -68,7 +68,8 @@ Completing a session name into a `@mention` for sending (that is the
 plan's order, after one preparatory move: `8d1872f` (the switcher's keys lifted
 into a module of their own), `795da6b` (1, the box is the query), `8af1cdd`
 (2, `tab` completes), `789a0dc` (3, `↓`'s two doors asserted with the box
-holding a query).
+holding a query), `4799a6d` (1, a defect of its own: a line's chord edits the
+query rather than closing the list).
 
 ### What landed
 
@@ -78,8 +79,8 @@ and unchanged, into `crates/bingo-surface-tui/src/input/switcher.rs`:
 `opens_the_roster`, `toggle_switcher` and `switcher` are `switcher::{opens,
 toggle, keys}`, `walk_to` is re-exported from `input` so `pointer.rs` still
 reaches it by the name it always used, and the tests stayed with `on_key` in
-`input.rs`, which is what they press. `input.rs` 937 → 788, and 795 after the
-three bricks.
+`input.rs`, which is what they press. `input.rs` 937 → 788, and 803 after the
+three bricks (fail at 1000).
 
 **1 — the query is the line.** `Switcher.query` is gone. `Switcher.draft` holds
 the line the box had when the list opened (`Composer::take`), and one function —
@@ -89,19 +90,24 @@ empty box and `ctrl+g` all go through it. The list is ranked by
 `ui.composer.text()` at every read: `roster::lines`, `walked`, `placed` and
 `Switcher::session` take the query as an argument, and nothing keeps a copy.
 Typing is the box's own editing: `switcher::edits` inserts, backspaces, deletes
-and moves the caret, and hands an `alt` chord to `super::alt` so a word chord is
-spelled in one table only. After every edit the cursor is re-placed on the
+and moves the caret, and hands a chord to `input::control` / `input::alt`, so
+the keys that edit a line are spelled in one table only. After every edit the cursor is re-placed on the
 session it was on (M55's rule, unchanged) and the view follows it, so `⏎` still
 keeps what a person is looking at.
 
 Two things the plan did not name had to hold with it:
 
-- **A chord takes the list away.** `ctrl+t`, `ctrl+f`, `ctrl+o` and `ctrl+b`
-  open something else over the list, and `ctrl+g` closes it; with the query in
-  the box, any of them leaving the list up or the query behind would leave a
-  line `⏎` sends. So `layered` puts the list away before answering a chord that
-  is not the list's own (`switcher::CHORD`), and `put_away` is a no-op unless
-  the list is what is showing.
+- **A layer's chord takes the list away; a line's chord edits it.** `ctrl+t`,
+  `ctrl+f`, `ctrl+o` and `ctrl+b` open something else over the list and
+  `ctrl+g` closes it, so `layered` puts the list away before answering any of
+  them but `switcher::CHORD` (and `put_away` is a no-op unless the list is what
+  is showing). `ctrl+w`, `ctrl+u`, `ctrl+k`, `ctrl+a`, `ctrl+e`, `ctrl+j` are
+  the *line's*, and the query is a line: `input::LAYERS` is now the one table of
+  the chords that open a layer, `chorded` answers only those, and every other
+  control chord reaches the box through `switcher::edits`, which hands it to
+  `input::control` — the same table any other line is edited by. (First cut had
+  `chorded` answering every control chord, so `ctrl+w` closed the list and then
+  deleted a word of the restored draft; `4799a6d`'s commit body has it.)
 - **The box's line is the list's, so it offers nothing else.** `Ui::listing()`
   is true while the list captures the keyboard, and `Ui::suggestions` answers
   nothing then — one fact in one place, so the `/` and `@` dropdown is neither
@@ -192,6 +198,7 @@ assertion about the box.
 New: `the_line_being_written_is_set_aside_and_given_back` (all three ways out,
 `esc` counted as the two presses §7's stack asks for),
 `a_chord_that_opens_something_else_puts_the_list_away`,
+`a_word_chord_edits_the_query_and_leaves_the_list_up`,
 `the_query_offers_no_command_of_its_own`,
 `tab_completes_the_name_the_cursor_is_on`,
 `tab_completes_a_rooms_name_with_its_sigil`,
@@ -203,13 +210,13 @@ New: `the_line_being_written_is_set_aside_and_given_back` (all three ways out,
 - **Windows.** Not cross-checked: the TUI cannot be checked against another
   target locally (ADR-0041's note), and nothing here is platform-shaped — no
   process, path, signal or clock is touched.
-- **The editing control chords leave the cursor a frame stale.** `ctrl+w`,
-  `ctrl+u`, `ctrl+k` and `ctrl+j` are answered by `input::control` (they fall
-  past `layered`'s chord table, as they did before M58), so they edit the query
-  without re-placing the cursor: until the next key, a row-index past the end of
-  a list they shortened draws no `❯`. Pre-existing in shape — the same keys
-  edited the invisible draft under M55 — and the fix wants the cursor to name a
-  session rather than an index, which is its own decision.
+- **A cursor is an index, and a list can shrink under it.** Every key the list
+  answers re-places the cursor, so no path this milestone opened leaves one
+  stale; but the shape stays fragile — `roster::Cursor { at }` names a row
+  number, not a session, and any future writer of the box that forgets to
+  re-place it would draw a list with no `❯` on it. Naming the session is the
+  fix and is its own decision (M55 left the same note about the store's answer
+  landing on a typed list, which is still true).
 - **`run.rs::attach` closes the layer without the draft.** A `/resume` or
   `/clear` landing while the list is up would drop the set-aside line. Not
   reachable by hand today (the list owns the keyboard and neither command can be
@@ -234,12 +241,12 @@ $ cargo clippy -j 2 --workspace --all-targets --locked -- -D warnings
 === clippy exit 0
 
 $ cargo test -j 2 --workspace --locked   # tee'd to target/m58-test.log
-81 `test result: ok` lines, 3742 passed, 0 failed — no known flake hit, no rerun
+81 `test result: ok` lines, 3743 passed, 0 failed — no known flake hit, no rerun
 === test exit 0
 
 $ scripts/check_discipline.sh
 dependency direction ok
-warn crates/bingo-surface-tui/src/input.rs: 795 non-test lines (>700)
+warn crates/bingo-surface-tui/src/input.rs: 803 non-test lines (>700)
 kernel names no tool
 cohesion ok
 warn crates/bingo-core/src/session.rs:129 fn handle is 66 lines (>60)
@@ -250,7 +257,7 @@ $ scripts/budget.sh
 dependencies (unique, normal): 332 (max  332)
 warm cargo check -p bingo-core: 0s (max  20s)
 relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
-target/debug: 7 GB (soft max  5)
+target/debug: 8 GB (soft max  5)
 warn: target/debug exceeds the soft limit
 test binaries: 55
 budget ok
