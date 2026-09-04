@@ -69,6 +69,7 @@ mod keys;
 mod layers;
 mod markdown;
 mod mentions;
+mod opening;
 mod pager;
 mod panel;
 mod paths;

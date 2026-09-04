@@ -52,7 +52,7 @@ impl Strip {
 
 /// The strip for a line, `width` columns wide.
 pub fn rows(held: &Held, line: &str, graphics: Graphics, decoded: &Decoded, width: u16) -> Strip {
-    let Graphics::Kitty { cell } = graphics else {
+    let Graphics::Kitty { cell, .. } = graphics else {
         return Strip::default();
     };
     let carried = held.shown(line);

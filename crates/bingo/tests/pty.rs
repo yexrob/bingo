@@ -44,6 +44,14 @@ enum Answers {
     Tofu,
     /// iTerm2, Apple Terminal: DA1 and nothing else.
     Da1Only,
+    /// tmux 3.6b with `allow-passthrough on`, an outer Ghostty. tmux answers
+    /// the bare XTVERSION for itself and answers it first — it replies to its
+    /// own pane before it has forwarded anything (`input.c`) — and the outer
+    /// terminal's four answers come out of the envelope behind it.
+    ThroughTmux,
+    /// The same tmux with the passthrough off: the envelope is dropped whole,
+    /// so its own name is all there is and no DA1 reply ever lands.
+    TmuxAlone,
 }
 
 impl Answers {
@@ -56,13 +64,31 @@ impl Answers {
                 b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1bP>|WezTerm 20240203-110809-5046fc22\x1b\\\x1b[?65;4;6;18;22c"
             }
             Answers::Da1Only => b"\x1b[?62;c",
+            Answers::ThroughTmux => {
+                b"\x1bP>|tmux 3.6b\x1b\\\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1bP>|ghostty 1.3.1\x1b\\\x1b[?62;22c"
+            }
+            Answers::TmuxAlone => b"\x1bP>|tmux 3.6b\x1b\\",
         }
+    }
+
+    /// Whether the child is to believe it is inside tmux. `TMUX` is what a
+    /// real one sets, and it is what decides the envelope.
+    fn multiplexed(self) -> bool {
+        matches!(self, Answers::ThroughTmux | Answers::TmuxAlone)
     }
 }
 
 /// What the graphics probe asks, as it appears in the child's output: seeing
-/// it is what tells the fake terminal to answer.
+/// it is what tells the fake terminal to answer. Wrapped or bare, the query
+/// itself reads the same — under tmux there is one more `ESC` in front of it.
 const GRAPHICS_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q";
+
+/// The same query in tmux's passthrough envelope: `DCS tmux;` and then the
+/// APC with its `ESC` doubled.
+const WRAPPED_QUERY: &[u8] = b"\x1bPtmux;\x1b\x1b_Gi=31,s=1,v=1,a=q";
+
+/// One transmitted picture, in the envelope tmux carries it in.
+const WRAPPED_TRANSMIT: &[u8] = b"\x1bPtmux;\x1b\x1b_Ga=T,f=100";
 
 /// A `bingo` on a pty, with everything it reads and writes in one place.
 struct Terminal {
@@ -101,10 +127,13 @@ impl Terminal {
         command.env("BINGO_FAKE_SCRIPT", &script);
         command.env("TERM", "xterm-256color");
         // The terminal under test is this pty and nothing the suite happens
-        // to be running inside: a multiplexer would turn the graphics probe
-        // off, and a truecolor claim would send the theme probe looking for
-        // an answer nobody here gives.
-        command.env_remove("TMUX");
+        // to be running inside: a truecolor claim would send the theme probe
+        // looking for an answer nobody here gives, and whether there is a
+        // multiplexer is the scene's to say and not the suite's.
+        match answers.multiplexed() {
+            true => command.env("TMUX", "/tmp/tmux-1000/default,4242,0"),
+            false => command.env_remove("TMUX"),
+        };
         command.env_remove("COLORTERM");
         command.env_remove("NO_COLOR");
         command.cwd(home.path());
@@ -347,6 +376,65 @@ fn a_terminal_that_answers_only_da1_gets_the_chip() {
     assert!(
         !contains(&terminal.written(), b"\x1b_Ga=T"),
         "nothing was transmitted to a terminal that cannot draw it"
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// M49: inside tmux the probe and the picture both travel in the passthrough
+/// envelope, and the outer terminal — the one that answers out of it — is
+/// what decides whether there is a picture at all.
+#[test]
+fn a_picture_under_tmux_travels_in_the_passthrough_envelope() {
+    let mut terminal = Terminal::opened(&[], READS_A_PICTURE, Answers::ThroughTmux);
+    std::fs::write(
+        terminal.home.path().join("shot.png"),
+        bingo_pictures::testing::png_bytes(1200, 900),
+    )
+    .unwrap();
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"look at it\r");
+    terminal.wait_for("That is the picture.");
+    let written = terminal.written();
+    assert!(
+        contains(&written, WRAPPED_QUERY),
+        "the question went to the terminal behind tmux"
+    );
+    assert_eq!(
+        count(&written, WRAPPED_TRANSMIT),
+        1,
+        "and so did the picture, once, in an envelope of its own"
+    );
+    assert!(
+        !terminal.screen().contains("[image:"),
+        "and no chip was drawn:\n{}",
+        terminal.screen()
+    );
+    terminal.send(&[0x04]);
+    terminal.leave();
+}
+
+/// The passthrough off: tmux answers for itself, nothing behind it answers at
+/// all, and what a person gets is the chip — not a picture-shaped hole.
+#[test]
+fn a_tmux_that_carries_nothing_through_gets_the_chip() {
+    let mut terminal = Terminal::opened(&[], READS_A_PICTURE, Answers::TmuxAlone);
+    std::fs::write(
+        terminal.home.path().join("shot.png"),
+        bingo_pictures::testing::png_bytes(100, 200),
+    )
+    .unwrap();
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"look at it\r");
+    terminal.wait_for("[image: image/png]");
+    let written = terminal.written();
+    assert!(
+        contains(&written, WRAPPED_QUERY),
+        "it was asked through the envelope all the same"
+    );
+    assert!(
+        !contains(&written, b"\x1b_Ga=T"),
+        "and nothing was transmitted to a terminal that never answered"
     );
     terminal.send(&[0x04]);
     terminal.leave();

@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::clock::{self, Now};
 use crate::effect::Effect;
-use crate::graphics::{Cell, Graphics, Picture, Stored};
+use crate::graphics::{Cell, Graphics, Picture, Stored, Transport};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
@@ -253,6 +253,7 @@ async fn attach(
         exit: None,
     };
     run.fetch_catalogs();
+    crate::opening::notices(&mut run.ui, Instant::now());
     if let Some(prompt) = opts.prompt {
         run.effect(Effect::Submit(bingo_sdk::Input::text(
             prompt,
@@ -275,12 +276,14 @@ fn placing(
     cell: Cell,
     stored: &mut Stored,
     placed: &[Picture],
+    transport: Transport,
 ) -> Vec<u8> {
-    stored.catch_up(placed, |picture| {
+    let pixels = |picture: &Picture| {
         let image = picture.image_in(state, &ui.pictures)?;
         ui.decoded
             .thumbnail(picture.id(), image, picture.pixels(cell))
-    })
+    };
+    stored.catch_up(placed, pixels, transport)
 }
 
 /// An instant one frame in the past, or this one on a machine that has not
@@ -413,7 +416,8 @@ impl Run {
     /// holding for this surface outlives the run otherwise, and nothing will
     /// ever place it again.
     fn forget_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
-        let bytes = self.stored.catch_up(&[], |_| None);
+        let transport = crate::graphics::chosen().transport();
+        let bytes = self.stored.catch_up(&[], |_| None, transport);
         if bytes.is_empty() {
             return Ok(());
         }
@@ -428,12 +432,12 @@ impl Run {
     /// frame whose pictures the terminal is already holding: the whole cost
     /// of a redraw is one walk of the blocks.
     fn hand_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
-        let Graphics::Kitty { cell } = crate::graphics::chosen() else {
+        let Graphics::Kitty { cell, transport } = crate::graphics::chosen() else {
             return Ok(());
         };
         let placed = self.ui.painted.borrow().placed();
         let state = self.session.tree.viewed();
-        let bytes = placing(&self.ui, state, cell, &mut self.stored, &placed);
+        let bytes = placing(&self.ui, state, cell, &mut self.stored, &placed, transport);
         if bytes.is_empty() {
             return Ok(());
         }

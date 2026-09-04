@@ -27,6 +27,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::clock::Now;
+use crate::graphics::Transport;
+use crate::graphics::tmux;
 use crate::tree::Tree;
 use crate::ui::Ui;
 use crate::view;
@@ -187,10 +189,24 @@ pub enum Dialect {
 pub fn notification(what: Notification) -> Vec<u8> {
     let term_program = std::env::var("TERM_PROGRAM").ok();
     let term = std::env::var("TERM").ok();
-    wrapped(
+    tmux::wrapped(
         message(what, dialect(term_program.as_deref())),
-        multiplexed(term.as_deref(), std::env::var_os("TMUX").is_some()),
+        envelope(multiplexed(
+            term.as_deref(),
+            std::env::var_os("TMUX").is_some(),
+        )),
     )
+}
+
+/// What a notification travels in. Every multiplexer gets tmux's envelope,
+/// screen included: a notification is worth one try through the only
+/// passthrough this surface writes, and there is nothing to fall back to —
+/// unlike a picture, whose cells would be tofu if the try failed.
+fn envelope(multiplexed: bool) -> Transport {
+    match multiplexed {
+        true => Transport::Tmux,
+        false => Transport::Bare,
+    }
 }
 
 /// iTerm2 and Terminal.app answer to `OSC 9`; everything else that notifies at
@@ -215,23 +231,6 @@ fn message(what: Notification, dialect: Dialect) -> Vec<u8> {
         Dialect::Osc777 => format!("\x1b]777;notify;bingo;{body}\x07").into_bytes(),
         Dialect::Osc9 => format!("\x1b]9;bingo · {body}\x07").into_bytes(),
     }
-}
-
-/// tmux swallows what it does not know unless it is told to pass it on, and
-/// the escape inside a passthrough is doubled.
-fn wrapped(sequence: Vec<u8>, multiplexed: bool) -> Vec<u8> {
-    if !multiplexed {
-        return sequence;
-    }
-    let mut out = b"\x1bPtmux;".to_vec();
-    for byte in sequence {
-        if byte == 0x1b {
-            out.push(0x1b);
-        }
-        out.push(byte);
-    }
-    out.extend_from_slice(b"\x1b\\");
-    out
 }
 
 /// `OSC 2 ; text BEL`. A stray control byte in a path would end the sequence
@@ -366,7 +365,7 @@ mod tests {
 
         let bare = message(Notification::NeedsYou, Dialect::Osc777);
         assert_eq!(
-            wrapped(bare.clone(), true),
+            tmux::wrapped(bare.clone(), envelope(true)),
             [
                 b"\x1bPtmux;".to_vec(),
                 b"\x1b\x1b]777;notify;bingo;needs you\x07".to_vec(),
@@ -374,6 +373,10 @@ mod tests {
             ]
             .concat(),
         );
-        assert_eq!(wrapped(bare.clone(), false), bare, "and nothing when not");
+        assert_eq!(
+            tmux::wrapped(bare.clone(), envelope(false)),
+            bare,
+            "and nothing when not"
+        );
     }
 }
