@@ -16,10 +16,14 @@ use super::Reply;
 /// This build's version, which is what a release is tagged.
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
-/// Whether the bin says this run may ask (`update.check`, ADR-0043 §4).
-/// Anything but an explicit no is a yes.
+/// Whether the bin said this run may ask (`update.check`, ADR-0043 §4).
+///
+/// Only an explicit yes is a yes. The bin always says one way or the other,
+/// so a real run is unaffected; a harness that builds its own options — this
+/// crate's tests, and any other caller of the loop — never reaches the
+/// network by forgetting to say no.
 pub(super) fn wanted(args: &Value) -> bool {
-    args.get("updateCheck").and_then(Value::as_bool) != Some(false)
+    args.get("updateCheck").and_then(Value::as_bool) == Some(true)
 }
 
 /// Ask, off the loop's thread, and mail back a version worth saying.
@@ -66,10 +70,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_run_asks_unless_the_settings_said_not_to() {
-        assert!(wanted(&json!({})));
-        assert!(wanted(&Value::Null));
+    fn only_a_run_whose_bin_said_so_asks() {
         assert!(wanted(&json!({ "updateCheck": true })));
         assert!(!wanted(&json!({ "updateCheck": false })));
+        assert!(!wanted(&json!({})), "a harness reaches nothing by default");
+        assert!(!wanted(&Value::Null));
     }
 }

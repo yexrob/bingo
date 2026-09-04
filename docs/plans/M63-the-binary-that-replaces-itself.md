@@ -155,8 +155,8 @@ $ scripts/check_discipline.sh
     discipline ok
     (no new warning: `fn run` in main.rs was brought back under 60 by
      folding the two `Work::Session` arms and lifting the notices loop
-     into `report`; `ui.rs` at 703 lines joins twenty-odd files already
-     over the 700 soft line.)
+     into `report_notices`; `ui.rs` at 703 lines joins twenty-odd files
+     already over the 700 soft line.)
 $ scripts/budget.sh
     dependencies (unique, normal): 333 (max  333)
     warm cargo check -p bingo-core: 0s (max  20s)
@@ -180,6 +180,14 @@ directory, and runs `bingo update` against it: the copy comes back
 `bingo 9.9.9`, with no `bingo.old` and no `bingo.new` beside it. Its
 archive is a `tar.gz` holding a shell script, so that half is
 `#[cfg(unix)]`; the zip half is Windows' and is compiled, not run.
+
+One thing the plan did not name and the suites did: a surface that asks
+the network at start would have had the TUI's own 900 tests and the pty
+harness reaching `api.github.com`. So the argument fails closed — only
+an explicit `updateCheck: true`, which only the bin says, asks — and
+the pty test and `scripts/tui-smoke.sh` write `update.check = false`
+into the run's home, the way the suite already refuses to inherit a
+developer's API keys.
 
 Not verified here, and left for the hands-on: a real GitHub release
 (this machine's address was already over the API's 60/h unauthenticated
