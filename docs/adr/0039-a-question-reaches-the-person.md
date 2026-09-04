@@ -72,5 +72,17 @@ a second representation.)
   unmarked option serializes as before and the schemas gained one
   optional field. Everything else is behind a defaulted method or a
   defaulted trait verb.
+- *2026-09-04, M53:* questions asked together are one interaction, not
+  a second door. `InteractionKind::Form { title, questions }` holds the
+  same `Question` a lone one always was — extracted, so the bare
+  variant's wire shape is byte-identical — and `Answer::Form` carries
+  one answer per question in order; `answer_for` (§2) answers a form
+  with every question's role option or none at all, so the stance and
+  the fail-closed fate are what they were. A preview rides on the
+  option it shows (`QuestionOption.preview`), never on the question.
+  §3's declined `elicitation/create` is now built as exactly the
+  mapping recorded there: a server's request becomes one form naming
+  the server, the reply is `accept`/`decline`/`cancel`, and a schema
+  the spec does not allow is declined with a notice.
 
-Refs: ADR-0035 §5, ADR-0036 §2, ADR-0011; Plan: M43
+Refs: ADR-0035 §5, ADR-0036 §2, ADR-0011; Plans: M43, M53
