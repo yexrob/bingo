@@ -61,17 +61,35 @@ may carry a preview.
    RPC doors (`plugin-rpc/src/doors.rs`) and the ACP question mapping
    are untouched (they open single `Question`s). Windows screens
    (`screens/windows.rs`) list a pending form as one item.
-5. **Docs.** ADR-0039 gains a dated note (≤10 lines): the form is a
+5. **MCP elicitation, the client half.** `bingo-mcp` declares the
+   `elicitation` capability at handshake and answers a server's
+   `elicitation/create` (spec 2025-06-18: `message` + a flat
+   `requestedSchema` of string/number/boolean/enum properties, with
+   `required`, `default`, `title`/`description`) through the ADR-0039
+   door as one `Form`: an enum property is a choice question, a
+   boolean a two-option one, a string or number a question with no
+   options that must be answered in words (`Question.options` empty
+   and `free_text: true` — the card shows an input row; a number is
+   checked before it is sent back). The reply maps to `accept` with
+   the content, `decline` (the person answered nothing / the
+   headless stance), or `cancel` (`esc`). The URL mode (`mode:
+   "url"`) opens the link the way `/login` opens one and waits for the
+   person's confirm. Contract first: a fixture of a real request from
+   the spec, the mapped `Form`, and the reply for each action. The
+   card's title names the server that is asking.
+6. **Docs.** ADR-0039 gains a dated note (≤12 lines): the form is a
    set of the existing question, not a new door; the preview is the
-   option's. `docs/design/tui.md` §2/§7 gain the card (dated).
+   option's; elicitation is the mapping §3 recorded and now builds.
+   `docs/design/tui.md` §2/§7 gain the card (dated).
 
 ## Files
 
 `bingo-sdk/src/event.rs` (+ fixtures/snapshots), `bingo-tool-fs/src/
 ask.rs`, `bingo-surface-tui/src/{form.rs,dialog.rs,input.rs,layers.rs,
 screens/windows.rs}`, `bingo-surface-print/src/{lib.rs,stream_json.rs}`,
-`bingo-channels/src/question.rs`, `docs/adr/0039-…md`,
-`docs/design/tui.md`. `run.rs` untouched.
+`bingo-channels/src/question.rs`, `bingo-mcp/src/` (capability,
+`elicitation.rs`), `docs/adr/0039-…md`, `docs/design/tui.md`.
+`run.rs` untouched.
 
 ## Exit criteria
 
@@ -83,14 +101,17 @@ screens/windows.rs}`, `bingo-surface-print/src/{lib.rs,stream_json.rs}`,
 - [ ] Old frames with a bare `Question` still load; the schema
   fixtures pin `Form` and `Answer::Form`.
 - [ ] Headless/bypass answer a `Form` by the roles or fail closed.
+- [ ] An MCP server's `elicitation/create` is a form card naming the
+  server; accept/decline/cancel each reach the server (fixture test
+  against a scripted server).
 - [ ] Every AGENTS.md gate; budget 331; tui-smoke; pty.
 - [ ] Hands-on (main session with the user): a three-question ask with
   a layout preview, seen and answered.
 
 ## Non-goals
 
-Free-form elicitation forms (text fields, numbers — ADR-0039 §3's
-recorded need stays recorded). Images in previews. Reordering or
+Nested or array schemas in elicitation (the spec keeps it flat; refuse
+with `decline` and a notice). Images in previews. Reordering or
 skipping questions from the model's side. A form spanning turns.
 
 ## Risks
