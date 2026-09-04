@@ -194,6 +194,18 @@ Eight commits, three bricks.
   in the normal tree but is not sha256 either. The hash is written once
   in `cache.rs`, with the reason beside it. It has one job — telling two
   addresses apart — and it is not a signature.
+- **One change of brief, mid-milestone** (the user, after seeing brick 2
+  described): a paste must place its `[image N]` at once and never wait
+  on the thumbnail. It falls out of the same seam rather than needing a
+  second one — `composer/strip.rs::thumbnail` measures where it used to
+  decode, so the token and the strip's slot are both on the frame the
+  paste lands on and only the pixels are late.
+  `a_carried_picture_is_sent_small_and_kept_when_its_token_goes` now
+  asserts all three beats: the paste frame writes no picture bytes and
+  has `[image 1]` in the line, the frame after the reply sends the
+  8×3 thumbnail (80×60 pixels, not the picture's 400×300), and the frame
+  after the submit sends nothing and takes nothing away.
+
 - **`run/showing.rs` holds functions over the run, not more of its
   methods.** `Run`'s inherent `impl` was already in three files
   (`run.rs`, `run/submit.rs`, `select.rs`) and `check_discipline.sh` §5
