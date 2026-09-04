@@ -441,7 +441,7 @@ impl Run {
     /// ever place it again.
     fn forget_pictures(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
         let transport = crate::graphics::chosen().transport();
-        let bytes = self.stored.catch_up(&[], |_| None, transport);
+        let bytes = self.stored.forget_all(transport);
         if bytes.is_empty() {
             return Ok(());
         }
@@ -2044,10 +2044,12 @@ mod tests {
     }
 
     /// The pictures behind the composer's line go to the terminal like any
-    /// others — at the strip's own small size, and forgotten the moment their
-    /// token leaves the line (M48 bricks 3 and 4).
+    /// others — at the strip's own small size (M48 brick 3). When the token
+    /// leaves the line the terminal keeps holding it, as it keeps every
+    /// picture until the cap pushes it out: nothing is deleted for a frame
+    /// that did not place it, so nothing flickers on the way back.
     #[test]
-    fn a_carried_picture_is_sent_small_and_forgotten_with_its_token() {
+    fn a_carried_picture_is_sent_small_and_kept_when_its_token_goes() {
         use base64::Engine;
         let mut run = idle(Instant::now());
         let mut recorder = Recorder::default();
@@ -2070,7 +2072,7 @@ mod tests {
             .iter()
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
             .collect();
-        assert_eq!(sent.len(), 2, "one send, one forget: {sent:?}");
+        assert_eq!(sent.len(), 1, "one send and nothing else: {sent:?}");
         // 400×300 pixels of a 10×20 cell is 40 by 15 cells, and the strip's
         // three rows cut that to eight by three.
         assert!(sent[0].starts_with("\x1b_Ga=T,f=100,q=2,U=1,"), "{sent:?}");
@@ -2089,7 +2091,6 @@ mod tests {
             Some((80, 60)),
             "the pixels of eight cells by three, not the picture's own"
         );
-        assert!(sent[1].contains("a=d,d=I"), "{sent:?}");
     }
 
     /// A picture an answer's own words named, through the whole seam (M51):

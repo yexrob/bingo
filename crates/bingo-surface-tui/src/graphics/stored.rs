@@ -3,13 +3,17 @@
 //!
 //! The frame says which pictures it placed and how big; this is the one place
 //! that turns the difference between that and what went out before into
-//! bytes. The invariant is a sentence: **the terminal holds exactly the last
-//! [`KEPT`] pictures the frame placed**. A picture drawn for the first time
-//! is transmitted, one whose rectangle changed is transmitted again — the
-//! bytes are cut to the cells they will cover (M48 brick 2), so a bigger
-//! rectangle is a picture the terminal was never given — and one that has
-//! fallen off the end is deleted, so a long conversation cannot fill the
-//! terminal's memory.
+//! bytes. The invariant is a sentence: **the terminal holds the last
+//! [`KEPT`] pictures a frame placed**. A picture drawn for the first time is
+//! transmitted, one whose rectangle changed is transmitted again — the bytes
+//! are cut to the cells they will cover (M48 brick 2), so a bigger rectangle
+//! is a picture the terminal was never given — and one that has fallen off
+//! the end is deleted, so a long conversation cannot fill the terminal's
+//! memory. A picture a frame did not place stays held: a list opened over
+//! the transcript, a scroll past a screenshot, hide its cells for a moment,
+//! and a picture deleted then sent again on the way back is a picture that
+//! flickers. With no cells to draw into, a held picture costs the terminal
+//! nothing but the memory the cap bounds.
 
 use std::sync::Arc;
 
@@ -42,43 +46,37 @@ impl Stored {
         transport: Transport,
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut held: Vec<Picture> = Vec::new();
+        let mut held = self.held.clone();
         for picture in wanted(placed) {
-            if held.iter().any(|kept| kept.id() == picture.id()) {
-                continue;
+            // Already there at this very rectangle — from an earlier frame,
+            // or from a block earlier in this one — costs nothing.
+            if !held.contains(picture) && !self.held.contains(picture) {
+                match transmitted(picture, &pixels, transport) {
+                    Some(bytes) => out.extend_from_slice(&bytes),
+                    // Nothing to send it with, so the terminal does not hold
+                    // it and nobody may believe it does.
+                    None => {
+                        held.retain(|kept| kept.id() != picture.id());
+                        continue;
+                    }
+                }
             }
-            match self.sending(picture, &pixels, transport) {
-                Some(bytes) => out.extend_from_slice(&bytes),
-                // Nothing to send it with, so the terminal does not hold it
-                // and nobody may believe it does.
-                None => continue,
-            }
+            // Placed again is newest again, whether or not it was sent.
+            held.retain(|kept| kept.id() != picture.id());
             held.push(picture.clone());
         }
+        held.drain(..held.len().saturating_sub(KEPT));
         out.extend(self.forgetting(&held, transport));
         self.held = held;
         out
     }
 
-    /// What one picture costs: nothing, when the terminal is already holding
-    /// it at this very rectangle; the pixels of that rectangle otherwise.
-    fn sending(
-        &self,
-        picture: &Picture,
-        pixels: &impl Fn(&Picture) -> Option<Arc<Png>>,
-        transport: Transport,
-    ) -> Option<Vec<u8>> {
-        if self.held.contains(picture) {
-            return Some(Vec::new());
-        }
-        let png = pixels(picture)?;
-        Some(kitty::transmit(
-            picture.id(),
-            &png.bytes,
-            picture.cols,
-            picture.rows,
-            transport,
-        ))
+    /// The bytes that make the terminal let every held picture go — the way
+    /// out, where nothing will ever place them again.
+    pub fn forget_all(&mut self, transport: Transport) -> Vec<u8> {
+        let out = self.forgetting(&[], transport);
+        self.held.clear();
+        out
     }
 
     /// The bytes for everything the terminal is holding that this frame did
@@ -91,6 +89,22 @@ impl Stored {
             .flat_map(|id| kitty::delete(id, transport))
             .collect()
     }
+}
+
+/// The pixels of one picture's rectangle, as the terminal is given them.
+fn transmitted(
+    picture: &Picture,
+    pixels: &impl Fn(&Picture) -> Option<Arc<Png>>,
+    transport: Transport,
+) -> Option<Vec<u8>> {
+    let png = pixels(picture)?;
+    Some(kitty::transmit(
+        picture.id(),
+        &png.bytes,
+        picture.cols,
+        picture.rows,
+        transport,
+    ))
 }
 
 /// The last [`KEPT`] of what the frame placed. They are handed over in the
@@ -155,14 +169,39 @@ mod tests {
         assert_eq!(stored.held, vec![picture("itm_1", 40, 12)]);
     }
 
+    /// A layer over the transcript, or a scroll past it, places no picture
+    /// for a frame: the terminal keeps holding it, so its return costs no
+    /// bytes and shows no flicker.
     #[test]
-    fn a_picture_the_transcript_no_longer_holds_is_deleted() {
+    fn a_picture_a_frame_did_not_place_is_kept_for_its_return() {
         let mut stored = Stored::default();
-        let gone = picture("itm_1", 4, 2);
-        stored.catch_up(std::slice::from_ref(&gone), pixels, Transport::Bare);
-        let after = text(stored.catch_up(&[], pixels, Transport::Bare));
-        assert_eq!(after, format!("\x1b_Ga=d,d=I,q=2,i={}\x1b\\", gone.id()));
-        assert!(stored.held.is_empty());
+        let hidden = picture("itm_1", 4, 2);
+        stored.catch_up(std::slice::from_ref(&hidden), pixels, Transport::Bare);
+        assert!(stored.catch_up(&[], pixels, Transport::Bare).is_empty());
+        assert_eq!(stored.held, vec![hidden.clone()]);
+        assert!(
+            stored
+                .catch_up(std::slice::from_ref(&hidden), pixels, Transport::Bare)
+                .is_empty(),
+            "back on the screen, it is already there"
+        );
+    }
+
+    #[test]
+    fn what_is_held_is_deleted_when_it_falls_off_the_end() {
+        let mut stored = Stored::default();
+        let old = picture("itm_old", 4, 2);
+        stored.catch_up(std::slice::from_ref(&old), pixels, Transport::Bare);
+        let newer: Vec<Picture> = (0..KEPT)
+            .map(|i| picture(&format!("itm_{i}"), 4, 2))
+            .collect();
+        let rolled = text(stored.catch_up(&newer, pixels, Transport::Bare));
+        assert_eq!(rolled.matches("a=d,d=I").count(), 1);
+        assert!(
+            rolled.ends_with(&format!("i={}\x1b\\", old.id())),
+            "{rolled:?}"
+        );
+        assert_eq!(stored.held.len(), KEPT);
     }
 
     /// Past the cap the oldest go, so a conversation full of screenshots
@@ -188,6 +227,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_way_out_lets_everything_go() {
+        let mut stored = Stored::default();
+        let held = picture("itm_1", 4, 2);
+        stored.catch_up(std::slice::from_ref(&held), pixels, Transport::Bare);
+        let gone = text(stored.forget_all(Transport::Bare));
+        assert_eq!(gone, format!("\x1b_Ga=d,d=I,q=2,i={}\x1b\\", held.id()));
+        assert!(stored.held.is_empty());
+    }
+
     /// A picture no decoder read is not held and not claimed to be: the next
     /// frame asks again rather than leaving a placeholder over nothing.
     #[test]
@@ -211,13 +260,16 @@ mod tests {
             "{sent:?}"
         );
         assert!(sent.ends_with("\x1b\x1b\\\x1b\\"), "{sent:?}");
-        let gone = text(stored.catch_up(&[], pixels, Transport::Tmux));
-        assert_eq!(
-            gone,
-            format!(
+        let newer: Vec<Picture> = (0..KEPT)
+            .map(|i| picture(&format!("new_{i}"), 4, 2))
+            .collect();
+        let gone = text(stored.catch_up(&newer, pixels, Transport::Tmux));
+        assert!(
+            gone.ends_with(&format!(
                 "\x1bPtmux;\x1b\x1b_Ga=d,d=I,q=2,i={}\x1b\x1b\\\x1b\\",
                 held.id()
-            )
+            )),
+            "{gone:?}"
         );
     }
 
@@ -230,5 +282,14 @@ mod tests {
         let bytes = text(stored.catch_up(&twice, pixels, Transport::Bare));
         assert_eq!(bytes.matches("a=T").count(), 1);
         assert_eq!(stored.held.len(), 1);
+
+        let apart = vec![
+            picture("itm_2", 4, 2),
+            picture("itm_3", 4, 2),
+            picture("itm_2", 4, 2),
+        ];
+        let bytes = text(stored.catch_up(&apart, pixels, Transport::Bare));
+        assert_eq!(bytes.matches("a=T").count(), 2, "{bytes:?}");
+        assert_eq!(stored.held.len(), 3);
     }
 }
