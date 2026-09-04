@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 35
 expression: "draw_tree(80, 24, tree, ui, now)"
 ---
 "                                                                                "
@@ -26,4 +25,4 @@ expression: "draw_tree(80, 24, tree, ui, now)"
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > @re                                                                        │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-"                                                                          fake-1"
+"                                                                     fake/fake-1"

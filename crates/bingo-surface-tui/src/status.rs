@@ -7,7 +7,7 @@
 //! the slot that gives way when the line does not fit: it is the one whose
 //! words are already the shortest true thing to say.
 
-use bingo_sdk::SessionState;
+use bingo_sdk::{Effort, SessionState};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -152,23 +152,49 @@ fn notice(ui: &Ui, now: Now) -> Vec<Span<'static>> {
     spans
 }
 
-/// Where you are and what answers you: the model alone at the root.
+/// Where you are and what answers you: who serves the model, which model,
+/// and how hard it is asked to think — the model alone at the root.
+///
+/// All three are read from the frames that carry them: the summary, which the
+/// kernel stamps from the choice a turn will actually run on, and the config
+/// view's `thinking`, which is the one place a client reads the level
+/// (ADR-0008 §4). Nothing here is a second copy of either.
 fn right(tree: &Tree) -> Vec<Span<'static>> {
     let state = tree.viewed();
-    let mut text = match tree.viewing() {
-        Some(child) => format!("in {}", tree::name(child)),
-        None => String::new(),
-    };
-    if let Some(model) = state.summary.model.clone().filter(|m| !m.is_empty()) {
-        if !text.is_empty() {
-            text.push_str(" · ");
-        }
-        text.push_str(&model);
-    }
-    if text.is_empty() {
+    let parts: Vec<String> = [
+        tree.viewing()
+            .map(|child| format!("in {}", tree::name(child))),
+        answering(state),
+        effort(state),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
         return Vec::new();
     }
-    vec![Span::styled(text, theme::dim())]
+    vec![Span::styled(parts.join(" · "), theme::dim())]
+}
+
+/// `provider/model`, or the model alone where no provider is named — an
+/// older journal's summary, or a session nothing answers.
+fn answering(state: &SessionState) -> Option<String> {
+    let model = state.summary.model.clone().filter(|m| !m.is_empty())?;
+    let provider = state.summary.provider.as_deref().filter(|p| !p.is_empty());
+    Some(match provider {
+        Some(provider) => format!("{provider}/{model}"),
+        None => model,
+    })
+}
+
+/// The reasoning effort the next turn will ask for. A model that does not
+/// reason is sent none, and the kernel publishes none, so the slot says
+/// nothing rather than a level no request carries.
+fn effort(state: &SessionState) -> Option<String> {
+    let level = state.config.kernel.get("thinking")?.clone();
+    serde_json::from_value::<Effort>(level)
+        .ok()
+        .map(|level| level.name().to_string())
 }
 
 fn join(parts: Vec<Span<'static>>) -> Vec<Span<'static>> {
@@ -391,7 +417,7 @@ mod tests {
         let (ui, _) = scene();
         let drawn = text(&tree, &ui, 80);
         assert!(!drawn.contains("running"), "{drawn}");
-        assert!(drawn.contains("in reviewer · fake-1"), "{drawn}");
+        assert!(drawn.contains("in reviewer · fake/fake-1"), "{drawn}");
     }
 
     /// The whole of a notice's life: the frames it arrives in, its window,
@@ -478,6 +504,40 @@ mod tests {
         let mut state = state();
         state.summary.model = None;
         state
+    }
+
+    /// Who serves it, which model, and how hard it thinks — the three facts
+    /// the right slot carries, each from the frame that says it.
+    #[test]
+    fn the_right_slot_says_provider_model_and_effort() {
+        let (ui, _) = scene();
+        let idle = text(&solo(&state()), &ui, 80);
+        assert!(idle.ends_with("fake/fake-1"), "{idle}");
+
+        let thinking = solo(&folded(vec![frame(
+            1,
+            thinking_view(Some(bingo_sdk::Effort::XHigh)),
+        )]));
+        let drawn = text(&thinking, &ui, 80);
+        assert!(drawn.ends_with("fake/fake-1 · xhigh"), "{drawn}");
+
+        let off = solo(&folded(vec![frame(1, thinking_view(None))]));
+        let drawn = text(&off, &ui, 80);
+        assert!(
+            drawn.ends_with("fake/fake-1"),
+            "a turn that asks for no effort shows none: {drawn}"
+        );
+    }
+
+    /// A summary written before the kernel stamped the provider on it.
+    #[test]
+    fn a_model_with_no_provider_stands_alone() {
+        let (ui, _) = scene();
+        let mut state = state();
+        state.summary.provider = None;
+        let drawn = text(&solo(&state), &ui, 80);
+        assert!(drawn.ends_with("fake-1"), "{drawn}");
+        assert!(!drawn.contains("/fake-1"), "{drawn}");
     }
 
     #[test]

@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/screens/windows.rs
-assertion_line: 15
 expression: screen.clone()
 ---
 "  …                                                                             "
@@ -26,4 +25,4 @@ expression: screen.clone()
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-"1 running                                                                 fake-1"
+"1 running                                                            fake/fake-1"

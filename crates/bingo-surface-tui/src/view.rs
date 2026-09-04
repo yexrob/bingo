@@ -1610,7 +1610,7 @@ mod tests {
         tree.show(&child_id());
         let (ui, now) = mid_turn();
         let screen = render_tree(&tree, &ui, now);
-        assert!(screen.contains("in reviewer · fake-1"), "{screen}");
+        assert!(screen.contains("in reviewer · fake/fake-1"), "{screen}");
         assert!(screen.contains("Two nits"), "{screen}");
         insta::assert_snapshot!(screen);
     }
