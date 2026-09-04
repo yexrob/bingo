@@ -111,7 +111,18 @@ pub fn hush(frame: &mut Frame, area: Rect) {
 /// grows downwards into the transcript and nothing under it moves. While the
 /// kernel's guard is down its rows are dim — the border is bright, because the
 /// card has arrived; the answers are not yet listening.
-pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reveal, guarded: bool) {
+///
+/// The border wears [`theme::attention`], the one beat everything that wants
+/// a person shares (§6): a card is on the screen exactly while it is
+/// unanswered, so it is asking for the whole of its life and stops by going.
+pub fn card(
+    frame: &mut Frame,
+    at: Rect,
+    lines: Vec<Line<'static>>,
+    reveal: Reveal,
+    guarded: bool,
+    now: crate::clock::Now,
+) {
     let lines = match guarded {
         true => lines.into_iter().map(hushed).collect(),
         false => lines,
@@ -136,7 +147,7 @@ pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reve
         Block::new()
             .borders(sides)
             .border_type(BorderType::Rounded)
-            .border_style(theme::presence()),
+            .border_style(theme::attention(now)),
         area,
     );
     // One cell of padding inside the border, as every box has (§4).

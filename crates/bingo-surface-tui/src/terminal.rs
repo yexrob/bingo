@@ -38,6 +38,15 @@ use crate::view;
 const SAVE_TITLE: &[u8] = b"\x1b[22;2t";
 const RESTORE_TITLE: &[u8] = b"\x1b[23;2t";
 
+/// DEC mode 2026, which every frame is written between: the terminal holds
+/// what arrives and paints the whole of it at once, so a draw is composited
+/// rather than torn (design §6 — smoothness is the absence of tearing, and
+/// every cue is read through it). A terminal that has never heard of the mode
+/// drops an unknown private mode without a mark on the screen, so nothing is
+/// asked and nothing is probed.
+const BEGIN_FRAME: &[u8] = b"\x1b[?2026h";
+const END_FRAME: &[u8] = b"\x1b[?2026l";
+
 /// Whether the enhancement flags are pushed right now, so [`restore`] can be
 /// called blind from every teardown path and pop exactly once.
 static PUSHED: AtomicBool = AtomicBool::new(false);
@@ -78,6 +87,9 @@ pub struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     /// The last title written; an unchanged one costs no bytes.
     title: Option<String>,
+    /// Whether this run brackets its frames, settled once from the
+    /// environment ([`synchronizes`]).
+    synchronized: bool,
 }
 
 impl Tui {
@@ -112,6 +124,10 @@ impl Tui {
         Ok(Self {
             terminal,
             title: None,
+            synchronized: synchronizes(
+                std::env::var("TERM").ok().as_deref(),
+                std::env::var_os("TMUX").is_some(),
+            ),
         })
     }
 
@@ -123,9 +139,18 @@ impl Tui {
 
 impl Screen for Tui {
     fn draw(&mut self, tree: &Tree, ui: &Ui, now: Now) -> io::Result<()> {
-        self.terminal
-            .draw(|frame| view::draw(tree, ui, frame, now))?;
-        Ok(())
+        if !self.synchronized {
+            self.terminal
+                .draw(|frame| view::draw(tree, ui, frame, now))?;
+            return Ok(());
+        }
+        // The closing half is written whatever the frame did: a terminal left
+        // holding an update that never ends shows nothing at all.
+        out_of_band(BEGIN_FRAME)?;
+        let drawn = self.terminal.draw(|frame| view::draw(tree, ui, frame, now));
+        let ended = out_of_band(END_FRAME);
+        drawn?;
+        ended
     }
 
     fn title(&mut self, text: &str) -> io::Result<()> {
@@ -223,6 +248,25 @@ pub fn dialect(term_program: Option<&str>) -> Dialect {
 /// whether the sequence has to be passed through it.
 pub fn multiplexed(term: Option<&str>, tmux: bool) -> bool {
     tmux || term.is_some_and(|term| term.starts_with("tmux") || term.starts_with("screen"))
+}
+
+/// Whether this run brackets its frames in mode 2026.
+///
+/// A terminal that has never heard of the mode drops it, so it is written
+/// blind — but a multiplexer is a terminal of its own and *consumes* it,
+/// which is the one case where writing it can cost something. tmux acts on
+/// the mode only from 3.7 (2026-06-26, `CHANGES`: "Add support for
+/// applications to use synchronized output mode (DECSET 2026) to prevent
+/// screen tearing during rapid updates"), and 3.7/3.7a act on it wrongly —
+/// they leave the frame unpainted until something unrelated redraws the pane
+/// or a one-second timeout fires (3.7b: "Fix so that the end of a
+/// synchronized update again triggers a redraw"). tmux already wraps what it
+/// repaints in the outer terminal's own synchronized update (its `Sync`
+/// capability has been DECSET 2026 since 3.4), so there is nothing here for
+/// it to add and a version to be wrong about. Under one, the frame goes
+/// bare — as it did before any of this.
+pub fn synchronizes(term: Option<&str>, tmux: bool) -> bool {
+    !multiplexed(term, tmux)
 }
 
 fn message(what: Notification, dialect: Dialect) -> Vec<u8> {
@@ -333,6 +377,35 @@ mod tests {
     fn the_title_stack_codes_are_the_xterm_ones() {
         assert_eq!(SAVE_TITLE, b"\x1b[22;2t");
         assert_eq!(RESTORE_TITLE, b"\x1b[23;2t");
+    }
+
+    /// The bracket is written as bytes, like every other out-of-band sequence
+    /// in this file, so this pins it to the spelling crossterm itself uses:
+    /// mode 2026 set and reset, and nothing wrapped around them.
+    #[test]
+    fn a_frame_is_bracketed_by_the_two_halves_of_mode_2026() {
+        let mut begin = Vec::new();
+        let mut end = Vec::new();
+        crossterm::queue!(begin, crossterm::terminal::BeginSynchronizedUpdate)
+            .expect("a sequence into a vector");
+        crossterm::queue!(end, crossterm::terminal::EndSynchronizedUpdate)
+            .expect("a sequence into a vector");
+        assert_eq!(BEGIN_FRAME, begin);
+        assert_eq!(END_FRAME, end);
+        assert_eq!(BEGIN_FRAME, b"\x1b[?2026h");
+        assert_eq!(END_FRAME, b"\x1b[?2026l");
+    }
+
+    /// The one listener the bracket is not written to is a multiplexer, which
+    /// eats it rather than passing it on.
+    #[test]
+    fn a_frame_goes_bare_through_a_multiplexer_and_bracketed_everywhere_else() {
+        assert!(synchronizes(Some("xterm-256color"), false));
+        assert!(synchronizes(Some("xterm-ghostty"), false));
+        assert!(synchronizes(None, false), "a terminal that says nothing");
+        assert!(!synchronizes(Some("tmux-256color"), false));
+        assert!(!synchronizes(Some("screen"), false));
+        assert!(!synchronizes(Some("xterm-256color"), true), "TMUX is set");
     }
 
     #[test]

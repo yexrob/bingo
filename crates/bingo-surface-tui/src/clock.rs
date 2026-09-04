@@ -129,6 +129,30 @@ pub fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// How wide the crest of a [`sweep`] is, as a share of the run it crosses:
+/// wide enough to read as one light passing over, narrow enough that the run
+/// is never lit all at once.
+const CREST: f32 = 0.35;
+
+/// A light crossing a run of cells from left to right — what a sent line runs
+/// along the input box's border, and what a landed answer runs along a tool's
+/// name. `t` is how far the sweep has come, from 0 to 1; the answer is how
+/// brightly the cell at `column` of `width` is lit under it: 1 at the crest
+/// and 0 a crest's width away from it.
+///
+/// It starts *on* the first cell rather than off the edge, because both of
+/// these answer something that just happened and a first frame that showed
+/// nothing would be a frame of nothing happening; it leaves past the last
+/// cell, so the run it crossed is at rest when it is over.
+pub fn sweep(t: f32, column: usize, width: usize) -> f32 {
+    if width == 0 {
+        return 0.0;
+    }
+    let at = (column as f32 + 0.5) / width as f32;
+    let head = t.clamp(0.0, 1.0) * (1.0 + CREST);
+    (1.0 - (at - head).abs() / CREST).clamp(0.0, 1.0)
+}
+
 /// Slow at both ends: what a breath does.
 pub fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -254,6 +278,43 @@ mod tests {
         assert!(ease_out(0.25) > 0.5, "ease-out covers ground early");
         assert!(ease_in_out(0.25) < 0.25, "ease-in-out starts slowly");
         assert_eq!(ease_in_out(0.5), 0.5, "and is symmetric about the middle");
+    }
+
+    /// The one brick both new beats stand on: the light that crosses a run.
+    #[test]
+    fn a_sweep_crosses_its_run_and_leaves_it_at_rest_behind_it() {
+        let across = |t| (0..10).map(|c| sweep(t, c, 10)).collect::<Vec<f32>>();
+        let brightest = |t: f32| {
+            let row = across(t);
+            row.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(at, _)| at)
+                .unwrap_or_default()
+        };
+        assert!(
+            across(0.0)[0] > 0.8,
+            "the near cell is lit on the very first frame: {:?}",
+            across(0.0)
+        );
+        assert!(
+            across(1.0).iter().all(|level| *level == 0.0),
+            "and nothing at all once it has passed: {:?}",
+            across(1.0)
+        );
+        assert_eq!(brightest(0.0), 0, "it starts at the near end");
+        assert!(brightest(0.25) < brightest(0.5), "and goes left to right");
+        assert!(brightest(0.5) < brightest(0.75));
+        assert_eq!(
+            across(0.5).iter().filter(|level| **level > 0.0).count(),
+            7,
+            "the crest is a band, not the whole run: {:?}",
+            across(0.5)
+        );
+        for t in [-1.0, 0.5, 2.0] {
+            assert_eq!(sweep(t, 0, 0), 0.0, "a run of no cells lights nothing");
+            assert!((0.0..=1.0).contains(&sweep(t, 3, 4)), "and never outside");
+        }
     }
 
     #[test]

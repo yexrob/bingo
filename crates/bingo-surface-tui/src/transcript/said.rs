@@ -175,7 +175,9 @@ fn notice(
     // item, which is where a rewind reads it back.
     let style = bullet_style(item.status, false);
     let mut out = match skill::of(item, rows.commands) {
-        Some(run) => super::skill_row(run, style, rows),
+        // A person's own `/skill` line is not a call coming back, so its
+        // words are at rest.
+        Some(run) => super::skill_row(run, style, rows, super::Landing::Settled),
         None => speaks(
             style,
             vec![headline(

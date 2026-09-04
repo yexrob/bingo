@@ -18,16 +18,13 @@ use std::time::{Duration, Instant};
 use bingo_sdk::{Item, ItemBody, ItemId, ItemStatus, Seq, SessionState};
 use ratatui::text::Line;
 
-use crate::clock::{FRAME, Now};
+use crate::clock::Now;
 use crate::fold::{self, Fold};
 use crate::graphics::Picture;
 use crate::skill;
 use crate::transcript::{self, Cue, Rows};
 use crate::tree::Agents;
 use crate::welcome;
-
-/// A completion flashes for exactly one frame before it settles (§6).
-const FLIP: Duration = FRAME;
 
 /// What can change about an item's block while it is on the screen. A
 /// terminal item's revision never moves again, so its block is rendered once.
@@ -141,15 +138,15 @@ impl Motion {
     }
 }
 
-/// How long a block goes on changing after it is drawn: the one frame a
-/// completion flashes for, the comet tail of an answer still arriving, and no
-/// time at all for anything that is simply there.
+/// How long a block goes on changing after it is drawn: the frames a landed
+/// call's own words move for, the comet tail of an answer still arriving, and
+/// no time at all for anything that is simply there.
 fn settles(item: &Item, flip: bool, moving: bool) -> Duration {
     if !moving {
         return Duration::ZERO;
     }
     if flip {
-        return FLIP;
+        return transcript::LANDING;
     }
     match (&item.body, item.status) {
         (ItemBody::Assistant { .. }, ItemStatus::Running) => transcript::COMET,
@@ -711,16 +708,16 @@ mod tests {
         sync_at(&mut blocks, &state, 60, now);
         assert!(blocks.moving(), "an answer still arriving is moving");
 
-        // It finishes, so the block flashes for one frame (§6).
+        // It finishes, so its own words move for the frames after (§6).
         state.items = vec![assistant("itm_1", "half a second", ItemStatus::Completed)];
         sync_at(&mut blocks, &state, 60, now);
-        assert!(blocks.moving(), "the completion is flashing");
+        assert!(blocks.moving(), "the completion is still landing");
         sync_at(&mut blocks, &state, 60, later(now, 16));
         assert!(blocks.moving(), "and has not run out halfway through");
 
-        // Past the flash: this sync draws the rest, and owes nothing after it.
-        let flip = FLIP.as_millis() as i64;
-        sync_at(&mut blocks, &state, 60, later(now, flip));
+        // Past the landing: this sync draws the rest, and owes nothing after.
+        let landed = transcript::LANDING.as_millis() as i64;
+        sync_at(&mut blocks, &state, 60, later(now, landed));
         assert!(
             !blocks.moving(),
             "the resting form is the frame just drawn: nothing more is owed"

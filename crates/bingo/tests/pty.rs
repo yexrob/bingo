@@ -286,6 +286,52 @@ fn no_print_on_exit_leaves_the_shell_as_it_was() {
     );
 }
 
+/// Every frame is written between the two halves of DEC mode 2026, so the
+/// terminal composites it instead of painting it as it arrives (design §6).
+/// A `TestBackend` sees cells and never bytes; this is the only place the
+/// bracket is visible.
+#[test]
+fn every_frame_is_written_inside_a_synchronized_update() {
+    const BEGIN: &[u8] = b"\x1b[?2026h";
+    const END: &[u8] = b"\x1b[?2026l";
+    let mut terminal = Terminal::open(&[]);
+    terminal.wait_for("? for shortcuts");
+    terminal.send(b"say hello\r");
+    terminal.wait_for("Hello from the pty.");
+    let written = terminal.written();
+    let (begins, ends) = (count(&written, BEGIN), count(&written, END));
+    assert!(begins > 1, "one bracket per frame, and there were frames");
+    assert!(
+        begins == ends || begins == ends + 1,
+        "every frame that opened has closed, bar the one in flight: \
+         {begins} begun, {ends} ended"
+    );
+    let first = written
+        .windows(BEGIN.len())
+        .position(|w| w == BEGIN)
+        .expect("a frame was begun");
+    let closed = written
+        .windows(END.len())
+        .position(|w| w == END)
+        .expect("a frame was ended");
+    assert!(first < closed, "and the frame is inside its own bracket");
+    terminal.send(&[0x04]);
+    terminal.leave();
+
+    // A multiplexer is a terminal of its own: it eats the mode rather than
+    // passing it on, and only tmux ≥ 3.7 acts on it at all — 3.7 and 3.7a
+    // wrongly. So under one the frame goes out bare.
+    let mut through = Terminal::opened(&[], SCRIPT, Answers::ThroughTmux);
+    through.wait_for("? for shortcuts");
+    through.send(b"say hello\r");
+    through.wait_for("Hello from the pty.");
+    let under_tmux = through.written();
+    assert_eq!(count(&under_tmux, BEGIN), 0, "nothing to say to tmux");
+    assert_eq!(count(&under_tmux, END), 0);
+    through.send(&[0x04]);
+    through.leave();
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     count(haystack, needle) > 0
 }

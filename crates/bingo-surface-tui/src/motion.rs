@@ -74,6 +74,11 @@ fn transcript_style(tree: &Tree, now: Now, needle: &str) -> Style {
         .unwrap_or_else(|| panic!("no span carries {needle:?}"))
 }
 
+/// What a block does as it lands: it takes its own room and nothing more, one
+/// light crosses the name of a call that came back, and one that came back
+/// wrong cools out of `bad`.
+mod landing;
+
 // ---- presence: the sparkle and the breath -------------------------------
 
 /// A turn that has been running long enough to have a row of its own.
@@ -128,6 +133,69 @@ fn the_presence_mark_breathes_between_two_thirds_and_all_of_itself() {
     });
 }
 
+/// A state whose one item is still arriving, and one whose one item is a
+/// call the turn is waiting on.
+fn answering() -> bingo_sdk::SessionState {
+    let mut state = folded(vec![frame(1, started("trn_1"))]);
+    state.apply(&frame(
+        2,
+        Event::ItemStarted {
+            item: assistant("itm_1", "half a sen", ItemStatus::Running),
+        },
+    ));
+    state
+}
+
+fn calling() -> bingo_sdk::SessionState {
+    folded(running_bash())
+}
+
+/// §6's first principle is that every motion reports a state change, and a
+/// breath at one fixed period reports only "a turn is running" — which the
+/// row's presence already says. So the period is what the turn is *doing*.
+#[test]
+fn the_breath_quickens_while_words_arrive_and_slows_while_a_tool_holds_the_turn() {
+    let ms = Duration::from_millis;
+    assert_eq!(crate::view::breath_of(&answering()), ms(900));
+    assert_eq!(crate::view::breath_of(&calling()), ms(2_200));
+    assert_eq!(
+        crate::view::breath_of(&folded(vec![frame(1, started("trn_1"))])),
+        ms(1_600),
+        "thinking is the pace between them, and the one a turn starts at"
+    );
+    assert_eq!(
+        crate::view::breath_of(&state()),
+        ms(1_600),
+        "and an idle session breathes at the same pace it would think at"
+    );
+}
+
+/// The row is drawn on that period and not on a constant, which is the half
+/// of the cue a unit test cannot see.
+#[test]
+fn the_sparkle_is_drawn_on_the_period_the_state_asks_for() {
+    let (ui, now) = mid_turn();
+    let at = later(now, 250);
+    crate::theme::with(crate::painted::truecolor(), || {
+        let drawn = |state: &bingo_sdk::SessionState| {
+            leading_style(&solo(state), &ui, at, "esc to interrupt")
+        };
+        let on = |period| {
+            theme::as_drawn(theme::breath(crate::clock::breath(
+                at,
+                Duration::from_millis(period),
+            )))
+        };
+        assert_eq!(drawn(&answering()), on(900));
+        assert_eq!(drawn(&calling()), on(2_200));
+        assert_ne!(
+            drawn(&answering()),
+            drawn(&calling()),
+            "and the two rhythms are told apart on the screen"
+        );
+    });
+}
+
 #[test]
 fn the_input_box_glows_on_the_same_breath_and_is_dim_when_idle() {
     let (ui, now) = mid_turn();
@@ -155,6 +223,70 @@ fn nothing_of_the_presence_is_on_screen_while_no_turn_runs() {
         !screen.contains('✻') || screen.contains("Welcome"),
         "{screen}"
     );
+}
+
+// ---- the person's own gesture -------------------------------------------
+
+/// The line the box's border wears, run by run, so a light crossing it can be
+/// told from the one style it rests in.
+fn border_runs(tree: &Tree, ui: &crate::ui::Ui, now: Now) -> Vec<Style> {
+    crate::painted::painted(80, 24, tree, ui, now)
+        .row(keys::PLACEHOLDER)
+        .into_iter()
+        .map(|(_, style)| style)
+        .collect()
+}
+
+/// `⏎` is the most repeated gesture in the whole surface and had no answer at
+/// all: the row simply existed. It runs one light along the box's border now,
+/// over six frames, and the border is back where it was on the seventh. The
+/// row read here is the box's own text row, so the two runs it carries are
+/// the border's left edge and its right — which is the light's first cell and
+/// its last, and so tells the direction as well as the fact.
+#[test]
+fn a_sent_line_runs_one_light_along_the_boxs_border() {
+    let state = state();
+    let tree = solo(&state);
+    let (mut ui, now) = scene();
+    let at_rest = crate::theme::with(crate::painted::truecolor(), || border_runs(&tree, &ui, now));
+
+    write(&mut ui, &state, "say hello", now);
+    crate::input::on_key(&mut ui, &tree, key(crossterm::event::KeyCode::Enter), now);
+    assert_eq!(ui.sending(now), Some(0.0), "the light starts on the key");
+    crate::theme::with(crate::painted::truecolor(), || {
+        let lit = |ms| border_runs(&tree, &ui, later(now, ms));
+        assert_ne!(lit(40), at_rest, "forty in, the near edge is lit");
+        assert_eq!(lit(40).last(), at_rest.last(), "and the far edge is not");
+        assert_ne!(lit(150), at_rest, "a hundred and fifty in, the far one is");
+        assert_eq!(lit(150).first(), at_rest.first(), "and the near one is not");
+        assert_eq!(lit(198), at_rest, "back at rest on the seventh frame");
+    });
+
+    // A second `⏎` is a second gesture: the light starts again rather than
+    // carrying on from where the first one had got to.
+    let half = later(now, 100);
+    write(&mut ui, &state, "again", half);
+    crate::input::on_key(&mut ui, &tree, key(crossterm::event::KeyCode::Enter), half);
+    assert_eq!(ui.sending(half), Some(0.0));
+    assert!(ui.sending(later(now, 298)).is_none(), "and ends six on");
+}
+
+#[test]
+fn a_still_surface_sends_a_line_with_no_light_at_all() {
+    let state = state();
+    let tree = solo(&state);
+    let (mut ui, now) = scene();
+    let at_rest = border_runs(&tree, &ui, still(now));
+    write(&mut ui, &state, "say hello", now);
+    crate::input::on_key(&mut ui, &tree, key(crossterm::event::KeyCode::Enter), now);
+    assert_eq!(ui.sending(still(now)), None);
+    for ms in [0i64, 33, 100, 198] {
+        assert_eq!(
+            border_runs(&tree, &ui, still(later(now, ms))),
+            at_rest,
+            "at {ms} ms the border is exactly what a still surface draws"
+        );
+    }
 }
 
 // ---- streaming: the comet tail ------------------------------------------
@@ -255,94 +387,6 @@ fn a_live_bullet_pulses_between_presence_and_its_glow() {
         assert_ne!(start, half, "it is somewhere else half a pulse in");
         assert_eq!(start, whole, "and back where it began after 1.2 s");
     });
-}
-
-#[test]
-fn a_completion_flashes_bold_for_exactly_one_frame() {
-    let (ui, now) = mid_turn();
-    let mut state = folded(running_bash());
-    let running = solo(&state);
-    crate::painted::painted(80, 24, &running, &ui, now);
-
-    state.apply(&frame(
-        3,
-        Event::ItemCompleted {
-            item: tool(
-                "itm_1",
-                "Bash",
-                serde_json::json!({"command": "cargo test"}),
-                Some(bingo_sdk::ToolOutput::text("ok")),
-                ItemStatus::Completed,
-            ),
-        },
-    ));
-    let done = solo(&state);
-    let flash = style_of(&done, &ui, now, "⏺");
-    assert_eq!(
-        flash,
-        theme::as_drawn(theme::good().patch(theme::bold())),
-        "one bold frame in `good`"
-    );
-    let settled = style_of(&done, &ui, later(now, FRAME.as_millis() as i64), "⏺");
-    assert_eq!(
-        settled,
-        theme::as_drawn(theme::good()),
-        "and it settles on the very next frame"
-    );
-}
-
-// ---- a block arriving ---------------------------------------------------
-
-/// Which row of a screen carries `needle`.
-fn row_of(screen: &str, needle: &str) -> usize {
-    screen
-        .lines()
-        .position(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("no row carries {needle:?}"))
-}
-
-/// §3's "nothing jumps" outranks §6's cue: a block arriving takes exactly its
-/// own room and the screen holds still from the frame it lands on. The rise
-/// was withdrawn on 2026-09-02 (§10) — it put its two blank rows under the
-/// newest block, which a bottom-anchored viewport turns into the whole
-/// transcript jumping up two rows and walking back over three frames, once
-/// per block.
-#[test]
-fn a_new_block_takes_its_own_room_and_walks_nowhere_after_it() {
-    let (ui, now) = mid_turn();
-    let mut state = folded(vec![frame(
-        1,
-        Event::ItemCompleted {
-            item: user("itm_1", "first"),
-        },
-    )]);
-    // The cache is warm after this draw, so the next block is one a person
-    // watches arrive.
-    let settled = screen(&solo(&state), &ui, now);
-    let was = row_of(&settled, "first");
-
-    state.apply(&frame(
-        2,
-        Event::ItemCompleted {
-            item: assistant("itm_2", "second", ItemStatus::Completed),
-        },
-    ));
-    let arriving = solo(&state);
-    let frames: Vec<String> = [0i64, 33, 66, 99]
-        .iter()
-        .map(|ms| screen(&arriving, &ui, later(now, *ms)))
-        .collect();
-    assert_eq!(
-        row_of(&frames[0], "first"),
-        was - 2,
-        "the row above moves up by the new block and its blank row, no further"
-    );
-    for (at, drawn) in frames.iter().enumerate().skip(1) {
-        assert_eq!(
-            drawn, &frames[0],
-            "frame {at} of the arrival draws the same screen"
-        );
-    }
 }
 
 // ---- the activity row ---------------------------------------------------
@@ -611,6 +655,33 @@ fn what_wants_a_person_alternates_on_the_second() {
     assert_eq!(at(999), theme::presence());
     assert_eq!(at(1_000), theme::text(), "on the second");
     assert_eq!(at(2_000), theme::presence());
+}
+
+/// The card's border is the fourth place that beat is said, and no longer
+/// the exception: a card is on the screen exactly while it is unanswered, so
+/// it asks for the whole of its life and stops asking by going.
+#[test]
+fn an_unanswered_cards_border_is_on_that_beat_too() {
+    let state = folded(vec![frame(1, opened(permission(Some("Edit(src/)"), None)))]);
+    let (mut ui, now) = settled();
+    ui.dialog.focus_on(state.interactions.first());
+    let tree = solo(&state);
+    let border = |at: Now| leading_style(&tree, &ui, at, "Do you want to");
+    assert_eq!(border(now), theme::as_drawn(theme::presence()));
+    assert_eq!(
+        border(later(now, 1_000)),
+        theme::as_drawn(theme::text()),
+        "on the second, with everything else that wants a person"
+    );
+    assert_eq!(
+        border(later(now, 2_000)),
+        theme::as_drawn(theme::presence())
+    );
+    assert_eq!(
+        border(still(later(now, 1_000))),
+        theme::as_drawn(theme::presence()),
+        "and it rests on bingo's own colour where nothing may move"
+    );
 }
 
 #[test]

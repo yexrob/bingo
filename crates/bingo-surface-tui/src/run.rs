@@ -354,6 +354,7 @@ impl Run {
             || self.ui.layer_moving(screen)
             || !self.ui.notices.is_empty()
             || self.ui.crossfading(screen)
+            || self.ui.sending(screen).is_some()
             || self.ui.painted.borrow().blocks.moving()
             || self.ui.exit_armed(screen.instant)
     }

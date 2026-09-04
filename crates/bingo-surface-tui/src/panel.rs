@@ -15,6 +15,7 @@ use bingo_sdk::{SessionId, SessionState, View};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
+use crate::clock::Now;
 use crate::rail::{CardId, Pin};
 use crate::views::{self, MISSING};
 use crate::{theme, window};
@@ -51,6 +52,7 @@ pub fn lines(
     pinned: &BTreeSet<Pin>,
     width: usize,
     room: usize,
+    now: Now,
 ) -> Vec<Line<'static>> {
     let rows = rows(state);
     if rows.is_empty() {
@@ -66,18 +68,18 @@ pub fn lines(
             at_cursor = out.len();
         }
         out.push(heading(id, at == cursor, is_pinned(pinned, session, id)));
-        out.extend(body(state, id, width));
+        out.extend(body(state, id, width, now));
     }
     window::onward(out, at_cursor, room)
 }
 
-fn body(state: &SessionState, id: &CardId, width: usize) -> Vec<Line<'static>> {
+fn body(state: &SessionState, id: &CardId, width: usize, now: Now) -> Vec<Line<'static>> {
     let payload = state
         .extensions
         .get(&id.plugin)
         .and_then(|kinds| kinds.get(&id.kind));
     let view = payload.map(view_of).unwrap_or_else(|| View::text(MISSING));
-    views::render(&view, width.saturating_sub(INDENT))
+    views::marked(&view, width.saturating_sub(INDENT), &views::Marks::at(now))
         .into_iter()
         .map(|line| views::indent(line, INDENT))
         .collect()
@@ -191,6 +193,7 @@ mod tests {
             &BTreeSet::new(),
             60,
             ROOM,
+            scene().1,
         )
         .iter()
         .map(|line| line.to_string().trim_end().to_string())
@@ -349,9 +352,17 @@ mod tests {
                 kind: "tasks".into(),
             },
         }]);
-        let here = lines(&state, &SessionId::from_raw("ses_1"), 0, &pinned, 60, ROOM);
+        let here = lines(
+            &state,
+            &SessionId::from_raw("ses_1"),
+            0,
+            &pinned,
+            60,
+            ROOM,
+            scene().1,
+        );
         assert!(here[0].to_string().contains(PINNED), "{:?}", here[0]);
-        let elsewhere = lines(&state, &child_id(), 0, &pinned, 60, ROOM);
+        let elsewhere = lines(&state, &child_id(), 0, &pinned, 60, ROOM, scene().1);
         assert!(!elsewhere[0].to_string().contains(PINNED));
     }
 }

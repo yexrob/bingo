@@ -32,6 +32,20 @@ pub(crate) use said::quiet;
 
 /// How long the comet tail of a block still arriving takes to cool (§6).
 pub const COMET: Duration = Duration::from_millis(180);
+/// How long one light takes to cross the name of a call that has just come
+/// back: six frames (§6). A thirty-three millisecond flash is below the
+/// threshold at which a person reads it as something happening.
+pub const SWEEP: Duration = Duration::from_millis(6 * crate::clock::FRAME.as_millis() as u64);
+/// How long a call that came back wrong takes to cool out of `bad` into the
+/// words behind it: twelve frames (§6). A flare that settles, never a shake —
+/// §3's "nothing jumps" outranks it.
+pub const FLARE: Duration = Duration::from_millis(12 * crate::clock::FRAME.as_millis() as u64);
+/// How long a block that has just landed goes on being drawn again: the
+/// longer of the two cues one can wear, so neither is cut short.
+pub const LANDING: Duration = match SWEEP.as_millis() > FLARE.as_millis() {
+    true => SWEEP,
+    false => FLARE,
+};
 /// How many cells of it are still warm.
 const COMET_CELLS: usize = 8;
 /// One pulse of a live tool's bullet (§6).
@@ -114,12 +128,51 @@ impl<'a> Rows<'a> {
 }
 
 /// Where one block is in its own motion (§6): the clock [`crate::blocks`]
-/// measured for it, and whether this is the one frame its completion flashes
-/// for.
+/// measured for it, and whether it flipped into being finished — which is
+/// what the light across its name, and the cooling of one that failed, are
+/// both measured from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cue {
     pub since: Instant,
     pub flip: bool,
+}
+
+/// What the words of a row that has just landed are doing: one light crossing
+/// the name of a call that came back, the whole row cooling out of `bad` for
+/// one that came back wrong, or nothing at all — which is what every frame
+/// but the twelve after it draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Landing {
+    Settled,
+    Landed(f32),
+    Failed(f32),
+}
+
+impl Landing {
+    /// How far into its own motion this block is. A block that did not just
+    /// finish, and a surface where nothing may move, are both settled.
+    fn of(cue: Cue, failed: bool, rows: &Rows<'_>) -> Self {
+        if !cue.flip || !rows.now.motion {
+            return Landing::Settled;
+        }
+        let len = match failed {
+            true => FLARE,
+            false => SWEEP,
+        };
+        let come = Anim::new(cue.since, len).progress(rows.now.instant);
+        match failed {
+            true => Landing::Failed(come),
+            false => Landing::Landed(come),
+        }
+    }
+
+    /// What the words after the name are drawn in.
+    fn about(self) -> Style {
+        match self {
+            Landing::Failed(come) => theme::cooling(come),
+            _ => theme::text(),
+        }
+    }
 }
 
 impl Rows<'_> {
@@ -216,7 +269,7 @@ fn item_lines(
         .into(),
         ItemBody::ToolCall { .. } => called(item, agents, fold, rows, cue).into(),
         ItemBody::Action { name, args, result } => {
-            action(item.status, name, args, result.as_ref(), fold, rows).into()
+            action(item.status, name, args, result.as_ref(), fold, rows, cue).into()
         }
         ItemBody::Compaction { before, after, .. } => vec![rule(
             &format!("context compacted ({before} → {after} tokens)"),
@@ -578,6 +631,15 @@ struct Call<'a> {
     run: Option<Run<'a>>,
 }
 
+impl Call<'_> {
+    /// Whether it came back wrong: its own status, or an output the tool
+    /// marked as an error. One question, asked here, so the bullet that says
+    /// so and the words that cool out of it can never disagree.
+    fn failed(&self) -> bool {
+        self.status == ItemStatus::Failed || self.output.is_some_and(|output| output.is_error)
+    }
+}
+
 /// The row one skill run wears, whichever door it came through: the model's
 /// `Skill(guide)` call and a person's own `/guide` are the same thing
 /// happening, so this is the only place either is drawn (design §4).
@@ -585,58 +647,89 @@ struct Call<'a> {
 /// The mark is the skill's own glyph in the bullet's place, in the colour the
 /// bullet would have worn: what kind of row it is and what state it is in are
 /// two facts, and each keeps its own carrier.
-fn skill_row(run: Run<'_>, style: Style, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    marked(theme::skill(), style, vec![asked(run, rows)], rows)
+fn skill_row(run: Run<'_>, style: Style, rows: &Rows<'_>, landing: Landing) -> Vec<Line<'static>> {
+    marked(theme::skill(), style, vec![asked(run, rows, landing)], rows)
 }
 
 /// `Skill(guide) the wire format`: the call as any tool row spells one, then
 /// the free text the skill was given — outside the parentheses, because it is
 /// what the skill reads and not what it is.
-fn asked(run: Run<'_>, rows: &Rows<'_>) -> Line<'static> {
-    let mut line = signature(skill::TOOL, run.name, rows);
+fn asked(run: Run<'_>, rows: &Rows<'_>, landing: Landing) -> Line<'static> {
+    let mut line = signature(skill::TOOL, run.name, rows, landing);
     if !run.args.is_empty() {
         line.spans
-            .push(Span::styled(format!(" {}", run.args), theme::text()));
+            .push(Span::styled(format!(" {}", run.args), landing.about()));
     }
     line
 }
 
 fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
-    let failed = call.status == ItemStatus::Failed || call.output.is_some_and(|o| o.is_error);
-    let style = live_bullet(call.status, failed, rows, cue);
+    let failed = call.failed();
+    let style = live_bullet(call.status, failed, rows);
+    let landing = Landing::of(cue, failed, rows);
     let mut out = match call.run {
-        Some(run) => skill_row(run, style, rows),
-        None => speaks(style, vec![signature(call.name, &call.about, rows)], rows),
+        Some(run) => skill_row(run, style, rows, landing),
+        None => speaks(
+            style,
+            vec![signature(call.name, &call.about, rows, landing)],
+            rows,
+        ),
     };
     out.extend(result(&call, rows));
     out
 }
 
 /// The bullet says what state the row is in; its motion says how fresh that
-/// state is — it pulses between `presence` and its glow while the tool runs,
-/// and flashes bold for one frame as the answer lands (§6).
-fn live_bullet(status: ItemStatus, failed: bool, rows: &Rows<'_>, cue: Cue) -> Style {
+/// state is — it pulses between `presence` and its glow while the tool runs.
+/// What the answer landing looks like is the row's own words ([`Landing`]),
+/// not a frame of weight on the bullet: a thirty-three millisecond flash is
+/// below the threshold at which a person reads it as something happening.
+fn live_bullet(status: ItemStatus, failed: bool, rows: &Rows<'_>) -> Style {
     let settled = bullet_style(status, failed);
-    if !rows.now.motion {
-        return settled;
-    }
-    if cue.flip {
-        return settled.patch(theme::bold());
-    }
-    match status {
-        ItemStatus::Running => theme::pulse(clock::breath(rows.now, PULSE)),
-        _ => settled,
+    match rows.now.motion && status == ItemStatus::Running {
+        true => theme::pulse(clock::breath(rows.now, PULSE)),
+        false => settled,
     }
 }
 
-/// `Read(Cargo.toml)`: the name bold, what it is about plain.
-fn signature(name: &str, about: &str, rows: &Rows<'_>) -> Line<'static> {
-    let mut spans = vec![Span::styled(name.to_string(), theme::bold())];
+/// `Read(Cargo.toml)`: the name bold, what it is about plain — and, for the
+/// twelve frames after the call comes back, whatever its landing is doing to
+/// the two of them.
+fn signature(name: &str, about: &str, rows: &Rows<'_>, landing: Landing) -> Line<'static> {
+    let mut spans = named(name, landing);
     let about = rows.shorten(about);
     if !about.is_empty() {
-        spans.push(Span::styled(format!("({about})"), theme::text()));
+        spans.push(Span::styled(format!("({about})"), landing.about()));
     }
     Line::from(spans)
+}
+
+/// The name of the row: one span at rest, and one per cell while a light is
+/// crossing it.
+fn named(name: &str, landing: Landing) -> Vec<Span<'static>> {
+    match landing {
+        Landing::Settled => vec![Span::styled(name.to_string(), theme::bold())],
+        Landing::Failed(come) => vec![Span::styled(
+            name.to_string(),
+            theme::cooling(come).patch(theme::bold()),
+        )],
+        Landing::Landed(come) => swept(name, come),
+    }
+}
+
+/// The name with one light crossing it, cell by cell: the same sweep the box's
+/// border runs when a line is sent, on the other side of the conversation.
+fn swept(name: &str, come: f32) -> Vec<Span<'static>> {
+    let cells = name.chars().count();
+    name.chars()
+        .enumerate()
+        .map(|(at, glyph)| {
+            Span::styled(
+                glyph.to_string(),
+                theme::landing(clock::sweep(come, at, cells)),
+            )
+        })
+        .collect()
 }
 
 /// The bullet carries the state, and nothing else has to.
@@ -766,7 +859,12 @@ fn cut(rows: Vec<Line<'static>>, limit: usize, opens: Option<&str>) -> Vec<Line<
 fn child_row(child: &SessionState, input: &Value, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let mut out = speaks(
         tree::bullet_style(tree::Status::of(child), tree::asking(child)),
-        vec![signature(&tree::name(child), &summarize(input), rows)],
+        vec![signature(
+            &tree::name(child),
+            &summarize(input),
+            rows,
+            Landing::Settled,
+        )],
         rows,
     );
     if let Some(activity) = tree::activity(child) {
@@ -811,10 +909,17 @@ fn action(
     result: Option<&Value>,
     fold: Fold,
     rows: &Rows<'_>,
+    cue: Cue,
 ) -> Vec<Line<'static>> {
+    let failed = status == ItemStatus::Failed;
     let mut out = speaks(
-        bullet_style(status, false),
-        vec![signature(name, &as_text(args), rows)],
+        bullet_style(status, failed),
+        vec![signature(
+            name,
+            &as_text(args),
+            rows,
+            Landing::of(cue, failed, rows),
+        )],
         rows,
     );
     if let Some(result) = result {
