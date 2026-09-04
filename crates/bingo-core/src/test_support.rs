@@ -234,6 +234,7 @@ pub fn kind(item: &Item) -> String {
         ItemBody::Assistant { .. } => "assistant",
         ItemBody::Reasoning { .. } => "reasoning",
         ItemBody::ToolCall { .. } => "tool",
+        ItemBody::Shell { .. } => "shell",
         ItemBody::Action { .. } => "action",
         ItemBody::Compaction { .. } => "compaction",
         ItemBody::Rewind { .. } => "rewind",

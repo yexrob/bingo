@@ -41,6 +41,36 @@ pub(super) const SURFACE: &str = "command";
 /// The one name that is its own prefix.
 const BANG: &str = "!";
 
+/// Whether a name is the shell line's (ADR-0008 §5).
+pub(super) fn is_shell(name: &str) -> bool {
+    name == BANG
+}
+
+/// Whether this submitter may run a shell line. A `!` is not a message to
+/// anybody: it runs a program on the machine bingo runs on, with the
+/// privileges bingo was started with, and nothing asks first. Only the person
+/// the session works for may write one — the same bareness the provider fold
+/// reads a person's own line by (`crate::context`). An agent's post, a room's
+/// nudge, a correspondent writing from a chat all sign what they send, and a
+/// signed line that starts with `!` is refused rather than run. A typed
+/// action carries no origin at all, which is the same answer.
+pub(super) fn may_run_shell(input: &Input) -> bool {
+    match input {
+        Input::Text { origin, .. } => crate::context::the_persons_own(origin),
+        Input::Action { .. } => false,
+    }
+}
+
+/// What a name nothing answers to is refused with. A `!` that found nothing
+/// is not a misspelling: the shell a bang line runs in is a plugin's, and a
+/// host that registered none has no shell at all rather than a typo.
+pub(super) fn unknown(name: &str) -> String {
+    match name {
+        BANG => format!("no shell here: nothing answers to {}", spelled(BANG)),
+        name => format!("unknown command: {}", spelled(name)),
+    }
+}
+
 /// A name and its argument text, as the actor parses them (ADR-0008 §1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Parsed {
@@ -419,6 +449,61 @@ mod tests {
             "/guide do the thing\n\nRead the guide.",
             "the typed line is the item's first line and its only record"
         );
+    }
+
+    /// The bareness the fold reads a person's own line by is the same bareness
+    /// a shell line is allowed by: a door that signs what it sends may not
+    /// run one (M65).
+    #[test]
+    fn only_the_persons_own_line_may_run_a_shell_command() {
+        let from = |origin: Origin| {
+            may_run_shell(&Input::Text {
+                text: "!ls".into(),
+                images: Vec::new(),
+                origin,
+            })
+        };
+        assert!(from(Origin::surface("tui")));
+        assert!(from(Origin::surface("print")));
+        assert!(!from(Origin {
+            surface: "agent".into(),
+            principal: Some("scout".into()),
+            conversation: None,
+        }));
+        assert!(!from(Origin {
+            surface: "channels".into(),
+            principal: Some("ou_person".into()),
+            conversation: Some("loopback/oc_1".into()),
+        }));
+        assert!(
+            !from(Origin {
+                surface: "peer".into(),
+                principal: None,
+                conversation: Some("#design".into()),
+            }),
+            "a post signs where it came from"
+        );
+        assert!(
+            !from(Origin::surface("kernel")),
+            "the kernel's own voice is not the person's"
+        );
+        assert!(
+            !may_run_shell(&Input::Action {
+                action: Action {
+                    name: BANG.into(),
+                    args: json!("ls"),
+                },
+            }),
+            "a button carries no origin, and a shell line needs one"
+        );
+    }
+
+    /// A `!` nothing answers to is not a misspelling.
+    #[test]
+    fn a_shell_line_with_no_shell_says_that_is_what_is_missing() {
+        assert!(is_shell(BANG) && !is_shell("model"));
+        assert!(unknown(BANG).contains("shell"), "{}", unknown(BANG));
+        assert_eq!(unknown("nope"), "unknown command: /nope");
     }
 
     #[test]
