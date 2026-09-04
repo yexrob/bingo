@@ -147,6 +147,15 @@ impl Painted {
         self.cells.clear();
     }
 
+    /// The picture a pointer is on, when it is on one. The cells under it say
+    /// which picture they are cells of, and this frame's own list says which
+    /// picture that is — so a click can only ever open a picture the screen is
+    /// showing (M56).
+    pub fn picture_at(&self, at: ratatui::layout::Position) -> Option<crate::graphics::Picture> {
+        let id = self.cells.iter().find(|one| one.area.contains(at))?.id;
+        self.placed().into_iter().find(|picture| picture.id() == id)
+    }
+
     /// Every picture this frame put cells on the screen for, oldest first: the
     /// transcript's, then the composer's own. The strip comes last because
     /// what falls off the terminal's cap is the oldest, and the picture a

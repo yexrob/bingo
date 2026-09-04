@@ -4,6 +4,8 @@
 
 use bingo_sdk::{Activation, Answer, Input, InteractionId, SessionId, SessionSelector};
 
+use crate::graphics::picture::Source;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     Submit(Input),
@@ -28,5 +30,10 @@ pub enum Effect {
     /// Ask the system clipboard for a picture and, if there is one, put
     /// `[image N]` in the line for it (ADR-0040). The loop owns the read.
     PasteImage,
+    /// Show a picture a click landed on in whatever this system opens pictures
+    /// with (M56). The loop resolves the source to a file on this machine —
+    /// the path the words named, or the one it writes the bytes to — and hands
+    /// that over ([`crate::viewer`]).
+    OpenPicture(Source),
     Exit,
 }

@@ -38,6 +38,11 @@ ignore.workspace = true
 # A picture the terminal can draw: whatever a person or a tool handed over,
 # as the one format the protocol takes (M46, ADR-0041).
 bingo-pictures.workspace = true
+# The one opener this workspace has: a click on a picture hands it to whatever
+# this system shows pictures with (M56, ADR-0042 §1). A library, which a plugin
+# may depend on (ADR-0042 §2); already in the tree, so it costs no crate.
+bingo-loopback.workspace = true
+thiserror.workspace = true
 
 # `O_NONBLOCK` for the graphics probe's own handle on the terminal, and
 # nothing else: a constant, no call and no `unsafe`. Already in the tree

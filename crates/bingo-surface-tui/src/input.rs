@@ -2473,6 +2473,135 @@ mod tests {
         assert!(ui.select.run.is_none(), "stepping in is not selecting");
     }
 
+    // ---- a picture is a thing to click (M56) ------------------------------
+
+    /// A `Read` that answered with a picture and nothing else (ADR-0040 §1).
+    fn read_a_picture() -> SessionState {
+        folded(vec![frame(
+            1,
+            bingo_sdk::Event::ItemCompleted {
+                item: item(
+                    "itm_1",
+                    bingo_sdk::ItemStatus::Completed,
+                    bingo_sdk::ItemBody::ToolCall {
+                        call_id: "call_1".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({ "file_path": "shot.png" }),
+                        output: Some(bingo_sdk::ToolOutput {
+                            parts: vec![bingo_sdk::ContentPart::Image(
+                                bingo_pictures::testing::png(100, 200),
+                            )],
+                            display: None,
+                            is_error: false,
+                        }),
+                        progress: None,
+                        duration_ms: Some(3),
+                    },
+                ),
+            },
+        )])
+    }
+
+    /// The row of the screen a picture's cells are on.
+    fn cells_row(screen: &str) -> u16 {
+        row_carrying(screen, &crate::graphics::kitty::PLACEHOLDER.to_string())
+    }
+
+    fn journal_picture() -> crate::graphics::picture::Source {
+        crate::graphics::picture::Source::Journal {
+            item: bingo_sdk::ItemId::from_raw("itm_1"),
+            part: 0,
+        }
+    }
+
+    /// A click inside a drawn picture opens it: the cells under the pointer say
+    /// which picture they are of, and the effect carries that source (M56).
+    #[test]
+    fn a_click_inside_a_picture_opens_it() {
+        let state = read_a_picture();
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            let screen = render(&state, &ui, now);
+            let row = cells_row(&screen);
+            let effects = on_mouse(&mut ui, &solo(&state), click(6, row), now);
+            assert_eq!(effects, vec![Effect::OpenPicture(journal_picture())]);
+            assert!(
+                ui.select.run.is_none(),
+                "opening a picture is not selecting"
+            );
+            assert!(ui.folds.is_empty(), "and it is not the block's fold");
+        });
+    }
+
+    /// A click beside the picture is the block's, as it always was: the
+    /// rectangle answers for its own cells and for nothing around them.
+    #[test]
+    fn a_click_beside_a_picture_is_still_the_blocks() {
+        let state = read_a_picture();
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            let screen = render(&state, &ui, now);
+            let row = row_carrying(&screen, "Read(shot.png)");
+            assert!(
+                on_mouse(&mut ui, &solo(&state), click(4, row), now).is_empty(),
+                "the row above the cells cycles the fold"
+            );
+            assert!(!ui.folds.is_empty(), "which is what it wrote");
+            let cells = cells_row(&screen);
+            // Ten cells from column 5, so column 60 is past the picture.
+            assert!(
+                on_mouse(&mut ui, &solo(&state), click(60, cells), now).is_empty(),
+                "and so does a click to the right of them"
+            );
+        });
+    }
+
+    /// A terminal that draws no picture has no cells to click: the chip is
+    /// words, and a click on it is the block's fold.
+    #[test]
+    fn a_chip_is_words_and_a_click_on_it_opens_nothing() {
+        let state = read_a_picture();
+        let (mut ui, now) = scene();
+        let screen = render(&state, &ui, now);
+        let row = row_carrying(&screen, "[image: image/png]");
+        assert!(on_mouse(&mut ui, &solo(&state), click(6, row), now).is_empty());
+    }
+
+    /// The strip's thumbnails answer the same way, so the picture about to be
+    /// sent is as clickable as the ones already said (M56).
+    #[test]
+    fn a_click_on_a_strips_thumbnail_opens_it() {
+        let state = state();
+        let (mut ui, now) = scene();
+        let token = ui.pictures.hold("", bingo_pictures::testing::png(100, 100));
+        ui.composer.insert(&crate::pictures::placeholder(token));
+        crate::graphics::with(crate::graphics::drawing(), || {
+            let screen = render(&state, &ui, now);
+            let row = cells_row(&screen);
+            let effects = on_mouse(&mut ui, &solo(&state), click(3, row), now);
+            assert_eq!(
+                effects,
+                vec![Effect::OpenPicture(
+                    crate::graphics::picture::Source::Draft { token }
+                )]
+            );
+        });
+    }
+
+    /// While a sheet is over the frame the cells under it are the sheet's: a
+    /// click cannot open a picture the screen is not showing.
+    #[test]
+    fn a_sheet_over_the_frame_takes_the_click_with_it() {
+        let state = read_a_picture();
+        let (mut ui, now) = scene();
+        crate::graphics::with(crate::graphics::drawing(), || {
+            let screen = render(&state, &ui, now);
+            let row = cells_row(&screen);
+            ui.layer.show(crate::ui::Open::Help, now.instant);
+            assert!(on_mouse(&mut ui, &solo(&state), click(6, row), now).is_empty());
+        });
+    }
+
     #[test]
     fn a_click_on_a_card_row_answers_it() {
         let state = folded(vec![frame(1, opened(permission(Some("Edit(src/)"), None)))]);
