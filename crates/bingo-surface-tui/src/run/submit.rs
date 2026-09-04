@@ -118,7 +118,9 @@ async fn read_mentions(
     mut images: Vec<Image>,
 ) -> Result<Vec<Image>, String> {
     for word in mentions {
-        match bingo_pictures::load(&bingo_pictures::Source::parse(&word, cwd)).await {
+        // A mentioned picture is journaled, so the session itself is where it
+        // is kept and the cache would be a second copy of it (M61).
+        match bingo_pictures::load(&bingo_pictures::Source::parse(&word, cwd), None).await {
             Ok(image) => images.push(image),
             Err(error) => return Err(format!("{word}: {error}")),
         }

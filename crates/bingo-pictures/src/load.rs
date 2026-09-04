@@ -6,6 +6,11 @@
 //! still arrives. Both are bounded before they are held: the journal's cap is
 //! checked on what the source says its size is, and again on what it actually
 //! sends, so neither a huge file nor a lying server fills this process.
+//!
+//! A URL is fetched once and kept ([`crate::cache`]): a picture behind an
+//! address does not change because a transcript was redrawn or a session
+//! resumed. A path is not cached — the file *is* the cache, and a copy of it
+//! under the data directory would be a second one to keep in step.
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,6 +19,7 @@ use bingo_sdk::{Image, ImageError};
 use futures::StreamExt;
 
 use crate::accepted::sniffed;
+use crate::cache::Cache;
 use crate::{PictureError, Source};
 
 /// How long a remote read may take, start to finish. A picture is beside a
@@ -22,13 +28,33 @@ use crate::{PictureError, Source};
 /// written on, and a phone tethering is still a network.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The picture `source` names, in a type a provider accepts.
-pub async fn load(source: &Source) -> Result<Image, PictureError> {
+/// The picture `source` names, in a type a provider accepts. `cache` is where
+/// a fetched one is kept and looked for; `None` for a caller that keeps none.
+pub async fn load(source: &Source, cache: Option<&Cache>) -> Result<Image, PictureError> {
     let bytes = match source {
         Source::Path(path) => read(path)?,
-        Source::Url(url) => fetch(url).await?,
+        Source::Url(url) => remote(url, cache).await?,
     };
     sniffed(&bytes)
+}
+
+/// A URL out of the cache where a young enough copy is in it, and off the
+/// network where it is not — and then kept, so the next reading of the same
+/// address costs nothing.
+///
+/// What is kept is what the server sent, not what a decoder made of it: the
+/// bytes are the fact, and everything else about the picture is derived from
+/// them by the same code on a hit as on a miss.
+async fn remote(url: &str, cache: Option<&Cache>) -> Result<Vec<u8>, PictureError> {
+    let Some(cache) = cache else {
+        return fetch(url).await;
+    };
+    if let Some(kept) = cache.hit(url) {
+        return Ok(kept);
+    }
+    let bytes = fetch(url).await?;
+    cache.keep(url, &bytes);
+    Ok(bytes)
 }
 
 /// A path off this machine's disk, its size read before its bytes are: a file
@@ -121,7 +147,7 @@ mod tests {
     async fn a_png_on_disk_is_read_and_passed_through() {
         let dir = tempfile::tempdir().expect("a directory");
         let bytes = drawn(4, 6, ImageFormat::Png);
-        let image = load(&wrote(dir.path(), "shot.png", &bytes))
+        let image = load(&wrote(dir.path(), "shot.png", &bytes), None)
             .await
             .expect("a picture");
         assert_eq!(image.media_type, "image/png");
@@ -132,7 +158,7 @@ mod tests {
     async fn a_bmp_on_disk_becomes_a_png() {
         let dir = tempfile::tempdir().expect("a directory");
         let source = wrote(dir.path(), "shot.bmp", &drawn(8, 5, ImageFormat::Bmp));
-        let image = load(&source).await.expect("a picture");
+        let image = load(&source, None).await.expect("a picture");
         assert_eq!(image.media_type, "image/png");
         assert_eq!(png_size(&decoded(&image)), Some((8, 5)));
     }
@@ -144,7 +170,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a directory");
         let source = wrote(dir.path(), "shot.png", b"not a picture at all");
         assert!(matches!(
-            load(&source).await,
+            load(&source, None).await,
             Err(PictureError::NotAPicture)
         ));
     }
@@ -153,7 +179,7 @@ mod tests {
     async fn a_path_that_is_not_there_says_so() {
         let dir = tempfile::tempdir().expect("a directory");
         let source = Source::Path(dir.path().join("missing.png"));
-        let error = load(&source).await.expect_err("no picture");
+        let error = load(&source, None).await.expect_err("no picture");
         assert!(matches!(error, PictureError::Unreadable(_)), "{error}");
     }
 
@@ -161,7 +187,7 @@ mod tests {
     async fn a_file_over_the_cap_is_refused_before_it_is_read() {
         let dir = tempfile::tempdir().expect("a directory");
         let source = wrote(dir.path(), "huge.png", &vec![0u8; Image::MAX_BYTES + 1]);
-        let error = load(&source).await.expect_err("no picture");
+        let error = load(&source, None).await.expect_err("no picture");
         assert!(
             matches!(
                 error,
@@ -183,7 +209,7 @@ mod tests {
                 .set_body_bytes(bytes.clone()),
         )
         .await;
-        let image = load(&source).await.expect("a picture");
+        let image = load(&source, None).await.expect("a picture");
         assert_eq!(image.media_type, "image/jpeg");
         assert_eq!(decoded(&image), bytes);
     }
@@ -200,7 +226,7 @@ mod tests {
                 .set_body_bytes(drawn(9, 4, ImageFormat::Tiff)),
         )
         .await;
-        let image = load(&source).await.expect("a picture");
+        let image = load(&source, None).await.expect("a picture");
         assert_eq!(image.media_type, "image/png");
         assert_eq!(png_size(&decoded(&image)), Some((9, 4)));
     }
@@ -236,7 +262,7 @@ mod tests {
                 .set_body_bytes(vec![0u8; Image::MAX_BYTES + 1]),
         )
         .await;
-        let error = load(&source).await.expect_err("no picture");
+        let error = load(&source, None).await.expect_err("no picture");
         assert!(
             matches!(error, PictureError::Refused(ImageError::TooLarge { .. })),
             "{error}"
@@ -247,7 +273,7 @@ mod tests {
     async fn a_url_that_is_not_there_says_so_and_names_no_url_twice() {
         let server = MockServer::start().await;
         let source = serving(&server, ResponseTemplate::new(404)).await;
-        let error = load(&source).await.expect_err("no picture");
+        let error = load(&source, None).await.expect_err("no picture");
         assert!(matches!(error, PictureError::Unfetchable(_)), "{error}");
         assert!(error.to_string().contains("404"), "{error}");
         assert!(
@@ -268,8 +294,109 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            load(&source).await,
+            load(&source, None).await,
             Err(PictureError::NotAPicture)
         ));
+    }
+
+    // ---- M61: a picture fetched once ------------------------------------
+
+    /// A picture served once, and the count of how many times it was asked
+    /// for: the whole of what the cache is about.
+    async fn counted(server: &MockServer) -> Source {
+        serving(
+            server,
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(drawn(6, 6, ImageFormat::Png)),
+        )
+        .await
+    }
+
+    async fn asked(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .map(|all| all.len())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_url_read_twice_is_fetched_once() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let cache = Cache::under(dir.path(), crate::cache::DAYS).expect("a cache");
+        let server = MockServer::start().await;
+        let source = counted(&server).await;
+        let first = load(&source, Some(&cache)).await.expect("a picture");
+        let again = load(&source, Some(&cache)).await.expect("a picture");
+        assert_eq!(asked(&server).await, 1, "the second reading is the cache's");
+        assert_eq!(decoded(&first), decoded(&again), "and the very same bytes");
+    }
+
+    /// A path is the file itself, so nothing is copied under the data
+    /// directory for it (non-goal, M61).
+    #[tokio::test]
+    async fn a_file_on_this_machine_is_never_copied_into_the_cache() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let cache = Cache::under(dir.path(), crate::cache::DAYS).expect("a cache");
+        let source = wrote(dir.path(), "shot.png", &drawn(3, 3, ImageFormat::Png));
+        load(&source, Some(&cache)).await.expect("a picture");
+        assert!(!dir.path().join(crate::cache::DIR).exists());
+    }
+
+    /// An entry past its time is fetched again and written again, so the
+    /// picture a person sees is never a fortnight stale.
+    #[tokio::test]
+    async fn an_entry_past_its_time_is_fetched_again_and_rewritten() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let cache = Cache::under(dir.path(), 1).expect("a cache");
+        let server = MockServer::start().await;
+        let source = counted(&server).await;
+        let Source::Url(url) = &source else {
+            panic!("a url");
+        };
+        load(&source, Some(&cache)).await.expect("a picture");
+        let entry = cache.path(url);
+        let stale = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&entry)
+            .expect("the entry")
+            .set_modified(stale)
+            .expect("a stamp this machine takes");
+        load(&source, Some(&cache)).await.expect("a picture");
+        assert_eq!(asked(&server).await, 2, "the stale entry was passed over");
+        let mtime = std::fs::metadata(&entry)
+            .and_then(|at| at.modified())
+            .expect("a stamp");
+        assert!(mtime > stale, "and the entry was written again");
+    }
+
+    /// `0` days is no cache: every reading is a fetch and nothing is written.
+    #[tokio::test]
+    async fn no_days_writes_nothing_and_fetches_every_time() {
+        let dir = tempfile::tempdir().expect("a directory");
+        assert!(Cache::under(dir.path(), 0).is_none(), "no cache to pass");
+        let server = MockServer::start().await;
+        let source = counted(&server).await;
+        load(&source, None).await.expect("a picture");
+        load(&source, None).await.expect("a picture");
+        assert_eq!(asked(&server).await, 2);
+        assert!(!dir.path().join(crate::cache::DIR).exists());
+    }
+
+    /// A server that is not there is not a picture, and the miss is not kept:
+    /// nothing may cache a failure as though it were bytes.
+    #[tokio::test]
+    async fn a_fetch_that_failed_leaves_no_entry_behind() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let cache = Cache::under(dir.path(), crate::cache::DAYS).expect("a cache");
+        let server = MockServer::start().await;
+        let source = serving(&server, ResponseTemplate::new(404)).await;
+        let Source::Url(url) = &source else {
+            panic!("a url");
+        };
+        load(&source, Some(&cache)).await.expect_err("no picture");
+        assert!(!cache.path(url).exists());
     }
 }

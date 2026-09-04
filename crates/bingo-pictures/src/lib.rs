@@ -9,8 +9,8 @@
 //! [`to_png`] answers with the bytes a terminal may draw and the size they
 //! draw at. [`sniffed`] and [`accepted`] answer with the one [`Image`] the
 //! journal keeps. [`load`] reads a [`Source`] — a path on this machine or a
-//! URL this machine fetches (ADR-0041 §3) — and hands the bytes to the first
-//! two.
+//! URL this machine fetches (ADR-0041 §3), kept on disk by [`cache`] — and
+//! hands the bytes to the first two.
 //!
 //! A PNG passes through untouched — its size is in its header, so nothing is
 //! decoded and nothing is re-encoded. Everything else is decoded once and
@@ -21,10 +21,12 @@ use bingo_sdk::Image;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
 mod accepted;
+pub mod cache;
 mod load;
 mod source;
 
 pub use accepted::{accepted, sniffed};
+pub use cache::Cache;
 pub use load::load;
 pub use source::{Source, names_a_picture};
 
