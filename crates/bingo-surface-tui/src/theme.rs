@@ -1012,7 +1012,10 @@ mod tests {
             // Every cell of the opening shot, and nothing else on the
             // surface: the ramp `dim` → `text` for what the world's own light
             // reaches and `presence` → glow for what the block does (§11).
-            ("lit", &["intro/mascot.rs", "intro/shade.rs"]),
+            (
+                "lit",
+                &["intro/mascot.rs", "intro/mod.rs", "intro/shade.rs"],
+            ),
             // Highlighted code reaches the table through one door, so no view
             // has to know that a keyword and the mode badge share a colour.
             ("ink", &["highlight.rs"]),
