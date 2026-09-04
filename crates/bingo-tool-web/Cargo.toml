@@ -16,6 +16,9 @@ bingo-sdk.workspace = true
 # M50: a picture behind a URL is read by the library crate (ADR-0041 §1), the
 # one place bytes become the picture a provider accepts. No decoder here.
 bingo-pictures.workspace = true
+# M54: the loopback socket a shown page is served on, and the browser opener
+# (ADR-0042 §1). No HTTP server of its own lives in this crate.
+bingo-loopback.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 reqwest.workspace = true

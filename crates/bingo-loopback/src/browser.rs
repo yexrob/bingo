@@ -1,8 +1,9 @@
-//! Opening a URL, best effort.
+//! Opening a URL in the person's browser, best effort.
 //!
-//! Never awaited and never fatal: the flow shows the URL through the prompter
-//! anyway, so a machine with no browser — a container, an ssh session — loses
-//! a convenience and not the login.
+//! Never awaited, and what `false` means is the caller's to decide: a login
+//! shows the URL through the prompter and carries on, while a page nobody can
+//! open is a call that fails at once (ADR-0042 §4). Either way a machine with
+//! no browser — a container, an ssh session — still has the URL.
 
 use std::process::{Command, Stdio};
 

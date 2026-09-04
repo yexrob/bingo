@@ -25,3 +25,4 @@ first record; 0036 §2 answered it before it was named).
 - [0034 — The room is read, not delivered](0034-the-room-is-read-not-delivered.md)
 - [0040 — A picture beside the words](0040-a-picture-beside-the-words.md)
 - [0041 — The picture from anywhere](0041-the-picture-from-anywhere.md)
+- [0042 — The page that answers back](0042-the-page-that-answers-back.md)

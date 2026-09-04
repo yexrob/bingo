@@ -50,6 +50,11 @@
 # at +33 because `ratatui-image`'s sixel quantiser was two thirds of it; the
 # kitty path needs no quantiser, so what is bought here is the decoders
 # alone. Default features are off: no `rayon`, no `default-formats`.
-max_dependencies = 331
+# M54 (docs/plans/M54-the-page-that-answers-back.md, ADR-0042) raises 331 → 332
+# by the one member `bingo-loopback`. It brings no crate of its own: the
+# listener is `tokio` `net`, the answer `serde_json`, the token `getrandom` and
+# `base64` — all already in the tree — and its tests speak HTTP by hand rather
+# than pull `reqwest` into a library that has to cross-check for Windows.
+max_dependencies = 332
 max_core_check_seconds = 20
 max_target_gb = 5

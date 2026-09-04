@@ -1,8 +1,11 @@
-//! Web tools: one page read as markdown, and a search for pages.
+//! Web tools: one page read as markdown, a search for pages, and one page put
+//! in front of the person.
 //!
-//! Both share one HTTP client, built here — the timeout, the redirect bound and
-//! the user agent are one fact, and a connection pool is worth more than two of
-//! them. Which service answers a search is the plugin's one setting.
+//! The first two share one HTTP client, built here — the timeout, the redirect
+//! bound and the user agent are one fact, and a connection pool is worth more
+//! than two of them. Which service answers a search is the plugin's one
+//! setting. The third makes no request at all: it serves a page on a loopback
+//! port and waits for what the person does with it (ADR-0042).
 
 mod approved;
 mod backend;
@@ -15,6 +18,7 @@ mod fetch;
 mod hits;
 mod html_text;
 mod output;
+mod page;
 mod picture;
 mod readable;
 mod search;
@@ -32,6 +36,7 @@ pub use backend::{Hit, SearchBackend};
 pub use brave::Brave;
 pub use duckduckgo::DuckDuckGo;
 pub use fetch::{FetchArgs, WebFetchTool};
+pub use page::{Opener, PageArgs, ShowPageTool};
 pub use search::{SearchArgs, WebSearchTool};
 
 /// What one request may take, from the connection to the last byte.
@@ -51,7 +56,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.tools.web",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tool:WebFetch", "tool:WebSearch"],
+    provides: &["tool:WebFetch", "tool:WebSearch", "tool:ShowPage"],
     requires: &[],
     config: Some(ConfigClaim {
         keys: &[("web", Merge::Replace)],
@@ -109,6 +114,7 @@ impl Plugin for WebPlugin {
         let searcher = backend(&settings.web, brave_key(&settings.web), http.clone())?;
         registrar.tool(Arc::new(WebFetchTool::new(http)) as Arc<dyn Tool>);
         registrar.tool(Arc::new(WebSearchTool::new(searcher)) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(ShowPageTool::new()) as Arc<dyn Tool>);
         Ok(())
     }
 }

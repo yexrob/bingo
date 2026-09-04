@@ -15,14 +15,15 @@ def deps(name):
     return {d["name"] for d in members[name]["dependencies"] if d.get("kind") in (None, "normal")}
 ws = set(members)
 # A library (ADR-0012 §1) registers nothing and sits below the plugins: it depends on the
-# sdk only, and any plugin may depend on it.
+# sdk and on other libraries (ADR-0042 §2 — cargo itself refuses a cycle), and any plugin
+# may depend on it.
 libraries = {n for n in ws if (members[n].get("metadata") or {}).get("bingo", {}).get("tier") == "library"}
 plugins = {n for n in ws if n not in ("bingo", "bingo-sdk", "bingo-core") and n not in libraries}
 bad = []
 for n in libraries:
     for d in deps(n) & ws:
-        if d != "bingo-sdk":
-            bad.append(f"{n} -> {d} (a library depends on bingo-sdk only)")
+        if d != "bingo-sdk" and d not in libraries:
+            bad.append(f"{n} -> {d} (a library depends on bingo-sdk and other libraries only)")
 for n in plugins:
     for d in deps(n) & ws:
         if d == "bingo-core":

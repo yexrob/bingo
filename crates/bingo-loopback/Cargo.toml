@@ -1,0 +1,37 @@
+[package]
+name = "bingo-loopback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "A page served on a loopback port, and the browser that is sent to it"
+
+# A library (ADR-0012 §1, widened by ADR-0042 §2): registers nothing, any
+# plugin and any other library may depend on it.
+[package.metadata.bingo]
+tier = "library"
+
+[lints]
+workspace = true
+
+[dependencies]
+# `net` for the listener; the workspace default omits it. Nothing else here is
+# a runtime concern: the timeout and the interrupt belong to the caller.
+tokio = { workspace = true, features = ["net"] }
+# The answer a page posts is JSON, and this is where it stops being bytes.
+serde_json.workspace = true
+# The token in the path is base64url, the shape every secret in this tree wears.
+base64.workspace = true
+# The system random source behind that token. `getrandom` rather than
+# `aws-lc-rs`: this crate must cross-check for Windows without a C toolchain
+# (ADR-0042, AGENTS.md "Every platform the release ships").
+getrandom.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The scripted client speaks HTTP over a socket by hand rather than through
+# `reqwest`, which would pull `aws-lc-sys` and take the Windows cross-check
+# with it (ADR-0041's note, ADR-0042).
+tokio = { workspace = true, features = ["net", "macros", "rt", "time"] }

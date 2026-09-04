@@ -13,13 +13,12 @@ use bingo_sdk::{Answer, AnswerSpec, InteractionKind, LoginFlow, LoginMethod, Pro
 use serde_json::Value;
 use tokio::time::Instant;
 
-use crate::browser;
 use crate::device;
 use crate::error::AuthError;
 use crate::exchange;
 use crate::issuer::Issuer;
-use crate::loopback::Loopback;
 use crate::pkce;
+use crate::redirect;
 use crate::store::{CredentialStore, Entry};
 use crate::tokens::{Tokens, unix_now};
 
@@ -151,22 +150,22 @@ impl TokenSource {
         prompter: Arc<dyn Prompter>,
         open_browser: bool,
     ) -> Result<Tokens, AuthError> {
-        let loopback = Loopback::bind().await?;
-        let redirect_uri = loopback.redirect_uri();
+        let loopback = redirect::bind().await?;
+        let redirect_uri = redirect::uri(loopback.port());
         let verifier = pkce::verifier()?;
         let state = pkce::state()?;
         let url = self
             .issuer
             .authorize_url(&redirect_uri, &pkce::challenge(&verifier), &state);
         if open_browser {
-            browser::open(&url);
+            bingo_loopback::browser::open(&url);
         }
         let asked = prompter.ask(
             self.opening(LoginFlow::Browser { url }),
             vec![AnswerSpec::Cancel],
         );
         let flow = async {
-            let code = loopback.receive(&state).await?;
+            let code = redirect::receive(loopback, &state).await?;
             let reply = exchange::authorization_code(
                 &self.http,
                 &self.issuer,

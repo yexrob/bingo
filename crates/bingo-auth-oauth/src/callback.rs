@@ -1,8 +1,8 @@
-//! The redirect the browser sends back, read out of the raw request head.
+//! The redirect the browser sends back, read out of the target it asked for.
 //!
-//! A parser rather than an HTTP server: the loopback listener owns the socket
-//! and this owns the meaning, so the `state` check has a pure test and the
-//! socket half has nothing to decide.
+//! A parser and nothing else: `bingo_loopback` owns the socket and reads the
+//! request line, `redirect` owns the port and the page, and this owns the
+//! meaning — so the `state` check has a pure test with no bytes in it.
 
 use crate::error::AuthError;
 use crate::percent;
@@ -18,12 +18,8 @@ pub struct Callback {
     pub state: String,
 }
 
-/// `GET /auth/callback?code=…&state=… HTTP/1.1` → the two values it carries.
-pub fn parse(request_head: &str) -> Result<Callback, AuthError> {
-    let target = request_head
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| AuthError::Invalid("the callback request has no target".into()))?;
+/// `/auth/callback?code=…&state=…` → the two values it carries.
+pub fn parse(target: &str) -> Result<Callback, AuthError> {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     if path != PATH {
         return Err(AuthError::Invalid(format!(
@@ -51,20 +47,16 @@ fn field(query: &str, name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn head(target: &str) -> String {
-        format!("GET {target} HTTP/1.1\r\nHost: localhost:1455\r\n\r\n")
-    }
-
     #[test]
     fn a_callback_yields_its_code_and_state_percent_decoded() {
-        let callback = parse(&head("/auth/callback?code=ac%2F1&state=st-2")).expect("a callback");
+        let callback = parse("/auth/callback?code=ac%2F1&state=st-2").expect("a callback");
         assert_eq!(callback.code, "ac/1");
         assert_eq!(callback.state, "st-2");
     }
 
     #[test]
     fn the_order_of_the_query_does_not_matter_and_extra_fields_are_ignored() {
-        let callback = parse(&head("/auth/callback?state=st&extra=x&code=ac")).expect("a callback");
+        let callback = parse("/auth/callback?state=st&extra=x&code=ac").expect("a callback");
         assert_eq!(
             callback,
             Callback {
@@ -76,7 +68,7 @@ mod tests {
 
     #[test]
     fn a_callback_without_a_state_is_read_but_matches_no_nonce() {
-        let callback = parse(&head("/auth/callback?code=ac")).expect("a callback");
+        let callback = parse("/auth/callback?code=ac").expect("a callback");
         assert_eq!(callback.state, "");
     }
 
@@ -90,11 +82,10 @@ mod tests {
             "/?code=ac",
         ] {
             assert!(
-                matches!(parse(&head(target)), Err(AuthError::Invalid(_))),
+                matches!(parse(target), Err(AuthError::Invalid(_))),
                 "{target} is not a usable callback"
             );
         }
-        assert!(matches!(parse("GET"), Err(AuthError::Invalid(_))));
         assert!(matches!(parse(""), Err(AuthError::Invalid(_))));
     }
 }
