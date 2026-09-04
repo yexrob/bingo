@@ -90,10 +90,11 @@ on the end state as today.
    (`welcome::opens(state, screen, env) -> bool`, pure, tested case by
    case), the off-thread frame, the skip, the settle to resting height,
    the end-state identity test.
-4. **Subtract.** `intro/mascot.rs`, `assets/mascot.png`, the
-   `bingo_pictures::pixels` seam if nothing else reads it, `end.rs`'s
+4. **Subtract.** `intro/mascot.rs`, `assets/mascot.png`, `end.rs`'s
    silhouette, and the design doc's §11 mascot paragraphs go. Nothing
-   ships dead.
+   ships dead. `bingo_pictures::pixels` **stays** (the user's call,
+   2026-09-04): a public seam of the pictures crate, kept for the next
+   caller that draws a picture rather than sends one.
 
 ## Files
 
