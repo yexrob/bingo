@@ -62,17 +62,36 @@ pub(super) fn toggle(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
 
 /// The list owns the keyboard while it is up: `↑`/`↓` walk the one column,
 /// labels and all, and the view goes with the cursor — walking the list *is*
-/// the switch, as the strip's walk was (§3). `⏎` settles on where the walk
-/// landed, `esc` takes the query back and then the list, and every other key
-/// is the box's.
+/// the switch, as the strip's walk was (§3). `tab` completes the name under
+/// the cursor into the box, `⏎` settles on where the walk landed, `esc` takes
+/// the query back and then the list, and every other key is the box's.
 pub(super) fn keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     if let Some((cursor, chosen)) = walked(ui, tree, key) {
         return walk_to(ui, tree, cursor, chosen);
     }
     match key.code {
+        KeyCode::Tab => completed(ui, tree),
         KeyCode::Enter | KeyCode::Esc => settle(ui, tree, key, now),
         _ => typed(ui, tree, key),
     }
+}
+
+/// `tab` puts the name the cursor is on into the box — a session's name, a
+/// room's `#name` — the way `tab` on the `/` dropdown completes a command, and
+/// the list narrows to what it left. The cursor stays on the row it completed:
+/// a name a person can read is a name the matcher keeps.
+fn completed(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
+    let Open::Switcher(open) = &ui.layer.open else {
+        return Vec::new();
+    };
+    let query = ui.composer.text();
+    let was = open.session(tree, query, open.cursor);
+    let Some(name) = open.name(tree, query, open.cursor) else {
+        return Vec::new();
+    };
+    ui.composer.set(&name);
+    ui.edited();
+    replaced(ui, tree, was)
 }
 
 /// Where the arrows move the cursor, and the session that lands under it.

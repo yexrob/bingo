@@ -33,7 +33,7 @@ use crate::roster;
 use crate::scroll::Scroll;
 use crate::search::Search;
 use crate::select::Select;
-use crate::tree::{self, Tree};
+use crate::tree::{self, Row, Tree};
 use crate::views::Marks;
 
 /// How long a transient notice holds the status line's middle slot (§3),
@@ -230,10 +230,26 @@ impl Switcher {
     /// the tree, the store's answer and the query the box holds, so a click
     /// and a keypress cannot be reading two different lists.
     pub fn session(&self, tree: &Tree, query: &str, cursor: roster::Cursor) -> Option<SessionId> {
+        self.of(tree, query, cursor, |row| row.session.clone())
+    }
+
+    /// What that row is called — a session's name, a room's `#name`: what
+    /// `tab` completes into the box.
+    pub fn name(&self, tree: &Tree, query: &str, cursor: roster::Cursor) -> Option<String> {
+        self.of(tree, query, cursor, |row| row.name.clone())
+    }
+
+    /// One walk of the list, and whatever the caller wants off the row it
+    /// lands on.
+    fn of<T>(
+        &self,
+        tree: &Tree,
+        query: &str,
+        cursor: roster::Cursor,
+        want: impl Fn(&Row<'_>) -> T,
+    ) -> Option<T> {
         let rows = tree::roster(tree, &self.stored);
-        cursor
-            .row(&roster::listing(tree, &rows, query))
-            .map(|row| row.session.clone())
+        cursor.row(&roster::listing(tree, &rows, query)).map(want)
     }
 }
 

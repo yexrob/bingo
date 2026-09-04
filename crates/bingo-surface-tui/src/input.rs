@@ -1868,6 +1868,71 @@ mod tests {
         );
     }
 
+    // ---- `tab` completes (M58) ------------------------------------------
+
+    /// `tab` completes the name the cursor is on into the box, the way `tab`
+    /// on the `/` dropdown completes a command; the list then holds the one
+    /// row the completed name leaves.
+    #[test]
+    fn tab_completes_the_name_the_cursor_is_on() {
+        let mut tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        assert_eq!(
+            walked_to(&mut ui, &tree, key(KeyCode::Down), now),
+            Some(child_id()),
+        );
+        // The loop applied the `View` the walk asked for.
+        tree.show(&child_id());
+
+        let effects = press_tree(&mut ui, &tree, key(KeyCode::Tab), now);
+        assert_eq!(ui.composer.text(), "reviewer", "the name is in the box");
+        assert_eq!(
+            selected(&ui),
+            at(0),
+            "and the list is the one row it narrowed to"
+        );
+        assert!(
+            effects.is_empty(),
+            "the walk already showed it, so nothing is asked for"
+        );
+        assert!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now).is_empty(),
+            "`⏎` keeps the session the completed name named"
+        );
+        assert!(!ui.layer.showing());
+        assert!(ui.composer.is_empty(), "and the box is the draft's again");
+    }
+
+    /// A room completes as its own `#name`: the sigil is part of what it is
+    /// called, and it is by that name the list finds it again.
+    #[test]
+    fn tab_completes_a_rooms_name_with_its_sigil() {
+        let tree = folded_tree(vec![
+            child_frame(1, announced("reviewer")),
+            log_frame(2, log_announced("#design")),
+        ]);
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "des", now);
+        press_tree(&mut ui, &tree, key(KeyCode::Tab), now);
+        assert_eq!(ui.composer.text(), "#design");
+        assert_eq!(selected(&ui), at(0));
+    }
+
+    /// A list with nothing left on it has no name to complete, and `tab`
+    /// leaves the line a person is typing exactly as it is.
+    #[test]
+    fn tab_completes_nothing_where_the_query_left_no_row() {
+        let tree = with_agents();
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        typing(&mut ui, &tree, "zzz", now);
+        press_tree(&mut ui, &tree, key(KeyCode::Tab), now);
+        assert_eq!(ui.composer.text(), "zzz");
+        assert!(ui.layer.showing(), "and the list is still up");
+    }
+
     // ---- one list, two doors --------------------------------------------
 
     /// `↓` means two things and a query changes neither: on an empty composer
