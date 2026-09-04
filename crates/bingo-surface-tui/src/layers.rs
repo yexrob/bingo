@@ -340,11 +340,10 @@ mod tests {
                     before,
                     "the picture's cell"
                 );
-                assert!(
-                    frame.buffer_mut()[(0, 1)].style().add_modifier
-                        == ratatui::style::Modifier::DIM
-                        || frame.buffer_mut()[(0, 1)].style().fg == theme::dim().fg,
-                    "the words recede"
+                assert_eq!(
+                    frame.buffer_mut()[(0, 1)].style().add_modifier,
+                    ratatui::style::Modifier::DIM,
+                    "the words recede by weight, in every look (M73)"
                 );
             })
             .expect("a frame");
