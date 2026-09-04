@@ -12,6 +12,7 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │   tools       bingo-tool-fs · bingo-tool-bash · bingo-tool-web · bingo-mcp · bingo-agents
 │   policy      bingo-permissions · bingo-hooks-shell
 │   session     bingo-store-jsonl (journal + index) · bingo-context (compactor + memory)
+│               bingo-checkpoints (a file's bytes before the turn that changed them · /rewind)
 │   features    bingo-skills · bingo-rooms · bingo-tasks · bingo-experience · bingo-schedule   (a team is resident agents: bingo-agents)
 │   surfaces    bingo-surface-print · bingo-surface-rpc · bingo-surface-tui · bingo-acp · bingo-channels
 │   demo        bingo-demo-ui               off unless `--demo-ui`: the worked example of ADR-0013's

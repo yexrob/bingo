@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use bingo_agents::AgentsPlugin;
 use bingo_channels::ChannelsPlugin;
+use bingo_checkpoints::CheckpointsPlugin;
 use bingo_context::ContextPlugin;
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
@@ -671,6 +672,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(TasksPlugin),
         Box::new(ExperiencePlugin),
         Box::new(SchedulePlugin::default()),
+        Box::new(CheckpointsPlugin::default()),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),
