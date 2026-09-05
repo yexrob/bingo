@@ -28,18 +28,18 @@ const INITIAL: [u32; 8] = [
 /// One message's digest.
 pub fn digest(bytes: &[u8]) -> [u8; 32] {
     let mut state = INITIAL;
-    let mut blocks = bytes.chunks_exact(64);
-    for block in &mut blocks {
+    let (blocks, rest) = bytes.as_chunks::<64>();
+    for block in blocks {
         compress(&mut state, block);
     }
-    let (last, more) = tail(blocks.remainder(), bytes.len());
+    let (last, more) = tail(rest, bytes.len());
     compress(&mut state, &last);
     if let Some(block) = more {
         compress(&mut state, &block);
     }
     let mut out = [0u8; 32];
-    for (word, slot) in state.iter().zip(out.chunks_exact_mut(4)) {
-        slot.copy_from_slice(&word.to_be_bytes());
+    for (word, slot) in state.iter().zip(out.as_chunks_mut::<4>().0) {
+        *slot = word.to_be_bytes();
     }
     out
 }
@@ -61,10 +61,10 @@ fn tail(rest: &[u8], len: usize) -> ([u8; 64], Option<[u8; 64]>) {
 }
 
 /// One 64-byte block into the state.
-fn compress(state: &mut [u32; 8], block: &[u8]) {
+fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
-    for (word, slot) in block.chunks_exact(4).zip(w.iter_mut()) {
-        *slot = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+    for (word, slot) in block.as_chunks::<4>().0.iter().zip(w.iter_mut()) {
+        *slot = u32::from_be_bytes(*word);
     }
     for i in 16..64 {
         let a = w[i - 15];
