@@ -42,11 +42,16 @@ use crate::theme;
 
 use super::Run;
 
-/// How long an idle run leaves the terminal alone between questions. Long
-/// enough that the bytes are nothing at all; short enough that a person whose
-/// system turned light under a window they never left sees bingo follow while
-/// they are still looking at it.
-const RE_ASK: Duration = Duration::from_secs(30);
+/// How long an idle run leaves the terminal alone between questions. The
+/// question is six bytes and the reply is read whole by [`crate::late`], so
+/// the clock is set by the eye and not by the wire: a person whose system
+/// turned light under a window they never left should see the tints follow
+/// before they wonder — the ink already has, on its own (M73). Two seconds is
+/// under that; thirty (M71's first cut) was a visible wait once the prose
+/// stopped waiting with it. tmux 3.6 answers from the ground it last heard
+/// from the outer terminal, which it re-asks on the terminal's own mode-2031
+/// report, so the same clock serves there.
+const RE_ASK: Duration = Duration::from_secs(2);
 
 /// What the terminal is owed, held until the frame boundary where every other
 /// out-of-band byte is written.
