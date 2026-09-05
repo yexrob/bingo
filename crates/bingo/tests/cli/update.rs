@@ -5,7 +5,9 @@
 //! and the two renames — runs against a copy of this binary, and the copy is
 //! then asked what version it is.
 
-use bingo_update::{asset, sha256};
+use bingo_update::asset;
+#[cfg(unix)]
+use bingo_update::sha256;
 use wiremock::matchers::{method, path as at};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
