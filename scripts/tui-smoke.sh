@@ -114,6 +114,22 @@ press_until() {
 }
 
 # Leave, and prove the shell has the terminal back with the status we expect.
+# Wait until the shell holds the pane again. A key typed while bingo is
+# still leaving goes to bingo, not to the shell, and is never seen again.
+gone() {
+  local i=0
+  while [ "$(tmux -L "$SOCKET" display-message -p -t "$SESSION" '#{pane_current_command}')" = bingo ]; do
+    if [ "$i" -ge "$TRIES" ]; then
+      echo "tui-smoke: bingo never left the pane" >&2
+      echo "--- pane ---" >&2
+      pane >&2
+      return 1
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+}
+
 # Each leaving is numbered: the pane keeps the last one's line, and a wait
 # for the same words would match it before this shell has even come back.
 LEFT=0
@@ -123,6 +139,7 @@ finish() {
   keys C-c
   await 'press ctrl+c again to exit'
   keys C-c
+  gone
   LEFT=$((LEFT + 1))
   keys "echo \"left $LEFT with: \$?\"" Enter
   await "left $LEFT with: 0"
