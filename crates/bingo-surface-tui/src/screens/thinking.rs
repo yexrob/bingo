@@ -73,6 +73,31 @@ fn a_thought_being_had_streams_under_its_own_row() {
     both("reasoning_streaming", &solo(&state), &ui, now);
 }
 
+/// The same thought written as models write them: one paragraph, no newline
+/// in it at all (2026-09-06, user-reported — "看得晃眼睛"). The cut counts the
+/// rows the paragraph wraps to, so the block is the row and its two at eighty
+/// columns and at a hundred and twenty alike, and the two rows hold the end of
+/// what has arrived.
+#[test]
+fn a_thought_of_one_paragraph_is_still_two_rows() {
+    let text = "The manifest first, because the lockfile only says what the manifest \
+                already asked for, and then the crate map, which is the one place the \
+                whole of the layering is written down, and only after both of them the \
+                plan, which says which of the two is allowed to";
+    let state = folded(vec![
+        frame(1, started("trn_1")),
+        item(2, user("itm_1", "what is in this workspace?")),
+        frame(
+            3,
+            Event::ItemStarted {
+                item: being_thought("itm_2", text),
+            },
+        ),
+    ]);
+    let (ui, now) = mid_turn();
+    both("reasoning_paragraph", &solo(&state), &ui, now);
+}
+
 /// A question, and a thought long enough to have something to keep back.
 fn a_thought_worth_reading() -> bingo_sdk::SessionState {
     let text = "The manifest first, because the lockfile only says what the manifest \

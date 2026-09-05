@@ -591,7 +591,7 @@ fn still_thinking(item: &Item, fold: Fold, rows: &Rows<'_>) -> Vec<Line<'static>
         theme::dim().patch(theme::italic()),
     )];
     if let Some(text) = thought(item) {
-        out.extend(returns(streaming(text, fold), rows));
+        out.extend(returns(streaming(text, fold, rows.result_width()), rows));
     }
     out
 }
@@ -603,10 +603,14 @@ fn still_thinking(item: &Item, fold: Fold, rows: &Rows<'_>) -> Vec<Line<'static>
 /// It carries no `… +N lines`: the count would change under the reader on
 /// every delta, and a tail is not a promise that the rest is reachable — that
 /// is what the row a thought decays to is for.
-fn streaming(text: &str, fold: Fold) -> Vec<Line<'static>> {
+///
+/// `width` is the measure the `⎿` body is wrapped at, so the tail is cut at
+/// the width it is drawn at and the block is [`THOUGHT_ROWS`] rows tall
+/// whatever the prose does.
+fn streaming(text: &str, fold: Fold, width: usize) -> Vec<Line<'static>> {
     match fold {
         Fold::Shut => Vec::new(),
-        Fold::Peek => tail(text, THOUGHT_ROWS),
+        Fold::Peek => tail(text, THOUGHT_ROWS, width),
         Fold::Open => plain(text),
     }
 }
@@ -804,7 +808,7 @@ fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
         let Some(progress) = call.progress else {
             return Vec::new();
         };
-        return returns(tail(progress, TAIL_ROWS), rows);
+        return returns(tail(progress, TAIL_ROWS, rows.result_width()), rows);
     }
     let Some(output) = call.output else {
         return Vec::new();
@@ -1518,6 +1522,75 @@ mod tests {
                 "     fourth".to_string(),
             ],
         );
+    }
+
+    /// A paragraph is one logical line and any number of rows, so the cut
+    /// counts rows: the row and [`THOUGHT_ROWS`] under it however wide the
+    /// prose runs, and what they hold is the end of it.
+    #[test]
+    fn a_thought_of_one_long_paragraph_still_streams_two_rows() {
+        let paragraph = "The manifest first, because the lockfile only says what the \
+                         manifest already asked for, and then the crate map, which is \
+                         the one place the whole of the layering is written down, and \
+                         only after both of them the plan that says which may move.";
+        let drawn = drawn(vec![thinking_item(paragraph)]);
+        assert_eq!(drawn.len(), 1 + THOUGHT_ROWS, "{drawn:?}");
+        assert!(
+            drawn
+                .last()
+                .is_some_and(|row| row.ends_with("which may move.")),
+            "the newest end of it: {drawn:?}"
+        );
+    }
+
+    /// The same cut under a running tool, whose lines are as long as the
+    /// program chose to make them: [`TAIL_ROWS`] rows, not three lines of any
+    /// width.
+    #[test]
+    fn a_running_tools_long_lines_are_cut_to_rows() {
+        let progress = "Compiling bingo-surface-tui v0.1.0 (/tmp/project/crates/bingo-surface-tui)\n\
+                        Compiling bingo-core v0.1.0 (/tmp/project/crates/bingo-core)\n\
+                        Compiling bingo-provider-fake v0.1.0 (/tmp/project/crates/bingo-provider-fake)";
+        let state = folded(vec![started_tool(
+            1,
+            running_tool("itm_1", "Bash", progress),
+        )]);
+        let drawn = rendered(&state);
+        assert_eq!(drawn.len(), 1 + TAIL_ROWS, "{drawn:?}");
+    }
+
+    /// The bug the row-wise cut was made for (2026-09-06, user-reported): the
+    /// transcript is anchored at its foot, so a block whose height moves moves
+    /// everything above it. Over every word of a thought that runs through two
+    /// paragraph breaks, the block is never taller than the row and its two,
+    /// and never shorter than it has already been.
+    #[test]
+    fn a_streaming_thought_never_changes_the_height_of_its_block() {
+        let text = "The manifest first, because the lockfile only says what the manifest \
+                    already asked for.\n\nThen the crate map, which is the one place the \
+                    layering is written down, and the plan after it, which says which of \
+                    the two is allowed to move.\n\nOnly then the code, and only the file \
+                    the plan names; anything else is a second reading of the same three \
+                    facts.";
+        let mut tallest = 0;
+        for stop in word_ends(text) {
+            let so_far = &text[..stop];
+            let height = drawn(vec![thinking_item(so_far)]).len();
+            assert!(height <= 1 + THOUGHT_ROWS, "{height} rows after {so_far:?}");
+            assert!(height >= tallest, "{height} rows after {so_far:?}");
+            tallest = height;
+        }
+        assert_eq!(tallest, 1 + THOUGHT_ROWS);
+    }
+
+    /// Where each word of a growing text ends, which is where one delta of it
+    /// would have left the reader.
+    fn word_ends(text: &str) -> Vec<usize> {
+        text.char_indices()
+            .filter(|(_, c)| c.is_whitespace())
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect()
     }
 
     /// The three states a thought that is over has, which is the whole of what
