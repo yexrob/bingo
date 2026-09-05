@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use bingo_sdk::*;
 
-use crate::host::{Change, Host};
+use crate::host::Host;
 use crate::models;
 use crate::turn::ModelChoice;
 
@@ -57,16 +57,15 @@ async fn set(
     cx: &CommandContext,
     wanted: &str,
 ) -> Result<CommandOutcome, KernelError> {
-    let level = parse(wanted).ok_or_else(|| {
+    let level = Effort::spoken(wanted).ok_or_else(|| {
         KernelError::new(
             ErrorCode::InvalidInput,
             format!("unknown thinking level: {wanted}"),
         )
     })?;
-    let choice = host
-        .reconfigure(&cx.session, Change::Thinking(level))
+    host.reconfigure(&cx.session, SessionChange::Thinking(level))
         .await?;
-    let mut message = said(level, Some(&choice));
+    let mut message = said(level, running_on(host, cx).await.as_ref());
     if let Some(refused) = super::remember(host, &[("thinking", serde_json::json!(level))]) {
         message.push('\n');
         message.push_str(&refused);
@@ -90,7 +89,7 @@ async fn running_on(host: &Arc<Host>, cx: &CommandContext) -> Option<ModelChoice
 /// The level is still kept, and takes effect the moment `/model` moves to a
 /// model that reasons.
 fn said(level: Option<Effort>, on: Option<&ModelChoice>) -> String {
-    let set = format!("thinking: {}", name(level));
+    let set = format!("thinking: {}", Effort::word(level));
     let Some(choice) = on.filter(|choice| level.is_some() && choice.reasoning.is_none()) else {
         return set;
     };
@@ -101,34 +100,19 @@ fn said(level: Option<Effort>, on: Option<&ModelChoice>) -> String {
     )
 }
 
-/// The ladder as a person says it, from the sdk's one list of levels.
+/// The ladder as a person says it, from the sdk's one list of words.
 fn levels() -> String {
-    let names: Vec<&str> = Effort::ALL.iter().map(|e| e.name()).collect();
-    format!("<{}|off>", names.join("|"))
-}
-
-/// `Some(None)` is off; `None` is not a level.
-fn parse(text: &str) -> Option<Option<Effort>> {
-    if text.eq_ignore_ascii_case("off") {
-        return Some(None);
-    }
-    Effort::parse(text).map(Some)
-}
-
-fn name(level: Option<Effort>) -> &'static str {
-    level.map_or("off", Effort::name)
+    format!("<{}>", Effort::words().collect::<Vec<_>>().join("|"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The usage line is the sdk's list and nothing kept beside it, so a
+    /// level added there is offered here without a second edit.
     #[test]
-    fn levels_parse_case_insensitively_and_off_is_none() {
-        assert_eq!(parse("XHigh"), Some(Some(Effort::XHigh)));
-        assert_eq!(parse("off"), Some(None));
-        assert_eq!(parse("loud"), None);
-        assert_eq!(name(Some(Effort::Max)), "max");
-        assert_eq!(name(None), "off");
+    fn the_usage_line_lists_every_word_a_level_may_be_said_in() {
+        assert_eq!(levels(), "<minimal|low|medium|high|xhigh|max|off>");
     }
 }

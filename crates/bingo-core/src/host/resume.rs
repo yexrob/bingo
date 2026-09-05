@@ -79,16 +79,16 @@ impl Host {
     ) -> Result<Mailbox, KernelError> {
         let frames = store.replay(id, Seq::ZERO).await?;
         let replayed = session::replayed(&frames)?;
-        let spec = spec_of(&replayed.summary);
+        let mut spec = spec_of(&replayed.summary);
         self.check_key_free(spec.key.as_deref())?;
-        let thinking = thinking_of(&replayed).unwrap_or(self.settings.kernel.thinking);
+        spec.thinking = Some(thinking_of(&replayed).unwrap_or(self.settings.kernel.thinking));
         let last = replayed.summary;
-        let choice = self.model_for(&spec, thinking).await?;
+        let choice = self.model_for(&spec).await?;
         let summary = crate::turn::runs_on(last, choice.as_ref());
         let mailbox = session::resume(frames, Some(store.clone()), self.services(), |mailbox| {
             Arc::new(self.turn_config(&spec, &summary, choice, mailbox))
         })?;
-        let live = Live::new(mailbox, &summary, spec, thinking);
+        let live = Live::new(mailbox, &summary, spec);
         self.lock().insert(summary.id.clone(), live.clone());
         let _ = self.gateway.send(GatewayEvent::SessionCreated {
             summary: Box::new(summary),
@@ -190,5 +190,7 @@ fn spec_of(summary: &SessionSummary) -> SessionSpec {
         model: summary.model.clone(),
         system_extra: summary.system_extra.clone(),
         tools: summary.tools.clone(),
+        // The level is not on the summary; the config view carries it back.
+        thinking: None,
     }
 }

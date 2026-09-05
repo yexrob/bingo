@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::error::{ErrorCode, KernelError};
 use crate::event::*;
 use crate::ids::{IntentId, InteractionId, ItemId, Seq, SessionId, TurnId};
-use crate::model::Image;
+use crate::model::{Effort, Image};
 use crate::service::WireService;
 use crate::state::SessionState;
 use crate::tool::{ToolCall, ToolOutcome};
@@ -54,6 +54,38 @@ pub struct SessionSpec {
     /// Restrict the tool set by name; `None` means every registered tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// How hard the session thinks (ADR-0047 §1). Absent inherits — the
+    /// parent's level as it stands, else the settings'; `null` is off;
+    /// otherwise the level. The host resolves it once, where it resolves the
+    /// model, and the spec is the one holder from then on.
+    #[serde(
+        default,
+        deserialize_with = "read_thinking",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub thinking: Option<Option<Effort>>,
+}
+
+/// `null` is a level said, not a level unsaid: without this serde folds it
+/// into the absent case and a spec could never ask for thinking off.
+fn read_thinking<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<Effort>>, D::Error> {
+    Option::<Effort>::deserialize(deserializer).map(Some)
+}
+
+/// What may be changed about a running session between turns (ADR-0047 §3).
+/// It lands on the next turn: the running one keeps the config it started on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionChange {
+    Model {
+        /// Stays as it was when absent.
+        provider: Option<String>,
+        model: String,
+    },
+    Thinking(Option<Effort>),
+    /// What the session is called from now on.
+    Title(String),
 }
 
 /// What an attachment carries beyond the session itself (ADR-0010 §3).
@@ -476,6 +508,31 @@ pub trait HostApi: Send + Sync {
         ))
     }
 
+    /// Move one of a session's knobs (ADR-0047 §3): the model it runs on,
+    /// how hard it thinks, what it is called. The host re-resolves the model
+    /// and hands the actor the config its next turn runs on.
+    ///
+    /// It answers nothing. What the next turn will actually ask for is read
+    /// back — a level a model does not reason at reaches no request — and
+    /// every client learns of the change from the `SessionUpdated` and
+    /// `ConfigChanged` that follow.
+    ///
+    /// Between turns, never inside one: a turn already running keeps the
+    /// config it started with, so a change made mid-turn lands on the next.
+    ///
+    /// It joins neither the JSON-RPC wire — a client has the commands — nor
+    /// the plugin bridge.
+    async fn reconfigure(
+        &self,
+        _session: &SessionId,
+        _change: SessionChange,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            "this host runs no sessions",
+        ))
+    }
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 
     /// Say one line to the person, wherever they are: a transcript notice on
@@ -582,6 +639,50 @@ mod tests {
         let read: Input = serde_json::from_value(serde_json::to_value(&held).expect("json"))
             .expect("a held line");
         assert_eq!(read, held);
+    }
+
+    /// Three answers, not two (ADR-0047 §1): a spec that says nothing about
+    /// thinking inherits, one that says `null` is off, one that names a level
+    /// asks for it. Serde folds `null` into absent unless told otherwise, so
+    /// the middle case is the one this pins.
+    #[test]
+    fn a_spec_tells_inheriting_a_level_apart_from_asking_for_none() {
+        let read = |value: serde_json::Value| -> SessionSpec {
+            serde_json::from_value(value).expect("a spec")
+        };
+        // `driver` is written whatever it is, so a round trip carries it.
+        let cwd = serde_json::json!({ "cwd": "/work", "driver": "model" });
+        assert_eq!(read(cwd.clone()).thinking, None, "absent inherits");
+
+        let mut off = cwd.clone();
+        off["thinking"] = Value::Null;
+        assert_eq!(read(off.clone()).thinking, Some(None), "null is off");
+
+        let mut low = cwd.clone();
+        low["thinking"] = Value::from("low");
+        assert_eq!(read(low.clone()).thinking, Some(Some(Effort::Low)));
+
+        for value in [cwd, off, low] {
+            let spec = read(value.clone());
+            assert_eq!(serde_json::to_value(&spec).expect("json"), value);
+        }
+    }
+
+    /// A spec written before the field is a spec that inherits: an older
+    /// journal's head frame reads without one and goes back on the wire as
+    /// it came.
+    #[test]
+    fn a_spec_from_before_the_field_reads_as_absent() {
+        let before = serde_json::json!({
+            "cwd": "/work",
+            "key": "agent/ses_1/reviewer",
+            "title": "reviewer",
+            "driver": "model",
+            "model": "m",
+        });
+        let spec: SessionSpec = serde_json::from_value(before.clone()).expect("an old spec");
+        assert_eq!(spec.thinking, None);
+        assert_eq!(serde_json::to_value(&spec).expect("json"), before);
     }
 
     /// An action carries no words to steer with, so it is never a held line.

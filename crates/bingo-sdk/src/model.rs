@@ -279,10 +279,36 @@ impl Effort {
         }
     }
 
-    /// A level by that name, in any case; `None` is not a level.
-    pub fn parse(word: &str) -> Option<Self> {
-        let lower = word.to_ascii_lowercase();
+    /// A level by that name, in any case; `None` is not a level. Private:
+    /// every door takes `off` beside the six, so [`Effort::spoken`] is the
+    /// one that reads a word.
+    fn parse(word: &str) -> Option<Self> {
+        let lower = word.trim().to_ascii_lowercase();
         Self::ALL.into_iter().find(|e| e.name() == lower)
+    }
+
+    /// Thinking turned off: not a level, but said where a level is said.
+    pub const OFF: &'static str = "off";
+
+    /// Every word a level may be said in: the six lowest first, then `off`.
+    /// The one list, so a command, a spawn and a tool offer the same choice
+    /// and refuse a word with the same words.
+    pub fn words() -> impl Iterator<Item = &'static str> {
+        Self::ALL.into_iter().map(Self::name).chain([Self::OFF])
+    }
+
+    /// What a spoken word means, in any case and either side trimmed:
+    /// `Some(None)` is off, `None` is not a word for a level at all.
+    pub fn spoken(word: &str) -> Option<Option<Self>> {
+        if word.trim().eq_ignore_ascii_case(Self::OFF) {
+            return Some(None);
+        }
+        Self::parse(word).map(Some)
+    }
+
+    /// How a level is said back, off included.
+    pub fn word(level: Option<Self>) -> &'static str {
+        level.map_or(Self::OFF, Self::name)
     }
 }
 
@@ -539,15 +565,38 @@ mod tests {
     #[test]
     fn a_level_is_spelled_one_way_for_a_person_and_another_on_the_wire() {
         for level in Effort::ALL {
-            assert_eq!(Effort::parse(level.name()), Some(level));
-            assert_eq!(Effort::parse(&level.name().to_uppercase()), Some(level));
+            assert_eq!(Effort::spoken(level.name()), Some(Some(level)));
+            assert_eq!(
+                Effort::spoken(&level.name().to_uppercase()),
+                Some(Some(level))
+            );
         }
         assert_eq!(Effort::XHigh.name(), "xhigh");
         assert_eq!(
             serde_json::to_value(Effort::XHigh).unwrap(),
             Value::from("xHigh")
         );
-        assert_eq!(Effort::parse("loud"), None);
+        assert_eq!(Effort::spoken("loud"), None);
+    }
+
+    /// Off is a word of the list and not a level: every door that takes a
+    /// level takes it, and says it back the same way.
+    #[test]
+    fn off_is_the_seventh_word_and_the_list_is_lowest_first() {
+        assert_eq!(
+            Effort::words().collect::<Vec<_>>(),
+            ["minimal", "low", "medium", "high", "xhigh", "max", "off"]
+        );
+        assert_eq!(Effort::spoken(" OFF "), Some(None));
+        assert_eq!(Effort::word(None), "off");
+        assert_eq!(Effort::word(Some(Effort::Max)), "max");
+        for word in Effort::words() {
+            assert_eq!(
+                Effort::spoken(word).map(Effort::word),
+                Some(word),
+                "{word} round-trips"
+            );
+        }
     }
 
     /// The wire shape is load-bearing (ADR-0040): an internally tagged

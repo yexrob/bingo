@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 use serde_json::json;
 
-use crate::host::{Change, Host};
+use crate::host::Host;
 use crate::turn::ModelChoice;
 
 const USAGE: &str = "usage: /model [<provider>/]<model>";
@@ -45,10 +45,7 @@ impl Command for ModelCommand {
 /// how hard it is asked to think — read from the resolved choice, which is
 /// what the next turn will actually ask.
 async fn report(host: &Arc<Host>, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
-    let choice = host
-        .session_model(&cx.session)
-        .await?
-        .ok_or_else(|| KernelError::new(ErrorCode::InvalidInput, "a log session has no model"))?;
+    let choice = running_on(host, cx).await?;
     Ok(CommandOutcome::View {
         view: View::Text {
             text: format!("{}\n{USAGE}", said(&choice)),
@@ -65,15 +62,15 @@ async fn set(
 ) -> Result<CommandOutcome, KernelError> {
     let known = host.providers().await;
     let (provider, model) = split(wanted, |id| known.iter().any(|p| p.id() == id));
-    let choice = host
-        .reconfigure(
-            &cx.session,
-            Change::Model {
-                provider: provider.map(str::to_string),
-                model: model.to_string(),
-            },
-        )
-        .await?;
+    host.reconfigure(
+        &cx.session,
+        SessionChange::Model {
+            provider: provider.map(str::to_string),
+            model: model.to_string(),
+        },
+    )
+    .await?;
+    let choice = running_on(host, cx).await?;
     let mut message = said(&choice);
     let keys = [
         ("provider", json!(choice.provider.id())),
@@ -86,6 +83,14 @@ async fn set(
     Ok(CommandOutcome::Applied {
         message: Some(message),
     })
+}
+
+/// What the session's next turn runs on, resolved as the turn will resolve
+/// it. A log session has none (ADR-0011 §1) and is told so.
+async fn running_on(host: &Arc<Host>, cx: &CommandContext) -> Result<ModelChoice, KernelError> {
+    host.session_model(&cx.session)
+        .await?
+        .ok_or_else(|| KernelError::new(ErrorCode::InvalidInput, "a log session has no model"))
 }
 
 /// The three facts a person asked for, in the vocabulary `/think` uses for

@@ -7,7 +7,7 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use bingo_sdk::*;
 
-use crate::host::{Change, Host};
+use crate::host::Host;
 
 const USAGE: &str = "usage: /rename <title>";
 /// A name has to sit in a one-line row beside everything else a session is.
@@ -55,7 +55,7 @@ async fn set(
     cx: &CommandContext,
     title: String,
 ) -> Result<CommandOutcome, KernelError> {
-    host.reconfigure(&cx.session, Change::Title(title.clone()))
+    host.reconfigure(&cx.session, SessionChange::Title(title.clone()))
         .await?;
     Ok(CommandOutcome::Applied {
         message: Some(named(Some(&title))),

@@ -640,6 +640,18 @@
       ],
       "description": "What a session does with what it is told (ADR-0011 §1)."
     },
+    "Effort": {
+      "type": "string",
+      "enum": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xHigh",
+        "max"
+      ],
+      "description": "Reasoning effort, in the vocabulary providers converge on."
+    },
     "Empty": {
       "type": "object",
       "description": "A method that answers nothing, and a method that asks for nothing."
@@ -2910,6 +2922,17 @@
             "type": "string"
           },
           "description": "Restrict the tool set by name; `None` means every registered tool."
+        },
+        "thinking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How hard the session thinks (ADR-0047 §1). Absent inherits — the\nparent's level as it stands, else the settings'; `null` is off;\notherwise the level. The host resolves it once, where it resolves the\nmodel, and the spec is the one holder from then on."
         }
       },
       "required": [

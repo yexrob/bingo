@@ -118,19 +118,14 @@ struct Live {
     cwd: String,
     parent: Option<SessionId>,
     created_at: Timestamp,
-    /// What the session was opened with; `/model` rewrites it (ADR-0008 §4).
+    /// What the session was opened with, resolved: `/model` and `/think`
+    /// rewrite it (ADR-0008 §4, ADR-0047 §1), and it is the one holder of
+    /// the provider, the model and the level the next turn runs on.
     spec: SessionSpec,
-    /// The effort the session asks for; `None` is off.
-    thinking: Option<Effort>,
 }
 
 impl Live {
-    fn new(
-        mailbox: Mailbox,
-        summary: &SessionSummary,
-        spec: SessionSpec,
-        thinking: Option<Effort>,
-    ) -> Self {
+    fn new(mailbox: Mailbox, summary: &SessionSummary, spec: SessionSpec) -> Self {
         Self {
             mailbox,
             key: summary.key.clone(),
@@ -138,36 +133,21 @@ impl Live {
             parent: summary.parent.as_ref().map(|p| p.session.clone()),
             created_at: summary.created_at,
             spec,
-            thinking,
         }
     }
 }
 
-/// What a command may change about a running session.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Change {
-    Model {
-        /// Stays as it was when absent.
-        provider: Option<String>,
-        model: String,
-    },
-    Thinking(Option<Effort>),
-    /// What the session is called from now on.
-    Title(String),
-}
-
-impl Change {
-    fn apply(self, spec: &mut SessionSpec, thinking: &mut Option<Effort>) {
-        match self {
-            Change::Model { provider, model } => {
-                if provider.is_some() {
-                    spec.provider = provider;
-                }
-                spec.model = Some(model);
+/// A knob moved, written into the spec that holds it.
+fn apply(change: SessionChange, spec: &mut SessionSpec) {
+    match change {
+        SessionChange::Model { provider, model } => {
+            if provider.is_some() {
+                spec.provider = provider;
             }
-            Change::Thinking(level) => *thinking = level,
-            Change::Title(title) => spec.title = Some(title),
+            spec.model = Some(model);
         }
+        SessionChange::Thinking(level) => spec.thinking = Some(level),
+        SessionChange::Title(title) => spec.title = Some(title),
     }
 }
 
@@ -554,8 +534,8 @@ impl Host {
             self.check_parent_limits(&parent.session)?;
         }
         self.check_key_free(spec.key.as_deref())?;
-        let (spec, thinking) = self.inherited(spec);
-        let choice = self.model_for(&spec, thinking).await?;
+        let spec = self.inherited(spec);
+        let choice = self.model_for(&spec).await?;
         let summary = turn::runs_on(self.summarize(&spec), choice.as_ref());
         if let Some(store) = &self.registry.store {
             store.create(&summary).await?;
@@ -567,7 +547,7 @@ impl Host {
             self.services(),
             |mailbox| Arc::new(self.turn_config(&spec, &summary, choice, mailbox)),
         );
-        let live = Live::new(mailbox, &summary, spec, thinking);
+        let live = Live::new(mailbox, &summary, spec);
         self.lock().insert(summary.id.clone(), live.clone());
         let _ = self.gateway.send(GatewayEvent::SessionCreated {
             summary: Box::new(summary),
@@ -580,52 +560,19 @@ impl Host {
     /// on the parent included — rather than the host's defaults, which are
     /// what the parent was opened on and may have left since. A spec without
     /// a live parent keeps the defaults.
-    fn inherited(&self, mut spec: SessionSpec) -> (SessionSpec, Option<Effort>) {
+    fn inherited(&self, mut spec: SessionSpec) -> SessionSpec {
         let parent = spec
             .parent
             .as_ref()
             .and_then(|link| self.live(&link.session).ok());
         let Some(parent) = parent else {
-            return (spec, self.settings.kernel.thinking);
+            spec.thinking = spec.thinking.or(Some(self.settings.kernel.thinking));
+            return spec;
         };
         spec.provider = spec.provider.or_else(|| parent.spec.provider.clone());
         spec.model = spec.model.or_else(|| parent.spec.model.clone());
-        (spec, parent.thinking)
-    }
-
-    /// Re-choose the model for a live session and hand the actor the config
-    /// its next turn runs on (ADR-0008 §4). Returns that choice: the provider,
-    /// the model and the effort in force are read from it and from nothing
-    /// else, and the actor publishes the `SessionUpdated` that says so.
-    pub async fn reconfigure(
-        &self,
-        id: &SessionId,
-        change: Change,
-    ) -> Result<ModelChoice, KernelError> {
-        let live = self.live(id)?;
-        if live.spec.driver == Driver::Log {
-            return Err(KernelError::new(
-                ErrorCode::InvalidInput,
-                "a log session has no model",
-            ));
-        }
-        let (mut spec, mut thinking) = (live.spec.clone(), live.thinking);
-        change.apply(&mut spec, &mut thinking);
-        let choice = self.choose_model(&spec, thinking).await?;
-        // The spec is what the session was asked to be, the actor's summary
-        // what it has become: a rename is the one thing here the spec knows
-        // first, and a name the actor minted is one the spec never had.
-        let mut summary = live.mailbox.summary().await?;
-        summary.title = spec.title.clone().or(summary.title);
-        let summary = turn::runs_on(summary, Some(&choice));
-        let config =
-            Arc::new(self.turn_config(&spec, &summary, Some(choice.clone()), &live.mailbox));
-        if let Some(entry) = self.lock().get_mut(id) {
-            entry.spec = spec;
-            entry.thinking = thinking;
-        }
-        live.mailbox.reconfigure(config);
-        Ok(choice)
+        spec.thinking = spec.thinking.or(Some(parent.spec.thinking.flatten()));
+        spec
     }
 
     /// Open a turn on a live session that only compacts.
@@ -643,12 +590,14 @@ impl Host {
         &self.config.env
     }
 
+    /// The level the session asks for, whatever the model then does with it;
+    /// `None` is off. Resolved at open, so it is never the absent case.
     pub fn session_thinking(&self, id: &SessionId) -> Result<Option<Effort>, KernelError> {
-        self.live(id).map(|l| l.thinking)
+        self.live(id).map(|l| l.spec.thinking.flatten())
     }
 
     /// What the session's next turn would run on, chosen from the spec as it
-    /// now stands: the same resolution [`Host::reconfigure`] hands the actor,
+    /// now stands: the same resolution [`HostApi::reconfigure`] hands the actor,
     /// so `ModelChoice::reasoning` here *is* what the turn will ask for.
     /// `None` for a log session, which resolves no provider (ADR-0011 §1).
     ///
@@ -656,7 +605,7 @@ impl Host {
     /// rather than assuming the setting reached the wire.
     pub async fn session_model(&self, id: &SessionId) -> Result<Option<ModelChoice>, KernelError> {
         let live = self.live(id)?;
-        self.model_for(&live.spec, live.thinking).await
+        self.model_for(&live.spec).await
     }
 
     pub async fn session_summary(&self, id: &SessionId) -> Result<SessionSummary, KernelError> {
@@ -855,6 +804,39 @@ impl HostApi for Host {
             .mailbox
             .withdraw(intent.clone(), who.surface)
             .await
+    }
+
+    /// Re-choose the model for a live session and hand the actor the config
+    /// its next turn runs on (ADR-0008 §4, ADR-0047 §3). The spec is the one
+    /// holder of what was moved, so the change is written there and read
+    /// back from there.
+    async fn reconfigure(
+        &self,
+        session: &SessionId,
+        change: SessionChange,
+    ) -> Result<(), KernelError> {
+        let live = self.live(session)?;
+        if live.spec.driver == Driver::Log {
+            return Err(KernelError::new(
+                ErrorCode::InvalidInput,
+                "a log session has no model",
+            ));
+        }
+        let mut spec = live.spec.clone();
+        apply(change, &mut spec);
+        let choice = self.choose_model(&spec).await?;
+        // The spec is what the session was asked to be, the actor's summary
+        // what it has become: a rename is the one thing here the spec knows
+        // first, and a name the actor minted is one the spec never had.
+        let mut summary = live.mailbox.summary().await?;
+        summary.title = spec.title.clone().or(summary.title);
+        let summary = turn::runs_on(summary, Some(&choice));
+        let config = Arc::new(self.turn_config(&spec, &summary, Some(choice), &live.mailbox));
+        if let Some(entry) = self.lock().get_mut(session) {
+            entry.spec = spec;
+        }
+        live.mailbox.reconfigure(config);
+        Ok(())
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {

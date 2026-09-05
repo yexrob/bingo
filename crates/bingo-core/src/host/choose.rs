@@ -65,18 +65,19 @@ impl Host {
     pub(super) async fn model_for(
         &self,
         spec: &SessionSpec,
-        thinking: Option<Effort>,
     ) -> Result<Option<ModelChoice>, KernelError> {
         match spec.driver {
-            Driver::Model => Ok(Some(self.choose_model(spec, thinking).await?)),
+            Driver::Model => Ok(Some(self.choose_model(spec).await?)),
             Driver::Log => Ok(None),
         }
     }
 
+    /// The spec holds the level too (ADR-0047 §1), resolved at open: a level
+    /// no model reasons at reaches no request, and that is what the turn
+    /// asks for.
     pub(super) async fn choose_model(
         &self,
         spec: &SessionSpec,
-        thinking: Option<Effort>,
     ) -> Result<ModelChoice, KernelError> {
         let provider = self.provider(spec.provider.as_deref()).await?;
         auth::check(provider.as_ref())?;
@@ -84,7 +85,7 @@ impl Host {
         let capabilities = self.resolve_model(provider.as_ref(), &model);
         Ok(ModelChoice {
             max_tokens: models::max_tokens(&capabilities, self.settings.kernel.max_tokens),
-            reasoning: thinking.filter(|_| capabilities.reasoning),
+            reasoning: spec.thinking.flatten().filter(|_| capabilities.reasoning),
             learned: self.learned.clone(),
             provider,
             id: model,

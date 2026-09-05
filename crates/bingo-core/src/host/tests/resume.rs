@@ -497,7 +497,7 @@ async fn a_log_session_needs_no_provider_and_answers_nothing() {
     let err = host
         .reconfigure(
             &journal.session,
-            Change::Model {
+            SessionChange::Model {
                 provider: None,
                 model: "m".into(),
             },

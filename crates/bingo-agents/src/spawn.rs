@@ -170,6 +170,8 @@ impl Plan {
             model: self.model.clone(),
             system_extra: Some(self.system_extra.clone()),
             tools: self.tools.clone(),
+            // M76 fills this in: a spawn names the level next.
+            thinking: None,
         }
     }
 }

@@ -146,6 +146,7 @@ async fn spec(
             .model
             .clone()
             .or_else(|| definition.and_then(|d| d.model.clone())),
+        thinking: None,
         system_extra: Some(note::system_extra(&team.system(system))),
         tools: crate::spawn::child_tools(
             &cx.host,

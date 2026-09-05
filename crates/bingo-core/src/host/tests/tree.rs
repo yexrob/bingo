@@ -296,14 +296,14 @@ async fn a_child_inherits_the_model_and_effort_its_parent_stands_on() {
         .unwrap();
     host.reconfigure(
         &root.session,
-        Change::Model {
+        SessionChange::Model {
             provider: None,
             model: "m-later".into(),
         },
     )
     .await
     .unwrap();
-    host.reconfigure(&root.session, Change::Thinking(Some(Effort::Low)))
+    host.reconfigure(&root.session, SessionChange::Thinking(Some(Effort::Low)))
         .await
         .unwrap();
 
@@ -326,4 +326,67 @@ async fn a_child_inherits_the_model_and_effort_its_parent_stands_on() {
         Some(Effort::Low),
         "and the parent's effort"
     );
+}
+
+/// A host whose scripted model declares reasoning, and a settings level for
+/// a root to stand on: without the declaration the level is filtered out of
+/// every request and this would prove nothing (ADR-0004).
+async fn thinking_host(scripts: Vec<Script>) -> (Arc<Host>, Arc<ScriptedProvider>) {
+    let provider = ScriptedProvider::new(scripts);
+    let plugins = vec![TestPlugin::boxed(
+        &PROVIDER,
+        vec![Contribution::Provider(provider.clone())],
+    )];
+    let config = HostConfig::new(env()).with_layer(
+        "cli",
+        json!({
+            "model": "m",
+            "thinking": "high",
+            "models": { "scripted/m": { "reasoning": true } },
+        }),
+    );
+    (Host::build(plugins, config).await.unwrap(), provider)
+}
+
+/// The three answers a spec may give about thinking (ADR-0047 §1), read off
+/// the requests the provider was handed rather than off any summary: `null`
+/// is off however hard the parent thinks, a level is that level, and saying
+/// nothing takes the parent's.
+#[tokio::test]
+async fn a_child_opens_at_the_level_its_spec_names_and_inherits_when_it_names_none() {
+    let (host, provider) = thinking_host(vec![
+        Script::Events(text("one")),
+        Script::Events(text("two")),
+        Script::Events(text("three")),
+    ])
+    .await;
+    let root = host
+        .open(create("/work", None), who(), OpenOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        host.session_thinking(&root.session).unwrap(),
+        Some(Effort::High),
+        "the root stands on the settings"
+    );
+
+    for thinking in [Some(None), Some(Some(Effort::Low)), None] {
+        let spec = SessionSpec {
+            parent: Some(under(&root.session)),
+            thinking,
+            ..spec("/work")
+        };
+        let mut child = host
+            .open(
+                SessionSelector::Create { spec },
+                who(),
+                OpenOptions::default(),
+            )
+            .await
+            .unwrap();
+        one_turn(&mut child, "go").await;
+    }
+
+    let asked: Vec<Option<Effort>> = provider.requests().iter().map(|r| r.reasoning).collect();
+    assert_eq!(asked, [None, Some(Effort::Low), Some(Effort::High)]);
 }
