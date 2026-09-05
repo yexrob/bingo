@@ -134,11 +134,12 @@ gone() {
 # for the same words would match it before this shell has even come back.
 LEFT=0
 finish() {
+  # A retry loop may have left a stray key in the composer, and a draft
+  # takes the hint off the status line.
+  keys C-u
   # While a turn runs the status line says `esc to interrupt`, and a ctrl+c
   # then interrupts the turn instead of asking to leave: wait for it to end.
   await '? for shortcuts'
-  # A retry loop may have left a stray key in the composer.
-  keys C-u
   keys C-c
   await 'press ctrl+c again to exit'
   keys C-c
