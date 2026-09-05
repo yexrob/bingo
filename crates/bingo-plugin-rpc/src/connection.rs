@@ -403,8 +403,15 @@ impl Connection {
         }
     }
 
+    /// One line out. A pipe that will not take it is a process that has
+    /// ended, and everything waiting on that process fails now — the reader
+    /// says the same a moment later, and saying it twice is harmless.
     async fn write(&self, message: Message) -> Result<(), String> {
-        self.writer.write(message).await
+        let sent = self.writer.write(message).await;
+        if sent.is_err() {
+            self.router.closed();
+        }
+        sent
     }
 }
 
