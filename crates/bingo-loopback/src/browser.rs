@@ -3,19 +3,49 @@
 //! Never awaited, and what `false` means is the caller's to decide: a login
 //! shows the URL through the prompter and carries on, while a page nobody can
 //! open is a call that fails at once (ADR-0042 §4). Either way a machine with
-//! no browser — a container, an ssh session — still has the URL.
+//! no browser — a container, an ssh session — still has the URL. A launcher
+//! may instead delegate presentation of that URL to its client (ADR-0046).
 
+use std::ffi::OsStr;
 use std::process::{Command, Stdio};
 
 /// Set to anything to keep a browser from opening; a test sets it so no run
-/// ever steals the screen.
+/// ever steals the screen. Takes precedence over [`BROWSER_MODE_ENV`].
 pub const NO_BROWSER_ENV: &str = "BINGO_NO_BROWSER";
 
-/// Whether a browser was asked to open the URL. `false` is the caller's cue
-/// to lean on the URL it is already showing.
+/// Set to `client` when an attached client owns presenting the URL already
+/// carried by tool progress or a login interaction. Other values keep the
+/// platform opener; delegation does not acknowledge delivery or rendering.
+pub const BROWSER_MODE_ENV: &str = "BINGO_BROWSER_MODE";
+
+#[derive(Debug, PartialEq, Eq)]
+enum BrowserMode {
+    Disabled,
+    Client,
+    System,
+}
+
+fn selected(no_browser: bool, mode: Option<&OsStr>) -> BrowserMode {
+    if no_browser {
+        BrowserMode::Disabled
+    } else if mode == Some(OsStr::new("client")) {
+        BrowserMode::Client
+    } else {
+        BrowserMode::System
+    }
+}
+
+/// Whether a browser was asked to open the URL or its presentation was
+/// delegated to the client. `false` is the caller's cue to lean on the URL
+/// it is already showing.
 pub fn open(url: &str) -> bool {
-    if std::env::var_os(NO_BROWSER_ENV).is_some() {
-        return false;
+    match selected(
+        std::env::var_os(NO_BROWSER_ENV).is_some(),
+        std::env::var_os(BROWSER_MODE_ENV).as_deref(),
+    ) {
+        BrowserMode::Disabled => return false,
+        BrowserMode::Client => return true,
+        BrowserMode::System => {}
     }
     command(url).is_some_and(|mut command| {
         command
@@ -51,9 +81,32 @@ fn command(url: &str) -> Option<Command> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_opt_out_wins_over_every_browser_mode() {
+        for mode in [None, Some("client"), Some(""), Some("unknown")] {
+            assert_eq!(selected(true, mode.map(OsStr::new)), BrowserMode::Disabled);
+        }
+    }
+
+    #[test]
+    fn only_the_exact_client_mode_delegates_presentation() {
+        assert_eq!(
+            selected(false, Some(OsStr::new("client"))),
+            BrowserMode::Client
+        );
+        for mode in [
+            None,
+            Some(""),
+            Some("unknown"),
+            Some("Client"),
+            Some("client "),
+        ] {
+            assert_eq!(selected(false, mode.map(OsStr::new)), BrowserMode::System);
+        }
+    }
+
     /// `std::env::set_var` is unsafe and this workspace forbids `unsafe`, so
-    /// the opt-out is exercised through the variable the harness itself sets
-    /// when it is present, and through the command table otherwise.
+    /// selection is tested with explicit inputs, without mutating the harness.
     #[test]
     fn the_opt_out_is_honoured_and_a_command_is_built_for_this_platform() {
         if std::env::var_os(NO_BROWSER_ENV).is_some() {
