@@ -105,3 +105,43 @@ snapshots, `docs/design/tui.md`.
   `tail`'s rows may start with the indent a paragraph carried. The drawn
   tests compare against `wrap` of the same text, not against a literal,
   so a divergence shows as a row that differs rather than a count.
+
+## Verified
+
+2026-09-06, dev `c531cdae` (opus-xhigh worker in `.claude/worktrees/m77`,
+merged fast-forward as `ea0c1c74` + `96536737`; the version bump follows).
+Exit criterion 1: the three drawn tests were run before the fix and
+failed as the plan predicted (`red.log`: the long paragraph drew 6 rows
+for 3, the tool's long lines 7 for 4, the stability sweep tripped at 4
+rows mid-paragraph). After: `output::tests::*` (six, the identity of the
+second wrap among them) and `transcript::tests::{a_thought_of_one_long_
+paragraph_still_streams_two_rows, a_running_tools_long_lines_are_cut_to_
+rows, a_streaming_thought_never_changes_the_height_of_its_block}` pass.
+Criterion 2: `reasoning_paragraph_{80x24,120x40}` new, `✻ Thinking…` over
+two `⎿` rows at both widths; no existing snapshot changed. Gates on dev
+after the merge and the bump:
+
+```text
+== fmt        exit 0
+== check      Finished `dev` profile — ok
+== clippy     Finished `dev` profile — ok (-D warnings)
+== test       86 suites, 4222 passed, 0 failed, 2 ignored (--no-fail-fast)
+              (first run: agents::the_same_roles_come_back_on_continue
+               failed once under load, 3/3 solo; not this change)
+== discipline discipline ok (pre-existing warn: session.rs handle 72 lines)
+== budget     budget ok — dependencies unchanged (334)
+== deny       advisories ok, bans ok, licenses ok, sources ok
+== smoke      tui-smoke ok
+```
+
+Criterion 4, hands-on in a harness-owned `tmux -L m77` at 80×24: a
+running tool's 127-column lines held exactly three rows in all 83
+captures while `step 1…40` advanced under them, the row above the block
+identical throughout; a 27 064-character thought held exactly two rows in
+all 138 captures over 13.8 s with the screen above it byte-identical.
+Not shown: three spaced captures of a *thought* whose text visibly moves
+between them — the fake provider emits reasoning deltas unpaced (only
+`Step::Delay` sleeps), so a thought is over within a frame. Found in
+passing, not chased: an unpaced burst of ~500 deltas stalls the surface's
+text while the spinner keeps moving, on the assistant-text path too, so
+it is not M77's.
