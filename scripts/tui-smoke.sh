@@ -114,14 +114,18 @@ press_until() {
 }
 
 # Leave, and prove the shell has the terminal back with the status we expect.
+# Each leaving is numbered: the pane keeps the last one's line, and a wait
+# for the same words would match it before this shell has even come back.
+LEFT=0
 finish() {
   # A retry loop may have left a stray key in the composer.
   keys C-u
   keys C-c
   await 'press ctrl+c again to exit'
   keys C-c
-  keys 'echo "left with: $?"' Enter
-  await 'left with: 0'
+  LEFT=$((LEFT + 1))
+  keys "echo \"left $LEFT with: \$?\"" Enter
+  await "left $LEFT with: 0"
 }
 
 tmux -L "$SOCKET" kill-server 2>/dev/null || true
