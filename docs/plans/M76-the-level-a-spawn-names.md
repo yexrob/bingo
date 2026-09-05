@@ -121,7 +121,30 @@ one tool, landing on the next turn (ADR-0047).
   test pins the word.
 - Fakes: `HostApi` has ten implementors; the refusing default keeps
   them compiling, and only `Fleet` (agents) needs to record.
-- Model-facing text: `SpawnAgent`'s description is already long; the
-  new field speaks through its own doc line, not the description.
-- `SetThinking` crosses to ACP agents by the deny list's shape; that is
-  intended (ADR-0047 §4), and no test drives a real agent.
+
+## Verified
+
+2026-09-05, dev `0abc2325` (opus-xhigh worker, merged fast-forward).
+Every exit criterion above is ticked by a named test: the
+spec contract in `bingo-sdk` `host::tests`, the three-way inheritance in
+`bingo-core` `host::tests::tree`, the spawn words, the YAML `off` and
+`thinking::tests::*` in `bingo-agents`, and in `crates/bingo/tests` the
+next-turn boundary and the child's first request (`thinking.rs`) plus
+`session/open` on the wire (`rpc.rs`), all reading `reasoning` off the
+fake provider's recorded requests. Beyond the plan: a seated team role
+takes its definition's `thinking:` too (`team/seat.rs`); `schema/rpc.json`
+regenerated. Gates on dev after the merge:
+
+```text
+== fmt        exit 0
+== check/clippy  Finished `dev` profile — ok (-D warnings)
+== test       exit 0 — 86 suites, 4212 passed, 0 failed, 2 ignored
+              (first run: 3 bingo-auth-oauth redirect flakes; solo rerun ok)
+== discipline discipline ok (pre-existing warn: session.rs handle 72 lines)
+== budget     budget ok — dependencies unchanged (334)
+```
+
+Unverified: `SetThinking` reaching a real ACP agent; Windows cross-check
+ran for sdk/core/agents only (no process, path, signal or clock touched).
+Hands-on owed by the user: a spawn with `thinking` and a `SetThinking`
+call in their own terminal.
