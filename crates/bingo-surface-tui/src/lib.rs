@@ -149,9 +149,15 @@ impl Surface for TuiSurface {
             for line in ended.screen {
                 println!("{line}");
             }
+            println!("{}", way_back(&ended.session));
         }
         Ok(ended.exit)
     }
+}
+
+/// The line under the last screenful: how to reopen the session just left.
+fn way_back(session: &bingo_sdk::SessionId) -> String {
+    format!("\nResume this session with:\n  bingo --resume {session}")
 }
 
 /// `--no-print-on-exit` is the one thing the bin says about this surface.

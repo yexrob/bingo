@@ -186,11 +186,13 @@ pub(crate) fn identity() -> ClientIdentity {
     }
 }
 
-/// How a run ended: the code, and the screenful of transcript the shell gets
-/// back once the alternate screen is gone (design §3).
+/// How a run ended: the code, the screenful of transcript the shell gets
+/// back once the alternate screen is gone, and the session it was, so the
+/// way back in can be said (design §3).
 pub(crate) struct Farewell {
     pub exit: Exit,
     pub screen: Vec<String>,
+    pub session: SessionId,
 }
 
 pub(crate) async fn drive(
@@ -409,6 +411,7 @@ impl Run {
         Ok(Farewell {
             exit,
             screen: self.farewell(screen.size().1),
+            session: root,
         })
     }
 

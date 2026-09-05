@@ -446,6 +446,10 @@ fn leaving_prints_the_last_screenful_into_the_shells_own_screen() {
         !shell.contains("? for shortcuts"),
         "the furniture does not:\n{shell}"
     );
+    assert!(
+        shell.contains("Resume this session with:") && shell.contains("bingo --resume "),
+        "and the way back in is the last thing said:\n{shell}"
+    );
 }
 
 /// A `!` line runs in the shell there and then and its output lands in the
