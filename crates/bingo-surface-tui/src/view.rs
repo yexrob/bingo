@@ -6,7 +6,7 @@
 //!
 //! `draw` is pure of everything but the frame it paints.
 
-use bingo_sdk::{Driver, LiveTurn, Origin, QueueEntry, SessionState, SessionSummary};
+use bingo_sdk::{Driver, SessionState, SessionSummary};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -20,40 +20,14 @@ use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Listed, Open, Picker, Switcher, Ui};
 use crate::{
-    composer as prompt, dialog, graphics, keys, layers, mentions, pager, panel, rail, rewind,
-    roster, search, select, status, theme, transcript, views, window, wrap,
+    activity, composer as prompt, dialog, graphics, keys, layers, mentions, pager, panel, rail,
+    rewind, roster, search, select, status, theme, transcript, views, window, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
 /// How many dropdown rows are shown at once.
 const MENU_ROWS: usize = 8;
-/// How long a turn must have run before it is worth a row of its own (§6).
-const ACTIVITY_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
-/// What the activity row's verb becomes once a person has asked the turn to
-/// stop: bingo's own words are for what it chose to do, and this it did not.
-pub const STOPPING: &str = "Stopping";
-/// One breath of bingo's presence while it is thinking: the pace between the
-/// other two, and the one a turn starts at (§6).
-const BREATH: std::time::Duration = std::time::Duration::from_millis(1600);
-/// The breath while words are arriving: quicker, because something is.
-const BREATH_ARRIVING: std::time::Duration = std::time::Duration::from_millis(900);
-/// The breath while a tool holds the turn: slower, because the waiting is
-/// somebody else's and the row says so.
-const BREATH_BLOCKED: std::time::Duration = std::time::Duration::from_millis(2200);
-/// One turn of the sparkle: four glyphs, 150 ms each (§6).
-const SPARKLE: std::time::Duration = std::time::Duration::from_millis(4 * theme::SPARKLE_MS as u64);
-/// bingo's own words for working (§4), one per turn.
-const VERBS: [&str; 8] = [
-    "Simmering",
-    "Noodling",
-    "Tinkering",
-    "Rummaging",
-    "Mulling",
-    "Weaving",
-    "Sketching",
-    "Percolating",
-];
 
 /// One render path for the whole tree: it paints the session in view and
 /// derives everything about the others — the counts on the status line, the
@@ -99,7 +73,7 @@ fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
         // while idle, so a turn starting or ending moves nothing — the
         // bottom-anchored transcript used to bounce by two rows at each end
         // of every stream, which read as flicker (§6: nothing still moves).
-        activity: u16::try_from(activity(state, ui, now).len())
+        activity: u16::try_from(activity::lines(state, ui, usize::from(width), now).len())
             .unwrap_or(u16::MAX)
             .max(2),
         rail,
@@ -169,7 +143,10 @@ fn render_activity(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect,
     if area.height == 0 {
         return;
     }
-    frame.render_widget(Paragraph::new(activity(state, ui, now)), area);
+    frame.render_widget(
+        Paragraph::new(activity::lines(state, ui, usize::from(area.width), now)),
+        area,
+    );
 }
 
 /// What floats over the frame, in the order it is stacked: the dropdown and a
@@ -521,188 +498,6 @@ fn lined(area: Rect, padding: usize) -> Rect {
     }
 }
 
-/// The rows between the transcript and the input box: what the turn is doing,
-/// and whatever the person has queued behind it.
-fn activity(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = working(state, ui, now).into_iter().collect();
-    out.extend(
-        state
-            .queue
-            .iter()
-            .filter(|entry| pending(&entry.origin))
-            .map(|entry| {
-                Line::from(Span::styled(
-                    format!("{} {}{}", theme::user(), entry.preview, waits(entry)),
-                    theme::dim(),
-                ))
-            }),
-    );
-    // A blank row between the transcript and these, as between any two blocks
-    // (§3): they are not the tail of what was said, they are what is going on.
-    if !out.is_empty() {
-        out.insert(0, Line::default());
-    }
-    out
-}
-
-/// The tag a row wears when the running turn will not be steered with it: a
-/// line that asked to wait for the turn to end, and a command, which has
-/// always waited for one (ADR-0008 §2, amended M68). `steerable` is the one
-/// reading of that, so there is nothing else here to keep in step with it.
-fn waits(entry: &QueueEntry) -> &'static str {
-    match entry.steerable {
-        true => "",
-        false => " (waits)",
-    }
-}
-
-/// Whether a queued input is a message the person is waiting to send. A
-/// subsystem's entry — a room's post, a spawn's brief, a job reporting in — is
-/// a steer in flight rather than something pending (ADR-0028), so it is drawn
-/// nowhere here; the turn that absorbs it shows it in the transcript as the
-/// quiet notice it is. The boundary is the transcript's own set, so an unknown
-/// surface fails to the loud, person's side in both places alike.
-fn pending(origin: &Origin) -> bool {
-    !transcript::quiet(origin)
-}
-
-/// `✻ Simmering… (esc to interrupt · 4s · ↓ 1.2k tokens)` — but only once the
-/// turn has been at it for [`ACTIVITY_AFTER`]: a turn that answers at once
-/// says nothing at all, because a row that flashes reports nothing (§6).
-///
-/// A turn a person has asked to stop reads `✻ Stopping… (4s · ↓ 1.2k tokens)`
-/// from the frame the key was pressed and keeps its sparkle and its clock
-/// until `TurnCompleted` takes the row away. The hint goes with the asking:
-/// `esc` has been pressed, and there is nothing further to press.
-fn working(state: &SessionState, ui: &Ui, now: Now) -> Option<Line<'static>> {
-    let turn = state.turn.as_ref()?;
-    let elapsed = now.past(turn.started_at);
-    let stopping = ui.stop_asked.as_ref() == Some(&turn.id);
-    // A row that answers a key is never held back by the delay that spares a
-    // fast turn its flash.
-    if elapsed < ACTIVITY_AFTER && !stopping {
-        return None;
-    }
-    let (verb, hint) = match stopping {
-        true => (STOPPING, ""),
-        false => (verb(&turn.id), "esc to interrupt · "),
-    };
-    let mut spans = vec![Span::styled(
-        format!("{} ", sparkle(now)),
-        breathing(state, now),
-    )];
-    spans.extend(beamed(format!("{verb}{}", theme::ellipsis()), now));
-    spans.push(Span::styled(
-        format!(" ({hint}{}s{})", elapsed.as_secs(), spent(turn)),
-        theme::dim(),
-    ));
-    if let Some(retry) = turn.retrying {
-        spans.push(Span::styled(
-            format!(" retrying {}/{}", retry.attempt, retry.max),
-            theme::presence(),
-        ));
-    }
-    Some(Line::from(spans))
-}
-
-/// How long one light takes to cross the working word and come round again.
-/// Slower than the sparkle's breath, so the two are read as two things.
-const BEAM: std::time::Duration = std::time::Duration::from_millis(2400);
-
-/// bingo's word with one light walking across it while the turn runs (user,
-/// 2026-09-05: the word wanted the beam the border and a landed call have).
-/// The crest wears the glow and the rest of the word is `text`, so a frame
-/// with no motion is the word alone.
-fn beamed(word: String, now: Now) -> Vec<Span<'static>> {
-    if !now.motion {
-        return vec![Span::styled(word, theme::text())];
-    }
-    let t = clock::phase(now, BEAM);
-    let width = word.chars().count();
-    word.chars()
-        .enumerate()
-        .map(|(at, c)| {
-            let lit = clock::sweep(t, at, width);
-            Span::styled(c.to_string(), theme::comet(1.0 - lit))
-        })
-        .collect()
-}
-
-/// What the turn has said so far, in the thousands §6 writes it in — and
-/// nothing at all before it has said anything.
-fn spent(turn: &LiveTurn) -> String {
-    match turn.usage.output_tokens {
-        0 => String::new(),
-        tokens => format!(" · ↓ {:.1}k tokens", tokens as f64 / 1000.0),
-    }
-}
-
-/// bingo's own word for what it is doing (§4), drawn once per turn from the
-/// turn's own id — so the same turn always reads the same way and a test can
-/// name what it will say.
-fn verb(turn: &bingo_sdk::TurnId) -> &'static str {
-    VERBS[seed(turn.as_str()) % VERBS.len()]
-}
-
-/// FNV-1a: a stable spread over the words without a dependency to make one.
-fn seed(id: &str) -> usize {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in id.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash as usize
-}
-
-/// The sparkle's frame, or its first one when nothing may move.
-fn sparkle(now: Now) -> &'static str {
-    match now.motion {
-        true => theme::sparkle(clock::cycle(now, SPARKLE)),
-        false => theme::spark(),
-    }
-}
-
-/// bingo breathing: the sparkle and the input box's border share one clock,
-/// so the whole surface inhales together. Still, it rests at `presence` —
-/// what breathes is the brightness, not the fact that it is working.
-fn breathing(state: &SessionState, now: Now) -> ratatui::style::Style {
-    match now.motion {
-        true => theme::breath(clock::breath(now, breath_of(state))),
-        false => theme::presence(),
-    }
-}
-
-/// How fast it breathes: the rhythm is what the turn is *doing*, so a pulse
-/// says more than "a turn is running", which the row's presence already says
-/// (§6). Words arriving are quick, a tool holding the turn is slow, and
-/// thinking is the pace between them.
-///
-/// The phase is the wall clock's own turn of the period ([`clock::breath`]),
-/// so a change of period changes where in the breath this frame lands. That
-/// step is the state change itself, which is the one moment §6 allows a cue
-/// to move — and it happens at most twice in a turn.
-pub(crate) fn breath_of(state: &SessionState) -> std::time::Duration {
-    if state.items.iter().any(arriving) {
-        return BREATH_ARRIVING;
-    }
-    if state.items.iter().any(blocking) {
-        return BREATH_BLOCKED;
-    }
-    BREATH
-}
-
-/// Whether an item is an answer still being said.
-fn arriving(item: &bingo_sdk::Item) -> bool {
-    matches!(item.body, bingo_sdk::ItemBody::Assistant { .. })
-        && item.status == bingo_sdk::ItemStatus::Running
-}
-
-/// Whether an item is a call the turn is waiting on.
-fn blocking(item: &bingo_sdk::Item) -> bool {
-    matches!(item.body, bingo_sdk::ItemBody::ToolCall { .. })
-        && item.status == bingo_sdk::ItemStatus::Running
-}
-
 /// The `?` panel: the one binding table, then the commands this session can
 /// run — the surface's own and the kernel's, from the same list the dropdown
 /// ranks.
@@ -910,7 +705,7 @@ fn render_draft(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, wi
 /// activity row's own breath while the model works (§4).
 fn border(state: &SessionState, now: Now) -> ratatui::style::Style {
     match state.busy() {
-        true => breathing(state, now),
+        true => activity::breathing(state, now),
         false => theme::dim(),
     }
 }
@@ -1499,9 +1294,10 @@ mod tests {
     fn a_steer_in_flight_asks_the_frame_for_no_row_at_all() {
         let (ui, now) = scene();
         let rows = |entries: &[(&str, &str, bool)]| {
-            activity(
+            activity::lines(
                 &folded(vec![frame(1, started("trn_1")), queue_frame(2, entries)]),
                 &ui,
+                80,
                 now,
             )
             .len()
@@ -1950,8 +1746,10 @@ mod tests {
         )
     }
 
+    /// The sheet lists what the plugins wrote — but the task list, which has
+    /// its own place under the activity row (M74) and is not listed twice.
     #[test]
-    fn ctrl_t_shows_what_the_plugins_wrote_into_the_session() {
+    fn ctrl_p_shows_what_the_plugins_wrote_into_the_session() {
         let tree = room(vec![
             posted(2, "itm_1", "reviewer", "what is left?"),
             log_frame(3, tasks()),
@@ -1960,22 +1758,41 @@ mod tests {
         let (mut ui, now) = scene();
         shown(&mut ui, Open::Panel, now);
         let screen = render_tree(&tree, &ui, now);
-        assert!(screen.contains("bingo.tasks · tasks"), "{screen}");
+        assert!(screen.contains("bingo.rooms · members"), "{screen}");
+        assert!(!screen.contains("bingo.tasks"), "{screen}");
         insta::assert_snapshot!(screen);
     }
 
     #[test]
     fn the_panel_shows_the_session_in_view_and_says_when_it_is_empty() {
-        let mut tree = room(vec![log_frame(2, tasks())]);
+        let mut tree = room(vec![log_frame(2, members())]);
         let (mut ui, now) = scene();
         shown(&mut ui, Open::Panel, now);
-        assert!(render_tree(&tree, &ui, now).contains("write the plan"));
+        assert!(render_tree(&tree, &ui, now).contains("scout"));
 
         let root = tree.root_id().clone();
         tree.show(&root);
         let screen = render_tree(&tree, &ui, now);
         assert!(screen.contains(crate::panel::NOTHING), "{screen}");
-        assert!(!screen.contains("write the plan"), "{screen}");
+        assert!(!screen.contains("scout"), "{screen}");
+    }
+
+    /// A room's board is the room's own list, drawn where any list is: under
+    /// the activity row of the room's own view, and nowhere in a member's.
+    #[test]
+    fn a_room_s_board_is_drawn_in_the_room_s_view_and_not_in_its_parent_s() {
+        let mut tree = room(vec![log_frame(2, tasks())]);
+        let (ui, now) = scene();
+        let board = render_tree(&tree, &ui, now);
+        assert!(
+            board.contains("2 tasks (0 done, 1 in progress, 1 open)"),
+            "{board}"
+        );
+        assert!(board.contains("◼ ship it — reviewer"), "{board}");
+
+        let root = tree.root_id().clone();
+        tree.show(&root);
+        assert!(!render_tree(&tree, &ui, now).contains("ship it"));
     }
 
     // ---- the three lanes (ADR-0013) -------------------------------------
@@ -2043,7 +1860,7 @@ mod tests {
             1,
             tool(
                 "itm_1",
-                "TaskList",
+                "Board",
                 json!({}),
                 Some(output),
                 ItemStatus::Completed,
@@ -2404,28 +2221,6 @@ mod tests {
             before,
             "the frame beneath is what it was"
         );
-    }
-
-    /// The working word carries one light across itself while the turn runs:
-    /// two frames apart, different cells are lit; with motion off it is the
-    /// word in `text` and nothing else.
-    #[test]
-    fn the_working_word_is_beamed_while_the_turn_runs_and_plain_when_still() {
-        let (_, now) = crate::test_support::scene();
-        let moving = beamed("Rummaging".to_string(), now);
-        assert_eq!(moving.len(), 9, "one span per character");
-        let later = beamed(
-            "Rummaging".to_string(),
-            crate::test_support::later(now, 600),
-        );
-        assert_ne!(
-            moving.iter().map(|s| s.style).collect::<Vec<_>>(),
-            later.iter().map(|s| s.style).collect::<Vec<_>>(),
-            "the light has moved"
-        );
-        let still = beamed("Rummaging".to_string(), crate::test_support::still(now));
-        assert_eq!(still.len(), 1);
-        assert_eq!(still[0].style, theme::text());
     }
 
     // ---- M48: the strip of thumbnails standing on the box -----------

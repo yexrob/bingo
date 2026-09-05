@@ -156,15 +156,15 @@ fn calling() -> bingo_sdk::SessionState {
 #[test]
 fn the_breath_quickens_while_words_arrive_and_slows_while_a_tool_holds_the_turn() {
     let ms = Duration::from_millis;
-    assert_eq!(crate::view::breath_of(&answering()), ms(900));
-    assert_eq!(crate::view::breath_of(&calling()), ms(2_200));
+    assert_eq!(crate::activity::breath_of(&answering()), ms(900));
+    assert_eq!(crate::activity::breath_of(&calling()), ms(2_200));
     assert_eq!(
-        crate::view::breath_of(&folded(vec![frame(1, started("trn_1"))])),
+        crate::activity::breath_of(&folded(vec![frame(1, started("trn_1"))])),
         ms(1_600),
         "thinking is the pace between them, and the one a turn starts at"
     );
     assert_eq!(
-        crate::view::breath_of(&state()),
+        crate::activity::breath_of(&state()),
         ms(1_600),
         "and an idle session breathes at the same pace it would think at"
     );
@@ -444,7 +444,7 @@ fn a_turn_asked_to_stop_says_so_and_keeps_its_sparkle_and_its_clock() {
     let tree = solo(&state);
     let (mut ui, now) = scene();
     ui.stop_asked = Some(bingo_sdk::TurnId::from_raw("trn_1"));
-    let row = |ms| row(&tree, &ui, later(now, ms), crate::view::STOPPING);
+    let row = |ms| row(&tree, &ui, later(now, ms), crate::activity::STOPPING);
     assert_eq!(row(4_000), "✻ Stopping… (4s)");
     // The sparkle is at another of its four glyphs a second later, which is
     // the point: the row is still alive while it winds down.
@@ -459,7 +459,7 @@ fn a_turn_asked_to_stop_says_so_and_keeps_its_sparkle_and_its_clock() {
     );
     let (working, _) = scene();
     assert_eq!(
-        leading_style(&tree, &ui, later(now, 4_000), crate::view::STOPPING),
+        leading_style(&tree, &ui, later(now, 4_000), crate::activity::STOPPING),
         leading_style(&turning(), &working, later(now, 4_000), "esc to interrupt"),
         "the sparkle is bingo's presence either way"
     );
@@ -478,7 +478,7 @@ fn stopping_outruns_the_activity_row_s_own_delay() {
     );
     ui.stop_asked = Some(bingo_sdk::TurnId::from_raw("trn_1"));
     assert!(
-        screen(&tree, &ui, later(now, 40)).contains(crate::view::STOPPING),
+        screen(&tree, &ui, later(now, 40)).contains(crate::activity::STOPPING),
         "but the answer to a key is not a cue, and does not wait"
     );
 }
@@ -492,7 +492,7 @@ fn the_next_turn_is_not_the_one_that_was_stopped() {
     ui.stop_asked = Some(bingo_sdk::TurnId::from_raw("trn_1"));
     let drawn = screen(&solo(&state), &ui, later(now, 4_000));
     assert!(drawn.contains("esc to interrupt"), "{drawn}");
-    assert!(!drawn.contains(crate::view::STOPPING), "{drawn}");
+    assert!(!drawn.contains(crate::activity::STOPPING), "{drawn}");
 }
 
 #[test]

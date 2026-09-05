@@ -19,7 +19,7 @@ use crate::fold::{self, Fold, Folds};
 use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, markdown, paths, theme, wrap};
+use crate::{acp, markdown, paths, tasks, theme, wrap};
 
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
@@ -347,7 +347,9 @@ fn rewound(dropped: u32, rows: &Rows<'_>) -> Vec<Line<'static>> {
 }
 
 /// A call that started a session is that session's row; every other call is
-/// its own (design §3: a child is a row where it began).
+/// its own (design §3: a child is a row where it began) — but a call that
+/// moved the task list draws no row at all, because the list under the
+/// activity row is its row (M74, as Claude Code draws none).
 fn called(
     item: &Item,
     agents: &Agents<'_>,
@@ -355,6 +357,9 @@ fn called(
     rows: &Rows<'_>,
     cue: Cue,
 ) -> Vec<Line<'static>> {
+    if tasks::quiet(item) {
+        return Vec::new();
+    }
     let ItemBody::ToolCall {
         name,
         input,
@@ -1018,6 +1023,52 @@ mod tests {
     /// own: these tests are about the grammar under it.
     fn rendered(state: &SessionState) -> Vec<String> {
         rendered_with(state, &Folds::new(), &[])
+    }
+
+    /// A call that moved the task list is no row: the list under the activity
+    /// row is its row (M74). One that failed, or went to a board, still is —
+    /// each has something on this screen the list cannot say.
+    #[test]
+    fn a_task_call_draws_no_row_unless_the_list_cannot_say_what_it_did() {
+        let ok = Some(ToolOutput::text("Created #1: write the plan"));
+        let quiet = drawn(vec![
+            person("itm_1", "note the plan"),
+            tool(
+                "itm_2",
+                "TaskCreate",
+                serde_json::json!({"subject": "write the plan"}),
+                ok.clone(),
+                ItemStatus::Completed,
+            ),
+            assistant("itm_3", "Noted.", ItemStatus::Completed),
+        ]);
+        assert!(!quiet.iter().any(|l| l.contains("TaskCreate")), "{quiet:?}");
+        assert_eq!(
+            quiet.iter().filter(|l| l.is_empty()).count(),
+            1,
+            "one gap: {quiet:?}"
+        );
+
+        let board = drawn(vec![tool(
+            "itm_2",
+            "TaskCreate",
+            serde_json::json!({"subject": "write the plan", "in": "#design"}),
+            ok,
+            ItemStatus::Completed,
+        )]);
+        assert!(board.iter().any(|l| l.contains("TaskCreate(")), "{board:?}");
+
+        let failed = drawn(vec![tool(
+            "itm_2",
+            "TaskUpdate",
+            serde_json::json!({"id": 9}),
+            Some(ToolOutput::error("No task #9")),
+            ItemStatus::Completed,
+        )]);
+        assert!(
+            failed.iter().any(|l| l.contains("No task #9")),
+            "{failed:?}"
+        );
     }
 
     fn rendered_with(state: &SessionState, folds: &Folds, commands: &[CommandSpec]) -> Vec<String> {

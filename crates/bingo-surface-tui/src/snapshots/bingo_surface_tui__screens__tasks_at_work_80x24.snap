@@ -1,10 +1,8 @@
 ---
-source: crates/bingo-surface-tui/src/view.rs
-assertion_line: 2130
-expression: screen
+source: crates/bingo-surface-tui/src/screens.rs
+assertion_line: 49
+expression: "draw_tree(80, 24, tree, ui, now)"
 ---
-"                                                                                "
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -16,14 +14,16 @@ expression: screen
 "│   cwd: /tmp/project                                                          │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 "                                                                                "
-"⏺ Board                                                                         "
-"  ⎿  id  task                                                                   "
-"     ──────────────────                                                         "
-"      1  write the plan                                                         "
-"      2  ship it                                                                "
+"> plan it, ship it, and celebrate                                               "
 "                                                                                "
+"⏺ Bash(cargo test)                                                              "
+"  ⎿     Compiling bingo v0.1.0                                                  "
 "                                                                                "
+"✻ Shipping it… (esc to interrupt · 1s)                                          "
+"  ⎿  ✔ Write the plan                                                           "
+"     ◼ Ship it                                                                  "
+"     ◻ Celebrate                                                                "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
-"│ > ask anything · / for commands · ! for shell                                │"
+"│ > ask anything · ⏎ steers · tab queues                                       │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 "? for shortcuts                                                      fake/fake-1"

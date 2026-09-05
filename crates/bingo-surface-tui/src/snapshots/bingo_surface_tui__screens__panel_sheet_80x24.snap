@@ -1,12 +1,13 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
+assertion_line: 49
 expression: "draw_tree(80, 24, tree, ui, now)"
 ---
-"❯ bingo.tasks · tasks                                                           "
-"  id  status       subject         owner                                        "
-"  ─────────────────────────────────────────                                     "
-"   1  pending      write the plan  –                                            "
-"   2  in_progress  ship it         reviewer                                     "
+"❯ bingo.rooms · members                                                         "
+"  ├─ reviewer                                                                   "
+"  └─ scout                                                                      "
+"                                                                                "
+"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

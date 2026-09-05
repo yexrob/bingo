@@ -138,7 +138,7 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
         match chord {
             'f' => ui.search = Some(Search::open()),
             switcher::CHORD => return Some(switcher::toggle(ui, tree, now)),
-            't' => ui.layer.toggle(Open::Panel, now.instant),
+            'p' => ui.layer.toggle(Open::Panel, now.instant),
             'o' => deepen(ui, tree, now),
             'b' => return Some(background(ui, tree, now)),
             // No other chord reaches here: `LAYERS` is what `chorded` answers.
@@ -159,7 +159,7 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
 /// of them. Every other control chord is the line's ([`control`]): `ctrl+w`
 /// deletes a word wherever a person is typing, the list's own query included,
 /// so it must not be mistaken for a layer's key.
-const LAYERS: [char; 5] = ['f', switcher::CHORD, 't', 'o', 'b'];
+const LAYERS: [char; 5] = ['f', switcher::CHORD, 'p', 'o', 'b'];
 
 /// The letter of a layer's control chord, if that is what this key is.
 fn chorded(key: KeyEvent) -> Option<char> {
@@ -667,6 +667,9 @@ fn control(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('u') => edit(ui, |c| c.delete_to_line_start()),
         KeyCode::Char('k') => edit(ui, |c| c.delete_to_line_end()),
         KeyCode::Char('v') => return vec![Effect::PasteImage],
+        // Claude Code's own key for its own list (M74): the rows go off the
+        // band and come back, and nothing opens.
+        KeyCode::Char('t') => ui.tasks_hidden = !ui.tasks_hidden,
         _ => {}
     }
     Vec::new()
@@ -1962,7 +1965,7 @@ mod tests {
         write(&mut ui, tree.viewed(), "half a thought", now);
         press_tree(&mut ui, &tree, ctrl('g'), now);
         typing(&mut ui, &tree, "sco", now);
-        press_tree(&mut ui, &tree, ctrl('t'), now);
+        press_tree(&mut ui, &tree, ctrl('p'), now);
         assert!(
             ui.layer.is(&Open::Panel),
             "the chord's own layer is what is up"
@@ -2905,16 +2908,29 @@ mod tests {
     // ---- the plugin-state panel -----------------------------------------
 
     #[test]
-    fn ctrl_t_toggles_the_plugin_state_panel_and_esc_closes_it() {
+    fn ctrl_p_toggles_the_plugin_state_panel_and_esc_closes_it() {
         let (mut ui, now) = scene();
-        assert!(press(&mut ui, &state(), ctrl('t'), now).is_empty());
+        assert!(press(&mut ui, &state(), ctrl('p'), now).is_empty());
         assert!(ui.layer.is(&Open::Panel));
-        press(&mut ui, &state(), ctrl('t'), now);
+        press(&mut ui, &state(), ctrl('p'), now);
         assert!(!ui.layer.is(&Open::Panel), "the same chord closes it");
 
-        press(&mut ui, &state(), ctrl('t'), now);
+        press(&mut ui, &state(), ctrl('p'), now);
         assert!(press(&mut ui, &state(), key(KeyCode::Esc), now).is_empty());
         assert!(!ui.layer.showing(), "and so does esc");
+    }
+
+    /// Claude Code's key for its own list (M74): the rows go off the band and
+    /// come back, and no layer opens over anything.
+    #[test]
+    fn ctrl_t_hides_the_task_list_and_again_shows_it() {
+        let (mut ui, now) = scene();
+        assert!(!ui.tasks_hidden);
+        assert!(press(&mut ui, &state(), ctrl('t'), now).is_empty());
+        assert!(ui.tasks_hidden);
+        assert!(!ui.layer.showing(), "nothing opens");
+        press(&mut ui, &state(), ctrl('t'), now);
+        assert!(!ui.tasks_hidden, "the same chord brings it back");
     }
 
     #[test]
@@ -2922,7 +2938,7 @@ mod tests {
         let (mut ui, now) = scene();
         press(&mut ui, &state(), typed('?'), now);
         assert!(ui.layer.is(&Open::Help));
-        press(&mut ui, &state(), ctrl('t'), now);
+        press(&mut ui, &state(), ctrl('p'), now);
         assert!(ui.layer.is(&Open::Panel), "focus moves, never sideways");
     }
 
@@ -3145,7 +3161,7 @@ mod tests {
     fn enter_in_the_panel_sheet_pins_a_panel_and_again_takes_it_back() {
         let state = boarded();
         let (mut ui, now) = scene();
-        press(&mut ui, &state, ctrl('t'), now);
+        press(&mut ui, &state, ctrl('p'), now);
         assert!(ui.layer.captures(), "the sheet answers its own keys");
         press(&mut ui, &state, key(KeyCode::Enter), now);
         assert!(ui.pinned.contains(&crate::rail::Pin {
@@ -3154,8 +3170,8 @@ mod tests {
         }));
         press(&mut ui, &state, key(KeyCode::Enter), now);
         assert!(ui.pinned.is_empty(), "the same key takes it back");
-        press(&mut ui, &state, ctrl('t'), now);
-        assert!(!ui.layer.showing(), "ctrl+t still closes it");
+        press(&mut ui, &state, ctrl('p'), now);
+        assert!(!ui.layer.showing(), "ctrl+p still closes it");
     }
 
     // ---- the line that waits (M68) --------------------------------------

@@ -1,7 +1,7 @@
 //! The rows of a list that fit around the row its cursor is on.
 //!
 //! Every list a person walks — the `/` menu, the `ctrl+g` switcher, the resume
-//! and rewind pickers, the `ctrl+t` panel — is longer than the room it is
+//! and rewind pickers, the `ctrl+p` panel — is longer than the room it is
 //! drawn in sooner or later. What it shows then is a window: a run of its rows
 //! with the cursor inside it, and a `…` line wherever the list goes on past an
 //! end. The cursor's row is never the one given up: where there is no room for

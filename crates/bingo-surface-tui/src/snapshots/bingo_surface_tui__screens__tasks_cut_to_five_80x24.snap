@@ -1,12 +1,8 @@
 ---
-source: crates/bingo-surface-tui/src/view.rs
-assertion_line: 2130
-expression: screen
+source: crates/bingo-surface-tui/src/screens.rs
+assertion_line: 49
+expression: "draw_tree(80, 24, tree, ui, now)"
 ---
-"                                                                                "
-"                                                                                "
-"                                                                                "
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
@@ -16,13 +12,17 @@ expression: screen
 "│   cwd: /tmp/project                                                          │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 "                                                                                "
-"⏺ Board                                                                         "
-"  ⎿  id  task                                                                   "
-"     ──────────────────                                                         "
-"      1  write the plan                                                         "
-"      2  ship it                                                                "
+"> plan it, ship it, and celebrate                                               "
 "                                                                                "
+"⏺ The plan is written; shipping next.                                           "
 "                                                                                "
+"  12 tasks (1 done, 1 in progress, 10 open)                                     "
+"  ◼ Ship it                                                                     "
+"  ◻ Celebrate                                                                   "
+"  ◻ Alpha                                                                       "
+"  ◻ Bravo                                                                       "
+"  ◻ Charlie                                                                     "
+"  … +6 pending, 1 completed                                                     "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"

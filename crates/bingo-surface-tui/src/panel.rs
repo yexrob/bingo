@@ -1,9 +1,10 @@
-//! The `ctrl+t` sheet: the viewed session's plugin-owned state, as the reducer
+//! The `ctrl+p` sheet: the viewed session's plugin-owned state, as the reducer
 //! keeps it (ADR-0011 §2). The surface knows no plugin and no kind — a payload
 //! that parses as a `View` is drawn as one (ADR-0013 §2) and any other is
 //! drawn for its shape alone, so a plugin that ships tomorrow shows up here
 //! with nothing added. It is derived from `SessionState` at render time, so it
-//! follows the view wherever it goes.
+//! follows the view wherever it goes. The one kind it leaves out is the task
+//! list, which the activity band draws ([`crate::tasks`], M74).
 //!
 //! It is also where a panel is pinned into the rail: `⏎` on a row pins it,
 //! `⏎` again takes it back. Where a panel sits is the surface's answer, not
@@ -18,7 +19,7 @@ use serde_json::Value;
 use crate::clock::Now;
 use crate::rail::{CardId, Pin};
 use crate::views::{self, MISSING};
-use crate::{theme, window};
+use crate::{tasks, theme, window};
 
 /// What a session with no plugin state says.
 pub const NOTHING: &str = "nothing to show";
@@ -28,7 +29,8 @@ const PINNED: &str = "pinned";
 const INDENT: usize = 2;
 
 /// What the sheet is showing, in the order it draws them: one row per kind a
-/// plugin published, whether or not anybody pinned it.
+/// plugin published, whether or not anybody pinned it — but the task list,
+/// which has its own place on the screen.
 pub fn rows(state: &SessionState) -> Vec<CardId> {
     state
         .extensions
@@ -39,6 +41,7 @@ pub fn rows(state: &SessionState) -> Vec<CardId> {
                 kind: kind.clone(),
             })
         })
+        .filter(|id| !tasks::is_list(&id.plugin, &id.kind))
         .collect()
 }
 
@@ -320,22 +323,31 @@ mod tests {
             "nodes": [{"label": "scout", "tone": "neutral"}],
         });
         let state = folded(vec![
-            frame(1, extended("bingo.tasks", "tasks", json!([{"id": 1}]))),
+            frame(1, extended("bingo.demo.ui", "board", json!([{"id": 1}]))),
             frame(2, extended("bingo.rooms", "members", roster)),
+            frame(
+                3,
+                extended(
+                    "bingo.tasks",
+                    "tasks",
+                    json!([{"id": 1, "status": "pending", "subject": "write the plan"}]),
+                ),
+            ),
         ]);
         assert_eq!(
             sheet(&state),
             vec![
-                "❯ bingo.rooms · members".to_string(),
-                "  └─ scout".to_string(),
-                String::new(),
-                "  bingo.tasks · tasks".to_string(),
+                "❯ bingo.demo.ui · board".to_string(),
                 "  id".to_string(),
                 "  ──".to_string(),
                 "   1".to_string(),
+                String::new(),
+                "  bingo.rooms · members".to_string(),
+                "  └─ scout".to_string(),
             ],
             "a payload that parses as a view is drawn as one, whatever else \
-             the plugin put in it"
+             the plugin put in it — and the task list is drawn under the \
+             activity row instead (M74)"
         );
     }
 
@@ -343,13 +355,13 @@ mod tests {
     fn a_pinned_row_says_so_and_only_in_the_session_it_was_pinned_in() {
         let state = folded(vec![frame(
             1,
-            extended("bingo.tasks", "tasks", json!([{"id": 1}])),
+            extended("bingo.demo.ui", "board", json!([{"id": 1}])),
         )]);
         let pinned = BTreeSet::from([Pin {
             session: SessionId::from_raw("ses_1"),
             card: CardId {
-                plugin: "bingo.tasks".into(),
-                kind: "tasks".into(),
+                plugin: "bingo.demo.ui".into(),
+                kind: "board".into(),
             },
         }]);
         let here = lines(

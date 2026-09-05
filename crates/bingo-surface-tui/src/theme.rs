@@ -110,6 +110,10 @@ pub struct Glyphs {
     /// A box a person ticks: `[0]` open, `[1]` done. One field because it is
     /// one fact in two states, as the sparkles are one in four.
     pub todo: [&'static str; 2],
+    /// A task on the session's list, by where it stands: `[0]` still to do,
+    /// `[1]` being done, `[2]` done — Claude Code's own three (M74), which
+    /// are not the box a person ticks: a task is the model's to move on.
+    pub task: [&'static str; 3],
     /// A tick with no box drawn round it: what a form's `Submit` tab wears and
     /// what stands inside a multi-select's own brackets.
     pub tick: &'static str,
@@ -134,6 +138,7 @@ pub const UNICODE: Glyphs = Glyphs {
     caret: "▌",
     sparkles: ["✻", "✢", "✶", "✽"],
     todo: ["☐", "☒"],
+    task: ["◻", "◼", "✔"],
     tick: "✔",
     mode: "⏵⏵",
     branch: "├",
@@ -159,6 +164,9 @@ pub const ASCII: Glyphs = Glyphs {
     caret: "|",
     sparkles: ["+", "+", "+", "+"],
     todo: ["-", "x"],
+    // Still to do, being done — the bullet, because it is the one the model
+    // is on — and done.
+    task: ["-", "*", "x"],
     tick: "x",
     mode: ">>",
     branch: "+",
@@ -974,6 +982,12 @@ pub fn cursor_span(focused: bool) -> ratatui::text::Span<'static> {
     }
 }
 
+/// The three marks a task on the list can wear, still to do first
+/// ([`Glyphs::task`]); which one a task gets is [`crate::tasks`]'s to say.
+pub fn tasks() -> [&'static str; 3] {
+    glyphs().task
+}
+
 pub fn todo(done: bool) -> &'static str {
     glyphs().todo[usize::from(done)]
 }
@@ -1121,6 +1135,8 @@ mod tests {
             (
                 "text",
                 &[
+                    // The working word at rest, where nothing may move.
+                    "activity.rs",
                     "composer.rs",
                     "dialog.rs",
                     // The question a form is on, and the option under its
@@ -1138,6 +1154,8 @@ mod tests {
                     "roster.rs",
                     "search.rs",
                     "status.rs",
+                    // A task still to do, and the mark before one.
+                    "tasks.rs",
                     "transcript.rs",
                     // The line of a shell command a person ran themselves.
                     "transcript/ran.rs",
@@ -1159,6 +1177,8 @@ mod tests {
             (
                 "dim",
                 &[
+                    // The verb row's clock and count, and a queued line.
+                    "activity.rs",
                     "composer.rs",
                     "dialog.rs",
                     // A form's tabs it is not on, the descriptions, and the
@@ -1179,6 +1199,9 @@ mod tests {
                     "roster.rs",
                     "search.rs",
                     "status.rs",
+                    // The summary between turns, a task that is done, its
+                    // owner, and the line that counts what was cut.
+                    "tasks.rs",
                     "transcript.rs",
                     // A folded result's own rows and its `+N lines` line.
                     "transcript/output.rs",
@@ -1218,28 +1241,36 @@ mod tests {
             (
                 "presence",
                 &[
+                    // The sparkle at rest, and a turn that is retrying.
+                    "activity.rs",
                     // Which session asked, named after a card's own title —
                     // every card's head is written in one place (ADR-0010 §3).
                     "form.rs",
                     "panel.rs",
                     "search.rs",
                     "select.rs",
+                    // The mark before the task being done: what the model
+                    // is on, in the colour of its working.
+                    "tasks.rs",
                     "transcript.rs",
                     "tree.rs",
-                    "view.rs",
                     "views/actions.rs",
                     "views/badge.rs",
                     "welcome.rs",
                 ],
             ),
             ("glow", &[]),
-            ("good", &["transcript.rs", "tree.rs", "views/badge.rs"]),
+            // A task that is done wears the mark a finished call does.
+            (
+                "good",
+                &["tasks.rs", "transcript.rs", "tree.rs", "views/badge.rs"],
+            ),
             (
                 "bad",
                 &["transcript.rs", "transcript/ran.rs", "views/badge.rs"],
             ),
             ("mode", &["status.rs"]),
-            ("breath", &["view.rs"]),
+            ("breath", &["activity.rs"]),
             // The ramp `presence` → glow: a live bullet, the fill of a bar,
             // and the light a sent line runs along the box's border — one
             // gradient, wherever §4 sanctions one.
@@ -1254,7 +1285,10 @@ mod tests {
                     "views/progress.rs",
                 ],
             ),
-            ("comet", &["opening/frame.rs", "transcript.rs", "view.rs"]),
+            (
+                "comet",
+                &["activity.rs", "opening/frame.rs", "transcript.rs"],
+            ),
             ("landing", &["transcript.rs"]),
             ("cooling", &["transcript.rs"]),
             ("fading", &["status.rs"]),

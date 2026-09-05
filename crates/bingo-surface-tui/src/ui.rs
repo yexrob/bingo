@@ -422,6 +422,10 @@ pub struct Ui {
     /// The panels a person pinned into the rail, per session (ADR-0013 §4:
     /// where a panel sits is the surface's answer, not the plugin's).
     pub pinned: BTreeSet<Pin>,
+    /// `ctrl+t` took the task list off the band (M74). The verb row keeps
+    /// the task being done either way: hiding the list is about rows, not
+    /// about what the turn is doing.
+    pub tasks_hidden: bool,
     /// The rail card the keyboard talks to; `tab` cycles it, a click takes it.
     pub focus: Option<CardId>,
     /// The panel sheet's cursor: the row `⏎` would pin.
@@ -502,6 +506,7 @@ impl Ui {
             notices: Vec::new(),
             block: None,
             pinned: BTreeSet::new(),
+            tasks_hidden: false,
             focus: None,
             panel: 0,
             pending: None,

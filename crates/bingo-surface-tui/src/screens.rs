@@ -35,6 +35,8 @@ mod questions;
 mod ran;
 /// The screens one skill run is read through (§4's skill row).
 mod skills;
+/// The screens the task list is read through (§4's `tasks` row, M74).
+mod tasks;
 /// The screens a team is read through (§3 "Teams").
 mod teams;
 /// The screens a thought is read through (§4, §6).
@@ -599,12 +601,9 @@ fn the_panel_sheet() {
         log_frame(
             3,
             extended(
-                "bingo.tasks",
-                "tasks",
-                json!([
-                    {"id": 1, "status": "pending", "subject": "write the plan"},
-                    {"id": 2, "status": "in_progress", "subject": "ship it", "owner": "reviewer"},
-                ]),
+                "bingo.rooms",
+                "members",
+                roster_payload(&["reviewer", "scout"], &[]),
             ),
         ),
     ]);

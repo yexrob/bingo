@@ -1,16 +1,17 @@
 ---
 source: crates/bingo-surface-tui/src/view.rs
+assertion_line: 2020
 expression: screen
 ---
 "❯ bingo.rooms · members                                                         "
 "  ├─ reviewer                                                                   "
 "  └─ scout [ live ]                                                             "
 "                                                                                "
-"  bingo.tasks · tasks                                                           "
-"  id  status       subject         owner                                        "
-"  ─────────────────────────────────────────                                     "
-"   1  pending      write the plan  –                                            "
-"   2  in_progress  ship it         reviewer                                     "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

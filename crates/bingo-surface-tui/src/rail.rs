@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn a_signal_is_a_card_and_an_extension_is_one_only_once_it_is_pinned() {
         let state = folded(vec![
-            frame(1, extended("bingo.tasks", "tasks", json!([{"id": 1}]))),
+            frame(1, extended("bingo.demo.ui", "board", json!([{"id": 1}]))),
             frame(
                 2,
                 signalled("bingo.demo.ui", "progress", progress_view(3, 10)),
@@ -238,11 +238,11 @@ mod tests {
             vec!["bingo.demo.ui/progress".to_string()],
             "nothing is pinned yet, and a signal never needs to be"
         );
-        let pinned = BTreeSet::from([pin("bingo.tasks", "tasks")]);
+        let pinned = BTreeSet::from([pin("bingo.demo.ui", "board")]);
         assert_eq!(
             ids(&cards(&state, &session(), &pinned)),
             vec![
-                "bingo.tasks/tasks".to_string(),
+                "bingo.demo.ui/board".to_string(),
                 "bingo.demo.ui/progress".to_string(),
             ],
             "the pinned panel comes first; the live cards follow"
@@ -253,11 +253,11 @@ mod tests {
     fn a_pin_belongs_to_the_session_it_was_made_in() {
         let state = folded(vec![frame(
             1,
-            extended("bingo.tasks", "tasks", json!([{"id": 1}])),
+            extended("bingo.demo.ui", "board", json!([{"id": 1}])),
         )]);
         let elsewhere = BTreeSet::from([Pin {
             session: child_id(),
-            card: CardId::new("bingo.tasks", "tasks"),
+            card: CardId::new("bingo.demo.ui", "board"),
         }]);
         assert!(cards(&state, &session(), &elsewhere).is_empty());
     }

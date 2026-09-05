@@ -330,8 +330,8 @@ step 'a button on a pinned board fires its command and the table changes'
 start '{"responses":[{"steps":[{"text":"nothing to do"}]}]}' '' '--demo-ui'
 keys '/board' Enter
 await 'board published'
-# ctrl+t opens the panel sheet, ⏎ pins the board into the rail, esc closes it.
-keys C-t
+# ctrl+p opens the panel sheet, ⏎ pins the board into the rail, esc closes it.
+keys C-p
 await 'bingo.demo.ui'
 keys Enter
 await 'pinned'
@@ -341,7 +341,7 @@ await 'Board'
 keys Tab
 await '❯ Board'
 keys '1'
-keys C-t
+keys C-p
 await 'running'
 finish
 

@@ -70,7 +70,11 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+t",
-        description: "plugin state (tasks, rooms)",
+        description: "show / hide the task list",
+    },
+    Binding {
+        keys: "ctrl+p",
+        description: "plugin state (rooms, panels to pin)",
     },
     Binding {
         // The stack of [`TABS`], in the order it is obeyed; a test holds the

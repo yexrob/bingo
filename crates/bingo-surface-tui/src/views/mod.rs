@@ -1,7 +1,7 @@
 //! One node of the `View` vocabulary, one renderer (ADR-0013 §1).
 //!
 //! [`render`] walks the tree and hands each node to the module that owns it,
-//! so a `Table` looks the same under a tool row, in the `ctrl+t` sheet and in
+//! so a `Table` looks the same under a tool row, in the `ctrl+p` sheet and in
 //! a rail card — the TUI draws every node exactly once, and it is tested once.
 //! Nothing here knows which lane the view came from or where it will be put:
 //! a renderer is a pure function of a node and a width.

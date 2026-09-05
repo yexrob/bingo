@@ -51,6 +51,9 @@
 //! session actor parses commands, not the client.
 
 mod acp;
+/// The rows between the transcript and the input box: the verb row, the task
+/// list and the queue (design §3).
+mod activity;
 mod blocks;
 mod clipboard;
 mod clock;
@@ -93,6 +96,9 @@ mod seats;
 mod select;
 mod skill;
 mod status;
+/// The session's task list, under the activity row and in its place between
+/// turns (M74): where Claude Code keeps it.
+mod tasks;
 mod terminal;
 mod theme;
 mod transcript;
