@@ -94,6 +94,9 @@ mod scroll;
 mod search;
 mod seats;
 mod select;
+/// The shells the session has running in the background (M75): a word under
+/// the row that started one, a count on the status line, and no card.
+mod shells;
 mod skill;
 mod status;
 /// The session's task list, under the activity row and in its place between

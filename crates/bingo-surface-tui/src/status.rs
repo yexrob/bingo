@@ -14,7 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::clock::{self, Now};
 use crate::tree::{self, Status, Tree};
 use crate::ui::Ui;
-use crate::{keys, permission, theme, wake};
+use crate::{keys, permission, shells, theme, wake};
 
 /// Cells between two slots.
 const GAP: usize = 2;
@@ -66,6 +66,7 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
     if let Some(running) = count(tree, Wants::Running) {
         parts.push(Span::styled(format!("{running} running"), theme::dim()));
     }
+    parts.extend(shells::counted(tree.viewed()));
     parts.extend(waking(tree.viewed(), now));
     parts.extend(notice(ui, now));
     if parts.is_empty() && ui.composer.is_empty() {

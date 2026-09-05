@@ -33,6 +33,9 @@ mod pictures;
 mod questions;
 /// The screens a shell line the person ran is read through (§5).
 mod ran;
+/// The screens a shell running in the background is read through (§4's
+/// `shell` row, M75).
+mod shells;
 /// The screens one skill run is read through (§4's skill row).
 mod skills;
 /// The screens the task list is read through (§4's `tasks` row, M74).

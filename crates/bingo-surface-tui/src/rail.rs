@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::views::{self, Marks};
-use crate::{panel, theme};
+use crate::{panel, shells, theme};
 
 /// How many rows one plugin may take before the rest of it folds away.
 const ROWS: usize = 8;
@@ -76,7 +76,11 @@ pub fn cards(state: &SessionState, session: &SessionId, pinned: &BTreeSet<Pin>) 
             })
         })
         .collect();
-    out.extend(published(&state.signals));
+    // The one signal that is not a card: the shells' running set, which the
+    // rows that started them and the status line already say (M75).
+    out.extend(
+        published(&state.signals).filter(|card| !shells::is_set(&card.id.plugin, &card.id.kind)),
+    );
     out
 }
 
@@ -246,6 +250,31 @@ mod tests {
                 "bingo.demo.ui/progress".to_string(),
             ],
             "the pinned panel comes first; the live cards follow"
+        );
+    }
+
+    /// The shells' running set is the one signal with no card: the transcript
+    /// and the status line are where it is read (M75).
+    #[test]
+    fn the_running_shells_are_the_one_signal_that_is_not_a_card() {
+        let state = folded(vec![
+            frame(
+                1,
+                signalled(
+                    "bingo.tools.bash",
+                    "jobs",
+                    json!({"kind": "table", "headers": ["job", "command", "since"],
+                           "rows": [["job_ab12cd34", "sleep 45", "10:22:07"]]}),
+                ),
+            ),
+            frame(
+                2,
+                signalled("bingo.demo.ui", "progress", progress_view(3, 10)),
+            ),
+        ]);
+        assert_eq!(
+            ids(&cards(&state, &session(), &BTreeSet::new())),
+            vec!["bingo.demo.ui/progress".to_string()],
         );
     }
 

@@ -21,6 +21,11 @@ use tokio::sync::watch;
 pub const PLUGIN: &str = "bingo.tools.bash";
 pub const KIND: &str = "jobs";
 
+/// The custom kind a call that went to the background answers with
+/// (ADR-0038): a surface that has learned it draws the job's state from the
+/// set, and one that has not draws the fold.
+pub const SHOWN: &str = "job";
+
 /// Characters of a command the rail and a notification show. Enough to tell
 /// two builds apart, short enough for a card.
 const HEAD: usize = 48;
@@ -155,6 +160,17 @@ impl Job {
     /// The job as a message names it.
     pub fn named(&self) -> String {
         format!("{} (`{}`)", self.id, head(&self.command))
+    }
+}
+
+/// What a person sees under the call that started a job, beside the text the
+/// model reads (ADR-0013 §2, the block lane): the id and the command as data
+/// for a surface that knows the kind, and one line for one that does not.
+pub fn shown(job: &Job) -> View {
+    View::Custom {
+        kind: SHOWN.into(),
+        data: serde_json::json!({ "id": job.id, "command": head(&job.command) }),
+        fold: format!("Started in the background as {}", job.id),
     }
 }
 
@@ -395,6 +411,21 @@ mod tests {
         over.finished(State::Killed);
         jobs.file(over);
         assert_eq!(jobs.view(&session()), Value::Null);
+    }
+
+    #[test]
+    fn a_started_job_is_shown_as_its_own_kind_with_a_fold_for_everyone_else() {
+        let job = with_id("job_ab12cd34");
+        let View::Custom { kind, data, fold } = shown(&job) else {
+            panic!("a custom kind");
+        };
+        assert_eq!(kind, SHOWN);
+        assert_eq!(data["id"], "job_ab12cd34");
+        assert_eq!(data["command"], "sleep 1");
+        assert_eq!(fold, "Started in the background as job_ab12cd34");
+        let wire = serde_json::to_value(shown(&job)).expect("a view");
+        assert_eq!(wire["kind"], "custom");
+        assert_eq!(wire["customKind"], "job");
     }
 
     #[test]

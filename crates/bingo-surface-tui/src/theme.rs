@@ -1198,6 +1198,7 @@ mod tests {
                     "rewind.rs",
                     "roster.rs",
                     "search.rs",
+                    "shells.rs",
                     "status.rs",
                     // The summary between turns, a task that is done, its
                     // owner, and the line that counts what was cut.

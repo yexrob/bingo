@@ -8,7 +8,8 @@
 //! that has finished is drawn once and then only cloned; the one that is still
 //! arriving is the only one that is drawn again, because it is the only one
 //! that can differ. A call that spawned a session is drawn again whenever the
-//! child's state moves, since its row is read from that state.
+//! child's state moves, since its row is read from that state; a call that
+//! sent a shell to the background, when the shell ends, for the same reason.
 //!
 //! Scrolling asks for a window of lines, which is why the blocks are kept
 //! rather than the flat transcript: a window is walked in blocks and cut to
@@ -22,10 +23,10 @@ use ratatui::text::Line;
 use crate::clock::Now;
 use crate::fold::{self, Fold};
 use crate::graphics::Picture;
-use crate::skill;
 use crate::transcript::{self, Cue, Rows};
 use crate::tree::Agents;
 use crate::welcome;
+use crate::{shells, skill};
 
 /// What can change about an item's block while it is on the screen. A
 /// terminal item's revision never moves again, so its block is rendered once.
@@ -51,6 +52,11 @@ struct Revision {
     /// arrived, and the arrival is the only thing that says so — it is not in
     /// the item, which has not changed a byte.
     linked: u64,
+    /// Whether the shell this call sent to the background is still running,
+    /// when it sent one (M75): the row under it is read from the running set
+    /// the shell's plugin signals, so the set's answer is the row's revision —
+    /// the item itself has not changed a byte when the shell ends.
+    shell: Option<bool>,
     /// The look it was drawn in. A style is baked into a `Line`, and the
     /// terminal may change which palette a token is worth under a running
     /// surface (M71): the lines are then a memo of a drawing nobody would make
@@ -68,6 +74,7 @@ fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold, rows: &Rows<'
         fold,
         skill: skill::of(item, rows.commands).is_some(),
         linked: rows.linked.answers(),
+        shell: shells::still(item, &rows.shells),
         look: crate::theme::current(),
     }
 }
@@ -555,6 +562,63 @@ mod tests {
             5_000,
             "a transcript that did not change is not drawn again"
         );
+    }
+
+    /// The row under a call that sent a shell to the background is read from
+    /// the running set, not from the item, so the set's answer has to be part
+    /// of what the block is a rendering of — or the row would say `Running`
+    /// for as long as the transcript stood (M75).
+    #[test]
+    fn a_shell_that_ends_makes_its_block_draw_again() {
+        let started = bingo_sdk::ToolOutput {
+            parts: vec![bingo_sdk::ContentPart::text("Started it")],
+            is_error: false,
+            display: Some(bingo_sdk::View::Custom {
+                kind: "job".into(),
+                data: serde_json::json!({ "id": "job_ab12cd34", "command": "sleep 45" }),
+                fold: "Started in the background as job_ab12cd34".into(),
+            }),
+        };
+        let set = serde_json::json!({
+            "kind": "table", "headers": ["job", "command", "since"],
+            "rows": [["job_ab12cd34", "sleep 45", "10:22:07"]],
+        });
+        let mut state = folded(vec![
+            frame(
+                1,
+                Event::ItemCompleted {
+                    item: tool(
+                        "itm_1",
+                        "Bash",
+                        serde_json::json!({ "command": "sleep 45", "background": true }),
+                        Some(started),
+                        ItemStatus::Completed,
+                    ),
+                },
+            ),
+            frame(2, signalled("bingo.tools.bash", "jobs", set)),
+        ]);
+        let mut blocks = cache();
+        sync(&mut blocks, &state, 80);
+        sync(&mut blocks, &state, 80);
+        assert_eq!(
+            blocks.renders(),
+            1,
+            "the shell runs on, nothing drawn again"
+        );
+
+        state.apply(&frame(
+            3,
+            signalled("bingo.tools.bash", "jobs", serde_json::Value::Null),
+        ));
+        sync(&mut blocks, &state, 80);
+        assert_eq!(
+            blocks.renders(),
+            2,
+            "the shell ended, the row is drawn again"
+        );
+        sync(&mut blocks, &state, 80);
+        assert_eq!(blocks.renders(), 2, "and then it is a memo again");
     }
 
     /// A block is drawn once and cloned ever after, so a picture read in

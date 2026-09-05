@@ -19,7 +19,7 @@ use crate::fold::{self, Fold, Folds};
 use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, markdown, paths, tasks, theme, wrap};
+use crate::{acp, markdown, paths, shells, tasks, theme, wrap};
 
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
@@ -98,6 +98,10 @@ pub struct Rows<'a> {
     /// in (M51). A row asks and draws what is there; it never goes looking,
     /// which is the run's job between frames.
     pub linked: &'a Linked,
+    /// The shells the session still has running in the background (M75),
+    /// read from the set the shell's plugin signals: what the row under a
+    /// backgrounded call says is true of now, not of when the call closed.
+    pub shells: Vec<String>,
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
@@ -137,6 +141,7 @@ impl<'a> Rows<'a> {
             now,
             pictures,
             linked,
+            shells: shells::running(state),
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
             update: None,
@@ -804,7 +809,13 @@ fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let Some(output) = call.output else {
         return Vec::new();
     };
-    returns(folded(output, call.fold, rows.result_width()), rows)
+    // A call that went to the background is answered by where its shell is
+    // now, not by what the answer said then (M75).
+    let body = match shells::started(output) {
+        Some(id) => kept(vec![shells::row(id, &rows.shells)], call.fold, 1, None),
+        None => folded(output, call.fold, rows.result_width()),
+    };
+    returns(body, rows)
 }
 
 /// A sub-session is a row where it began: what it is, what it was asked, and

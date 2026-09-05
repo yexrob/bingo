@@ -48,8 +48,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, Contribution, Plugin, PluginError, PluginManifest, Registrar, ResultLimit, Subject,
-    Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
+    Command, ContentPart, Contribution, Plugin, PluginError, PluginManifest, Registrar,
+    ResultLimit, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -132,7 +133,7 @@ impl BashTool {
         let job = self.file(command, log.path().to_path_buf(), cx);
         let running = run::start(command, &cx.cwd, Sink::file(log))?;
         self.take(job.clone(), running, conditions, cx).await;
-        Ok(ToolOutput::text(started(&job, why)))
+        Ok(answered(started(&job, why), &job))
     }
 
     /// Wait for it, unless a person takes it into the background first.
@@ -184,7 +185,7 @@ impl BashTool {
         let job = self.file(command, log.path().to_path_buf(), cx);
         running.sink.lock().await.promote(log).await;
         self.take(job.clone(), running, conditions, cx).await;
-        Ok(ToolOutput::text(promoted(&job)))
+        Ok(answered(promoted(&job), &job))
     }
 
     async fn open_log(&self, cx: &ToolContext) -> Result<Log, ToolError> {
@@ -228,6 +229,16 @@ impl BashTool {
 /// The bound a call sets for itself, within the tool's own ceiling.
 fn deadline(timeout: Option<u64>) -> Duration {
     Duration::from_millis(timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS))
+}
+
+/// The text the model reads, and beside it what a person sees: where the
+/// command went, as the block lane carries it (ADR-0013 §2).
+fn answered(text: String, job: &Job) -> ToolOutput {
+    ToolOutput {
+        parts: vec![ContentPart::text(text)],
+        is_error: false,
+        display: Some(jobs::shown(job)),
+    }
 }
 
 /// What a call gets back the moment its command is running in the background.
