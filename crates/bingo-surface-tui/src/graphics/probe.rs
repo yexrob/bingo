@@ -20,6 +20,7 @@
 //! and the second does not survive `ssh`.
 
 use super::Cell;
+#[cfg(any(unix, test))]
 use super::tmux::{self, Transport};
 
 /// The four questions, in one write. The kitty query carries a one pixel
