@@ -11,7 +11,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Attachment, CatalogKind, Delivery, ErrorCode, HostHandle, Input, IntentId, KernelError,
+    Attachment, CatalogKind, Delivery, Effort, ErrorCode, HostHandle, Input, IntentId, KernelError,
     OpenOptions, ParentLink, SessionId, SessionSelector, SessionSpec, Subject, Tool, ToolContext,
     ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::definition::Definition;
-use crate::{library, message, names, note, watch};
+use crate::{library, message, names, note, thinking, watch};
 
 /// What a spawn is called when the call names neither a definition nor an
 /// instance.
@@ -60,7 +60,8 @@ pub struct SpawnArgs {
     /// back. The sub-agent reads nothing of this conversation.
     pub prompt: String,
     /// A named definition, `.bingo/agents/<name>.md`: its system prompt,
-    /// model and tool set. Without one the sub-agent inherits this session's.
+    /// model, thinking level and tool set. Without one the sub-agent inherits
+    /// this session's.
     pub agent: Option<String>,
     /// What to call this one, for `SendMessage` and `WaitAgent`. Defaults to
     /// the definition's name; a name a sibling already holds gets `-2`, `-3`.
@@ -82,6 +83,10 @@ pub struct SpawnArgs {
     /// The tools the sub-agent may call, by name. By default it has every
     /// tool this session has, except `SpawnAgent`.
     pub tools: Option<Vec<String>>,
+    /// How hard the sub-agent thinks: `off`, or a level. This session's by
+    /// default.
+    #[schemars(schema_with = "thinking::maybe_word_schema")]
+    pub thinking: Option<String>,
 }
 
 impl SpawnArgs {
@@ -126,6 +131,9 @@ struct Plan {
     base: String,
     provider: Option<String>,
     model: Option<String>,
+    /// What the child's spec says about thinking: `None` inherits the
+    /// parent's, `Some(None)` is off, else the level asked for.
+    thinking: Option<Option<Effort>>,
     system_extra: String,
     tools: Option<Vec<String>>,
 }
@@ -143,6 +151,7 @@ impl Plan {
             .or_else(|| definition.and_then(|d| d.tools.clone()));
         Ok(Plan {
             base: args.base(definition)?,
+            thinking: level(args, definition)?,
             provider: args
                 .provider
                 .clone()
@@ -170,8 +179,7 @@ impl Plan {
             model: self.model.clone(),
             system_extra: Some(self.system_extra.clone()),
             tools: self.tools.clone(),
-            // M76 fills this in: a spawn names the level next.
-            thinking: None,
+            thinking: self.thinking,
         }
     }
 }
@@ -230,6 +238,24 @@ async fn start(
         ErrorCode::InvalidInput,
         format!("every name from {} on is taken; name this one", plan.base),
     ))
+}
+
+/// The level the child opens at: the call's word over the definition's,
+/// and nothing said leaves the spec to inherit the parent's (ADR-0047 §2).
+/// A word that is not one names where it was written, because the model
+/// fixes a call and a person fixes a file.
+fn level(
+    args: &SpawnArgs,
+    definition: Option<&Definition>,
+) -> Result<Option<Option<Effort>>, KernelError> {
+    if let Some(word) = &args.thinking {
+        return thinking::spoken(word, "thinking").map(Some);
+    }
+    let declared = definition.and_then(|d| Some((d.thinking.as_deref()?, d.name.as_str())));
+    let Some((word, name)) = declared else {
+        return Ok(None);
+    };
+    thinking::spoken(word, &format!("the {name} definition's thinking")).map(Some)
 }
 
 /// The definition a call names, or what it could have named.
@@ -357,6 +383,7 @@ impl Tool for SpawnAgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::tests::{Fleet, Recorder, assistant, tool_context, turn_completed, turn_failed};
     use std::sync::Arc;
 
@@ -366,6 +393,7 @@ mod tests {
             description: "d".into(),
             model: Some("fake-2".into()),
             provider: Some("other".into()),
+            thinking: None,
             tools: Some(vec!["Read".into(), "SpawnAgent".into()]),
             system: body.into(),
         }
@@ -613,6 +641,69 @@ mod tests {
             args(json!({ "prompt": "p", "standby": true, "background": false }))
                 .delivery()
                 .is_err()
+        );
+    }
+
+    /// ADR-0047 §2: the call over the definition over the parent. `null` on
+    /// the spec is off and absent is inherit, which is why the assertions
+    /// are on `Option<Option<Effort>>` and not on a level.
+    #[tokio::test]
+    async fn a_spawn_opens_the_child_at_the_level_it_names() {
+        let spec = minted(json!({ "prompt": "go", "name": "counter", "thinking": "low" })).await;
+        assert_eq!(spec.thinking, Some(Some(Effort::Low)));
+
+        let off = minted(json!({ "prompt": "go", "name": "counter", "thinking": "off" })).await;
+        assert_eq!(off.thinking, Some(None), "off is a level said, not unsaid");
+
+        let quiet = minted(json!({ "prompt": "go", "name": "counter" })).await;
+        assert_eq!(quiet.thinking, None, "saying nothing inherits");
+    }
+
+    #[tokio::test]
+    async fn a_word_that_is_not_a_level_is_refused_with_the_list() {
+        let (out, host) = spawned(json!({ "prompt": "go", "thinking": "loud" })).await;
+        assert!(out.is_error);
+        let text = out.parts[0].as_text().unwrap_or_default();
+        assert!(text.starts_with("thinking: \"loud\""), "{text}");
+        for word in bingo_sdk::Effort::words() {
+            assert!(text.contains(word), "{word} is missing from {text}");
+        }
+        assert!(host.spawned().is_empty(), "nothing was started to be fixed");
+    }
+
+    /// A definition decides what the call did not, and a word nobody can read
+    /// names the file rather than the call, because that is where it is fixed.
+    #[test]
+    fn a_definition_s_level_is_taken_and_a_bad_one_names_the_definition() {
+        let args = |value: Value| serde_json::from_value::<SpawnArgs>(value).expect("args");
+        let quiet = Definition {
+            thinking: Some("off".into()),
+            ..definition("quiet", "You say little.")
+        };
+        assert_eq!(
+            level(&args(json!({ "prompt": "p" })), Some(&quiet)),
+            Ok(Some(None))
+        );
+        assert_eq!(
+            level(
+                &args(json!({ "prompt": "p", "thinking": "max" })),
+                Some(&quiet)
+            ),
+            Ok(Some(Some(Effort::Max))),
+            "the call decides over the definition"
+        );
+
+        let broken = Definition {
+            thinking: Some("loud".into()),
+            ..definition("broken", "b")
+        };
+        let refused = level(&args(json!({ "prompt": "p" })), Some(&broken))
+            .expect_err("a word nobody can read");
+        assert!(
+            refused
+                .message
+                .starts_with("the broken definition's thinking:"),
+            "{refused}"
         );
     }
 

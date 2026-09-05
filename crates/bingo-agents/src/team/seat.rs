@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Driver, Env, Hook, HookContext, HookMatcher, HookPoint, HostHandle, KernelError, OpenOptions,
-    ParentLink, Phase, SessionId, SessionSelector, SessionSpec,
+    Driver, Effort, Env, Hook, HookContext, HookMatcher, HookPoint, HostHandle, KernelError,
+    OpenOptions, ParentLink, Phase, SessionId, SessionSelector, SessionSpec,
 };
 
 use crate::definition::Definition;
@@ -146,7 +146,7 @@ async fn spec(
             .model
             .clone()
             .or_else(|| definition.and_then(|d| d.model.clone())),
-        thinking: None,
+        thinking: definition.and_then(seated_level),
         system_extra: Some(note::system_extra(&team.system(system))),
         tools: crate::spawn::child_tools(
             &cx.host,
@@ -155,6 +155,21 @@ async fn spec(
                 .or_else(|| definition.and_then(|d| d.tools.clone())),
         )
         .await,
+    }
+}
+
+/// The level a role's definition declares. A hook has nobody to hand a
+/// refusal to, so a word nobody can read is warned about and the seat
+/// inherits the root's level, as a role naming a definition nobody wrote is
+/// warned about and seated anyway.
+fn seated_level(definition: &Definition) -> Option<Option<Effort>> {
+    let word = definition.thinking.as_deref()?;
+    match crate::thinking::spoken(word, "thinking") {
+        Ok(level) => Some(level),
+        Err(refused) => {
+            tracing::warn!(agent = definition.name, %refused, "the level is not one");
+            None
+        }
     }
 }
 
@@ -261,7 +276,7 @@ mod tests {
         let project = Project::new(TWO);
         project.tree.write(
             &project.cwd.join(".bingo/agents/reviewer.md"),
-            "---\nmodel: fake-2\nprovider: other\ntools: [Read]\n---\nYou review diffs.\n",
+            "---\nmodel: fake-2\nprovider: other\nthinking: xhigh\ntools: [Read]\n---\nYou review diffs.\n",
         );
         let root = project.fleet.root();
         project.opens(&root).await;
@@ -270,8 +285,23 @@ mod tests {
         assert_eq!(reviewer.model.as_deref(), Some("fake-2"));
         assert_eq!(reviewer.provider.as_deref(), Some("other"));
         assert_eq!(reviewer.tools.clone(), Some(vec!["Read".to_string()]));
+        assert_eq!(reviewer.thinking, Some(Some(Effort::XHigh)));
         let extra = reviewer.system_extra.clone().unwrap_or_default();
         assert!(extra.ends_with("You review diffs."), "{extra}");
+    }
+
+    /// A hook has nobody to refuse to: a level nobody can read leaves the
+    /// seat inheriting the root's rather than stopping the seating.
+    #[tokio::test]
+    async fn a_level_nobody_can_read_leaves_the_seat_inheriting() {
+        let project = Project::new(TWO);
+        project.tree.write(
+            &project.cwd.join(".bingo/agents/reviewer.md"),
+            "---\nthinking: loud\n---\nYou review diffs.\n",
+        );
+        let root = project.fleet.root();
+        project.opens(&root).await;
+        assert_eq!(project.fleet.spawned()[0].thinking, None);
     }
 
     #[tokio::test]

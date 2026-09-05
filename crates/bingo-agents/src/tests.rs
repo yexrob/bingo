@@ -13,9 +13,9 @@ use bingo_sdk::{
     CatalogKind, ClientIdentity, CloseReason, CommandContext, Delivery, Driver, Env, ErrorCode,
     Event, Frame, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HookContext, HostApi,
     HostHandle, Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody,
-    ItemId, ItemStatus, KernelError, OpenOptions, ParentLink, Prompter, Seq, SessionFilter,
-    SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec, SessionState,
-    SessionSummary, ToolContext, ToolHost, TurnId, TurnOrigin, TurnStatus, Usage,
+    ItemId, ItemStatus, KernelError, OpenOptions, ParentLink, Prompter, Seq, SessionChange,
+    SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec,
+    SessionState, SessionSummary, ToolContext, ToolHost, TurnId, TurnOrigin, TurnStatus, Usage,
 };
 use futures::StreamExt;
 use jiff::Timestamp;
@@ -115,6 +115,8 @@ struct Inner {
     opened: Mutex<Vec<SessionId>>,
     delivered: Mutex<Vec<(SessionId, Input, Delivery)>>,
     locked: Mutex<Vec<String>>,
+    /// The knobs a tool asked the host to move, and whose.
+    reconfigured: Mutex<Vec<(SessionId, SessionChange)>>,
 }
 
 fn locked<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -174,6 +176,10 @@ impl Fleet {
 
     pub(crate) fn delivered(&self) -> Vec<(SessionId, Input, Delivery)> {
         locked(&self.0.delivered).clone()
+    }
+
+    pub(crate) fn reconfigured(&self) -> Vec<(SessionId, SessionChange)> {
+        locked(&self.0.reconfigured).clone()
     }
 
     /// A key another session already holds, as the kernel reports it.
@@ -356,6 +362,24 @@ impl HostApi for Fleet {
         Ok(())
     }
 
+    /// A session this fleet does not know is refused, as the kernel refuses
+    /// one: a tool that moves a knob has to name a session that is there.
+    async fn reconfigure(
+        &self,
+        session: &SessionId,
+        change: SessionChange,
+    ) -> Result<(), KernelError> {
+        let known = self.sessions().iter().any(|l| &l.summary.id == session);
+        if !known {
+            return Err(KernelError::new(
+                ErrorCode::SessionNotFound,
+                "no such session",
+            ));
+        }
+        locked(&self.0.reconfigured).push((session.clone(), change));
+        Ok(())
+    }
+
     async fn extend(
         &self,
         _session: &SessionId,
@@ -459,6 +483,10 @@ impl Recorder {
 
     pub(crate) fn delivered(&self) -> Vec<(SessionId, Input, Delivery)> {
         self.fleet.delivered()
+    }
+
+    pub(crate) fn reconfigured(&self) -> Vec<(SessionId, SessionChange)> {
+        self.fleet.reconfigured()
     }
 }
 

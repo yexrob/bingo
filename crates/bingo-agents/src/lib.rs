@@ -4,7 +4,7 @@
 //! a roster is `sessions{parent}`, and `@name` is a submit hook that
 //! redirects.
 //!
-//! Five tools, two hooks, two commands:
+//! Six tools, two hooks, two commands:
 //!
 //! - `SpawnAgent` mints a child under the calling tool item and delivers the
 //!   prompt. In the foreground it waits for the child's final text; in the
@@ -12,7 +12,8 @@
 //! - `SendMessage` wakes an agent — a child, a teammate beside the caller, or
 //!   `parent` — or posts into a room's journal, `WaitAgent` joins one or
 //!   several agents under one deadline and reads what each said,
-//!   `ListAgents` reads the tree, `ListModels` reads the model catalogue.
+//!   `ListAgents` reads the tree, `ListModels` reads the model catalogue,
+//!   `SetThinking` moves how hard this session or a child thinks.
 //! - `@name rest` in the composer reaches the child of that name.
 //! - A root session opening in a project with a `.bingo/team.json` seats the
 //!   roles it declares, as children of itself.
@@ -35,6 +36,7 @@ mod note;
 mod serial;
 mod spawn;
 mod team;
+mod thinking;
 mod wait;
 mod watch;
 
@@ -54,6 +56,7 @@ pub use models::ListModelsTool;
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
 pub use team::{SeatHook, TeamCommand};
+pub use thinking::SetThinkingTool;
 pub use wait::WaitAgentTool;
 
 static MANIFEST: PluginManifest = PluginManifest {
@@ -66,6 +69,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "tool:WaitAgent",
         "tool:ListAgents",
         "tool:ListModels",
+        "tool:SetThinking",
         "hook:agents",
         "hook:team",
         "command:agents",
@@ -91,7 +95,7 @@ pub(crate) fn traits() -> ToolTraits {
     }
 }
 
-/// Registers the five tools, the `@name` hook and `/agents`. Nothing here
+/// Registers the six tools, the `@name` hook and `/agents`. Nothing here
 /// holds the host: a tool reads it from its call, a hook from its context.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentsPlugin;
@@ -108,6 +112,7 @@ impl Plugin for AgentsPlugin {
         registrar.tool(Arc::new(WaitAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListModelsTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(SetThinkingTool) as Arc<dyn Tool>);
         registrar.add(Contribution::Hook(Arc::new(AtNameHook) as Arc<dyn Hook>));
         registrar.add(Contribution::Hook(
             Arc::new(SeatHook::new(registrar.env().clone())) as Arc<dyn Hook>,
@@ -145,6 +150,7 @@ mod plugin_tests {
                 "tool:WaitAgent",
                 "tool:ListAgents",
                 "tool:ListModels",
+                "tool:SetThinking",
                 "hook:agents",
                 "hook:team",
                 "command:agents",
@@ -175,7 +181,8 @@ mod plugin_tests {
                 "SendMessage",
                 "WaitAgent",
                 "ListAgents",
-                "ListModels"
+                "ListModels",
+                "SetThinking"
             ]
         );
         let hooks: Vec<String> = contributions

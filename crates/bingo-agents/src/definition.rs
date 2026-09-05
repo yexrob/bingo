@@ -18,6 +18,9 @@ struct Frontmatter {
     description: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    /// How hard the child thinks: `off`, or a level. A word, kept a word
+    /// here; the spawn is where it becomes a level or a refusal.
+    thinking: Option<String>,
     /// The tools the child may call, by name.
     tools: Option<Vec<String>>,
 }
@@ -29,6 +32,9 @@ pub struct Definition {
     pub description: String,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// How hard the child thinks, as the file said it; `None` leaves the
+    /// level to the caller and then to the parent.
+    pub thinking: Option<String>,
     /// `None` leaves the choice to the caller and then to the host.
     pub tools: Option<Vec<String>>,
     /// The body: the child's system prompt, after the sub-agent note.
@@ -49,6 +55,7 @@ impl Definition {
             description: front.description.unwrap_or_else(|| first_line(body)),
             model: front.model,
             provider: front.provider,
+            thinking: front.thinking,
             tools: front.tools,
             system: body.to_string(),
         }
@@ -104,6 +111,7 @@ mod tests {
              description: Reviews a diff\n\
              model: fake-1\n\
              provider: fake\n\
+             thinking: high\n\
              tools: [Read, Grep]\n\
              ---\n\
              You review diffs.\n",
@@ -112,6 +120,7 @@ mod tests {
         assert_eq!(definition.description, "Reviews a diff");
         assert_eq!(definition.model.as_deref(), Some("fake-1"));
         assert_eq!(definition.provider.as_deref(), Some("fake"));
+        assert_eq!(definition.thinking.as_deref(), Some("high"));
         assert_eq!(definition.tools, Some(vec!["Read".into(), "Grep".into()]));
         assert_eq!(definition.system, "You review diffs.\n");
     }
@@ -148,6 +157,18 @@ mod tests {
     fn an_unclosed_block_is_content() {
         let source = "---\nname: x\nno closing fence\n";
         assert_eq!(split(source), (None, source));
+    }
+
+    /// serde-saphyr reads YAML 1.2, where `off` is a word and not `false`
+    /// (it was a boolean in 1.1). The spawn parses a word, so a definition
+    /// that turns thinking off must arrive as one.
+    #[test]
+    fn thinking_off_arrives_as_the_word_and_not_a_boolean() {
+        let definition = Definition::parse("quiet", "---\nthinking: off\n---\nbody\n");
+        assert_eq!(definition.thinking.as_deref(), Some("off"));
+        let leveled = Definition::parse("deep", "---\nthinking: xhigh\n---\nbody\n");
+        assert_eq!(leveled.thinking.as_deref(), Some("xhigh"));
+        assert_eq!(Definition::parse("plain", "body\n").thinking, None);
     }
 
     #[test]
