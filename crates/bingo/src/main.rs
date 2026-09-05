@@ -124,7 +124,8 @@ struct Cli {
     #[arg(long, value_name = "ID", conflicts_with = "session_id")]
     resume: Option<String>,
 
-    /// Stop the turn after this many model rounds.
+    /// Stop the turn after this many model rounds; without it a turn runs
+    /// until the model stops on its own.
     #[arg(long, value_name = "N", global = true)]
     max_turns: Option<u32>,
 
@@ -719,9 +720,7 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     config
         .layers
         .push(settings::Layer::new("cli", cli_settings));
-    if let Some(rounds) = cli.max_turns {
-        config.budget.max_rounds = rounds;
-    }
+    config.budget.max_rounds = cli.max_turns;
     Ok(config)
 }
 

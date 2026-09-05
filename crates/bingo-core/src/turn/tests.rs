@@ -360,7 +360,7 @@ async fn the_round_budget_stops_a_runaway_loop() {
     );
     let mut cfg = config(provider, vec![Arc::new(EchoTool { read_only: true })]);
     cfg.budget = TurnBudget {
-        max_rounds: 2,
+        max_rounds: Some(2),
         max_retries: 0,
     };
     let host = RecordingHost::new();

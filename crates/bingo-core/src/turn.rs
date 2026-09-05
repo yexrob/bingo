@@ -352,7 +352,7 @@ impl Turn<'_> {
         if self.cancel.is_cancelled() {
             return self.interrupted();
         }
-        if self.round >= self.cfg.budget.max_rounds {
+        if self.cfg.budget.spent(self.round) {
             return Step::Closing(TurnStatus::Failed {
                 error: KernelError::new(
                     ErrorCode::TurnBudgetExhausted,

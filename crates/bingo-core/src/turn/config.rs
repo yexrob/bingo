@@ -12,16 +12,25 @@ use crate::models::Learned;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TurnBudget {
-    pub max_rounds: u32,
+    /// Model rounds a turn may run before it is closed on it; `None` lets
+    /// the turn run until the model stops on its own.
+    pub max_rounds: Option<u32>,
     pub max_retries: u32,
 }
 
 impl Default for TurnBudget {
     fn default() -> Self {
         Self {
-            max_rounds: 100,
+            max_rounds: None,
             max_retries: 10,
         }
+    }
+}
+
+impl TurnBudget {
+    /// Whether `round` is past the rounds this budget allows.
+    pub fn spent(&self, round: u32) -> bool {
+        self.max_rounds.is_some_and(|max| round >= max)
     }
 }
 
