@@ -36,6 +36,9 @@ drops `ModelRequest.reasoning` on the floor for an ACP session, and
    session already end in the next request's `model` and `reasoning`.
    The instance reads the two fields it always received and applies
    what changed. No kernel word moves, no new tool, no new door.
+   *(Amended 2026-09-05, ADR-0047: a new field and a new tool after
+   all — `SpawnAgent{thinking}` and `SetThinking` — both ending here,
+   in the next request's `reasoning`.)*
 4. **Applied between turns, never inside one** — the moment those
    knobs take effect for every provider already.
 
