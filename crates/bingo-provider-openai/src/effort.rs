@@ -41,6 +41,10 @@ const FAMILIES: &[(&str, &[&str])] = &[
         "gpt-5.6",
         &["none", "low", "medium", "high", "xhigh", "max"],
     ),
+    // OpenAI's own model page, 2026-09-05: "`reasoning.effort` supports
+    // `low`, `medium`, `high`, `xhigh`, and `max`" — models.dev has no
+    // reasoning_options for it yet.
+    ("gpt-6", &["low", "medium", "high", "xhigh", "max"]),
     ("o1", &["low", "medium", "high"]),
     ("o3", &["low", "medium", "high"]),
     ("o4-mini", &["low", "medium", "high"]),
@@ -177,8 +181,12 @@ mod tests {
                 "gpt-5.2-chat-latest",
                 ["medium", "medium", "medium", "medium", "medium", "medium"],
             ),
-            // none…max — the only family that takes the two deep tiers
+            // none…max — the families that take the two deep tiers
             ("gpt-5.6", ["low", "low", "medium", "high", "xhigh", "max"]),
+            (
+                "gpt-6-astra",
+                ["low", "low", "medium", "high", "xhigh", "max"],
+            ),
             (
                 "gpt-5.6-sol",
                 ["low", "low", "medium", "high", "xhigh", "max"],

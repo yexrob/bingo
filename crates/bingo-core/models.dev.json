@@ -1,7 +1,319 @@
 {
-  "deepseek": {
+  "groq": {
     "models": {
-      "deepseek-v4-flash": {
+      "whisper-large-v3": {
+        "limit": {
+          "context": 0,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "audio"
+          ]
+        }
+      },
+      "whisper-large-v3-turbo": {
+        "limit": {
+          "context": 0,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "audio"
+          ]
+        }
+      },
+      "llama-3.1-8b-instant": {
+        "limit": {
+          "context": 131072,
+          "output": 131072
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "allam-2-7b": {
+        "limit": {
+          "context": 4096,
+          "output": 4096
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "llama-3.3-70b-versatile": {
+        "limit": {
+          "context": 131072,
+          "output": 32768
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen/qwen3.8-27b": {
+        "limit": {
+          "context": 131042,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen/qwen3.6-27b": {
+        "limit": {
+          "context": 131072,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "groq/compound": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "groq/compound-mini": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "meta-llama/llama-prompt-guard-2-86m": {
+        "limit": {
+          "context": 512,
+          "output": 512
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "meta-llama/llama-prompt-guard-2-22m": {
+        "limit": {
+          "context": 512,
+          "output": 512
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "openai/gpt-oss-20b": {
+        "limit": {
+          "context": 131072,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "openai/gpt-oss-safeguard-20b": {
+        "limit": {
+          "context": 131072,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "openai/gpt-oss-120b": {
+        "limit": {
+          "context": 131072,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "canopylabs/orpheus-v1-english": {
+        "limit": {
+          "context": 4000,
+          "output": 50000
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "canopylabs/orpheus-arabic-saudi": {
+        "limit": {
+          "context": 4000,
+          "output": 50000
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      }
+    }
+  },
+  "minimax": {
+    "models": {
+      "MiniMax-M2": {
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "MiniMax-M2.1": {
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "MiniMax-M2.5": {
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "MiniMax-M2.5-highspeed": {
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "MiniMax-M3": {
+        "limit": {
+          "context": 1048576,
+          "output": 512000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "MiniMax-M2.7-highspeed": {
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "MiniMax-M2.7": {
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      }
+    }
+  },
+  "alibaba": {
+    "models": {
+      "qwen3.7-max": {
+        "limit": {
+          "context": 1000000,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen2-5-72b-instruct": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "deepseek-v4-flash-0731": {
         "limit": {
           "context": 1000000,
           "output": 384000
@@ -13,10 +325,22 @@
           ]
         }
       },
-      "deepseek-v4-pro": {
+      "qwen3-coder-plus": {
         "limit": {
-          "context": 1000000,
-          "output": 384000
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-next-80b-a3b-thinking": {
+        "limit": {
+          "context": 131072,
+          "output": 32768
         },
         "reasoning": true,
         "modalities": {
@@ -25,10 +349,654 @@
           ]
         }
       },
-      "deepseek-v4-flash-vision-exp": {
+      "qwen2-5-omni-7b": {
+        "limit": {
+          "context": 32768,
+          "output": 2048
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video"
+          ]
+        }
+      },
+      "qwen-mt-turbo": {
+        "limit": {
+          "context": 16384,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen-vl-max": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen3-next-80b-a3b-instruct": {
+        "limit": {
+          "context": 131072,
+          "output": 32768
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-coder-flash": {
         "limit": {
           "context": 1000000,
-          "output": 384000
+          "output": 65536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-14b": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen-max": {
+        "limit": {
+          "context": 32768,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3.6-plus": {
+        "limit": {
+          "context": 1000000,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "qwen-vl-plus": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen-omni-turbo-realtime": {
+        "limit": {
+          "context": 32768,
+          "output": 2048
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio"
+          ]
+        }
+      },
+      "qwen3.5-27b": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio"
+          ]
+        }
+      },
+      "qwen3.5-35b-a3b": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio"
+          ]
+        }
+      },
+      "qwen-flash": {
+        "limit": {
+          "context": 1000000,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "glm-5.2": {
+        "limit": {
+          "context": 1000000,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen-turbo": {
+        "limit": {
+          "context": 1000000,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-livetranslate-flash-realtime": {
+        "limit": {
+          "context": 53248,
+          "output": 4096
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video"
+          ]
+        }
+      },
+      "qwen3-vl-30b-a3b": {
+        "limit": {
+          "context": 131072,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen-vl-ocr": {
+        "limit": {
+          "context": 34096,
+          "output": 4096
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen3-32b": {
+        "limit": {
+          "context": 131072,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwq-plus": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-vl-plus": {
+        "limit": {
+          "context": 262144,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen2-5-7b-instruct": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-coder-30b-a3b-instruct": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3.5-397b-a17b": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio"
+          ]
+        }
+      },
+      "qwen3.6-27b": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio"
+          ]
+        }
+      },
+      "qwen3-asr-flash": {
+        "limit": {
+          "context": 53248,
+          "output": 4096
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "audio"
+          ]
+        }
+      },
+      "qwen3-omni-flash": {
+        "limit": {
+          "context": 65536,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video"
+          ]
+        }
+      },
+      "qwen2-5-vl-72b-instruct": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen3.6-35b-a3b": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio"
+          ]
+        }
+      },
+      "qwen3-max": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen-plus": {
+        "limit": {
+          "context": 1000000,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3.5-122b-a10b": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio"
+          ]
+        }
+      },
+      "qwen3-omni-flash-realtime": {
+        "limit": {
+          "context": 65536,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video"
+          ]
+        }
+      },
+      "qwen2-5-vl-7b-instruct": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen3.6-flash": {
+        "limit": {
+          "context": 1000000,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "qwen3.8-flash": {
+        "limit": {
+          "context": 1000000,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "qwen2-5-14b-instruct": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3.6-max-preview": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen-plus-character-ja": {
+        "limit": {
+          "context": 8192,
+          "output": 512
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3.8-max": {
+        "limit": {
+          "context": 1000000,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "pdf"
+          ]
+        }
+      },
+      "qwen3-8b": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-235b-a22b": {
+        "limit": {
+          "context": 131072,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3.7-plus": {
+        "limit": {
+          "context": 1000000,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "qwen-omni-turbo": {
+        "limit": {
+          "context": 32768,
+          "output": 2048
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video"
+          ]
+        }
+      },
+      "qwen3-coder-480b-a35b-instruct": {
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen2-5-32b-instruct": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qwen3-vl-235b-a22b": {
+        "limit": {
+          "context": 131072,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "qwen3.5-plus": {
+        "limit": {
+          "context": 1000000,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "qwen-mt-plus": {
+        "limit": {
+          "context": 16384,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "qvq-max": {
+        "limit": {
+          "context": 131072,
+          "output": 8192
         },
         "reasoning": true,
         "modalities": {
@@ -40,20 +1008,208 @@
       }
     }
   },
-  "google": {
+  "anthropic": {
     "models": {
-      "gemini-3.1-flash-tts-preview": {
+      "claude-sonnet-4-6": {
         "limit": {
-          "context": 8192,
-          "output": 16384
+          "context": 1000000,
+          "output": 128000
         },
         "reasoning": true,
         "modalities": {
           "input": [
-            "text"
+            "text",
+            "image",
+            "pdf"
           ]
         }
       },
+      "claude-opus-5": {
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-opus-4-5": {
+        "limit": {
+          "context": 200000,
+          "output": 64000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-fable-5-1": {
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-opus-4-6": {
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-sonnet-4-5-20250929": {
+        "limit": {
+          "context": 1000000,
+          "output": 64000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-opus-4-7": {
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-haiku-4-5-20251001": {
+        "limit": {
+          "context": 200000,
+          "output": 64000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-fable-5": {
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-haiku-4-5": {
+        "limit": {
+          "context": 200000,
+          "output": 64000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-sonnet-4-5": {
+        "limit": {
+          "context": 1000000,
+          "output": 64000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-opus-4-8": {
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-sonnet-5": {
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "claude-opus-4-5-20251101": {
+        "limit": {
+          "context": 200000,
+          "output": 64000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      }
+    }
+  },
+  "google": {
+    "models": {
       "gemma-4-26b-a4b-it": {
         "limit": {
           "context": 262144,
@@ -67,49 +1223,7 @@
           ]
         }
       },
-      "gemini-3-pro-image": {
-        "limit": {
-          "context": 131072,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gemini-3-pro-image-preview": {
-        "limit": {
-          "context": 131072,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gemini-flash-lite-latest": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-3.5-flash-lite": {
+      "gemini-3.1-pro-preview-customtools": {
         "limit": {
           "context": 1048576,
           "output": 65536
@@ -138,9 +1252,35 @@
           ]
         }
       },
-      "gemini-3.1-pro-preview": {
+      "lyria-3-clip-preview": {
         "limit": {
           "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gemini-2.5-flash-image": {
+        "limit": {
+          "context": 32768,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "deep-research-max-preview-04-2026": {
+        "limit": {
+          "context": 131072,
           "output": 65536
         },
         "reasoning": true,
@@ -154,7 +1294,20 @@
           ]
         }
       },
-      "gemini-3.1-pro-preview-customtools": {
+      "gemini-3-pro-image": {
+        "limit": {
+          "context": 131072,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gemini-3.1-pro-preview": {
         "limit": {
           "context": 1048576,
           "output": 65536
@@ -202,34 +1355,6 @@
           ]
         }
       },
-      "gemini-robotics-er-1.6-preview": {
-        "limit": {
-          "context": 131072,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ]
-        }
-      },
-      "gemma-4-31b-it": {
-        "limit": {
-          "context": 262144,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
       "gemini-2.5-computer-use-preview-10-2025": {
         "limit": {
           "context": 131072,
@@ -240,201 +1365,6 @@
           "input": [
             "text",
             "image"
-          ]
-        }
-      },
-      "lyria-3-clip-preview": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "veo-3.1-fast-generate-preview": {
-        "limit": {
-          "context": 480,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "gemini-embedding-001": {
-        "limit": {
-          "context": 2048,
-          "output": 1
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "gemini-2.5-pro-preview-tts": {
-        "limit": {
-          "context": 8192,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "gemini-flash-latest": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-3.5-flash": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-3.5-live-translate-preview": {
-        "limit": {
-          "context": 16384,
-          "output": 32768
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "audio"
-          ]
-        }
-      },
-      "veo-3.1-lite-generate-preview": {
-        "limit": {
-          "context": 480,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gemini-omni-flash-preview": {
-        "limit": {
-          "context": 131072,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "gemini-3.1-flash-lite": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-2.5-flash": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-2.5-flash-preview-tts": {
-        "limit": {
-          "context": 8192,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "veo-3.1-generate-preview": {
-        "limit": {
-          "context": 480,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gemini-embedding-2": {
-        "limit": {
-          "context": 8192,
-          "output": 1
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video",
-            "pdf"
           ]
         }
       },
@@ -454,112 +1384,9 @@
           ]
         }
       },
-      "gemini-3.1-flash-image": {
-        "limit": {
-          "context": 65536,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-3.1-flash-image-preview": {
-        "limit": {
-          "context": 65536,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "lyria-3-pro-preview": {
+      "gemini-3.1-flash-lite": {
         "limit": {
           "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gemini-3.1-flash-lite-preview": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-3-flash-preview": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio",
-            "pdf"
-          ]
-        }
-      },
-      "gemini-2.5-flash-image": {
-        "limit": {
-          "context": 32768,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gemini-2.5-pro": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video",
-            "pdf"
-          ]
-        }
-      },
-      "deep-research-max-preview-04-2026": {
-        "limit": {
-          "context": 131072,
           "output": 65536
         },
         "reasoning": true,
@@ -588,6 +1415,272 @@
           ]
         }
       },
+      "gemini-2.5-pro-preview-tts": {
+        "limit": {
+          "context": 8192,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gemini-3.5-flash": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "veo-3.1-generate-preview": {
+        "limit": {
+          "context": 480,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gemini-3.1-flash-lite-preview": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "veo-3.1-fast-generate-preview": {
+        "limit": {
+          "context": 480,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "gemini-2.5-flash-preview-tts": {
+        "limit": {
+          "context": 8192,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gemini-embedding-001": {
+        "limit": {
+          "context": 2048,
+          "output": 1
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gemini-3.1-flash-image": {
+        "limit": {
+          "context": 65536,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-3.5-flash-lite": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-3-pro-image-preview": {
+        "limit": {
+          "context": 131072,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gemini-3.1-flash-tts-preview": {
+        "limit": {
+          "context": 8192,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "veo-3.1-lite-generate-preview": {
+        "limit": {
+          "context": 480,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gemini-flash-lite-latest": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "gemma-4-31b-it": {
+        "limit": {
+          "context": 262144,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gemini-embedding-2": {
+        "limit": {
+          "context": 8192,
+          "output": 1
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-3-flash-preview": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-3.8-flash": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-3.5-live-translate-preview": {
+        "limit": {
+          "context": 16384,
+          "output": 32768
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "audio"
+          ]
+        }
+      },
+      "lyria-3-pro-preview": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
       "gemini-3.7-flash": {
         "limit": {
           "context": 1048576,
@@ -603,12 +1696,88 @@
             "pdf"
           ]
         }
+      },
+      "gemini-2.5-pro": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-flash-latest": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-3.1-flash-image-preview": {
+        "limit": {
+          "context": 65536,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gemini-omni-flash-preview": {
+        "limit": {
+          "context": 131072,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "gemini-2.5-flash": {
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video",
+            "pdf"
+          ]
+        }
       }
     }
   },
   "meta": {
     "models": {
-      "muse-spark-1.2": {
+      "muse-spark-1.3": {
         "limit": {
           "context": 1048576,
           "output": 131072
@@ -624,18 +1793,19 @@
           ]
         }
       },
-      "muse-spark-1.1": {
+      "muse-spark-1.2": {
         "limit": {
-          "context": 1000000,
-          "output": 32000
+          "context": 1048576,
+          "output": 131072
         },
         "reasoning": true,
         "modalities": {
           "input": [
             "text",
             "image",
+            "video",
             "pdf",
-            "video"
+            "audio"
           ]
         }
       },
@@ -654,26 +1824,8 @@
             "audio"
           ]
         }
-      }
-    }
-  },
-  "moonshotai": {
-    "models": {
-      "kimi-k2.7-code": {
-        "limit": {
-          "context": 262144,
-          "output": 262144
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
       },
-      "kimi-k3": {
+      "muse-spark-1.3-contributor": {
         "limit": {
           "context": 1048576,
           "output": 131072
@@ -683,26 +1835,48 @@
           "input": [
             "text",
             "image",
+            "video",
+            "pdf",
+            "audio"
+          ]
+        }
+      },
+      "muse-spark-1.1": {
+        "limit": {
+          "context": 1048576,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf",
             "video"
           ]
         }
-      },
-      "kimi-k2-0711-preview": {
+      }
+    }
+  },
+  "deepseek": {
+    "models": {
+      "deepseek-v4-flash-vision-exp": {
         "limit": {
-          "context": 131072,
-          "output": 16384
+          "context": 1000000,
+          "output": 384000
         },
-        "reasoning": false,
+        "reasoning": true,
         "modalities": {
           "input": [
-            "text"
+            "text",
+            "image"
           ]
         }
       },
-      "kimi-k2-thinking-turbo": {
+      "deepseek-v4-flash": {
         "limit": {
-          "context": 262144,
-          "output": 262144
+          "context": 1000000,
+          "output": 384000
         },
         "reasoning": true,
         "modalities": {
@@ -711,7 +1885,662 @@
           ]
         }
       },
-      "kimi-k2.5": {
+      "deepseek-v4-pro": {
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      }
+    }
+  },
+  "openai": {
+    "models": {
+      "gpt-5-nano": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-4.1-nano": {
+        "limit": {
+          "context": 1047576,
+          "output": 32768
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-4o-2024-05-13": {
+        "limit": {
+          "context": 128000,
+          "output": 4096
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5-pro": {
+        "limit": {
+          "context": 400000,
+          "output": 272000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "chatgpt-image-latest": {
+        "limit": {
+          "context": 0,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.6-sol": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-4o-2024-08-06": {
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-6-astra": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-5.2-pro": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.3-codex-spark": {
+        "limit": {
+          "context": 128000,
+          "output": 32000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-4.1-mini": {
+        "limit": {
+          "context": 1047576,
+          "output": 32768
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-5.4": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-4-turbo": {
+        "limit": {
+          "context": 128000,
+          "output": 4096
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.1": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "o1": {
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-4o": {
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-5.6-luna": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-5.3-codex": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-4o-mini": {
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-image-1.5": {
+        "limit": {
+          "context": 0,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "o1-pro": {
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-4.1": {
+        "limit": {
+          "context": 1047576,
+          "output": 32768
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "text-embedding-ada-002": {
+        "limit": {
+          "context": 8192,
+          "output": 1536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gpt-image-1": {
+        "limit": {
+          "context": 0,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.4-nano": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.5-pro": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-image-1-mini": {
+        "limit": {
+          "context": 0,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.4-mini": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-image-2": {
+        "limit": {
+          "context": 0,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-3.5-turbo": {
+        "limit": {
+          "context": 16385,
+          "output": 4096
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gpt-5.6": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "text-embedding-3-small": {
+        "limit": {
+          "context": 8191,
+          "output": 1536
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gpt-5-mini": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.4-pro": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "text-embedding-3-large": {
+        "limit": {
+          "context": 8191,
+          "output": 3072
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gpt-5.6-terra": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-4": {
+        "limit": {
+          "context": 8192,
+          "output": 8192
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "gpt-5.2": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5": {
+        "limit": {
+          "context": 400000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.2-chat-latest": {
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "o4-mini": {
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-realtime-2.1": {
+        "limit": {
+          "context": 128000,
+          "output": 32000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "audio",
+            "image"
+          ]
+        }
+      },
+      "o3-mini": {
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "o3": {
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "o3-pro": {
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.3-chat-latest": {
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "gpt-5.5": {
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "gpt-4o-2024-11-20": {
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      }
+    }
+  },
+  "moonshotai": {
+    "models": {
+      "kimi-k2.7-code-highspeed": {
         "limit": {
           "context": 262144,
           "output": 262144
@@ -725,15 +2554,17 @@
           ]
         }
       },
-      "kimi-k2-0905-preview": {
+      "kimi-k2.6": {
         "limit": {
           "context": 262144,
           "output": 262144
         },
-        "reasoning": false,
+        "reasoning": true,
         "modalities": {
           "input": [
-            "text"
+            "text",
+            "image",
+            "video"
           ]
         }
       },
@@ -749,7 +2580,7 @@
           ]
         }
       },
-      "kimi-k2.7-code-highspeed": {
+      "kimi-k2.7-code": {
         "limit": {
           "context": 262144,
           "output": 262144
@@ -775,7 +2606,45 @@
           ]
         }
       },
-      "kimi-k2.6": {
+      "kimi-k2-0711-preview": {
+        "limit": {
+          "context": 131072,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "kimi-k3": {
+        "limit": {
+          "context": 1048576,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "kimi-k2-0905-preview": {
+        "limit": {
+          "context": 262144,
+          "output": 262144
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "kimi-k2.5": {
         "limit": {
           "context": 262144,
           "output": 262144
@@ -788,15 +2657,27 @@
             "video"
           ]
         }
+      },
+      "kimi-k2-thinking-turbo": {
+        "limit": {
+          "context": 262144,
+          "output": 262144
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
       }
     }
   },
-  "anthropic": {
+  "xai": {
     "models": {
-      "claude-opus-4-7": {
+      "grok-4.3": {
         "limit": {
           "context": 1000000,
-          "output": 128000
+          "output": 30000
         },
         "reasoning": true,
         "modalities": {
@@ -807,10 +2688,10 @@
           ]
         }
       },
-      "claude-opus-4-8": {
+      "grok-4.20-0309-reasoning": {
         "limit": {
           "context": 1000000,
-          "output": 128000
+          "output": 30000
         },
         "reasoning": true,
         "modalities": {
@@ -821,10 +2702,10 @@
           ]
         }
       },
-      "claude-sonnet-5": {
+      "grok-4.20-multi-agent-0309": {
         "limit": {
           "context": 1000000,
-          "output": 128000
+          "output": 30000
         },
         "reasoning": true,
         "modalities": {
@@ -835,138 +2716,126 @@
           ]
         }
       },
-      "claude-sonnet-4-5-20250929": {
+      "grok-imagine-image": {
+        "limit": {
+          "context": 16000,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "grok-imagine-video": {
+        "limit": {
+          "context": 1024,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "pdf"
+          ]
+        }
+      },
+      "grok-4.5": {
+        "limit": {
+          "context": 500000,
+          "output": 500000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "grok-build-0.1": {
+        "limit": {
+          "context": 256000,
+          "output": 256000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "grok-imagine-video-1.5": {
+        "limit": {
+          "context": 1024,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "pdf"
+          ]
+        }
+      },
+      "grok-imagine-image-2.0": {
+        "limit": {
+          "context": 64000,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "grok-4.6": {
+        "limit": {
+          "context": 500000,
+          "output": 500000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "grok-imagine-image-quality": {
+        "limit": {
+          "context": 16000,
+          "output": 0
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        }
+      },
+      "grok-4.20-0309-non-reasoning": {
         "limit": {
           "context": 1000000,
-          "output": 64000
+          "output": 30000
         },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-opus-4-5": {
-        "limit": {
-          "context": 200000,
-          "output": 64000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-sonnet-4-6": {
-        "limit": {
-          "context": 1000000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-haiku-4-5-20251001": {
-        "limit": {
-          "context": 200000,
-          "output": 64000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-sonnet-4-5": {
-        "limit": {
-          "context": 1000000,
-          "output": 64000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-opus-4-5-20251101": {
-        "limit": {
-          "context": 200000,
-          "output": 64000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-fable-5": {
-        "limit": {
-          "context": 1000000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-haiku-4-5": {
-        "limit": {
-          "context": 200000,
-          "output": 64000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-opus-4-6": {
-        "limit": {
-          "context": 1000000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "claude-opus-5": {
-        "limit": {
-          "context": 1000000,
-          "output": 128000
-        },
-        "reasoning": true,
+        "reasoning": false,
         "modalities": {
           "input": [
             "text",
@@ -979,9 +2848,59 @@
   },
   "zai": {
     "models": {
+      "glm-4.7": {
+        "limit": {
+          "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "glm-4.5-air": {
+        "limit": {
+          "context": 131072,
+          "output": 98304
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
       "glm-4.6": {
         "limit": {
           "context": 204800,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "glm-4.6v": {
+        "limit": {
+          "context": 128000,
+          "output": 32768
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video"
+          ]
+        }
+      },
+      "glm-5.2": {
+        "limit": {
+          "context": 1000000,
           "output": 131072
         },
         "reasoning": true,
@@ -1003,9 +2922,9 @@
           ]
         }
       },
-      "glm-5v-turbo": {
+      "glm-5.3-flash": {
         "limit": {
-          "context": 200000,
+          "context": 1000000,
           "output": 131072
         },
         "reasoning": true,
@@ -1018,10 +2937,10 @@
           ]
         }
       },
-      "glm-4.7": {
+      "glm-4.5": {
         "limit": {
-          "context": 204800,
-          "output": 131072
+          "context": 131072,
+          "output": 98304
         },
         "reasoning": true,
         "modalities": {
@@ -1068,6 +2987,18 @@
           ]
         }
       },
+      "glm-5.1": {
+        "limit": {
+          "context": 200000,
+          "output": 131072
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
       "glm-5-turbo": {
         "limit": {
           "context": 200000,
@@ -1092,45 +3023,7 @@
           ]
         }
       },
-      "glm-5.2": {
-        "limit": {
-          "context": 1000000,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "glm-4.6v": {
-        "limit": {
-          "context": 128000,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "glm-4.5-air": {
-        "limit": {
-          "context": 131072,
-          "output": 98304
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "glm-5.1": {
+      "glm-5v-turbo": {
         "limit": {
           "context": 200000,
           "output": 131072
@@ -1138,7 +3031,10 @@
         "reasoning": true,
         "modalities": {
           "input": [
-            "text"
+            "text",
+            "image",
+            "video",
+            "pdf"
           ]
         }
       },
@@ -1153,1648 +3049,15 @@
             "text"
           ]
         }
-      },
-      "glm-4.5": {
-        "limit": {
-          "context": 131072,
-          "output": 98304
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "glm-5.3-flash": {
-        "limit": {
-          "context": 1000000,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "pdf"
-          ]
-        }
-      }
-    }
-  },
-  "openai": {
-    "models": {
-      "gpt-4o": {
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-image-1.5": {
-        "limit": {
-          "context": 0,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.3-chat-latest": {
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5-nano": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-4o-mini": {
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-3.5-turbo": {
-        "limit": {
-          "context": 16385,
-          "output": 4096
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "o1-pro": {
-        "limit": {
-          "context": 200000,
-          "output": 100000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.5-pro": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-4-turbo": {
-        "limit": {
-          "context": 128000,
-          "output": 4096
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-image-1-mini": {
-        "limit": {
-          "context": 0,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-4": {
-        "limit": {
-          "context": 8192,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "gpt-5.6-sol": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "o3-pro": {
-        "limit": {
-          "context": 200000,
-          "output": 100000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.4-pro": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.6": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-5-mini": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.6-luna": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "text-embedding-ada-002": {
-        "limit": {
-          "context": 8192,
-          "output": 1536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "gpt-5.3-codex": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-5.3-codex-spark": {
-        "limit": {
-          "context": 128000,
-          "output": 32000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-4.1-nano": {
-        "limit": {
-          "context": 1047576,
-          "output": 32768
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "o1": {
-        "limit": {
-          "context": 200000,
-          "output": 100000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-5.2": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-image-1": {
-        "limit": {
-          "context": 0,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-realtime-2.1": {
-        "limit": {
-          "context": 128000,
-          "output": 32000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "audio",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.4-mini": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-4o-2024-05-13": {
-        "limit": {
-          "context": 128000,
-          "output": 4096
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "o3": {
-        "limit": {
-          "context": 200000,
-          "output": 100000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "chatgpt-image-latest": {
-        "limit": {
-          "context": 0,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "text-embedding-3-small": {
-        "limit": {
-          "context": 8191,
-          "output": 1536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "gpt-5-pro": {
-        "limit": {
-          "context": 400000,
-          "output": 272000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.5": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-4.1": {
-        "limit": {
-          "context": 1047576,
-          "output": 32768
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-4o-2024-08-06": {
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.6-terra": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "o4-mini": {
-        "limit": {
-          "context": 200000,
-          "output": 100000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.4": {
-        "limit": {
-          "context": 1050000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "o3-mini": {
-        "limit": {
-          "context": 200000,
-          "output": 100000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "gpt-4o-2024-11-20": {
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "text-embedding-3-large": {
-        "limit": {
-          "context": 8191,
-          "output": 3072
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "gpt-5.2-chat-latest": {
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.2-pro": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-image-2": {
-        "limit": {
-          "context": 0,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-4.1-mini": {
-        "limit": {
-          "context": 1047576,
-          "output": 32768
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "gpt-5.4-nano": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "gpt-5.1": {
-        "limit": {
-          "context": 400000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      }
-    }
-  },
-  "xai": {
-    "models": {
-      "grok-imagine-video": {
-        "limit": {
-          "context": 1024,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "pdf"
-          ]
-        }
-      },
-      "grok-4.6": {
-        "limit": {
-          "context": 500000,
-          "output": 500000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-4.5": {
-        "limit": {
-          "context": 500000,
-          "output": 500000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-4.20-0309-non-reasoning": {
-        "limit": {
-          "context": 1000000,
-          "output": 30000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-imagine-video-1.5": {
-        "limit": {
-          "context": 1024,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "pdf"
-          ]
-        }
-      },
-      "grok-imagine-image-quality": {
-        "limit": {
-          "context": 8000,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-4.20-0309-reasoning": {
-        "limit": {
-          "context": 1000000,
-          "output": 30000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-4.20-multi-agent-0309": {
-        "limit": {
-          "context": 1000000,
-          "output": 30000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-imagine-image-2.0": {
-        "limit": {
-          "context": 8000,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-imagine-image": {
-        "limit": {
-          "context": 8000,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-build-0.1": {
-        "limit": {
-          "context": 256000,
-          "output": 256000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      },
-      "grok-4.3": {
-        "limit": {
-          "context": 1000000,
-          "output": 30000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "pdf"
-          ]
-        }
-      }
-    }
-  },
-  "alibaba": {
-    "models": {
-      "qwen2-5-vl-7b-instruct": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen3-vl-plus": {
-        "limit": {
-          "context": 262144,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen3-coder-30b-a3b-instruct": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.7-max": {
-        "limit": {
-          "context": 1000000,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen-turbo": {
-        "limit": {
-          "context": 1000000,
-          "output": 16384
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen-omni-turbo": {
-        "limit": {
-          "context": 32768,
-          "output": 2048
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video"
-          ]
-        }
-      },
-      "qwen-vl-max": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen3-32b": {
-        "limit": {
-          "context": 131072,
-          "output": 16384
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-vl-30b-a3b": {
-        "limit": {
-          "context": 131072,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen3-235b-a22b": {
-        "limit": {
-          "context": 131072,
-          "output": 16384
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen-max": {
-        "limit": {
-          "context": 32768,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.5-35b-a3b": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ]
-        }
-      },
-      "qwen3.5-397b-a17b": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ]
-        }
-      },
-      "qwen-plus": {
-        "limit": {
-          "context": 1000000,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.5-plus": {
-        "limit": {
-          "context": 1000000,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "qwen2-5-vl-72b-instruct": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen3-livetranslate-flash-realtime": {
-        "limit": {
-          "context": 53248,
-          "output": 4096
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video"
-          ]
-        }
-      },
-      "qwen3-coder-flash": {
-        "limit": {
-          "context": 1000000,
-          "output": 65536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.6-max-preview": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.8-max": {
-        "limit": {
-          "context": 1000000,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "pdf"
-          ]
-        }
-      },
-      "qwen3.7-plus": {
-        "limit": {
-          "context": 1000000,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "qwen3-vl-235b-a22b": {
-        "limit": {
-          "context": 131072,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen-vl-ocr": {
-        "limit": {
-          "context": 34096,
-          "output": 4096
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen2-5-72b-instruct": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-14b": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.8-flash": {
-        "limit": {
-          "context": 1000000,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "qwen-mt-turbo": {
-        "limit": {
-          "context": 16384,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-next-80b-a3b-thinking": {
-        "limit": {
-          "context": 131072,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-coder-480b-a35b-instruct": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-omni-flash": {
-        "limit": {
-          "context": 65536,
-          "output": 16384
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video"
-          ]
-        }
-      },
-      "qwen-flash": {
-        "limit": {
-          "context": 1000000,
-          "output": 32768
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-8b": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-max": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "glm-5.2": {
-        "limit": {
-          "context": 1000000,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen2-5-omni-7b": {
-        "limit": {
-          "context": 32768,
-          "output": 2048
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video"
-          ]
-        }
-      },
-      "qwen3.6-35b-a3b": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ]
-        }
-      },
-      "qvq-max": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen3.6-27b": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ]
-        }
-      },
-      "qwen3-next-80b-a3b-instruct": {
-        "limit": {
-          "context": 131072,
-          "output": 32768
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-omni-flash-realtime": {
-        "limit": {
-          "context": 65536,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio",
-            "video"
-          ]
-        }
-      },
-      "qwen3.6-plus": {
-        "limit": {
-          "context": 1000000,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "qwen2-5-14b-instruct": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen-mt-plus": {
-        "limit": {
-          "context": 16384,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen-plus-character-ja": {
-        "limit": {
-          "context": 8192,
-          "output": 512
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen2-5-7b-instruct": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.5-27b": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ]
-        }
-      },
-      "qwq-plus": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3.5-122b-a10b": {
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video",
-            "audio"
-          ]
-        }
-      },
-      "qwen3-coder-plus": {
-        "limit": {
-          "context": 1048576,
-          "output": 65536
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen-omni-turbo-realtime": {
-        "limit": {
-          "context": 32768,
-          "output": 2048
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "audio"
-          ]
-        }
-      },
-      "deepseek-v4-flash-0731": {
-        "limit": {
-          "context": 1000000,
-          "output": 384000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen3-asr-flash": {
-        "limit": {
-          "context": 53248,
-          "output": 4096
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "audio"
-          ]
-        }
-      },
-      "qwen2-5-32b-instruct": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen-vl-plus": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "qwen3.6-flash": {
-        "limit": {
-          "context": 1000000,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        }
       }
     }
   },
   "mistral": {
     "models": {
-      "mistral-medium-2508": {
-        "limit": {
-          "context": 262144,
-          "output": 262144
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "mistral-small-latest": {
-        "limit": {
-          "context": 256000,
-          "output": 256000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "devstral-medium-2507": {
+      "pixtral-12b": {
         "limit": {
           "context": 128000,
           "output": 128000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "open-mixtral-8x7b": {
-        "limit": {
-          "context": 32000,
-          "output": 32000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "mistral-large-2411": {
-        "limit": {
-          "context": 131072,
-          "output": 16384
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "mistral-nemo": {
-        "limit": {
-          "context": 128000,
-          "output": 128000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "devstral-latest": {
-        "limit": {
-          "context": 262144,
-          "output": 262144
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "mistral-large-latest": {
-        "limit": {
-          "context": 262144,
-          "output": 262144
         },
         "reasoning": false,
         "modalities": {
@@ -2816,10 +3079,59 @@
           ]
         }
       },
+      "mistral-small-2506": {
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "magistral-small": {
+        "limit": {
+          "context": 128000,
+          "output": 128000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
       "devstral-2512": {
         "limit": {
           "context": 262144,
           "output": 262144
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "mistral-embed": {
+        "limit": {
+          "context": 8000,
+          "output": 3072
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "devstral-small-2505": {
+        "limit": {
+          "context": 128000,
+          "output": 128000
         },
         "reasoning": false,
         "modalities": {
@@ -2841,87 +3153,60 @@
           ]
         }
       },
-      "open-mistral-nemo": {
-        "limit": {
-          "context": 128000,
-          "output": 128000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "mistral-small-2603": {
-        "limit": {
-          "context": 256000,
-          "output": 256000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "magistral-small": {
-        "limit": {
-          "context": 128000,
-          "output": 128000
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "voxtral-mini-latest": {
-        "limit": {
-          "context": 0,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "audio"
-          ]
-        }
-      },
-      "mistral-small-2506": {
+      "magistral-medium-latest": {
         "limit": {
           "context": 128000,
           "output": 16384
         },
-        "reasoning": false,
+        "reasoning": true,
         "modalities": {
           "input": [
-            "text",
-            "image"
+            "text"
           ]
         }
       },
-      "pixtral-large-latest": {
+      "open-mixtral-8x22b": {
         "limit": {
-          "context": 128000,
-          "output": 128000
+          "context": 64000,
+          "output": 64000
         },
         "reasoning": false,
         "modalities": {
           "input": [
-            "text",
-            "image"
+            "text"
           ]
         }
       },
-      "mistral-large-2512": {
+      "open-mixtral-8x7b": {
+        "limit": {
+          "context": 32000,
+          "output": 32000
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "open-mistral-7b": {
+        "limit": {
+          "context": 8000,
+          "output": 8000
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "mistral-medium-latest": {
         "limit": {
           "context": 262144,
           "output": 262144
         },
-        "reasoning": false,
+        "reasoning": true,
         "modalities": {
           "input": [
             "text",
@@ -2929,7 +3214,7 @@
           ]
         }
       },
-      "ministral-3b-latest": {
+      "devstral-medium-2507": {
         "limit": {
           "context": 128000,
           "output": 128000
@@ -2954,34 +3239,10 @@
           ]
         }
       },
-      "devstral-small-2505": {
+      "mistral-large-2512": {
         "limit": {
-          "context": 128000,
-          "output": 128000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "ministral-8b-latest": {
-        "limit": {
-          "context": 128000,
-          "output": 128000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "mistral-medium-2505": {
-        "limit": {
-          "context": 131072,
-          "output": 131072
+          "context": 262144,
+          "output": 262144
         },
         "reasoning": false,
         "modalities": {
@@ -3003,10 +3264,35 @@
           ]
         }
       },
-      "open-mistral-7b": {
+      "voxtral-small-latest": {
         "limit": {
-          "context": 8000,
-          "output": 8000
+          "context": 32000,
+          "output": 32000
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
+        }
+      },
+      "ministral-8b-latest": {
+        "limit": {
+          "context": 128000,
+          "output": 128000
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "mistral-nemo": {
+        "limit": {
+          "context": 128000,
+          "output": 128000
         },
         "reasoning": false,
         "modalities": {
@@ -3027,10 +3313,35 @@
           ]
         }
       },
-      "pixtral-12b": {
+      "mistral-small-latest": {
+        "limit": {
+          "context": 256000,
+          "output": 256000
+        },
+        "reasoning": true,
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        }
+      },
+      "open-mistral-nemo": {
         "limit": {
           "context": 128000,
           "output": 128000
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "mistral-large-latest": {
+        "limit": {
+          "context": 262144,
+          "output": 262144
         },
         "reasoning": false,
         "modalities": {
@@ -3040,23 +3351,34 @@
           ]
         }
       },
-      "voxtral-small-latest": {
+      "voxtral-mini-latest": {
         "limit": {
-          "context": 32000,
-          "output": 32000
+          "context": 0,
+          "output": 0
         },
         "reasoning": false,
         "modalities": {
           "input": [
-            "text",
             "audio"
           ]
         }
       },
-      "codestral-latest": {
+      "mistral-large-2411": {
         "limit": {
-          "context": 256000,
-          "output": 4096
+          "context": 131072,
+          "output": 16384
+        },
+        "reasoning": false,
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        }
+      },
+      "devstral-latest": {
+        "limit": {
+          "context": 262144,
+          "output": 262144
         },
         "reasoning": false,
         "modalities": {
@@ -3077,46 +3399,10 @@
           ]
         }
       },
-      "open-mixtral-8x22b": {
+      "mistral-small-2603": {
         "limit": {
-          "context": 64000,
-          "output": 64000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "magistral-medium-latest": {
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "mistral-embed": {
-        "limit": {
-          "context": 8000,
-          "output": 3072
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "mistral-medium-latest": {
-        "limit": {
-          "context": 262144,
-          "output": 262144
+          "context": 256000,
+          "output": 256000
         },
         "reasoning": true,
         "modalities": {
@@ -3125,38 +3411,23 @@
             "image"
           ]
         }
-      }
-    }
-  },
-  "groq": {
-    "models": {
-      "whisper-large-v3": {
-        "limit": {
-          "context": 0,
-          "output": 0
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "audio"
-          ]
-        }
       },
-      "llama-3.3-70b-versatile": {
+      "mistral-medium-2505": {
         "limit": {
           "context": 131072,
-          "output": 32768
+          "output": 131072
         },
         "reasoning": false,
         "modalities": {
           "input": [
-            "text"
+            "text",
+            "image"
           ]
         }
       },
-      "allam-2-7b": {
+      "codestral-latest": {
         "limit": {
-          "context": 4096,
+          "context": 256000,
           "output": 4096
         },
         "reasoning": false,
@@ -3166,10 +3437,10 @@
           ]
         }
       },
-      "llama-3.1-8b-instant": {
+      "ministral-3b-latest": {
         "limit": {
-          "context": 131072,
-          "output": 131072
+          "context": 128000,
+          "output": 128000
         },
         "reasoning": false,
         "modalities": {
@@ -3178,60 +3449,12 @@
           ]
         }
       },
-      "whisper-large-v3-turbo": {
+      "mistral-medium-2508": {
         "limit": {
-          "context": 0,
-          "output": 0
+          "context": 262144,
+          "output": 262144
         },
         "reasoning": false,
-        "modalities": {
-          "input": [
-            "audio"
-          ]
-        }
-      },
-      "openai/gpt-oss-120b": {
-        "limit": {
-          "context": 131072,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "openai/gpt-oss-safeguard-20b": {
-        "limit": {
-          "context": 131072,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "openai/gpt-oss-20b": {
-        "limit": {
-          "context": 131072,
-          "output": 65536
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "qwen/qwen3.6-27b": {
-        "limit": {
-          "context": 131072,
-          "output": 16384
-        },
-        "reasoning": true,
         "modalities": {
           "input": [
             "text",
@@ -3239,165 +3462,16 @@
           ]
         }
       },
-      "meta-llama/llama-prompt-guard-2-86m": {
+      "pixtral-large-latest": {
         "limit": {
-          "context": 512,
-          "output": 512
+          "context": 128000,
+          "output": 128000
         },
         "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "meta-llama/llama-prompt-guard-2-22m": {
-        "limit": {
-          "context": 512,
-          "output": 512
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "groq/compound-mini": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "groq/compound": {
-        "limit": {
-          "context": 131072,
-          "output": 8192
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "canopylabs/orpheus-arabic-saudi": {
-        "limit": {
-          "context": 4000,
-          "output": 50000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "canopylabs/orpheus-v1-english": {
-        "limit": {
-          "context": 4000,
-          "output": 50000
-        },
-        "reasoning": false,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      }
-    }
-  },
-  "minimax": {
-    "models": {
-      "MiniMax-M2.7": {
-        "limit": {
-          "context": 204800,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "MiniMax-M2.7-highspeed": {
-        "limit": {
-          "context": 204800,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "MiniMax-M2.1": {
-        "limit": {
-          "context": 204800,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "MiniMax-M2": {
-        "limit": {
-          "context": 204800,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "MiniMax-M2.5-highspeed": {
-        "limit": {
-          "context": 204800,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "MiniMax-M3": {
-        "limit": {
-          "context": 1048576,
-          "output": 512000
-        },
-        "reasoning": true,
         "modalities": {
           "input": [
             "text",
-            "image",
-            "video"
-          ]
-        }
-      },
-      "MiniMax-M2.5": {
-        "limit": {
-          "context": 204800,
-          "output": 131072
-        },
-        "reasoning": true,
-        "modalities": {
-          "input": [
-            "text"
+            "image"
           ]
         }
       }
