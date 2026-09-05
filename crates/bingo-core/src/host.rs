@@ -51,8 +51,8 @@ pub struct HostConfig {
     pub env: Env,
     /// How deep a chain of sub-sessions may go; 1 = one level below a root.
     pub max_child_depth: u32,
-    /// Live children one session may have.
-    pub max_children: usize,
+    /// Live children one session may have; `None` places no bound.
+    pub max_children: Option<usize>,
 }
 
 impl HostConfig {
@@ -63,7 +63,7 @@ impl HostConfig {
             budget: TurnBudget::default(),
             env,
             max_child_depth: 1,
-            max_children: 20,
+            max_children: None,
         }
     }
 
@@ -420,15 +420,18 @@ impl Host {
                 ),
             ));
         }
+        let Some(max) = self.config.max_children else {
+            return Ok(());
+        };
         let children = self
             .lock()
             .values()
             .filter(|l| l.parent.as_ref() == Some(parent))
             .count();
-        if children >= self.config.max_children {
+        if children >= max {
             return Err(KernelError::new(
                 ErrorCode::InvalidInput,
-                format!("sub-session limit {} reached", self.config.max_children),
+                format!("sub-session limit {max} reached"),
             ));
         }
         Ok(())
