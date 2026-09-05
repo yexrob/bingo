@@ -551,7 +551,7 @@ impl Host {
             self.check_parent_limits(&parent.session)?;
         }
         self.check_key_free(spec.key.as_deref())?;
-        let thinking = self.settings.kernel.thinking;
+        let (spec, thinking) = self.inherited(spec);
         let choice = self.model_for(&spec, thinking).await?;
         let summary = turn::runs_on(self.summarize(&spec), choice.as_ref());
         if let Some(store) = &self.registry.store {
@@ -570,6 +570,24 @@ impl Host {
             summary: Box::new(summary),
         });
         Ok(live.mailbox)
+    }
+
+    /// What a child is opened with where its spec says nothing: its parent's
+    /// provider, model and effort as they stand now — `/model` and `/think`
+    /// on the parent included — rather than the host's defaults, which are
+    /// what the parent was opened on and may have left since. A spec without
+    /// a live parent keeps the defaults.
+    fn inherited(&self, mut spec: SessionSpec) -> (SessionSpec, Option<Effort>) {
+        let parent = spec
+            .parent
+            .as_ref()
+            .and_then(|link| self.live(&link.session).ok());
+        let Some(parent) = parent else {
+            return (spec, self.settings.kernel.thinking);
+        };
+        spec.provider = spec.provider.or_else(|| parent.spec.provider.clone());
+        spec.model = spec.model.or_else(|| parent.spec.model.clone());
+        (spec, parent.thinking)
     }
 
     /// Re-choose the model for a live session and hand the actor the config

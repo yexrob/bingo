@@ -282,3 +282,48 @@ async fn deleting_the_root_deletes_its_children_first() {
         Some(ErrorCode::SessionNotFound)
     );
 }
+
+/// A child opened without a model of its own runs on what its parent runs on
+/// *now*: `/model` and `/think` on the parent moved it off the host's
+/// defaults, and a sub-agent spawned afterwards is the parent's hand, not a
+/// fresh start on the settings file.
+#[tokio::test]
+async fn a_child_inherits_the_model_and_effort_its_parent_stands_on() {
+    let (host, _provider) = host_with(vec![]).await;
+    let root = host
+        .open(create("/work", None), who(), OpenOptions::default())
+        .await
+        .unwrap();
+    host.reconfigure(
+        &root.session,
+        Change::Model {
+            provider: None,
+            model: "m-later".into(),
+        },
+    )
+    .await
+    .unwrap();
+    host.reconfigure(&root.session, Change::Thinking(Some(Effort::Low)))
+        .await
+        .unwrap();
+
+    let child = host
+        .open(
+            create("/work", Some(under(&root.session))),
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    let summary = host.session_summary(&child.session).await.unwrap();
+    assert_eq!(
+        summary.model.as_deref(),
+        Some("m-later"),
+        "the parent's model"
+    );
+    assert_eq!(
+        host.session_thinking(&child.session).unwrap(),
+        Some(Effort::Low),
+        "and the parent's effort"
+    );
+}
