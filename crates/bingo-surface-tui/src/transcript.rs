@@ -564,82 +564,66 @@ fn cooling(back: usize, age: f32) -> Style {
     theme::comet((age + behind).min(1.0))
 }
 
-/// A thought is readable where it happened, and while it is being had: the
-/// row says `✻ Thinking…` over the newest two rows of what has arrived, then
-/// closes to `✻ Thought for 2s` alone.
+/// A thought is readable where it happened, and while it is being had: `✻
+/// Thinking…` over the newest [`THOUGHT_ROWS`] rows of what has arrived so
+/// far, and once it is over `✻ Thought for 2s` over the very same rows.
 ///
-/// One match on one fact — whether the thinking is over — because that is the
-/// only thing the two halves differ by.
+/// The heading is the whole of what the close changes (2026-09-06,
+/// user-directed). The transcript is anchored at its foot, so a thought that
+/// gave its rows back when it ended dropped the conversation above it by two
+/// at the one moment a person was reading it. One body, then, and one match —
+/// on the one fact the two halves differ by.
 fn thinking(item: &Item, fold: Fold, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    match item.completed_at {
-        None => still_thinking(item, fold, rows),
-        Some(end) => thought_for(item, end, fold, rows),
-    }
-}
-
-/// A thought as it is being had: the row, and under it the newest
-/// [`THOUGHT_ROWS`] of what has been thought so far — dim under the same `⎿`
-/// a running tool's tail hangs from (§6), scrolling up as the deltas arrive.
-///
-/// They wear no comet tail. The comet is `presence`'s glow on words being said
-/// (§6 "streaming"), and thinking is where `dim` lives (§4): a second warm
-/// light beside the sparkle would put motion on the one thing a person is
-/// meant to read past.
-fn still_thinking(item: &Item, fold: Fold, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let mut out = vec![sparkled(
-        format!("Thinking{}", theme::ellipsis()),
-        theme::dim().patch(theme::italic()),
-    )];
+    let mut out = vec![match item.completed_at {
+        None => still_thinking(),
+        Some(end) => thought_for(item, end),
+    }];
     if let Some(text) = thought(item) {
-        out.extend(returns(streaming(text, fold, rows.result_width()), rows));
+        out.extend(returns(thought_rows(text, fold, rows.result_width()), rows));
     }
     out
 }
 
-/// What is under a thought still being had: the newest rows of it, which is
-/// the only cut that can follow something that grows from the bottom; the
-/// whole of it where a person opened it; nothing where they shut it.
+/// The row of a thought as it is being had: dim italic, and the ellipsis
+/// breathing with the rest of the surface.
+fn still_thinking() -> Line<'static> {
+    sparkled(
+        format!("Thinking{}", theme::ellipsis()),
+        theme::dim().patch(theme::italic()),
+    )
+}
+
+/// The row of a thought that is over: how long it took.
+fn thought_for(item: &Item, end: jiff::Timestamp) -> Line<'static> {
+    sparkled(
+        format!("Thought for {}", took(end.duration_since(item.started_at))),
+        theme::dim(),
+    )
+}
+
+/// What hangs under a thought's row, dim under the same `⎿` a running tool's
+/// tail hangs from (§6): the newest rows of what has been thought, which is
+/// the only cut that can follow something growing from the bottom; the whole
+/// of it where a person opened it; nothing where a click has gone round to its
+/// shut.
 ///
-/// It carries no `… +N lines`: the count would change under the reader on
-/// every delta, and a tail is not a promise that the rest is reachable — that
-/// is what the row a thought decays to is for.
+/// The same rows on either side of the close, which is what holding where it
+/// ended means. They wear no comet — the comet is `presence`'s glow on words
+/// being *said* (§6 "streaming"), and thinking is where `dim` lives (§4) — and
+/// no `… +N lines`: while the thought streams the count would change under the
+/// reader on every delta, and at the close the mark would spend the very row
+/// the hold is there to keep. What was cut is one click away, which is what
+/// the ring is for.
 ///
 /// `width` is the measure the `⎿` body is wrapped at, so the tail is cut at
 /// the width it is drawn at and the block is [`THOUGHT_ROWS`] rows tall
 /// whatever the prose does.
-fn streaming(text: &str, fold: Fold, width: usize) -> Vec<Line<'static>> {
+fn thought_rows(text: &str, fold: Fold, width: usize) -> Vec<Line<'static>> {
     match fold {
         Fold::Shut => Vec::new(),
         Fold::Peek => tail(text, THOUGHT_ROWS, width),
         Fold::Open => plain(text),
     }
-}
-
-/// A thought that is over: how long it took, and — where a person has asked
-/// for it — what was thought, dim under the `⎿`.
-///
-/// The row is alone by default. A finished thought is working, not an answer:
-/// it is read past, and the rows it would spend belong to what came of it. The
-/// text is one click or one `ctrl+o` away, and the peek starts at the *top*,
-/// because somebody opening a finished thought is reading it from the
-/// beginning rather than watching it move.
-fn thought_for(
-    item: &Item,
-    end: jiff::Timestamp,
-    fold: Fold,
-    rows: &Rows<'_>,
-) -> Vec<Line<'static>> {
-    let mut out = vec![sparkled(
-        format!("Thought for {}", took(end.duration_since(item.started_at))),
-        theme::dim(),
-    )];
-    if let Some(text) = thought(item) {
-        out.extend(returns(
-            kept(plain(text), fold, THOUGHT_ROWS, Some(EXPAND)),
-            rows,
-        ));
-    }
-    out
 }
 
 /// The `✻` and what it says beside it.
@@ -1496,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_streams_and_then_closes_to_the_row_alone() {
+    fn thinking_streams_and_then_holds_the_rows_it_streamed() {
         assert_eq!(
             drawn(vec![thinking_item("the manifest")]),
             vec!["✻ Thinking…".to_string(), "  ⎿  the manifest".to_string()],
@@ -1504,9 +1488,41 @@ mod tests {
         );
         assert_eq!(
             drawn(vec![thought_item("The manifest first.", 2)]),
-            vec!["✻ Thought for 2s".to_string()],
-            "and once it is over it closes: the text is a click away, not a row"
+            vec![
+                "✻ Thought for 2s".to_string(),
+                "  ⎿  The manifest first.".to_string(),
+            ],
+            "and once it is over it holds: the heading's words are the whole of the change"
         );
+    }
+
+    /// The close moves nothing (2026-09-06, user-directed): a thought that is
+    /// over holds the rows it held on its last delta, so the heading's words
+    /// are the whole of what changes and the conversation above it stays where
+    /// it was. Three shapes of text, because the cut is a tail measured in
+    /// rows and each of them wraps to those rows differently.
+    #[test]
+    fn a_thought_that_closes_holds_the_rows_it_was_streaming() {
+        let paragraph = "The manifest first, because the lockfile only says what the \
+                         manifest already asked for, and then the crate map, which is \
+                         the one place the whole of the layering is written down.";
+        let broken = "The manifest first.\n\nThen the crate map, which is the one place \
+                      the layering is written down.\n\nThe plan after that: it says \
+                      which of the two is allowed to move.";
+        for text in ["the manifest", paragraph, broken] {
+            let streaming = drawn(vec![thinking_item(text)]);
+            let over = drawn(vec![thought_item(text, 2)]);
+            assert_eq!(
+                streaming.len(),
+                over.len(),
+                "the block keeps its height: {streaming:?} / {over:?}"
+            );
+            assert_eq!(
+                streaming[1..],
+                over[1..],
+                "and every row under the heading: {streaming:?} / {over:?}"
+            );
+        }
     }
 
     /// Two rows, the newest of what has arrived — the same tail a running tool
@@ -1593,10 +1609,11 @@ mod tests {
             .collect()
     }
 
-    /// The three states a thought that is over has, which is the whole of what
-    /// a click on one walks (§7). It is the one block with a shut.
+    /// The three states a thought that is over has, in the order a click walks
+    /// them (§7). It is the one block with a shut, and the shut is on the far
+    /// side of the whole rather than where the thought was met.
     #[test]
-    fn a_finished_thought_is_shut_then_peeks_from_the_top_then_opens_whole() {
+    fn a_finished_thought_holds_its_tail_then_opens_whole_then_shuts() {
         let text: String = (1..=9).map(|i| format!("step {i}\n")).collect();
         let state = folded(vec![frame(
             1,
@@ -1608,20 +1625,23 @@ mod tests {
             let folds: Folds = [(ItemId::from_raw("itm_1"), fold)].into_iter().collect();
             rendered_with(&state, &folds, &[])
         };
-        assert_eq!(at(Fold::Shut), vec!["✻ Thought for 3s".to_string()]);
         assert_eq!(
             at(Fold::Peek),
             vec![
                 "✻ Thought for 3s".to_string(),
-                "  ⎿  step 1".to_string(),
-                "     step 2".to_string(),
-                "     … +7 lines (ctrl+o to expand)".to_string(),
+                "  ⎿  step 8".to_string(),
+                "     step 9".to_string(),
             ],
-            "the peek reads from the top: nothing is moving to follow"
+            "the hold is the tail it ended on, and it promises nothing"
         );
         let open = at(Fold::Open);
         assert_eq!(open.len(), 10, "the row and every step: {open:?}");
         assert_eq!(open.last().map(String::as_str), Some("     step 9"));
+        assert_eq!(
+            at(Fold::Shut),
+            vec!["✻ Thought for 3s".to_string()],
+            "and one more click puts the thought away"
+        );
     }
 
     /// Nothing thought yet, and nothing to fold: the row alone, as an empty
@@ -1686,7 +1706,10 @@ mod tests {
     fn a_thought_without_the_mark_is_untouched() {
         assert_eq!(
             drawn(vec![thought_item("The manifest first.", 2)]),
-            vec!["✻ Thought for 2s".to_string()],
+            vec![
+                "✻ Thought for 2s".to_string(),
+                "  ⎿  The manifest first.".to_string(),
+            ],
         );
         assert_eq!(
             drawn(vec![agent_call(
@@ -1694,7 +1717,10 @@ mod tests {
                 "The manifest first.",
                 serde_json::json!({ "title": "not a call" }),
             )]),
-            vec!["✻ Thought for 1s".to_string()],
+            vec![
+                "✻ Thought for 1s".to_string(),
+                "  ⎿  The manifest first.".to_string(),
+            ],
             "a namespace without the flag is somebody's private note, not a call"
         );
     }
@@ -1750,14 +1776,19 @@ mod tests {
         assert_eq!(took(jiff::SignedDuration::from_secs(-1)), "<1s");
     }
 
-    /// However long a thought was, the row a person meets is the same one row
-    /// — a five-row cut of somebody else's working is what it stopped being.
+    /// However long a thought was, what a person meets is the row and the two
+    /// rows it ended on — the rows it was already wearing, and never the
+    /// five-row cut of somebody else's working it stopped being.
     #[test]
-    fn a_long_thought_costs_the_transcript_one_row() {
+    fn a_long_thought_holds_the_two_rows_it_ended_on() {
         let text: String = (1..=99).map(|i| format!("step {i}\n")).collect();
         assert_eq!(
             drawn(vec![thought_item(&text, 3)]),
-            vec!["✻ Thought for 3s".to_string()],
+            vec![
+                "✻ Thought for 3s".to_string(),
+                "  ⎿  step 98".to_string(),
+                "     step 99".to_string(),
+            ],
         );
     }
 

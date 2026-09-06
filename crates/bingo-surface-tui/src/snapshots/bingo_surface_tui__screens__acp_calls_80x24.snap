@@ -2,11 +2,11 @@
 source: crates/bingo-surface-tui/src/screens.rs
 expression: "draw_tree(80, 24, tree, ui, now)"
 ---
-"╰──────────────────────────────────────────────────────────────────────────────╯"
 "                                                                                "
 "> rename the wire module                                                        "
 "                                                                                "
 "✻ Thought for 1s                                                                "
+"  ⎿  the import list moves too                                                  "
 "                                                                                "
 "⏺ Read(src/lib.rs)                                                              "
 "  ⎿  pub mod wire;                                                              "

@@ -76,14 +76,15 @@ fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect>
     Vec::new()
 }
 
-/// A click on a block walks its fold one step and comes back to where its kind
-/// starts (§7). A *key* never means two directions (§7, M11e); a click on the
-/// same row is one gesture, and one gesture may go round.
+/// A click on a block walks its fold one step and comes back round to the peek
+/// its kind starts at (§7). A *key* never means two directions (§7, M11e); a
+/// click on the same row is one gesture, and one gesture may go round.
 ///
-/// A result, a notice and an action have the two states they always had — open
-/// and their five-row cut — because that cut is where they start. A thought
-/// that is over starts shut, so the same walk gives it three: shut, its first
-/// two rows, the whole of it. Only a thought has a state worth skipping past.
+/// A result, a notice and an action have the two states they always had — their
+/// five-row cut and the whole of it. A thought that is over has three, and the
+/// third is on the far side of the whole: the two rows it ended on, all of it,
+/// then the row alone. Only a thought is worth putting away, and putting it
+/// away is asked for rather than arrived at.
 ///
 /// It writes the map `ctrl+o` writes, so a block is open in one way only.
 fn cycle_fold(ui: &mut Ui, state: &SessionState, id: &bingo_sdk::ItemId) {

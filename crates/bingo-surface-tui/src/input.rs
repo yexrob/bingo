@@ -248,17 +248,19 @@ pub(crate) fn item_of<'a>(
     state.items.iter().find(|item| &item.id == id)
 }
 
-/// What `ctrl+o` opens further: a block whose row wears
-/// `… +N lines (ctrl+o to expand)` — a call that came back, a thought that was
-/// not redacted, an action's own result. A quiet notice is deliberately not
-/// one: its cut promises no key (M11's rule, 2026-09-01), and a click is what
-/// opens it.
+/// What `ctrl+o` opens further: a block that is keeping something back — a
+/// call that came back, a thought that was not redacted, an action's own
+/// result. Most of them say so on the row, with `… +N lines (ctrl+o to
+/// expand)`; a thought that is over holds the rows it ended on and says
+/// nothing, because the mark would cost it the row it is holding
+/// (2026-09-06). A quiet notice is deliberately not one either: its cut
+/// promises no key (M11's rule, 2026-09-01), and a click is what opens it.
 fn folds(item: &bingo_sdk::Item) -> bool {
     match &item.body {
         bingo_sdk::ItemBody::ToolCall { output, .. } => output.is_some(),
         // Only once the thinking is over, as a call folds only once it has
-        // come back: while it is being had the row wears the same three tail
-        // rows a running tool does, which cut nothing and promise no key.
+        // come back: while it is being had the rows under the row are the tail
+        // a running tool wears, which cuts nothing and promises no key.
         bingo_sdk::ItemBody::Reasoning { .. } => {
             item.completed_at.is_some() && crate::transcript::thought(item).is_some()
         }
@@ -2431,27 +2433,25 @@ mod tests {
         (1..=9).map(|i| format!("step {i}\n")).collect()
     }
 
-    /// `ctrl+o` only ever opens further (§7), and a thought has one rung more
-    /// than a result because it starts one lower: shut, its first two rows,
-    /// the whole of it, the sheet. `esc` out of the sheet puts it back where
-    /// its kind starts.
+    /// `ctrl+o` only ever opens further (§7): a thought that is over holds the
+    /// two rows it ended on, and from there the whole of it and then the
+    /// sheet. `esc` out of the sheet puts it back where its kind starts.
     #[test]
-    fn ctrl_o_climbs_a_thought_from_shut_through_peek_and_whole_to_the_sheet() {
+    fn ctrl_o_climbs_a_thought_from_its_hold_through_the_whole_to_the_sheet() {
         let state = thought(&steps());
         let (mut ui, now) = scene();
-        let shut = render(&state, &ui, now);
-        assert!(shut.contains("Thought for 2s"), "{shut}");
-        assert!(!shut.contains("step 1"), "it starts shut: {shut}");
-
-        press(&mut ui, &state, ctrl('o'), now);
-        let peek = render(&state, &ui, now);
-        assert!(peek.contains("step 2"), "{peek}");
-        assert!(!peek.contains("step 3"), "two rows, from the top: {peek}");
-        assert!(peek.contains("+7 lines (ctrl+o to expand)"), "{peek}");
+        let held = render(&state, &ui, now);
+        assert!(held.contains("Thought for 2s"), "{held}");
+        assert!(held.contains("step 9"), "it holds where it ended: {held}");
+        assert!(!held.contains("step 7"), "two rows of it: {held}");
+        assert!(
+            !held.contains("ctrl+o to expand"),
+            "and no cut mark: {held}"
+        );
 
         press(&mut ui, &state, ctrl('o'), now);
         let opened = render(&state, &ui, now);
-        assert!(opened.contains("step 9"), "{opened}");
+        assert!(opened.contains("step 1"), "{opened}");
 
         press(&mut ui, &state, ctrl('o'), now);
         assert!(
@@ -2460,36 +2460,40 @@ mod tests {
         );
 
         press(&mut ui, &state, key(KeyCode::Esc), now);
-        assert!(ui.folds.is_empty(), "and esc folds it back to shut");
+        assert!(ui.folds.is_empty(), "and esc folds it back to the hold");
     }
 
     /// A click walks the same rungs and comes back round (§7): a thought that
-    /// is over is the one block with three states, because it is the one with
-    /// a state a person wants to skip.
+    /// is over is the one block with three states, because it is the one whose
+    /// working a person may want put away — and putting it away is on the far
+    /// side of the whole, never where the thought was met.
     #[test]
     fn a_click_cycles_a_finished_thought_through_its_three_states() {
         let state = thought(&steps());
         let tree = solo(&state);
         let (mut ui, now) = scene();
-        assert!(!render(&state, &ui, now).contains("step 1"), "shut");
-
-        let row = last_row(&ui);
-        on_mouse(&mut ui, &tree, click(6, row), now);
-        let peek = render(&state, &ui, now);
-        assert!(peek.contains("step 1") && peek.contains("step 2"), "{peek}");
-        assert!(!peek.contains("step 3"), "the peek is two rows: {peek}");
+        let held = render(&state, &ui, now);
+        assert!(
+            held.contains("step 9") && !held.contains("step 7"),
+            "{held}"
+        );
 
         let row = last_row(&ui);
         on_mouse(&mut ui, &tree, click(6, row), now);
         let opened = render(&state, &ui, now);
-        assert!(opened.contains("step 9"), "{opened}");
+        assert!(opened.contains("step 1"), "{opened}");
         assert!(!opened.contains("+7 lines"), "{opened}");
 
         let row = last_row(&ui);
         on_mouse(&mut ui, &tree, click(6, row), now);
+        let shut = render(&state, &ui, now);
+        assert!(!shut.contains("step 9"), "the row alone: {shut}");
+
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
         assert!(
-            !render(&state, &ui, now).contains("step 1"),
-            "the third click is back where the first started"
+            render(&state, &ui, now).contains("step 9"),
+            "and the fourth click is back where the first started"
         );
     }
 

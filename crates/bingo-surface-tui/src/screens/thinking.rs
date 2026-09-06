@@ -33,8 +33,11 @@ fn being_thought(id: &str, text: &str) -> bingo_sdk::Item {
     )
 }
 
+/// A thought in the flow of a turn: asked, thought, answered. Short enough to
+/// hold one row, and it holds it — the answer under it sits where it sat while
+/// the thinking was still going on.
 #[test]
-fn thinking_and_its_decay() {
+fn a_thought_between_a_question_and_its_answer() {
     let state = folded(vec![
         item(1, user("itm_1", "what is in this workspace?")),
         item(2, thought("itm_2", "The manifest first.", 2)),
@@ -54,23 +57,46 @@ fn thinking_and_its_decay() {
 /// (§4).
 #[test]
 fn a_thought_being_had_streams_under_its_own_row() {
-    let text = "The manifest first, because the lockfile only says what the manifest \
-                already asked for.\n\
-                Then the crate map, which is the one place the layering is written down.\n\
-                The plan after that: it says which of the two is allowed to move.\n\
-                Only then the code, and only the";
     let state = folded(vec![
         frame(1, started("trn_1")),
         item(2, user("itm_1", "what is in this workspace?")),
         frame(
             3,
             Event::ItemStarted {
-                item: being_thought("itm_2", text),
+                item: being_thought("itm_2", AS_FAR_AS_IT_GOT),
             },
         ),
     ]);
     let (ui, now) = mid_turn();
     both("reasoning_streaming", &solo(&state), &ui, now);
+}
+
+/// A thought as the deltas have left it, cut off mid-sentence where the model
+/// happened to be. The two scenes above and below share it, so the one thing
+/// their snapshots may differ by is what the close is allowed to change.
+const AS_FAR_AS_IT_GOT: &str = "The manifest first, because the lockfile only says what \
+                                the manifest already asked for.\n\
+                                Then the crate map, which is the one place the layering \
+                                is written down.\n\
+                                The plan after that: it says which of the two is allowed \
+                                to move.\n\
+                                Only then the code, and only the";
+
+/// The same thought one frame later (2026-09-06, user-directed: 默认思考完不要
+/// 闭合吧 就保持住 不然还是会在闭合的时候布局变化). The thinking is over, the
+/// heading says how long it took, and the two rows under it are the two rows
+/// it was already wearing — so the block keeps its height and the conversation
+/// above it does not move. Read against `reasoning_streaming_*`: the heading
+/// is the only row that differs.
+#[test]
+fn a_finished_thought_holds_the_rows_it_ended_on() {
+    let state = folded(vec![
+        frame(1, started("trn_1")),
+        item(2, user("itm_1", "what is in this workspace?")),
+        item(3, thought("itm_2", AS_FAR_AS_IT_GOT, 1)),
+    ]);
+    let (ui, now) = mid_turn();
+    both("reasoning_held", &solo(&state), &ui, now);
 }
 
 /// The same thought written as models write them: one paragraph, no newline
@@ -118,30 +144,16 @@ fn the_thought() -> bingo_sdk::ItemId {
     bingo_sdk::ItemId::from_raw("itm_2")
 }
 
-/// What a person meets (2026-09-02, later still, user-directed): the row
-/// alone. A thought is working, and the rows under it belong to what came of
-/// it — the five a fold used to keep, and the line counting the rest, were six
-/// rows of the model's notes standing between the question and the answer.
+/// One click past the whole of it, which is where the ring reaches the shut
+/// (§7): the row alone. A thought is the one block worth putting away — it is
+/// working, not an answer — and putting it away is asked for rather than met
+/// on arrival, because arriving at it is what moved the layout.
 #[test]
-fn a_finished_thought_closes_to_its_own_row() {
-    let (ui, now) = scene();
-    both(
-        "reasoning_closed",
-        &solo(&a_thought_worth_reading()),
-        &ui,
-        now,
-    );
-}
-
-/// One click, or one `ctrl+o`: the first two rows of it, from the top —
-/// nothing is moving, so there is no newest end to follow — under the same
-/// `… +N lines (ctrl+o to expand)` every other cut wears.
-#[test]
-fn a_finished_thought_peeks_at_its_first_rows() {
+fn a_finished_thought_shuts_where_the_ring_comes_round() {
     let (mut ui, now) = scene();
-    ui.folds.insert(the_thought(), Fold::Peek);
+    ui.folds.insert(the_thought(), Fold::Shut);
     both(
-        "reasoning_peek",
+        "reasoning_shut",
         &solo(&a_thought_worth_reading()),
         &ui,
         now,
