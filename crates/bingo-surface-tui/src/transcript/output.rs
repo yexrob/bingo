@@ -22,8 +22,20 @@ use crate::{theme, views, wrap};
 /// `keep` logical lines are wrapped: each holds at least one row, so `keep` of
 /// them always hold the `keep` rows the cut needs, and the work per delta stays
 /// with the tail instead of the whole text.
+///
+/// Blank lines are left out before that cut, because a tail is the newest of
+/// what has *arrived* and a paragraph break is not something that arrived: a
+/// thought of three paragraphs whose last was one short sentence held its `⎿`
+/// on the break with the sentence under it, the connector pointing at an empty
+/// row for the rest of the session (2026-09-06, the hands-on drive). A line
+/// with text on it wraps to rows that carry that text, so the tail is `keep`
+/// rows of text wherever the arriving text has `keep` non-blank lines to give,
+/// and shorter only where it has fewer.
 pub(super) fn tail(arriving: &str, keep: usize, width: usize) -> Vec<Line<'static>> {
-    let lines: Vec<&str> = arriving.trim_end().lines().collect();
+    let lines: Vec<&str> = arriving
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     let last = lines[lines.len().saturating_sub(keep)..].join("\n");
     let mut rows = wrap::wrap_all(&plain(&last), width);
     rows.split_off(rows.len().saturating_sub(keep))
@@ -168,13 +180,37 @@ mod tests {
         assert!(paragraph.ends_with(&drawn.concat()), "{drawn:?}");
     }
 
-    /// A blank line is a row like any other: crossing a paragraph break keeps
-    /// the count where it was, which is the whole point of counting rows.
+    /// Crossing a paragraph break keeps the count where it was, which is the
+    /// whole point of counting rows.
     #[test]
     fn a_paragraph_break_does_not_shrink_the_count() {
         let across = format!("{PARAGRAPH}\n\nThen the plan.");
         assert_eq!(tail(&across, 2, 40).len(), 2);
         assert_eq!(rows(&tail(&across, 2, 40))[1], "Then the plan.");
+    }
+
+    /// The shape the hands-on drive caught (2026-09-06): three paragraphs whose
+    /// last is one short sentence. The break above the sentence was a row of
+    /// the tail, so the `⎿` hung on nothing for the rest of the session; the
+    /// tail is the end of the paragraph over the sentence.
+    #[test]
+    fn a_break_above_the_last_sentence_is_not_a_row_of_the_tail() {
+        let drive = format!("{PARAGRAPH}\n\nSo: manifest, map, plan.");
+        let whole = wrap::wrap_all(&plain(PARAGRAPH), 40);
+        assert_eq!(
+            rows(&tail(&drive, 2, 40)),
+            vec![
+                whole[whole.len() - 1].to_string(),
+                "So: manifest, map, plan.".to_string(),
+            ],
+        );
+    }
+
+    /// A text that ends on a blank line has arrived as far as the line before
+    /// it: the tail is the rows that carry text, not the emptiness after them.
+    #[test]
+    fn a_text_that_ends_blank_tails_to_the_rows_before_the_blank() {
+        assert_eq!(rows(&tail("one\ntwo\n\n", 2, 40)), vec!["one", "two"]);
     }
 
     /// `transcript::under` wraps the tail again at the same width when it

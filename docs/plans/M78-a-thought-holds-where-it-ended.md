@@ -92,3 +92,21 @@ new, `reasoning_{closed,peek}_*` deleted, `thinking_*` updated,
   and it is still reached by the ring. Nothing is deleted from them.
 - A transcript now carries three rows per thought for the life of the
   session instead of one; the user chose stability over the row.
+
+## Addendum (2026-09-06, after the hands-on drive)
+
+Driving a real `bingo` with a fake-provider thought of three paragraphs
+whose last is one short sentence, the held block came out as `⎿` over an
+empty row with the sentence under it: the last two *rows* of the wrapped
+text were the paragraph break and the sentence, so the connector pointed
+at nothing for the rest of the session. A tail is the newest of what has
+arrived and a blank row is not something that arrived, so `output::tail`
+leaves blank logical lines out before the cut — the last `keep`
+**non-blank** lines, wrapped to the width, and the last `keep` rows of
+that, which is `keep` rows of text wherever the text has that many lines
+to give. Two tests in `output.rs` pin it: the drive's own shape tails to
+the paragraph's last row over the sentence — it failed before the change
+with `["", "So: manifest, map, plan."]`, the screen the drive showed —
+and a text that ends on a blank line tails to the rows before it. The
+M77 stability sweep and the M78 close pins pass untouched, and no
+snapshot moved.
