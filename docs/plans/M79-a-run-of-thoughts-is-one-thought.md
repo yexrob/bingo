@@ -102,3 +102,36 @@ four new snapshots, `docs/design/tui.md`.
 - `Revision` equality is what stops a terminal block from being redrawn;
   `last` in it is what makes a former last draw again as nothing. A test
   pins that the old block goes and no gap is left.
+
+## Verified
+
+2026-09-06, dev `72a22fc3` (opus-xhigh worker in `.claude/worktrees/m79`,
+merged fast-forward as `4a446d2f` + `39b3221b`; the 0.5.4 bump follows).
+Exit criterion 1 ran red before the change (two thoughts drew two blocks
+with a gap, a running third drew three, `70s` stood where `3m 21s` was
+expected) and green after; the click, `ctrl+o` and sheet tests, the
+`blocks` test that a joined thought gives its slot back with no stray
+gap, and seven `thoughts` unit tests pass. Snapshots: `reasoning_run_*`
+and `reasoning_run_streaming_*` new at both sizes, nothing else changed.
+Beyond the plan: the thought's rows moved to `transcript/thinking.rs`
+(`transcript.rs` would have passed the 1000-line fail line), `deepen`
+walks past a run still being had, and `pager::lines` takes the state.
+Gates on dev after the merge and the bump:
+
+```text
+== fmt / check / clippy (-D warnings)   exit 0
+== test       86 suites, 4241 passed, 0 failed, 2 ignored (--no-fail-fast)
+== discipline discipline ok (pre-existing warns only)
+== budget     budget ok — dependencies unchanged (334)
+== deny       advisories ok, bans ok, licenses ok, sources ok
+== smoke      tui-smoke ok
+```
+
+Hands-on, harness-owned `tmux -L fable-m79` at 80×24, three `reasoning`
+steps with 1.5 s delays then the answer, 90 captures at 100 ms: every
+capture with a thought on it has exactly one `✻ Thought`/`✻ Thinking`
+row, two rows of the joined text under it, through the run and after
+the answer. The worker's own drive read the same. The summed heading is
+pinned by the unit tests and the `reasoning_run` snapshots (`1m 21s`);
+the fake closes each block within a millisecond, so a live drive reads
+`<1s`. Not exercised live: the endpoint that produced the ten items.
