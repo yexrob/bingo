@@ -9,7 +9,7 @@
 //! from the item every frame, so a block that is still arriving grows under the
 //! sheet rather than being copied into it.
 
-use bingo_sdk::{Item, ItemBody, ItemId};
+use bingo_sdk::{Item, ItemBody, ItemId, SessionState};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::text::{Line, Span};
 
@@ -18,7 +18,7 @@ use crate::effect::Effect;
 use crate::search::Search;
 use crate::tree::Tree;
 use crate::ui::{Open, Ui};
-use crate::{acp, markdown, search, theme, transcript, wrap};
+use crate::{acp, markdown, search, theme, thoughts, transcript, wrap};
 
 /// The rows the sheet spends on itself: what it is, and the air under it.
 pub const HEAD: usize = 2;
@@ -94,10 +94,14 @@ impl Window {
 /// Everything an item says, with nothing folded away — and nothing at all for
 /// one a transcript row already shows whole, which is what says `⏎` does not
 /// open it.
-pub fn lines(item: &Item, width: usize) -> Vec<Line<'static>> {
+///
+/// The state is here for the one block that is more than its own item: a run
+/// of thoughts draws as one and opens as one (M79), so the sheet is of the
+/// run and not of the thought whose row it was reached from.
+pub fn lines(state: &SessionState, item: &Item, width: usize) -> Vec<Line<'static>> {
     let body = match &item.body {
         ItemBody::Assistant { text } => markdown::render(text, width),
-        ItemBody::Reasoning { .. } => reasoning(item, width),
+        ItemBody::Reasoning { .. } => reasoning(state, item, width),
         ItemBody::ToolCall {
             output: Some(output),
             ..
@@ -109,19 +113,22 @@ pub fn lines(item: &Item, width: usize) -> Vec<Line<'static>> {
 }
 
 /// What a reasoning item opens on: what came back from one of the agent's own
-/// calls (ADR-0035 §4), else what was thought. A thought that came back empty
-/// is a row and nothing else, and so is a call that said nothing — `⏎` on
-/// either opens no sheet.
-fn reasoning(item: &Item, width: usize) -> Vec<Line<'static>> {
+/// calls (ADR-0035 §4), else what the run it belongs to thought — every
+/// thought of it, as the block a person clicked showed them all together. A
+/// thought that came back empty is a row and nothing else, and so is a call
+/// that said nothing — `⏎` on either opens no sheet.
+fn reasoning(state: &SessionState, item: &Item, width: usize) -> Vec<Line<'static>> {
     if let Some(call) = acp::call(item) {
         return call
             .output
             .map(|output| transcript::whole(&output, width))
             .unwrap_or_default();
     }
-    transcript::thought(item)
-        .map(|text| markdown::render(text, width))
-        .unwrap_or_default()
+    let text = thoughts::text(&thoughts::run_of(state, &item.id));
+    match text.is_empty() {
+        true => Vec::new(),
+        false => markdown::render(&text, width),
+    }
 }
 
 /// What the sheet is of, on its first row.
@@ -180,9 +187,10 @@ fn head(title: &str, searching: Option<&Search>) -> Line<'static> {
 /// for a row that already shows everything it has.
 pub fn open_block(ui: &mut Ui, tree: &Tree, now: Now, focused: Option<&ItemId>) -> bool {
     let width = width_of(ui);
-    let Some(id) = crate::input::latest(tree.viewed(), focused, |item| {
-        !lines(item, width).is_empty()
-    }) else {
+    let state = tree.viewed();
+    let Some(id) =
+        crate::input::latest(state, focused, |item| !lines(state, item, width).is_empty())
+    else {
         return false;
     };
     ui.layer.show(Open::Pager(Pager::open(id)), now.instant);
@@ -209,11 +217,12 @@ fn content_of(ui: &Ui, tree: &Tree) -> Vec<Line<'static>> {
         return Vec::new();
     };
     let width = width_of(ui);
-    tree.viewed()
+    let state = tree.viewed();
+    state
         .items
         .iter()
         .find(|item| item.id == open.item)
-        .map(|item| lines(item, width))
+        .map(|item| lines(state, item, width))
         .unwrap_or_default()
 }
 
@@ -330,6 +339,30 @@ mod tests {
         Pager::open(ItemId::from_raw("itm_1"))
     }
 
+    /// The sheet's content for one block, in a session that holds it: what a
+    /// person sees after `⏎` on its row.
+    fn sheet_of(item: &Item, width: usize) -> Vec<Line<'static>> {
+        opened(vec![item.clone()], &item.id, width)
+    }
+
+    /// The same, out of a session of several items: which of them the sheet is
+    /// of is the id it was opened on.
+    fn opened(items: Vec<Item>, id: &ItemId, width: usize) -> Vec<Line<'static>> {
+        let state = folded(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| frame(i as u64 + 1, bingo_sdk::Event::ItemCompleted { item }))
+                .collect(),
+        );
+        state
+            .items
+            .iter()
+            .find(|item| &item.id == id)
+            .map(|item| lines(&state, item, width))
+            .unwrap_or_default()
+    }
+
     #[test]
     fn a_result_opens_with_every_line_it_folded_away() {
         let output = ToolOutput::text((1..=40).map(|i| format!("line {i}\n")).collect::<String>());
@@ -340,7 +373,7 @@ mod tests {
             Some(output),
             ItemStatus::Completed,
         );
-        let content = lines(&item, 60);
+        let content = sheet_of(&item, 60);
         assert_eq!(content.len(), 40);
         assert_eq!(content[39].to_string(), "line 40");
         assert_eq!(title(&item), "Read(src/lib.rs)");
@@ -357,13 +390,54 @@ mod tests {
             },
         );
         assert_eq!(
-            lines(&item, 60)
+            sheet_of(&item, 60)
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
             vec!["The manifest first, then the lockfile.".to_string()],
         );
         assert_eq!(title(&item), "Thinking");
+    }
+
+    /// A run of thoughts draws as one block (M79), so it opens as one sheet:
+    /// every thought of the run, in order, whichever of them the sheet was
+    /// reached from — and still called `Thinking`, because that is what it is.
+    #[test]
+    fn a_run_of_thoughts_opens_as_the_whole_run() {
+        let run = vec![
+            thought("itm_1", "The manifest first."),
+            thought("itm_2", "Then the crate map."),
+            thought("itm_3", "The plan after that."),
+        ];
+        let shown = |id: &str| -> Vec<String> {
+            opened(run.clone(), &ItemId::from_raw(id), 60)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        assert_eq!(
+            shown("itm_3"),
+            vec![
+                "The manifest first.".to_string(),
+                String::new(),
+                "Then the crate map.".to_string(),
+                String::new(),
+                "The plan after that.".to_string(),
+            ],
+        );
+        assert_eq!(shown("itm_1"), shown("itm_3"), "one run, one sheet");
+        assert_eq!(title(&run[2]), "Thinking");
+    }
+
+    fn thought(id: &str, text: &str) -> Item {
+        item(
+            id,
+            ItemStatus::Completed,
+            ItemBody::Reasoning {
+                text: text.into(),
+                provider_metadata: Default::default(),
+            },
+        )
     }
 
     /// One of the agent's own calls opens on what came back and says which
@@ -387,7 +461,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            lines(&call, 60)
+            sheet_of(&call, 60)
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
@@ -408,7 +482,7 @@ mod tests {
                 "title": "plan", "content": []
             }),
         );
-        assert!(lines(&call, 60).is_empty());
+        assert!(sheet_of(&call, 60).is_empty());
         assert_eq!(title(&call), "Mode(plan)");
     }
 
@@ -428,13 +502,13 @@ mod tests {
         };
         let in_transcript = crate::markdown::render(&table, crate::wrap::measure(160) - 2);
         assert_eq!(widest(&in_transcript), 98, "cut to the measure, with an …");
-        assert_eq!(widest(&lines(&item, 160)), 122, "and whole in the sheet");
+        assert_eq!(widest(&sheet_of(&item, 160)), 122, "and whole in the sheet");
     }
 
     #[test]
     fn a_row_that_already_shows_everything_opens_nothing() {
         let item = user("itm_1", "run the tests");
-        assert!(lines(&item, 60).is_empty());
+        assert!(sheet_of(&item, 60).is_empty());
     }
 
     #[test]

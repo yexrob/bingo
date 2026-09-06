@@ -19,7 +19,7 @@ use crate::fold::{self, Fold, Folds};
 use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, markdown, paths, shells, tasks, theme, wrap};
+use crate::{acp, markdown, paths, shells, tasks, theme, thoughts, wrap};
 
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
@@ -31,10 +31,13 @@ mod output;
 mod pictured;
 /// A shell line the person ran themselves (`!<command>`).
 mod ran;
+/// The rows a thought draws, one of them or a run of them (§4, §6).
+mod thinking;
 
 pub use output::whole;
 use output::{folded, kept, plain, tail};
 pub use ran::whole as shell_whole;
+pub use thinking::thought;
 
 pub(crate) use said::quiet;
 
@@ -256,11 +259,46 @@ impl From<Vec<Line<'static>>> for Block {
     }
 }
 
-/// One item's block. `previous` is the item before it, which a receipt joins;
+/// Where one item sits among the ones around it: everything a block needs of
+/// its neighbours, asked once per item and handed down as one thing.
+#[derive(Debug, Default)]
+pub struct Place<'a> {
+    /// The item before it, which a receipt answers.
+    pub previous: Option<&'a Item>,
+    /// The thoughts adjacent before it ([`crate::thoughts`]), which the last
+    /// of a run draws as its own. Empty for everything that is not a thought.
+    pub run: &'a [Item],
+    /// Whether a newer thought has joined this one: then the run's block hangs
+    /// on that one and this draws nothing at all.
+    pub joined: bool,
+}
+
+impl<'a> Place<'a> {
+    /// Where the item at `at` sits.
+    pub fn of(items: &'a [Item], at: usize) -> Self {
+        let thought = items.get(at).is_some_and(thoughts::is_thought);
+        Self {
+            previous: at.checked_sub(1).and_then(|before| items.get(before)),
+            run: match thought {
+                true => thoughts::run_before(items, at),
+                false => &[],
+            },
+            joined: thought && thoughts::next_is_thought(items, at),
+        }
+    }
+
+    /// The run this item ends, itself last: the thoughts one block draws.
+    fn thoughts<'b>(&'b self, item: &'b Item) -> Vec<&'b Item> {
+        self.run.iter().chain([item]).collect()
+    }
+}
+
+/// One item's block. `place` is where it sits among its neighbours — the item
+/// before it, which a receipt joins, and the run of thoughts it may end;
 /// `agents` the sub-sessions this transcript's calls spawned.
 pub fn item_block(
     item: &Item,
-    previous: Option<&Item>,
+    place: &Place<'_>,
     agents: &Agents<'_>,
     rows: &Rows<'_>,
     cue: Cue,
@@ -270,7 +308,7 @@ pub fn item_block(
     let fold = fold::fold_of(rows.folds, item);
     pictured::under_the_words(
         item,
-        item_lines(item, previous, agents, rows, cue, fold),
+        item_lines(item, place, agents, rows, cue, fold),
         fold,
         rows,
     )
@@ -282,7 +320,7 @@ pub fn item_block(
 /// block rather than lines.
 fn item_lines(
     item: &Item,
-    previous: Option<&Item>,
+    place: &Place<'_>,
     agents: &Agents<'_>,
     rows: &Rows<'_>,
     cue: Cue,
@@ -297,7 +335,7 @@ fn item_lines(
         // thought or a call ([`crate::acp`]).
         ItemBody::Reasoning { .. } => match acp::call(item) {
             Some(call) => agent_call(call, fold, rows, cue),
-            None => thinking(item, fold, rows),
+            None => thinking::lines(item, place, fold, rows),
         }
         .into(),
         ItemBody::ToolCall { .. } => called(item, agents, fold, rows, cue).into(),
@@ -326,7 +364,7 @@ fn item_lines(
             decision,
             feedback,
             ..
-        } => receipt(tool, *decision, feedback.as_deref(), previous, rows).into(),
+        } => receipt(tool, *decision, feedback.as_deref(), place.previous, rows).into(),
         ItemBody::Asset { asset, label } => vec![Line::from(Span::styled(
             format!("[{}]", label.clone().unwrap_or_else(|| asset.clone())),
             theme::dim(),
@@ -562,96 +600,6 @@ fn tail_lit(line: Line<'static>, age: f32) -> Line<'static> {
 fn cooling(back: usize, age: f32) -> Style {
     let behind = back as f32 / COMET_CELLS as f32;
     theme::comet((age + behind).min(1.0))
-}
-
-/// A thought is readable where it happened, and while it is being had: `✻
-/// Thinking…` over the newest [`THOUGHT_ROWS`] rows of what has arrived so
-/// far, and once it is over `✻ Thought for 2s` over the very same rows.
-///
-/// The heading is the whole of what the close changes (2026-09-06,
-/// user-directed). The transcript is anchored at its foot, so a thought that
-/// gave its rows back when it ended dropped the conversation above it by two
-/// at the one moment a person was reading it. One body, then, and one match —
-/// on the one fact the two halves differ by.
-fn thinking(item: &Item, fold: Fold, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let mut out = vec![match item.completed_at {
-        None => still_thinking(),
-        Some(end) => thought_for(item, end),
-    }];
-    if let Some(text) = thought(item) {
-        out.extend(returns(thought_rows(text, fold, rows.result_width()), rows));
-    }
-    out
-}
-
-/// The row of a thought as it is being had: dim italic, and the ellipsis
-/// breathing with the rest of the surface.
-fn still_thinking() -> Line<'static> {
-    sparkled(
-        format!("Thinking{}", theme::ellipsis()),
-        theme::dim().patch(theme::italic()),
-    )
-}
-
-/// The row of a thought that is over: how long it took.
-fn thought_for(item: &Item, end: jiff::Timestamp) -> Line<'static> {
-    sparkled(
-        format!("Thought for {}", took(end.duration_since(item.started_at))),
-        theme::dim(),
-    )
-}
-
-/// What hangs under a thought's row, dim under the same `⎿` a running tool's
-/// tail hangs from (§6): the newest rows of what has been thought, which is
-/// the only cut that can follow something growing from the bottom; the whole
-/// of it where a person opened it; nothing where a click has gone round to its
-/// shut.
-///
-/// The same rows on either side of the close, which is what holding where it
-/// ended means. They wear no comet — the comet is `presence`'s glow on words
-/// being *said* (§6 "streaming"), and thinking is where `dim` lives (§4) — and
-/// no `… +N lines`: while the thought streams the count would change under the
-/// reader on every delta, and at the close the mark would spend the very row
-/// the hold is there to keep. What was cut is one click away, which is what
-/// the ring is for.
-///
-/// `width` is the measure the `⎿` body is wrapped at, so the tail is cut at
-/// the width it is drawn at and the block is [`THOUGHT_ROWS`] rows tall
-/// whatever the prose does.
-fn thought_rows(text: &str, fold: Fold, width: usize) -> Vec<Line<'static>> {
-    match fold {
-        Fold::Shut => Vec::new(),
-        Fold::Peek => tail(text, THOUGHT_ROWS, width),
-        Fold::Open => plain(text),
-    }
-}
-
-/// The `✻` and what it says beside it.
-fn sparkled(text: String, style: Style) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{} ", theme::spark()), theme::dim()),
-        Span::styled(text, style),
-    ])
-}
-
-/// How long a thought took, as a person reads a clock: something that happened
-/// took some time, so under a second is `<1s` and never `0s`.
-fn took(span: jiff::SignedDuration) -> String {
-    match span.as_secs() {
-        seconds if seconds < 1 => "<1s".to_string(),
-        seconds => format!("{seconds}s"),
-    }
-}
-
-/// What a thought has under it: what was thought. `None` for one that came
-/// back empty — Anthropic's redacted thinking, an OpenAI turn the provider
-/// summarised nothing of — which draws the row alone, folds nothing, opens
-/// nothing and so promises nothing.
-pub fn thought(item: &Item) -> Option<&str> {
-    match &item.body {
-        ItemBody::Reasoning { text, .. } if !text.trim().is_empty() => Some(text),
-        _ => None,
-    }
 }
 
 /// One tool call, as much of it as there is yet.
@@ -1454,8 +1402,13 @@ mod tests {
 
     /// A thought, once it is one: how long it took, and what it was.
     fn thought_item(text: &str, seconds: i64) -> Item {
+        thought_at("itm_1", text, seconds)
+    }
+
+    /// The same, named: a run is several of them, so each needs its own id.
+    fn thought_at(id: &str, text: &str, seconds: i64) -> Item {
         let mut item = item(
-            "itm_1",
+            id,
             ItemStatus::Completed,
             ItemBody::Reasoning {
                 text: text.into(),
@@ -1469,14 +1422,103 @@ mod tests {
     /// A thought as it is being had: no `completed_at`, and as much text as
     /// the deltas have carried so far.
     fn thinking_item(text: &str) -> Item {
+        thinking_at("itm_1", text)
+    }
+
+    fn thinking_at(id: &str, text: &str) -> Item {
         item(
-            "itm_1",
+            id,
             ItemStatus::Running,
             ItemBody::Reasoning {
                 text: text.into(),
                 provider_metadata: Default::default(),
             },
         )
+    }
+
+    /// A run of thoughts is one thought (M79, user-directed: 会有这种连续的
+    /// 思考 我感觉可以合并成一个). The provider closes a reasoning item and
+    /// opens the next as the model goes on thinking, so ten of them in a row
+    /// were ten blocks; a person reads them as one thought that took as long
+    /// as the whole run. One heading, the summed time, the run's texts joined.
+    #[test]
+    fn a_run_of_thoughts_draws_as_one_thought() {
+        assert_eq!(
+            drawn(vec![
+                thought_at("itm_1", "The manifest first.", 2),
+                thought_at("itm_2", "Then the crate map.", 3),
+            ]),
+            vec![
+                "✻ Thought for 5s".to_string(),
+                "  ⎿  The manifest first.".to_string(),
+                "     Then the crate map.".to_string(),
+            ],
+            "one block, one heading, the last two rows of the joined text"
+        );
+    }
+
+    /// The run's heading is the last thought's state: while the newest of them
+    /// is still being had the whole run says so, and the tail is the newest of
+    /// what the run has thought.
+    #[test]
+    fn a_run_whose_last_thought_is_still_being_had_is_thinking() {
+        assert_eq!(
+            drawn(vec![
+                thought_at("itm_1", "The manifest first.", 2),
+                thought_at("itm_2", "Then the crate map.", 3),
+                thinking_at("itm_3", "The plan after that."),
+            ]),
+            vec![
+                "✻ Thinking…".to_string(),
+                "  ⎿  Then the crate map.".to_string(),
+                "     The plan after that.".to_string(),
+            ],
+        );
+    }
+
+    /// Adjacent is adjacent: anything the model did between two thoughts keeps
+    /// them apart, because what it did is what a person read between them.
+    #[test]
+    fn a_call_between_two_thoughts_keeps_them_two_blocks() {
+        assert_eq!(
+            drawn(vec![
+                thought_at("itm_1", "The manifest first.", 2),
+                tool(
+                    "itm_2",
+                    "Read",
+                    serde_json::json!({"file_path": "Cargo.toml"}),
+                    Some(ToolOutput::text("Read 3 lines")),
+                    ItemStatus::Completed,
+                ),
+                thought_at("itm_3", "Then the crate map.", 3),
+            ]),
+            vec![
+                "✻ Thought for 2s".to_string(),
+                "  ⎿  The manifest first.".to_string(),
+                String::new(),
+                "⏺ Read(Cargo.toml)".to_string(),
+                "  ⎿  Read 3 lines".to_string(),
+                String::new(),
+                "✻ Thought for 3s".to_string(),
+                "  ⎿  Then the crate map.".to_string(),
+            ],
+        );
+    }
+
+    /// A run is long: ten thoughts of half a minute each is what the journal
+    /// behind M79 held, so the heading reads a clock rather than a count of
+    /// seconds nobody divides in their head.
+    #[test]
+    fn a_run_of_minutes_reads_as_minutes_and_seconds() {
+        let drawn = drawn(vec![
+            thought_at("itm_1", "The manifest first.", 70),
+            thought_at("itm_2", "Then the crate map.", 131),
+        ]);
+        assert_eq!(
+            drawn.first().map(String::as_str),
+            Some("✻ Thought for 3m 21s"),
+            "{drawn:?}"
+        );
     }
 
     #[test]
@@ -1766,14 +1808,6 @@ mod tests {
         );
         let item = state.items.first().expect("the call");
         assert_eq!(fold::fold_of(&Folds::new(), item), Fold::Peek);
-    }
-
-    /// Under a second is a moment, not no time at all.
-    #[test]
-    fn a_thought_shorter_than_a_second_says_so() {
-        assert_eq!(took(jiff::SignedDuration::from_millis(400)), "<1s");
-        assert_eq!(took(jiff::SignedDuration::from_secs(1)), "1s");
-        assert_eq!(took(jiff::SignedDuration::from_secs(-1)), "<1s");
     }
 
     /// However long a thought was, what a person meets is the row and the two

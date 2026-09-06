@@ -1212,6 +1212,9 @@ mod tests {
                     // The `$` a shell line the person ran is written under.
                     "transcript/ran.rs",
                     "transcript/said.rs",
+                    // The `✻` of a thinking row and everything under it: a
+                    // thought is working, and working is read past (§4).
+                    "transcript/thinking.rs",
                     "tree.rs",
                     "view.rs",
                     "views/actions.rs",

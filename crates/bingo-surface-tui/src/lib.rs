@@ -104,6 +104,9 @@ mod status;
 mod tasks;
 mod terminal;
 mod theme;
+/// What a run of thoughts is (M79): consecutive reasoning items, which the
+/// transcript draws as one thought.
+mod thoughts;
 mod transcript;
 mod tree;
 mod ui;

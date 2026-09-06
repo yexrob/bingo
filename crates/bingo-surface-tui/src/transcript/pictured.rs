@@ -324,7 +324,8 @@ mod tests {
             flip: false,
         };
         graphics::with(terminal, || {
-            super::super::item_block(item, None, &Agents::new(), &rows, cue)
+            let place = super::super::Place::default();
+            super::super::item_block(item, &place, &Agents::new(), &rows, cue)
         })
     }
 

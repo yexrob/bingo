@@ -242,7 +242,7 @@ fn paged(
     let Some(item) = tree.viewed().items.iter().find(|item| item.id == open.item) else {
         return;
     };
-    let content = pager::lines(item, above.width as usize);
+    let content = pager::lines(tree.viewed(), item, above.width as usize);
     let window = pager::Window {
         height: content.len(),
         rows: usize::from(above.height).saturating_sub(pager::HEAD),

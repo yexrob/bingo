@@ -124,6 +124,58 @@ fn a_thought_of_one_paragraph_is_still_two_rows() {
     both("reasoning_paragraph", &solo(&state), &ui, now);
 }
 
+/// A run of thoughts, as the OpenAI Responses API hands one over (M79,
+/// user-directed, with a screenshot: 会有这种连续的思考 我感觉可以合并成一个).
+/// The endpoint closes a reasoning item and opens the next as the model goes
+/// on thinking, so what the journal holds is three items with nothing between
+/// them — ten, in the session the user was reading. They draw as **one**
+/// thought: one heading over the sum of their times, and two rows of their
+/// texts joined, which is the same tail a single thought wears.
+#[test]
+fn a_run_of_thoughts_draws_as_one_thought() {
+    let state = folded(vec![
+        frame(1, started("trn_1")),
+        item(2, user("itm_1", "what is in this workspace?")),
+        item(3, thought("itm_2", FIRST_OF_THE_RUN, 31)),
+        item(4, thought("itm_3", SECOND_OF_THE_RUN, 24)),
+        item(5, thought("itm_4", THIRD_OF_THE_RUN, 26)),
+    ]);
+    let (ui, now) = mid_turn();
+    both("reasoning_run", &solo(&state), &ui, now);
+}
+
+/// The same run one item earlier: the third thought is still being had, so the
+/// whole run says `✻ Thinking…` and its tail is the newest of what the run has
+/// thought — the two thoughts that are over are read through the one that is
+/// not, because a person is watching one thought and not three.
+#[test]
+fn a_run_whose_last_thought_is_still_being_had() {
+    let state = folded(vec![
+        frame(1, started("trn_1")),
+        item(2, user("itm_1", "what is in this workspace?")),
+        item(3, thought("itm_2", FIRST_OF_THE_RUN, 31)),
+        item(4, thought("itm_3", SECOND_OF_THE_RUN, 24)),
+        frame(
+            5,
+            Event::ItemStarted {
+                item: being_thought("itm_4", "And the plan after that, which says which of the"),
+            },
+        ),
+    ]);
+    let (ui, now) = mid_turn();
+    both("reasoning_run_streaming", &solo(&state), &ui, now);
+}
+
+/// The three items of the run, each the length the journal's were: a sentence
+/// of working, closed and opened again by the endpoint rather than by the
+/// model changing the subject.
+const FIRST_OF_THE_RUN: &str =
+    "The manifest first, because the lockfile only says what the manifest already asked for.";
+const SECOND_OF_THE_RUN: &str =
+    "Then the crate map: it is the one place the whole of the layering is written down.";
+const THIRD_OF_THE_RUN: &str =
+    "And the plan after that, which says which of the two is allowed to move.";
+
 /// A question, and a thought long enough to have something to keep back.
 fn a_thought_worth_reading() -> bingo_sdk::SessionState {
     let text = "The manifest first, because the lockfile only says what the manifest \

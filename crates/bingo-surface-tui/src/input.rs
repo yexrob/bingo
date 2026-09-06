@@ -175,10 +175,15 @@ fn chorded(key: KeyEvent) -> Option<char> {
 /// `ctrl+o to expand`).
 fn deepen(ui: &mut Ui, tree: &Tree, now: Now) {
     let focused = ui.select.block.clone();
-    let Some(id) = latest(tree.viewed(), focused.as_ref(), folds) else {
+    let state = tree.viewed();
+    // A thought a newer one joined has no block of its own (M79), so there is
+    // nothing on the screen for the key to open: the run's rows are the last
+    // thought's, and so is the fold under them.
+    let opens = |item: &bingo_sdk::Item| folds(item) && crate::thoughts::ends_its_run(state, item);
+    let Some(id) = latest(state, focused.as_ref(), opens) else {
         return;
     };
-    let Some(item) = item_of(tree.viewed(), &id) else {
+    let Some(item) = item_of(state, &id) else {
         return;
     };
     match fold::deeper(fold::fold_of(&ui.folds, item)) {
@@ -2497,6 +2502,74 @@ mod tests {
         );
     }
 
+    /// A run of thoughts is one block (M79), so it is one fold: a click on any
+    /// of its rows opens the whole run where it happened, and `ctrl+o` from
+    /// there takes a sheet with every thought of it.
+    #[test]
+    fn a_click_opens_the_whole_run_and_ctrl_o_takes_it_to_the_sheet() {
+        let state = a_run_of_thoughts();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        let held = render(&state, &ui, now);
+        assert!(
+            held.contains("Thought for 6s"),
+            "the run's own time: {held}"
+        );
+        assert!(
+            !held.contains("The manifest first"),
+            "the tail of the run alone: {held}"
+        );
+
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
+        let opened = render(&state, &ui, now);
+        assert!(opened.contains("The manifest first"), "{opened}");
+        assert_eq!(ui.folds.len(), 1, "one fold for the whole run");
+
+        press(&mut ui, &state, ctrl('o'), now);
+        let sheet = render(&state, &ui, later(now, 200));
+        for thought in ["The manifest first", "Then the crate map", "The plan after"] {
+            assert!(sheet.contains(thought), "{thought} is missing: {sheet}");
+        }
+    }
+
+    /// Three thoughts in a row, as a provider that closes a reasoning item per
+    /// output item hands them over.
+    fn a_run_of_thoughts() -> SessionState {
+        let thought = |id: &str, text: &str, seconds: i64| {
+            let mut item = crate::test_support::item(
+                id,
+                bingo_sdk::ItemStatus::Completed,
+                bingo_sdk::ItemBody::Reasoning {
+                    text: text.into(),
+                    provider_metadata: Default::default(),
+                },
+            );
+            item.completed_at = Some(ts() + jiff::SignedDuration::from_secs(seconds));
+            item
+        };
+        folded(vec![
+            frame(
+                1,
+                bingo_sdk::Event::ItemCompleted {
+                    item: thought("itm_1", "The manifest first.", 1),
+                },
+            ),
+            frame(
+                2,
+                bingo_sdk::Event::ItemCompleted {
+                    item: thought("itm_2", "Then the crate map.", 2),
+                },
+            ),
+            frame(
+                3,
+                bingo_sdk::Event::ItemCompleted {
+                    item: thought("itm_3", "The plan after that.", 3),
+                },
+            ),
+        ])
+    }
+
     /// A redacted thought promises nothing: no fold, no key, no sheet.
     #[test]
     fn an_empty_thought_opens_nothing() {
@@ -2511,12 +2584,14 @@ mod tests {
     }
 
     /// A thought being had is not a fold: its two tail rows scroll rather than
-    /// cut, and promise no key, so `ctrl+o` walks past it to the thought that
-    /// is over — the same rule a running call keeps.
+    /// cut, and promise no key, so `ctrl+o` walks past it — and past the whole
+    /// run it ends, because a run of thoughts is one thought (M79). The fold
+    /// it lifts once the run is over is the run's last item, which is the one
+    /// with the block.
     #[test]
-    fn ctrl_o_walks_past_a_thought_that_is_still_being_had() {
+    fn ctrl_o_walks_past_a_run_whose_last_thought_is_still_being_had() {
         let mut state = thought(&steps());
-        let being_had = crate::test_support::item(
+        let mut being_had = crate::test_support::item(
             "itm_2",
             bingo_sdk::ItemStatus::Running,
             bingo_sdk::ItemBody::Reasoning {
@@ -2524,14 +2599,32 @@ mod tests {
                 provider_metadata: Default::default(),
             },
         );
-        state.apply(&frame(2, bingo_sdk::Event::ItemStarted { item: being_had }));
+        state.apply(&frame(
+            2,
+            bingo_sdk::Event::ItemStarted {
+                item: being_had.clone(),
+            },
+        ));
         let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        press(&mut ui, &state, ctrl('o'), now);
+        assert!(
+            ui.folds.is_empty(),
+            "the run is still being thought: nothing on the screen cuts"
+        );
+
+        being_had.status = bingo_sdk::ItemStatus::Completed;
+        being_had.completed_at = Some(ts() + jiff::SignedDuration::from_secs(3));
+        state.apply(&frame(
+            3,
+            bingo_sdk::Event::ItemCompleted { item: being_had },
+        ));
         render(&state, &ui, now);
         press(&mut ui, &state, ctrl('o'), now);
         assert_eq!(
             ui.folds.keys().map(ToString::to_string).collect::<Vec<_>>(),
-            vec!["itm_1".to_string()],
-            "the thought that is over is the one with a fold to lift"
+            vec!["itm_2".to_string()],
+            "one fold for the run, on the item its block hangs from"
         );
     }
 

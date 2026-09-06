@@ -23,7 +23,7 @@ use ratatui::text::Line;
 use crate::clock::Now;
 use crate::fold::{self, Fold};
 use crate::graphics::Picture;
-use crate::transcript::{self, Cue, Rows};
+use crate::transcript::{self, Cue, Place, Rows};
 use crate::tree::Agents;
 use crate::welcome;
 use crate::{shells, skill};
@@ -57,6 +57,13 @@ struct Revision {
     /// the shell's plugin signals, so the set's answer is the row's revision —
     /// the item itself has not changed a byte when the shell ends.
     shell: Option<bool>,
+    /// How many thoughts of its run are above this one, and whether it is the
+    /// last of them (M79). A run of thoughts draws as one block, hung on its
+    /// last item, so the run growing by one is a different rendering of that
+    /// block — and the item that *was* last is a different rendering too: it
+    /// draws nothing now, and the entry has to go the frame it stops.
+    run: usize,
+    last: bool,
     /// The look it was drawn in. A style is baked into a `Line`, and the
     /// terminal may change which palette a token is worth under a running
     /// surface (M71): the lines are then a memo of a drawing nobody would make
@@ -66,12 +73,20 @@ struct Revision {
     look: crate::theme::Theme,
 }
 
-fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold, rows: &Rows<'_>) -> Revision {
+fn revision(
+    item: &Item,
+    place: &Place<'_>,
+    agent: Option<&SessionState>,
+    fold: Fold,
+    rows: &Rows<'_>,
+) -> Revision {
     Revision {
         status: item.status,
         size: size(&item.body),
         agent: agent.map(|child| child.seq),
         fold,
+        run: place.run.len(),
+        last: !place.joined,
         skill: skill::of(item, rows.commands).is_some(),
         linked: rows.linked.answers(),
         shell: shells::still(item, &rows.shells),
@@ -242,10 +257,9 @@ impl Blocks {
             None => boxed,
         };
         let mut kept = 0;
-        let mut previous: Option<&Item> = None;
-        for item in &state.items {
-            kept += self.block(kept, item, previous, agents, rows);
-            previous = Some(item);
+        for (at, item) in state.items.iter().enumerate() {
+            let place = Place::of(&state.items, at);
+            kept += self.block(kept, item, &place, agents, rows);
         }
         // Whatever is left behind the last item was rewound away.
         self.blocks.truncate(kept);
@@ -279,15 +293,16 @@ impl Blocks {
         &mut self,
         at: usize,
         item: &Item,
-        previous: Option<&Item>,
+        place: &Place<'_>,
         agents: &Agents<'_>,
         rows: &Rows<'_>,
     ) -> usize {
         let now = rows.now.instant;
         let agent = agents.get(&item.id).copied();
-        let revision = revision(item, agent, fold::fold_of(rows.folds, item), rows);
+        let revision = revision(item, place, agent, fold::fold_of(rows.folds, item), rows);
         let held = self.blocks.get(at).filter(|entry| entry.id == item.id);
         let same = held.is_some_and(|entry| entry.revision == revision);
+        let occupied = held.is_some();
         // An item that has only just finished is not yet terminal for this
         // cache: it has a frame of flashing left to do, and a frame after that
         // to settle into.
@@ -296,10 +311,15 @@ impl Blocks {
         }
         let motion = self.motion(held, item, &revision, rows.now);
         self.renders += 1;
-        let drawn = transcript::item_block(item, previous, agents, rows, motion.cue(now));
+        let drawn = transcript::item_block(item, place, agents, rows, motion.cue(now));
         if drawn.lines.is_empty() {
-            // An item with nothing to say is not a block at all.
-            if same {
+            // An item with nothing to say is not a block at all — and one that
+            // said something until this frame gives its slot back with its
+            // rendering, or the stale rows would stand and a blank row with
+            // them (a thought a newer one joined, M79). Drawing it again every
+            // frame costs a match and no allocation, which is what a block
+            // that is not there is worth.
+            if occupied {
                 self.blocks.remove(at);
             }
             return 0;
@@ -735,6 +755,58 @@ mod tests {
         assert_eq!(
             lines.iter().filter(|l| l.trim().is_empty()).count(),
             1 + under_the_welcome
+        );
+    }
+
+    /// A thought, once it is one.
+    fn thought(id: &str, text: &str, seconds: i64) -> Item {
+        let mut thought = item(
+            id,
+            ItemStatus::Completed,
+            ItemBody::Reasoning {
+                text: text.into(),
+                provider_metadata: Default::default(),
+            },
+        );
+        thought.completed_at = Some(ts() + jiff::SignedDuration::from_secs(seconds));
+        thought
+    }
+
+    /// A run of thoughts draws as one block, hung on its last item (M79), so
+    /// the thought that *was* last stops being a block the frame a newer one
+    /// starts. `last` in the revision is what says so, and the rendering has to
+    /// go with the entry: a stale block would stand under the run's own, with
+    /// a blank row between them.
+    #[test]
+    fn a_thought_a_newer_one_joined_gives_its_block_back() {
+        let mut state = state();
+        state.items = vec![thought("itm_1", "The manifest first.", 2)];
+        let mut blocks = cache();
+        let alone = sync(&mut blocks, &state, 60);
+        let top = head(&state, 60);
+        assert_eq!(blocks.at(top), Some(ItemId::from_raw("itm_1")));
+
+        state.items.push(thought("itm_2", "Then the crate map.", 3));
+        let joined = sync(&mut blocks, &state, 60);
+        let lines: Vec<String> = blocks
+            .window(0, joined)
+            .iter()
+            .map(|line| line.to_string().trim_end().to_string())
+            .collect();
+        assert_eq!(blocks.blocks.len(), 1, "one block for the run: {lines:?}");
+        assert_eq!(joined, alone + 1, "one row more, and no blank one");
+        assert_eq!(
+            &lines[top..],
+            [
+                "✻ Thought for 5s",
+                "  ⎿  The manifest first.",
+                "     Then the crate map.",
+            ],
+        );
+        assert_eq!(
+            blocks.at(top),
+            Some(ItemId::from_raw("itm_2")),
+            "the run's block, and its rows, are the last thought's"
         );
     }
 
