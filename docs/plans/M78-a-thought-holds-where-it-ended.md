@@ -141,13 +141,10 @@ on dev after the last merge:
 Hands-on, the real `target/debug/bingo` in a harness-owned `tmux -L
 fable-m78` at 80×24, fake provider: a three-paragraph thought, a 3 s
 delay, then the answer; 70 captures at 100 ms. From the third capture to
-the last, the heading is `✻ Thought for <1s` over exactly two rows of
-text — `second reading of the same three facts.` / `So: manifest, map,
-plan, and then the one file.` — through the delay, through the answer
-landing under it, and after the turn ended; the only change above the
-block is the transcript scrolling up by the answer's own rows. The first
-drive, before the addendum, showed the same block with an empty `⎿` row
-where the paragraph break was; that screen is what the addendum fixed.
-Unverified: a thought whose text visibly moves between captures (the
-fake provider paces no reasoning delta); Windows, by the tester who
-reported it — v0.5.3 is theirs to try.
+the last, `✻ Thought for <1s` sits over the same two rows of text through
+the delay, the answer landing under it, and the turn's end; above the
+block only the answer's own rows scroll the transcript. The first drive,
+before the addendum, showed an empty `⎿` row on the paragraph break —
+the screen the addendum fixed. Unverified: a thought whose text visibly
+moves between captures (the fake paces no reasoning delta); Windows, by
+the tester who reported it — v0.5.3 is theirs to try.
