@@ -110,3 +110,44 @@ with `["", "So: manifest, map, plan."]`, the screen the drive showed —
 and a text that ends on a blank line tails to the rows before it. The
 M77 stability sweep and the M78 close pins pass untouched, and no
 snapshot moved.
+
+## Verified
+
+2026-09-06, dev `7788b767` (opus-xhigh workers in `.claude/worktrees/m78`
+and `m78b`, both merged fast-forward: `4165a383` + `bfa79098`, then the
+addendum `7788b767`; the 0.5.3 bump sits between). Criterion 1: the close
+pin `a_thought_that_closes_holds_the_rows_it_was_streaming` ran red before
+the change (`["✻ Thinking…", "  ⎿  the manifest"]` against `["✻ Thought
+for 2s"]`) and green after; the addendum's
+`a_break_above_the_last_sentence_is_not_a_row_of_the_tail` ran red with
+the drive's exact rows (`["", "So: …"]`) and green after. Criterion 2:
+`reasoning_held_*` differ from `reasoning_streaming_*` by the heading row
+alone at both sizes; `reasoning_shut_*` are the old `reasoning_closed_*`
+byte for byte; `thinking_*` and `acp_calls_*` each gained the one row a
+short finished thought now holds — every other snapshot untouched. Gates
+on dev after the last merge:
+
+```text
+== fmt        exit 0
+== check      exit 0
+== clippy     exit 0 (-D warnings)
+== test       86 suites, 4225 passed, 0 failed, 2 ignored (--no-fail-fast)
+== discipline discipline ok (pre-existing warns only)
+== budget     budget ok — dependencies unchanged
+== deny       advisories ok, bans ok, licenses ok, sources ok
+== smoke      tui-smoke ok
+```
+
+Hands-on, the real `target/debug/bingo` in a harness-owned `tmux -L
+fable-m78` at 80×24, fake provider: a three-paragraph thought, a 3 s
+delay, then the answer; 70 captures at 100 ms. From the third capture to
+the last, the heading is `✻ Thought for <1s` over exactly two rows of
+text — `second reading of the same three facts.` / `So: manifest, map,
+plan, and then the one file.` — through the delay, through the answer
+landing under it, and after the turn ended; the only change above the
+block is the transcript scrolling up by the answer's own rows. The first
+drive, before the addendum, showed the same block with an empty `⎿` row
+where the paragraph break was; that screen is what the addendum fixed.
+Unverified: a thought whose text visibly moves between captures (the
+fake provider paces no reasoning delta); Windows, by the tester who
+reported it — v0.5.3 is theirs to try.
