@@ -223,6 +223,57 @@ fn a_finished_job_opens_a_turn_on_a_headless_run() {
     );
 }
 
+/// The other side of the wake: a one-shot `--print` run ends at the root's
+/// turn, so there is no later turn for a job's completion to open, and the
+/// job goes with the process (ADR-0018 §4). Its own line is written every
+/// tenth of a second for twenty seconds, which the run does not wait for.
+const STARTS_AND_LEAVES: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"Bash","input":{
+        "command":"i=0; while [ $i -lt 200 ]; do echo tick; i=$((i+1)); sleep 0.1; done",
+        "background":true}}}]},
+    {"steps":[{"text":"it is running"}]}
+]}"#;
+
+#[test]
+fn a_one_shot_run_ends_at_its_turn_and_the_job_ends_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(STARTS_AND_LEAVES);
+    let started = std::time::Instant::now();
+    let out = scripted_run(
+        dir.path(),
+        &script,
+        &["--dangerously-skip-permissions"],
+        "start it and leave it running",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the run waited for the job it left running"
+    );
+    assert_eq!(logs(dir.path()).len(), 1, "the job never started");
+
+    let log = log_text(dir.path());
+    assert!(log.starts_with("tick\n"), "the job never ran: {log}");
+    assert!(
+        log.lines().count() < 200,
+        "the run outlived the whole job: {} lines",
+        log.lines().count()
+    );
+    assert!(
+        !growing(dir.path()),
+        "the job outlived the run that started it"
+    );
+}
+
+/// Whether the job is still writing, which is what a process still running
+/// looks like from outside: it writes a line every tenth of a second, so two
+/// readings a beat apart differ for as long as it lives.
+fn growing(home: &std::path::Path) -> bool {
+    let before = log_text(home).len();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    log_text(home).len() != before
+}
+
 /// A person's `ctrl+b` is this command with the running call's id; the TUI
 /// fires it as an action and a host types it, and both are the one door.
 const PROMOTED: &str = r#"{"responses":[
