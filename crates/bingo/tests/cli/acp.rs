@@ -189,7 +189,7 @@ impl Scripted {
     /// The binary against this adapter's home, in this adapter's directory.
     fn base(&self) -> Command {
         let mut cmd = bingo();
-        cmd.env("HOME", self.home.path())
+        cmd.envs(home_env(self.home.path()))
             .arg("--settings")
             .arg(&self.settings)
             .args(["--print", "--cwd"])

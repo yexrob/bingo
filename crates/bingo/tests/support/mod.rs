@@ -8,6 +8,8 @@
 // uses is not dead.
 #![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
 
+pub mod home;
+
 use std::io::Write;
 use std::process::Stdio;
 use std::time::Duration;
@@ -51,7 +53,7 @@ impl Server {
             .arg(home.path())
             .args(extra)
             .env("BINGO_FAKE_SCRIPT", &path)
-            .env("HOME", home.path())
+            .envs(home::home_env(home.path()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

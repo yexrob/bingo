@@ -20,7 +20,7 @@ fn a_project_skill_is_a_command_whose_body_becomes_the_prompt() {
         .args(["--print", "--output-format", "json", "--cwd"])
         .arg(project.path())
         .arg("/hello world")
-        .env("HOME", home.path()));
+        .envs(home_env(home.path())));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let frames: Vec<Frame> = stdout(&out)
         .lines()
@@ -71,7 +71,7 @@ fn an_unknown_slash_command_is_still_refused() {
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
         .args(["--print", "/nosuchskill now"])
-        .env("HOME", home.path()));
+        .envs(home_env(home.path())));
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stderr(&out).contains("unknown command: /nosuchskill"),

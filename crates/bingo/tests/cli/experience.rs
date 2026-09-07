@@ -300,7 +300,7 @@ fn the_command_folds_the_library_into_a_table() {
     let empty = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script(&scripted(Vec::new())).path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args(["--print", "--cwd"])
             .arg(home.path())
             .arg("/experience"),
@@ -329,7 +329,7 @@ fn the_command_folds_the_library_into_a_table() {
     let listed = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script(&scripted(Vec::new())).path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args(["--print", "--cwd"])
             .arg(home.path())
             .arg("/experience"),

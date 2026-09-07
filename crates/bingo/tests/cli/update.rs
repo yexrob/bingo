@@ -56,7 +56,7 @@ async fn released(name: &str, archive: Vec<u8>, list: String) -> MockServer {
 /// `bingo update`, in its own home, against the release `server` serves.
 fn updating(binary: &std::path::Path, home: &std::path::Path, server: &MockServer) -> Command {
     let mut cmd = Command::new(binary);
-    cmd.env("HOME", home)
+    cmd.envs(home_env(home))
         .env("BINGO_UPDATE_API", server.uri())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

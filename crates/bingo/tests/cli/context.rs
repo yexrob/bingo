@@ -17,7 +17,7 @@ fn the_context_warning_is_said_once_near_the_line() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--settings"])
         .arg(settings.path())
         .args(["--cwd"])
@@ -43,7 +43,7 @@ fn an_overflow_is_retried_once_and_the_window_is_learned_on_disk() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--output-format", "json", "--cwd"])
         .arg(home.path())
         .arg("go"));
@@ -83,7 +83,7 @@ fn an_overflow_after_many_rounds_is_summarised_and_the_turn_goes_on() {
     ));
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--output-format", "json", "--cwd"])
         .arg(home.path())
         .arg("list the docs"));
@@ -143,7 +143,7 @@ fn a_working_turn_leaves_one_file_per_fact_in_the_project_memory() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", first.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--cwd"])
         .arg(home.path())
         .arg("what is in notes.txt?"));
@@ -175,7 +175,7 @@ fn a_working_turn_leaves_one_file_per_fact_in_the_project_memory() {
     let again = script(r#"{"responses":[{"steps":[{"text":"Still one line."}]}]}"#);
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", again.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--cwd"])
         .arg(home.path())
         .arg("and now?"));
@@ -189,7 +189,7 @@ fn a_working_turn_leaves_one_file_per_fact_in_the_project_memory() {
     let listing = script(r#"{"responses":[]}"#);
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", listing.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--cwd"])
         .arg(home.path())
         .arg("/memory"));

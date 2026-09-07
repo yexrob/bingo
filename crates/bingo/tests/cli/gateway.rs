@@ -82,7 +82,7 @@ impl Gateway {
     /// name its channel.
     fn cmd(&self) -> Command {
         let mut cmd = bingo();
-        cmd.env("HOME", self.path())
+        cmd.envs(home_env(self.path()))
             .env("BINGO_FAKE_SCRIPT", &self.script)
             .arg("--cwd")
             .arg(self.path())
@@ -482,7 +482,7 @@ fn channels_add_asks_for_both_and_writes_each_where_it_belongs() {
 
     let mut cmd = bingo();
     let out = typed(
-        cmd.env("HOME", home.path())
+        cmd.envs(home_env(home.path()))
             .args(["channels", "add", "feishu"]),
         &["cli_myapp", "s-added-not-printed"],
     );

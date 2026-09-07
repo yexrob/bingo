@@ -32,7 +32,7 @@ fn a_pre_tool_use_hook_that_denies_stops_the_write_and_tells_the_model() {
         .arg("--settings")
         .arg(settings.path())
         .arg("write it")
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .env("BINGO_FAKE_SCRIPT", fake.path()));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let frames: Vec<Frame> = stdout(&out)

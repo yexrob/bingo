@@ -123,7 +123,7 @@ fn the_models_command_lists_the_catalogue_and_refreshes_on_demand() {
     let ask = |line: &str| {
         run_within(
             bingo()
-                .env("HOME", home.path())
+                .envs(home_env(home.path()))
                 .env("BINGO_FAKE_SCRIPT", script.path())
                 .args(["--print", "--cwd"])
                 .arg(home.path())
@@ -159,7 +159,7 @@ fn models_refuses_an_argument_it_does_not_know() {
     let script = script(r#"{"responses":[]}"#);
     let out = run_within(
         bingo()
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .env("BINGO_FAKE_SCRIPT", script.path())
             .args(["--print", "--cwd"])
             .arg(home.path())

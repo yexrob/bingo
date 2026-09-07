@@ -10,7 +10,7 @@ fn max_turns_stops_a_tool_loop_with_a_named_error() {
     let script = script(&format!(r#"{{"responses":[{read},{read},{read}]}}"#));
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir.path())
+        .envs(home_env(dir.path()))
         .args(["--print", "--max-turns", "2", "--cwd"])
         .arg(dir.path())
         .arg("loop"));
@@ -22,7 +22,7 @@ fn max_turns_stops_a_tool_loop_with_a_named_error() {
 #[test]
 fn resuming_an_unknown_session_is_not_found_before_any_turn() {
     let out = run(bingo()
-        .env("HOME", tempfile::tempdir().unwrap().path())
+        .envs(home_env(tempfile::tempdir().unwrap().path()))
         .args(["--print", "--resume", "ses_nope", "hello"]));
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stdout(&out), "");
@@ -151,7 +151,7 @@ fn a_session_another_process_holds_cannot_be_continued() {
     );
     let mut holder = bingo()
         .env("BINGO_FAKE_SCRIPT", slow.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--dangerously-skip-permissions", "--cwd"])
         .arg(home.path())
         .arg("wait")

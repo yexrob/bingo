@@ -13,7 +13,7 @@ fn print_in(
 ) -> Output {
     run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home)
+        .envs(home_env(home))
         .args(["--print", "--cwd"])
         .arg(home)
         .args(extra)

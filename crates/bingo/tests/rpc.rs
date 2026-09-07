@@ -335,7 +335,7 @@ async fn a_session_written_by_a_print_run_reopens_by_id_with_its_items() {
     let cwd = server.cwd();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_bingo"))
         .env("BINGO_FAKE_SCRIPT", cwd.join("script.json"))
-        .env("HOME", &cwd)
+        .envs(support::home::home_env(&cwd))
         .args(["--print", "--output-format", "json", "--cwd"])
         .arg(&cwd)
         .arg("first")

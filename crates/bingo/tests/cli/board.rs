@@ -108,7 +108,7 @@ fn a_member_reads_a_room_s_board_claims_a_task_and_the_parent_sees_it() {
     let out = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args([
                 "--print",
                 "--output-format",
@@ -218,7 +218,7 @@ fn a_task_left_by_a_member_that_is_gone_reads_as_gone() {
     let first = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script(CLAIMED).path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args([
                 "--print",
                 "--output-format",

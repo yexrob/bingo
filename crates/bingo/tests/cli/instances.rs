@@ -30,7 +30,7 @@ fn write_auth(home: &std::path::Path, value: serde_json::Value) {
 /// is left as the test found it: a named instance must not read it either way.
 fn bingo_with(home: &std::path::Path, file: &std::path::Path) -> Command {
     let mut cmd = bingo();
-    cmd.env("HOME", home)
+    cmd.envs(home_env(home))
         .env("BINGO_NO_BROWSER", "1")
         .arg("--settings")
         .arg(file)

@@ -15,7 +15,7 @@ fn no_answers(dir: &std::path::Path, format: &str) -> (tempfile::NamedTempFile, 
     let script = script(r#"{"responses":[]}"#);
     let mut cmd = bingo();
     cmd.env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir)
+        .envs(home_env(dir))
         .args([
             "--print",
             "--input-format",

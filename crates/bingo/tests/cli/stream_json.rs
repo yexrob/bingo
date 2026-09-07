@@ -28,7 +28,7 @@ fn stream_json_is_init_then_messages_then_result_and_nothing_else() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir.path())
+        .envs(home_env(dir.path()))
         .args(["--print", "--output-format", "stream-json", "--cwd"])
         .arg(dir.path())
         .arg("what is in notes.txt?"));
@@ -73,7 +73,7 @@ fn a_failed_turn_is_a_result_line_with_errors() {
         script(r#"{"responses":[{"steps":[{"error":{"kind":"auth","message":"bad key"}}]}]}"#);
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", tempfile::tempdir().unwrap().path())
+        .envs(home_env(tempfile::tempdir().unwrap().path()))
         .args(["--print", "--output-format", "stream-json", "hello"]));
     assert_eq!(out.status.code(), Some(1));
     let lines = lines_of(&out);
@@ -106,7 +106,7 @@ fn a_sub_sessions_lines_carry_the_call_that_spawned_it() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir.path())
+        .envs(home_env(dir.path()))
         .args(["--print", "--output-format", "stream-json", "--cwd"])
         .arg(dir.path())
         .arg("ask an agent to say hi"));
@@ -304,7 +304,7 @@ pub(crate) fn hosted(
 ) -> Command {
     let mut cmd = bingo();
     cmd.env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir)
+        .envs(home_env(dir))
         .args([
             "--print",
             "--input-format",

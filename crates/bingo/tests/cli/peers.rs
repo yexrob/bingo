@@ -113,7 +113,7 @@ fn run_json(home: &Path, script: &tempfile::NamedTempFile, prompt: &str) -> Outp
     run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home)
+            .envs(home_env(home))
             .args(["--print", "--output-format", "json", "--cwd"])
             .arg(home)
             .arg(prompt),

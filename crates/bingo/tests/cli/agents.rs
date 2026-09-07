@@ -60,7 +60,7 @@ fn a_foreground_agent_answers_the_root_and_stdout_stays_the_root_s() {
     let script = script(FOREGROUND);
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--cwd"])
         .arg(home.path())
         .arg("spawn one"));
@@ -311,7 +311,7 @@ fn a_childs_permission_is_refused_off_a_tty_in_every_output_format() {
         let out = run_within(
             bingo()
                 .env("BINGO_FAKE_SCRIPT", script.path())
-                .env("HOME", home.path())
+                .envs(home_env(home.path()))
                 .args(["--print", "--output-format", format, "--cwd"])
                 .arg(home.path())
                 .arg("spawn one"),
@@ -394,7 +394,7 @@ fn a_project_definition_names_the_agent_it_starts() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--cwd"])
         .arg(home.path())
         .arg("ask the reviewer"));
@@ -569,7 +569,7 @@ fn an_unwoken_member_has_no_turn_and_its_brief_is_not_journalled() {
     let out = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script(A_SEATED_MEMBER).path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args(["--print", "--output-format", "json", "--cwd"])
             .arg(home.path())
             .arg("seat the understudy"),
@@ -607,7 +607,7 @@ fn a_child_has_no_spawn_agent_to_call() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["--print", "--cwd"])
         .arg(home.path())
         .arg("spawn one"));

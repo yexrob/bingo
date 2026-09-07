@@ -122,7 +122,7 @@ impl Running {
     fn spawn(home: &Path, script: &tempfile::NamedTempFile, extra: &[&str]) -> Self {
         let mut child = bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home)
+            .envs(home_env(home))
             .args(["serve", "--stdio"])
             .args(extra)
             .arg("--cwd")
@@ -200,7 +200,7 @@ fn the_schedule_command_folds_to_stdout_under_print() {
     let out = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args(["--print", "--cwd"])
             .arg(home.path())
             .arg("/schedule"),
@@ -382,7 +382,7 @@ fn a_second_process_runs_with_the_schedules_dormant_and_says_who_has_them() {
     let out = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args(["--print", "--cwd"])
             .arg(home.path())
             .arg("/schedule"),
@@ -497,7 +497,7 @@ fn the_wake_command_answers_under_print_and_finds_nothing_standing() {
         let out = run_within(
             bingo()
                 .env("BINGO_FAKE_SCRIPT", script.path())
-                .env("HOME", home.path())
+                .envs(home_env(home.path()))
                 .args(["--print", "--cwd"])
                 .arg(home.path())
                 .arg(args),

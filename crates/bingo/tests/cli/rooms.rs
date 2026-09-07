@@ -279,7 +279,7 @@ fn with_a_listening_room(home: &Path, listeners: &str) {
 fn hosting(home: &Path, script: &tempfile::NamedTempFile) -> Command {
     let mut cmd = bingo();
     cmd.env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home)
+        .envs(home_env(home))
         .args([
             "--print",
             "--input-format",

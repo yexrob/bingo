@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 /// The look that follows the terminal for as long as the run lasts (M71).
+#[path = "../support/home.rs"]
+mod home;
+
 mod look;
 
 /// How long any one wait may take before the run is called stalled.
@@ -264,7 +267,9 @@ impl Terminal {
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_bingo"));
         command.args(["--cwd", &home.path().to_string_lossy()]);
         command.args(extra);
-        command.env("HOME", home.path());
+        for (name, value) in home::home_env(home.path()) {
+            command.env(name, value);
+        }
         command.env("BINGO_FAKE_SCRIPT", &script);
         command.env("TERM", "xterm-256color");
         stub_tmux(&mut command, home.path(), answers.passthrough());

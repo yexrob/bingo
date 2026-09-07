@@ -17,6 +17,10 @@ use std::process::{Command, Output, Stdio};
 
 use bingo_sdk::{Event, Frame, InteractionKind, ItemBody};
 
+#[path = "support/home.rs"]
+mod home;
+use home::home_env;
+
 #[path = "support/python.rs"]
 mod python;
 use python::python3;
@@ -53,7 +57,7 @@ fn script(dir: &Path, json: &str) -> PathBuf {
 fn bingo(home: &Path, project: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_bingo"));
     command
-        .env("HOME", home)
+        .envs(home_env(home))
         .env_remove("BINGO_FAKE_SCRIPT")
         .args(["--print", "--cwd"])
         .arg(project)

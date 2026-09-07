@@ -13,7 +13,7 @@ fn conversation(
     command
         .env("OPENAI_API_KEY", "sk-test")
         .env("OPENAI_BASE_URL", server.uri())
-        .env("HOME", home)
+        .envs(home_env(home))
         .args([
             "--print",
             "--provider",

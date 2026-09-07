@@ -46,7 +46,7 @@ fn asked_with(dir: &std::path::Path, source: &str) -> Output {
     let script = script(r#"{"responses":[{"steps":[{"text":"A picture."}]}]}"#);
     run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir)
+        .envs(home_env(dir))
         .args(["--print", "--cwd"])
         .arg(dir)
         .args(["--image", source])
@@ -184,7 +184,7 @@ fn an_image_flag_under_stream_json_input_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = shot(dir.path());
     let out = run(bingo()
-        .env("HOME", dir.path())
+        .envs(home_env(dir.path()))
         .args(["--print", "--input-format", "stream-json", "--cwd"])
         .arg(dir.path())
         .arg("--image")
