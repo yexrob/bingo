@@ -17,6 +17,9 @@
 //! - A root session opening in a project with a `.bingo/team.json` seats the
 //!   roles it declares, as children of itself.
 //! - `/agents` shows the roster a person needs; `/team` what was declared.
+//! - `agents.team` is the one door onto `.bingo/team.json` for the plugins
+//!   that own its other keys: this plugin parses the file, and nobody else
+//!   knows where it is (ADR-0031).
 //!
 //! Every tool is declared read-only and trusted: none of them reads or writes
 //! anything outside the process, and what a child then does is gated in the
@@ -42,7 +45,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, Contribution, Hook, Plugin, PluginError, PluginManifest, Registrar, Tool, ToolTraits,
+    Command, Contribution, Hook, Plugin, PluginError, PluginManifest, Registrar, ServiceHandle,
+    Tool, ToolTraits, WireService,
 };
 
 pub use command::AgentsCommand;
@@ -53,7 +57,7 @@ pub use message::MessageTool;
 pub use models::ListModelsTool;
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
-pub use team::{SeatHook, TeamCommand};
+pub use team::{SeatHook, TEAM, TeamCommand, TeamFile};
 pub use thinking::SetThinkingTool;
 
 static MANIFEST: PluginManifest = PluginManifest {
@@ -70,12 +74,30 @@ static MANIFEST: PluginManifest = PluginManifest {
         "hook:team",
         "command:agents",
         "command:team",
+        "service:agents.team",
     ],
     requires: &[],
     // Definitions are files, not settings, and the limits on a session tree
     // are the kernel's.
     config: None,
 };
+
+/// `.bingo/team.json` under the key another plugin looks it up by. The typed
+/// lookup is a `ServiceHandle` over the wire face, which is how a service met
+/// by method rather than by type is reached from in process (ADR-0031 §4) —
+/// and it must be met that way, because `team` is a noun the kernel has no
+/// word for and a plugin may not import this one to get a trait.
+///
+/// No wire face is opened: every key of the file answers through one method,
+/// and a key nobody has claimed yet is not this plugin's to hand a stranger.
+fn team_file() -> Contribution {
+    let wire = Arc::new(TeamFile) as Arc<dyn WireService>;
+    Contribution::Service {
+        key: TEAM.to_string(),
+        value: Arc::new(ServiceHandle::new(wire)),
+        wire: None,
+    }
+}
 
 /// What every tool here is. They read the session tree and post into a
 /// queue: nothing outside the process changes, and a child's own calls are
@@ -118,6 +140,7 @@ impl Plugin for AgentsPlugin {
         registrar.add(Contribution::Command(
             Arc::new(TeamCommand) as Arc<dyn Command>
         ));
+        registrar.add(team_file());
         Ok(())
     }
 }
@@ -149,6 +172,7 @@ mod plugin_tests {
                 "hook:team",
                 "command:agents",
                 "command:team",
+                "service:agents.team",
             ]
         );
         assert!(MANIFEST.requires.is_empty());
@@ -194,6 +218,18 @@ mod plugin_tests {
             })
             .collect();
         assert_eq!(commands, ["agents", "team"]);
+        let services: Vec<(&str, bool)> = contributions
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Service { key, wire, .. } => Some((key.as_str(), wire.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            services,
+            [("agents.team", false)],
+            "the team file, in process only (ADR-0031 §3)"
+        );
     }
 
     #[test]

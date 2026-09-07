@@ -76,7 +76,7 @@ impl RoomsHook {
     /// The rooms `.bingo/team.json` declares, opened under the session that
     /// just started, exactly as `/room <name> [member…]` would open them.
     async fn seat_declared(&self, cx: &HookContext) {
-        let declared = match team::rooms(&cx.cwd) {
+        let declared = match team::rooms(&cx.host, &cx.cwd).await {
             Ok(declared) => declared,
             Err(error) => {
                 tracing::warn!(%error, "the team file seats nobody this run");
@@ -199,10 +199,10 @@ mod tests {
     use super::*;
     use crate::ear::Seat;
     use crate::room::payload;
-    use crate::tests::{Fleet, extension, hook_context, posted, stamped, ts, updated};
+    use crate::tests::{Fleet, Stub, extension, hook_context, posted, stamped, ts, updated};
     use bingo_sdk::Delivery;
-    use serde_json::Value;
-    use std::path::{Path, PathBuf};
+    use serde_json::{Value, json};
+    use std::path::Path;
 
     /// The seats a roster line asks for: a bare name is patient, `name:0` live.
     fn seats(roster: &[&str]) -> Vec<Seat> {
@@ -367,69 +367,80 @@ mod tests {
         );
     }
 
-    /// A project whose team file declares one room, and the directory a
-    /// session in it works from.
-    fn project(source: &str) -> (tempfile::TempDir, PathBuf) {
-        let home = tempfile::tempdir().expect("a temporary home");
-        let file = home.path().join(".bingo").join("team.json");
-        std::fs::create_dir_all(file.parent().expect("a directory")).expect("a directory");
-        std::fs::write(&file, source).expect("a file");
-        let cwd = home.path().to_path_buf();
-        (home, cwd)
+    /// The directory a session in a project works from. Where the team file
+    /// is and what it says are the owning plugin's (ADR-0031); what reaches
+    /// this hook is the `rooms` its service answers with.
+    fn cwd() -> &'static Path {
+        Path::new("/work/project")
     }
 
-    const DECLARED: &str = r#"{
-        "roles": [{"name": "reviewer"}],
-        "rooms": [{"name": "design", "members": ["reviewer", "scout"]}]
-    }"#;
+    /// A fleet whose team file declares these rooms.
+    fn declaring(section: Value) -> Fleet {
+        Fleet::default().serving(crate::team::TEAM, Stub::declaring(section))
+    }
+
+    fn declared() -> Value {
+        json!([{"name": "design", "members": ["reviewer", "scout"]}])
+    }
 
     #[tokio::test]
     async fn a_project_s_rooms_are_seated_when_a_person_s_session_opens() {
-        let (_home, cwd) = project(DECLARED);
-        let fleet = Fleet::default();
+        let fleet = declaring(declared());
         let root = fleet.root();
         let hook = RoomsHook::default();
-        hook.on_session(Phase::Start, &hook_context(&root, &fleet, &cwd))
+        hook.on_session(Phase::Start, &hook_context(&root, &fleet, cwd()))
             .await;
 
         let created = fleet.created();
         assert_eq!(created.len(), 1, "{created:?}");
         assert_eq!(created[0].title.as_deref(), Some("#design"));
-        assert_eq!(created[0].cwd, cwd);
+        assert_eq!(created[0].cwd, cwd());
         let room = fleet.titled("#design").expect("the room was opened");
         assert_eq!(fleet.members(&room), ["reviewer", "scout"]);
     }
 
     #[tokio::test]
     async fn an_agent_s_session_opening_seats_nothing() {
-        let (_home, cwd) = project(DECLARED);
-        let fleet = Fleet::default();
+        let fleet = declaring(declared());
         let root = fleet.root();
         let child = fleet.child(&root, "reviewer");
         let hook = RoomsHook::default();
-        hook.on_session(Phase::Start, &hook_context(&child, &fleet, &cwd))
+        hook.on_session(Phase::Start, &hook_context(&child, &fleet, cwd()))
             .await;
         assert!(fleet.created().is_empty());
     }
 
     #[tokio::test]
     async fn a_session_ending_seats_nothing() {
-        let (_home, cwd) = project(DECLARED);
-        let fleet = Fleet::default();
+        let fleet = declaring(declared());
         let root = fleet.root();
         RoomsHook::default()
-            .on_session(Phase::End, &hook_context(&root, &fleet, &cwd))
+            .on_session(Phase::End, &hook_context(&root, &fleet, cwd()))
             .await;
         assert!(fleet.created().is_empty());
     }
 
     #[tokio::test]
     async fn a_project_that_declares_none_seats_none() {
-        let (_home, cwd) = project(r#"{"roles": [{"name": "reviewer"}]}"#);
-        let fleet = Fleet::default();
+        let fleet = declaring(Value::Null);
         let root = fleet.root();
         RoomsHook::default()
-            .on_session(Phase::Start, &hook_context(&root, &fleet, &cwd))
+            .on_session(Phase::Start, &hook_context(&root, &fleet, cwd()))
+            .await;
+        assert!(fleet.created().is_empty());
+    }
+
+    /// A team file the plugin that owns it could not read seats nobody this
+    /// run, and stops nothing: the session opens either way.
+    #[tokio::test]
+    async fn a_team_file_that_will_not_parse_seats_nobody_and_fails_nothing() {
+        let fleet = Fleet::default().serving(
+            crate::team::TEAM,
+            Stub::refusing("/work/project/.bingo/team.json: { not json"),
+        );
+        let root = fleet.root();
+        RoomsHook::default()
+            .on_session(Phase::Start, &hook_context(&root, &fleet, cwd()))
             .await;
         assert!(fleet.created().is_empty());
     }

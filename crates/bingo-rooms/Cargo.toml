@@ -17,13 +17,16 @@ async-trait.workspace = true
 # M18: `OpenRoom`'s argument type is the schema the model is shown, derived
 # from it rather than written twice.
 schemars.workspace = true
-# M9: `.bingo/team.json` declares rooms, and a room's membership is a payload.
+# M9: a room a project declares is a value read out of the team file, and a
+# room's membership is a payload. M83: the file itself belongs to another
+# plugin and reaches here as JSON through a service (ADR-0031).
 serde.workspace = true
 serde_json.workspace = true
 # M9: a hook has nobody to return an error to; a member nobody is, and a team
 # file that will not parse, are reported here.
 tracing.workspace = true
-# M9: reading the team file fails in two ways worth telling apart.
+# M9: asking for the team file's rooms fails in two ways worth telling apart —
+# the owner could not read the file, or its `rooms` is not a roster.
 thiserror.workspace = true
 # M19 (ADR-0022 §3): the chaser is one bounded timer per open mention, and a
 # nudge is sent from it. Already in the tree.
@@ -36,6 +39,5 @@ jiff.workspace = true
 bingo-sdk = { workspace = true, features = ["testing"] }
 # M9: the attachment the host double hands back carries a frame stream.
 futures.workspace = true
-tempfile.workspace = true
 # M19: `tokio::time::pause`, so 300 seconds of patience costs a test none.
 tokio = { workspace = true, features = ["test-util"] }

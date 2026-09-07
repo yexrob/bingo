@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use bingo_sdk::{ErrorCode, KernelError};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::names;
 
@@ -38,8 +39,8 @@ pub struct Role {
     pub tools: Option<Vec<String>>,
 }
 
-/// What a team file declares. A key this plugin does not know is ignored:
-/// another plugin reads its own resources from the same file.
+/// What a team file declares, of what this plugin owns. Every other key
+/// belongs to somebody else and reaches them through [`section`].
 #[derive(Debug, Default, Deserialize)]
 struct Document {
     #[serde(default)]
@@ -80,29 +81,51 @@ pub fn find(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors().map(path_in).find(|path| path.is_file())
 }
 
+/// The nearest team file, read and parsed — the one place that knows where a
+/// project declares its team and that what it declares is a JSON object. Both
+/// doors onto the file come through here, so no two readings of it can
+/// disagree about which file it was. `None` when no directory from here up
+/// declares one.
+fn document(cwd: &Path) -> Result<Option<(PathBuf, Value)>, KernelError> {
+    let Some(path) = find(cwd) else {
+        return Ok(None);
+    };
+    let source = std::fs::read_to_string(&path).map_err(|e| refused(&path, e))?;
+    let value = serde_json::from_str(&source).map_err(|e| refused(&path, e))?;
+    Ok(Some((path, value)))
+}
+
+/// One top-level key of that document, as a person wrote it. This is the door
+/// a plugin that owns another of the file's nouns reads its own through
+/// (ADR-0031): what the key means stays with whoever owns it, and nothing
+/// here reads a word of it. `None` for no file and for no such key alike —
+/// a project that declares nothing under a name declares nothing.
+pub fn section(cwd: &Path, key: &str) -> Result<Option<Value>, KernelError> {
+    Ok(document(cwd)?.and_then(|(_, document)| document.get(key).cloned()))
+}
+
 /// The team a session in `cwd` belongs to, norms and all; `None` when no
 /// directory from here up declares one.
 pub fn of(cwd: &Path) -> Result<Option<Team>, KernelError> {
-    match find(cwd) {
-        Some(path) => read(&path).map(Some),
-        None => Ok(None),
-    }
+    let Some((path, document)) = document(cwd)? else {
+        return Ok(None);
+    };
+    read(&path, document).map(Some)
 }
 
-/// One team file, and the norms beside it.
-fn read(path: &Path) -> Result<Team, KernelError> {
-    let source = std::fs::read_to_string(path).map_err(|e| refused(path, e))?;
-    let document = parse(&source).map_err(|e| refused(path, e.message))?;
+/// One team file's roles, and the norms beside it.
+fn read(path: &Path, document: Value) -> Result<Team, KernelError> {
+    let document = parse(document).map_err(|e| refused(path, e.message))?;
     Ok(Team {
         roles: document.roles,
         norms: norms(path, document.norms.as_deref())?,
     })
 }
 
-/// What a source declares, with every role's name checked: a name the key or
-/// the address could not carry is a mistake to report, not one to seat.
-fn parse(source: &str) -> Result<Document, KernelError> {
-    let document: Document = serde_json::from_str(source)
+/// What a document declares, with every role's name checked: a name the key
+/// or the address could not carry is a mistake to report, not one to seat.
+fn parse(document: Value) -> Result<Document, KernelError> {
+    let document: Document = serde_json::from_value(document)
         .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?;
     for role in &document.roles {
         names::check(&role.name)?;
