@@ -18,7 +18,7 @@
 
 - New crate `bingo-plugin-rpc` (plugin tier). No new dependencies: framing is serde_json over lines, the process is `tokio::process`, both in the tree.
 - The bridge's NDJSON framing consciously repeats the ~100-line envelope loop the RPC surface has; sharing it would make a plugin import a plugin. Two copies of a codec are mechanism, not a second representation of a fact; a third copy forces the module into the sdk.
-- The wire schema is versioned by `protocol` in `initialize`; an unknown major refuses the handshake with a notice rather than guessing.
+- The wire schema is versioned by `protocol` in `initialize`; an unknown major refuses the handshake with a notice rather than guessing. The major stays at 1 until a plugin outside this repository speaks it *(ruled 2026-09-07, after it had reached 6 with nobody on the other end)*: until then the wire changes in place, `schema/plugin.json` is the record, and the bundled examples move with it.
 - A bridge plugin's config slice lives under the host plugin's claim (`plugins.<name>` inside `bingo.plugin-rpc`'s key), typed by the manifest's `config` schema; the loader validates it like any other slice.
 
 ## Supersedes

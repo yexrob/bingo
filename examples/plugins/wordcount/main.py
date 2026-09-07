@@ -13,7 +13,7 @@ import json
 import os
 import sys
 
-PROTOCOL = 6
+PROTOCOL = 1
 
 
 def send(message):

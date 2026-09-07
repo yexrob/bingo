@@ -551,19 +551,6 @@ mod tests {
     }
 
     #[test]
-    fn protocol_five_compactor_declarations_are_rejected_before_registration() {
-        let legacy: InitializeResult = serde_json::from_value(serde_json::json!({
-            "protocol": 5, "name": "old-compactor", "version": "1.0",
-            "compactors": [{"id": "cut"}]
-        }))
-        .expect("protocol five fixture");
-        let error = check_protocol(&legacy)
-            .expect_err("the old model-only compaction contract is incompatible");
-        assert!(error.contains("protocol 5"));
-        assert!(error.contains("speaks 6"));
-    }
-
-    #[test]
     fn this_host_speaks_one_major_and_refuses_the_rest() {
         assert!(check_protocol(&result(PROTOCOL)).is_ok());
         let later = PROTOCOL + 1;

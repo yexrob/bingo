@@ -47,10 +47,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The major the host speaks. A process that answers with another one is
-/// refused rather than guessed at (ADR-0015 §Consequences). Six since
-/// ADR-0048 made compaction request-bearing and its observed failures typed.
-/// A plugin written for another major is refused during the handshake.
-pub const PROTOCOL: u32 = 6;
+/// refused rather than guessed at (ADR-0015 §Consequences). It stays at one
+/// until a plugin outside this repository speaks it: until then the wire
+/// changes in place and `schema/plugin.json` is the record of what it is,
+/// and a number nobody is held to would only count our own edits.
+pub const PROTOCOL: u32 = 1;
 
 /// Every name that travels on the wire, in one place.
 pub mod name {

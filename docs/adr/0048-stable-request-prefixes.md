@@ -44,10 +44,9 @@ fold; its context therefore receives that actual request, not a second model fie
 8. `provider_options.bingo.purpose=compaction` marks that side call. ACP rejects
    it before touching a delegated session; a single local drain would not prevent
    that agent executing tools. Unknown explicit purposes also fail closed there.
-   Plugin protocol 6 carries the SDK request and a tagged completed/failed result
+   The plugin wire carries the SDK request and a tagged completed/failed result
    with observed error usage; it does not grant parent-provider credentials.
-   Generic transport failures have no measured usage to report. Major-5 peers
-   are rejected at handshake rather than accepted into an incompatible call.
+   Generic transport failures have no measured usage to report.
    Overflow may use one disclosed shortened retry, then the explicit no-model
    fallback; it is not represented as full-prefix cache reuse.
 
