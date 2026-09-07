@@ -3,6 +3,7 @@
 
 mod acp_proxy;
 mod channels;
+mod env;
 mod login;
 mod provider;
 mod update;
