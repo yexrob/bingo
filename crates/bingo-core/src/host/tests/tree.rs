@@ -229,6 +229,43 @@ async fn a_lagging_child_is_healed_and_the_client_never_sees_a_marker() {
     assert_eq!(queued, n, "the last queue view is whole");
 }
 
+/// The root lags like any other session, and healing it leaves the stream it
+/// lagged on to end behind it. That end is stale — a later stream of the same
+/// session is already following — and the attachment reads on.
+#[tokio::test]
+async fn a_lagging_root_is_healed_and_its_stream_does_not_end() {
+    let host = asking_host(vec![]).await;
+    let mut root = host
+        .open(create("/work", None), who(), OpenOptions::with_children())
+        .await
+        .unwrap();
+    let n = 3 * crate::session::SUBSCRIBER_CAPACITY;
+    let mailbox = host.live(&root.session).unwrap().mailbox;
+    for i in 0..n {
+        mailbox.deliver(
+            IntentId::mint(),
+            Input::text(format!("held {i}"), Origin::surface("agent")),
+            Delivery::Hold,
+        );
+    }
+    let mut last = root.snapshot.seq;
+    let mut queued = 0;
+    let mut lagged = false;
+    while let Some(frame) = root.events.next().await {
+        lagged |= matches!(frame.event, Event::Lagged { .. });
+        assert_eq!(frame.seq, last.next(), "nothing durable is skipped");
+        last = frame.seq;
+        if let Event::QueueChanged { entries, .. } = &frame.event {
+            queued = entries.len();
+            if queued == n {
+                break;
+            }
+        }
+    }
+    assert!(!lagged, "the marker stays inside the kernel");
+    assert_eq!(queued, n, "the client read past its own lag");
+}
+
 #[tokio::test]
 async fn deleting_the_root_deletes_its_children_first() {
     let host = asking_host(vec![]).await;

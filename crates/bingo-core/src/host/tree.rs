@@ -32,16 +32,22 @@ use crate::session::{Mailbox, SUBSCRIBER_CAPACITY};
 /// Which session opened each interaction the client has seen open.
 type Owners = Arc<Mutex<HashMap<InteractionId, Mailbox>>>;
 
-/// What one followed stream yields: a frame, or the end of that session's stream.
+/// What one followed stream yields: a frame, or the end of that stream.
 enum Tagged {
     Frame(Box<Frame>),
-    End(SessionId),
+    /// One stream of `session` is over. A session is followed again after a
+    /// lag or a replay, and the stream it left behind ends after the new one
+    /// has started; `epoch` says which of the two this was.
+    End {
+        session: SessionId,
+        epoch: u64,
+    },
 }
 
 type TaggedStream = Pin<Box<dyn Stream<Item = Tagged> + Send>>;
 
-fn tagged(session: SessionId, frames: FrameStream) -> TaggedStream {
-    let end = stream::once(async move { Tagged::End(session) });
+fn tagged(session: SessionId, epoch: u64, frames: FrameStream) -> TaggedStream {
+    let end = stream::once(async move { Tagged::End { session, epoch } });
     Box::pin(frames.map(|f| Tagged::Frame(Box::new(f))).chain(end))
 }
 
@@ -61,12 +67,16 @@ pub(super) async fn attach(
         root: root.id().clone(),
         followed: HashMap::new(),
         streams: SelectAll::new(),
+        epochs: 0,
         owners: Arc::clone(&owners),
         gateway: Some(gateway),
         out,
     };
     forwarder.follow_live(root.clone(), events);
     forwarder.adopt_descendants().await;
+    // The forwarder owns the sending half of `out`, so whichever way `run`
+    // ends — the root closed, the client gone, a panic — the channel closes
+    // with it and the client's stream ends rather than falling silent.
     tokio::spawn(forwarder.run());
     let events = stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|f| (f, rx)) });
     Ok(Attachment {
@@ -87,6 +97,9 @@ struct Forwarder {
     /// Every session followed, root included.
     followed: HashMap<SessionId, Followed>,
     streams: SelectAll<TaggedStream>,
+    /// Minted per stream followed, so the end of one this attachment has
+    /// already replaced is told apart from the end of the one it holds.
+    epochs: u64,
     owners: Owners,
     /// `None` once the host is gone; the streams end on their own then.
     gateway: Option<broadcast::Receiver<GatewayEvent>>,
@@ -99,6 +112,8 @@ struct Followed {
     /// `ZERO` until the first frame goes out.
     last: Seq,
     source: Source,
+    /// Which stream of this session is the current one.
+    epoch: u64,
 }
 
 /// Where a followed session's frames come from.
@@ -125,8 +140,8 @@ impl Forwarder {
                             return;
                         }
                     }
-                    Some(Tagged::End(session)) => {
-                        if self.ended(session).await {
+                    Some(Tagged::End { session, epoch }) => {
+                        if self.ended(session, epoch).await {
                             return;
                         }
                     }
@@ -141,8 +156,17 @@ impl Forwarder {
     /// earlier stream of the same session left off.
     fn follow(&mut self, id: SessionId, frames: FrameStream, source: Source) {
         let last = self.since(&id);
-        self.followed.insert(id.clone(), Followed { last, source });
-        self.streams.push(tagged(id, frames));
+        self.epochs += 1;
+        let epoch = self.epochs;
+        self.followed.insert(
+            id.clone(),
+            Followed {
+                last,
+                source,
+                epoch,
+            },
+        );
+        self.streams.push(tagged(id, epoch, frames));
     }
 
     fn follow_live(&mut self, mailbox: Mailbox, frames: FrameStream) {
@@ -198,18 +222,28 @@ impl Forwarder {
     }
 
     /// Returns whether the whole attachment is over.
-    async fn ended(&mut self, session: SessionId) -> bool {
+    async fn ended(&mut self, session: SessionId, epoch: u64) -> bool {
+        // The old half of a heal: this attachment has already followed the
+        // session on, so the end says nothing about it — least of all about
+        // the root, whose end would otherwise take the client's stream with it.
+        if self.superseded(&session, epoch) {
+            return false;
+        }
         if session == self.root {
             return true;
         }
         if self.replaying(&session) {
             self.replayed(&session).await;
         } else if !self.lives(&session) {
-            // A healed stream's old half ends while its session runs on;
-            // this one does not, and nothing more is coming from it.
+            // Nothing more is coming from this one.
             self.absent(&session);
         }
         false
+    }
+
+    /// Whether a later stream of the same session has taken over from this one.
+    fn superseded(&self, session: &SessionId, epoch: u64) -> bool {
+        self.followed.get(session).is_some_and(|f| f.epoch != epoch)
     }
 
     fn replaying(&self, session: &SessionId) -> bool {
