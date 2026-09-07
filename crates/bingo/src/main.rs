@@ -3,7 +3,6 @@
 
 mod acp_proxy;
 mod channels;
-mod gateway;
 mod login;
 mod provider;
 mod update;
@@ -190,7 +189,7 @@ enum Command {
     /// One resident bingo per data dir, managed like a service (ADR-0020).
     Gateway {
         #[command(subcommand)]
-        verb: gateway::Verb,
+        verb: bingo_gateway::Verb,
     },
     /// The stdio↔socket pump an ACP agent spawns to reach this run's shared
     /// tools (ADR-0036 §3). Hidden: it is a row in a `session/new` this
@@ -435,11 +434,11 @@ fn work_of(cli: &Cli) -> Work {
 fn resident(
     work: Work,
     cwd: &std::path::Path,
-) -> Result<Option<gateway::run::Resident>, KernelError> {
+) -> Result<Option<bingo_gateway::run::Resident>, KernelError> {
     match work {
-        Work::Gateway => gateway::run::enter(
-            &gateway::paths::Paths::new(&environment(cwd)),
-            &gateway::probe::Kill,
+        Work::Gateway => bingo_gateway::run::enter(
+            &bingo_gateway::paths::Paths::new(&environment(cwd)),
+            &bingo_gateway::probe::Kill,
         )
         .map(Some),
         _ => Ok(None),
@@ -483,7 +482,7 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
             action: Some(ChannelsAction::Secret { adapter }),
         }) => Some(channel_secret(&env, adapter).await),
         Some(Command::Gateway { verb }) if !verb.is_run() => {
-            Some(gateway::dispatch(verb, &env, cwd, cli.settings.as_deref()).await)
+            Some(bingo_gateway::dispatch(verb, &env, cwd, cli.settings.as_deref()).await)
         }
         _ => None,
     }

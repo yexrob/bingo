@@ -388,7 +388,7 @@ fn tracing_lines_land_in_the_gateway_log_at_info_and_at_warn() {
         "a warn from the run that replaced the corpse is in it: {log}"
     );
     assert!(
-        log.contains("bingo::gateway::run"),
+        log.contains("bingo_gateway::run"),
         "and the target says which module said it: {log}"
     );
     gateway.verb(&["stop"]);

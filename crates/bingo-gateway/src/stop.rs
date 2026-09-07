@@ -143,8 +143,8 @@ async fn gone(paths: &Paths, record: &Record, probe: &dyn Probe) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::pidfile;
-    use crate::gateway::probe::tests::Fake;
+    use crate::pidfile;
+    use crate::probe::tests::Fake;
     use jiff::Timestamp;
 
     fn record(pid: u32) -> Record {

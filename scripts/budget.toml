@@ -71,6 +71,13 @@
 # own: a snapshot is `std::fs`, the index is a line of text, the tool call's
 # path is read out of `serde_json`, and a snapshot that failed is a `tracing`
 # line — all already in the tree.
-max_dependencies = 334
+# ADR-0020 (amended 2026-09-07) raises 334 → 335 by the one member
+# `bingo-gateway`. It brings no crate of its own and costs the tree nothing
+# else: the gateway is what `crates/bingo/src/gateway/` already was, and every
+# external crate it names — `process-wrap`, `tracing-subscriber`, `serde`,
+# `jiff` — moved off the binary's dependency list onto this one, which the
+# binary depends on. The resolved normal tree outside the workspace is
+# unchanged.
+max_dependencies = 335
 max_core_check_seconds = 20
 max_target_gb = 5

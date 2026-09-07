@@ -47,7 +47,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::probe::tests::Fake;
+    use crate::probe::tests::Fake;
     use jiff::Timestamp;
 
     fn written(home: &std::path::Path, pid: u32) -> Paths {

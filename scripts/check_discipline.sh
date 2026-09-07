@@ -18,12 +18,19 @@ ws = set(members)
 # sdk and on other libraries (ADR-0042 §2 — cargo itself refuses a cycle), and any plugin
 # may depend on it.
 libraries = {n for n in ws if (members[n].get("metadata") or {}).get("bingo", {}).get("tier") == "library"}
-plugins = {n for n in ws if n not in ("bingo", "bingo-sdk", "bingo-core") and n not in libraries}
+# A composition (ADR-0020, amended 2026-09-07) is a piece of the binary that
+# was moved out of it: it may depend on whatever the binary may, and only the
+# binary may depend on it.
+compositions = {n for n in ws if (members[n].get("metadata") or {}).get("bingo", {}).get("tier") == "composition"}
+plugins = {n for n in ws if n not in ("bingo", "bingo-sdk", "bingo-core") and n not in libraries and n not in compositions}
 bad = []
 for n in libraries:
     for d in deps(n) & ws:
         if d != "bingo-sdk" and d not in libraries:
             bad.append(f"{n} -> {d} (a library depends on bingo-sdk and other libraries only)")
+for n in ws - {"bingo"} - compositions:
+    for d in deps(n) & compositions:
+        bad.append(f"{n} -> {d} (a composition is the binary's own; only bingo may depend on it)")
 for n in plugins:
     for d in deps(n) & ws:
         if d == "bingo-core":

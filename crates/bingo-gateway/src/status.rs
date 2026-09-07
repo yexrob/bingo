@@ -114,8 +114,8 @@ pub fn uptime(since: Timestamp, now: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::pidfile::Record;
-    use crate::gateway::probe::tests::Fake;
+    use crate::pidfile::Record;
+    use crate::probe::tests::Fake;
 
     fn at(text: &str) -> Timestamp {
         text.parse().expect("a timestamp")

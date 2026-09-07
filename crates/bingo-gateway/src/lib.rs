@@ -7,6 +7,11 @@
 //! plugin host on the existing `Work::Channels` path, and the sessions,
 //! transcripts, schedules and locks are the normal ones in the normal places.
 //!
+//! Everything but the host is here. The binary composes plugins and picks a
+//! surface, so it keeps the one thing only it can do — building the host that
+//! `run` then holds — and hands this crate the rest: the verbs, the pidfile,
+//! the log sink, the supervisor's file and the doctor.
+//!
 //! The pieces, in the order they rest on each other:
 //!
 //! - [`paths`] — where the gateway's two files live.

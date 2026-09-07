@@ -1,0 +1,48 @@
+[package]
+name = "bingo-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "One resident bingo per data dir, managed like a service"
+
+# A composition (ADR-0020, amended 2026-09-07): it assembles nothing the
+# binary could not, and depends on whatever the binary does — the kernel's
+# settings loader and the channels plugin it preflights. Only `bingo` may
+# depend on it; `scripts/check_discipline.sh` asserts that.
+[package.metadata.bingo]
+tier = "composition"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+# `doctor` reads the settings this invocation would have loaded, through the
+# kernel's own loader: one layering rule, not a second one for a diagnosis.
+bingo-core.workspace = true
+# Which channel is configured and what it would sign with. The preflight is
+# the adapter's own question, so the adapter answers it (ADR-0020 §2, §5).
+bingo-channels.workspace = true
+# The verbs are a `Subcommand` the binary flattens into its own command line.
+clap.workspace = true
+# `run` waits on a signal; `start` and `stop` wait on a pid.
+tokio.workspace = true
+# ADR-0020 §2: `gateway start` detaches through `ProcessSession`, so a
+# resident bingo outlives the terminal without this crate spelling `unsafe`.
+process-wrap.workspace = true
+# The pidfile is a record on disk, so it is derived, not hand-built.
+serde.workspace = true
+# The doctor reads the settings layers as the JSON they are.
+serde_json.workspace = true
+# Its start time, in the same spelling the schedule store writes.
+jiff.workspace = true
+# ADR-0020 §6: the gateway installs the tracing sink; `warn!` from any plugin
+# lands in `gateway.log` instead of nowhere.
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

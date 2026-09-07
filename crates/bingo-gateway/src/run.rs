@@ -229,7 +229,7 @@ fn internal(message: impl Into<String>) -> KernelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::probe::tests::Fake;
+    use crate::probe::tests::Fake;
 
     fn paths(home: &std::path::Path) -> Paths {
         Paths::new(&bingo_sdk::Env::rooted(home))

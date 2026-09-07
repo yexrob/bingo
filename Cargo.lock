@@ -236,6 +236,7 @@ dependencies = [
  "bingo-core",
  "bingo-demo-ui",
  "bingo-experience",
+ "bingo-gateway",
  "bingo-hooks-shell",
  "bingo-mcp",
  "bingo-permissions",
@@ -262,15 +263,12 @@ dependencies = [
  "futures",
  "jiff",
  "portable-pty",
- "process-wrap 10.0.0",
  "reqwest",
  "rmcp",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "vt100",
  "wiremock",
 ]
@@ -420,6 +418,24 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "ulid",
+]
+
+[[package]]
+name = "bingo-gateway"
+version = "0.5.4"
+dependencies = [
+ "bingo-channels",
+ "bingo-core",
+ "bingo-sdk",
+ "clap",
+ "jiff",
+ "process-wrap 10.0.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

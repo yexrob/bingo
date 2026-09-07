@@ -14,7 +14,18 @@ doctor`) are the settled UX for this.
 
 ## Decision
 
-`bingo gateway <verb>` manages one resident bingo process per data dir.
+`bingo gateway <verb>` manages one resident bingo process per data dir, and
+the code for it is `bingo-gateway`, a crate of its own.
+
+*(Amended 2026-09-07: it was `crates/bingo/src/gateway/`, ~2,500 lines inside
+a binary whose whole job is to compose plugins and pick a surface. The move
+is a move: every verb, the pidfile, the log sink, the unit file and the
+doctor read the same, and the binary keeps only what it alone can do —
+building the host that §1's `run` holds. The crate is a **composition**:
+`tier = "composition"`, a piece of the binary moved out of it, so it may
+depend on whatever the binary may — the kernel's settings loader for §5, the
+channels plugin for §2's preflight — and only `bingo` may depend on it.
+`scripts/check_discipline.sh` asserts that.)*
 
 1. **The gateway is a whole host, not a bridge.** `gateway run` assembles the
    ordinary plugin host on the existing `Work::Channels` path (headless, the

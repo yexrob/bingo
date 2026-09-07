@@ -435,7 +435,7 @@ fn fixed(rows: &[Row]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::probe::tests::Fake;
+    use crate::probe::tests::Fake;
     use jiff::Timestamp;
 
     struct Case {
