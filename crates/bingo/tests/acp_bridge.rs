@@ -9,17 +9,25 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_provider_acp::bridge::doors::{Doors, Refused};
-use bingo_provider_acp::bridge::{ADDRESS_VAR, Address, Bridge, TOKEN_VAR};
+use bingo_provider_acp::bridge::{ADDRESS_VAR, Address, Bridge, TOKEN_VAR, handshake, socket};
 use bingo_sdk::{Env, ToolCall, ToolOutput, ToolSpec};
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
 use rmcp::transport::TokioChildProcess;
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+
+/// Long enough for a loaded box to spawn a process and speak MCP through it,
+/// short enough that a proxy which never gives up fails in seconds instead of
+/// hanging the suite for as long as the runner will let it.
+const PATIENCE: Duration = Duration::from_secs(30);
 
 /// Doors that answer with what they were asked, so a round trip through two
 /// processes can be seen to have carried the arguments.
@@ -74,7 +82,10 @@ async fn an_agent_reaches_the_shared_tools_through_the_spawned_proxy() {
     let token = bridge.admit(doors.clone()).expect("a token");
 
     let transport = TokioChildProcess::new(proxy(&address, token.as_str())).expect("it spawns");
-    let client = ().serve(transport).await.expect("the bridge answers");
+    let client = tokio::time::timeout(PATIENCE, ().serve(transport))
+        .await
+        .expect("the handshake was answered rather than waited on")
+        .expect("the bridge answers");
 
     let offered = client.list_all_tools().await.expect("a list");
     assert_eq!(
@@ -134,8 +145,47 @@ async fn a_proxy_with_a_token_this_run_never_minted_gets_nothing() {
     let _bridge = Bridge::at(address.clone()).expect("it listens");
 
     let transport = TokioChildProcess::new(proxy(&address, "not-a-token")).expect("it spawns");
-    assert!(
-        ().serve(transport).await.is_err(),
-        "the stream is closed, not answered"
-    );
+    let answer = tokio::time::timeout(PATIENCE, ().serve(transport))
+        .await
+        .expect("the proxy gave up rather than holding the handshake open");
+    assert!(answer.is_err(), "the stream is closed, not answered");
+}
+
+/// The other half of the refusal above: the proxy must end when the bridge
+/// does, though the agent still holds its stdin.
+///
+/// Driven by hand rather than through `rmcp`, because the order is the whole
+/// point — one line has to cross before the socket goes, so the proxy's
+/// uncancellable stdin read is certainly outstanding when it does. Through
+/// `rmcp` that order is a coin toss, and so was the hang this pins.
+#[tokio::test]
+async fn a_proxy_ends_when_its_bridge_does_though_its_stdin_is_open() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let address = Address::of_run(&Env::rooted(home.path()), std::process::id());
+    let mut listener = socket::Listener::bind(&address).expect("it listens");
+
+    let mut command = proxy(&address, "spoken-for");
+    command.stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut child = command.spawn().expect("it spawns");
+    // Held open for the whole test: the agent that spawned a proxy does not
+    // close its stdin, and a proxy that waited for that would never end.
+    let mut stdin = child.stdin.take().expect("a pipe");
+
+    let mut stream = listener.accept().await.expect("the proxy dials");
+    let offered = handshake::read(&mut stream).await.expect("a token line");
+    assert_eq!(offered, "spoken-for");
+
+    stdin.write_all(b"a line\n").await.expect("the proxy reads");
+    stdin.flush().await.expect("the proxy reads");
+    let mut crossed = [0u8; 7];
+    stream.read_exact(&mut crossed).await.expect("it crosses");
+    assert_eq!(&crossed, b"a line\n");
+
+    drop(stream);
+    let ended = tokio::time::timeout(PATIENCE, child.wait())
+        .await
+        .expect("the proxy ended when the bridge did")
+        .expect("it is reaped");
+    assert!(ended.success(), "{ended}");
+    drop(stdin);
 }
