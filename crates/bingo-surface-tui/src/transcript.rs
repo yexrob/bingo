@@ -622,15 +622,6 @@ struct Call<'a> {
     run: Option<Run<'a>>,
 }
 
-impl Call<'_> {
-    /// Whether it came back wrong: its own status, or an output the tool
-    /// marked as an error. One question, asked here, so the bullet that says
-    /// so and the words that cool out of it can never disagree.
-    fn failed(&self) -> bool {
-        self.status == ItemStatus::Failed || self.output.is_some_and(|output| output.is_error)
-    }
-}
-
 /// The row one skill run wears, whichever door it came through: the model's
 /// `Skill(guide)` call and a person's own `/guide` are the same thing
 /// happening, so this is the only place either is drawn (design §4).
@@ -655,7 +646,7 @@ fn asked(run: Run<'_>, rows: &Rows<'_>, landing: Landing) -> Line<'static> {
 }
 
 fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
-    let failed = call.failed();
+    let failed = call.status.failed(call.output);
     let style = live_bullet(call.status, failed, rows);
     let landing = Landing::of(cue, failed, rows);
     let mut out = match call.run {

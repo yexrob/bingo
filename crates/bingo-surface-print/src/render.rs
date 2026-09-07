@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use bingo_sdk::{
-    DeltaKind, ErrorCode, Event, Frame, IntentOutcome, Item, ItemBody, ItemId, ItemStatus,
-    SessionState, ToolOutput, TurnStatus,
+    DeltaKind, ErrorCode, Event, Frame, IntentOutcome, Item, ItemBody, ItemId, SessionState,
+    ToolOutput, TurnStatus,
 };
 use serde_json::Value;
 
@@ -301,7 +301,7 @@ impl Renderer {
         duration_ms: Option<u64>,
         err: &mut (impl Write + ?Sized),
     ) -> io::Result<()> {
-        let verdict = if tool_failed(item, output) {
+        let verdict = if item.status.failed(output) {
             "error"
         } else {
             "ok"
@@ -402,18 +402,12 @@ pub(crate) fn write_line(line: &str, out: &mut (impl Write + ?Sized)) -> io::Res
     out.flush()
 }
 
-/// The verdict both modes report for a finished tool call, in one place: a
-/// failed status and an error output are the same news.
-pub(crate) fn tool_failed(item: &Item, output: Option<&ToolOutput>) -> bool {
-    item.status == ItemStatus::Failed || output.is_some_and(|o| o.is_error)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::tests::{assistant, frame, session_state, tool_call};
     use bingo_sdk::{
-        ContentPart, KernelError, Level, Origin, SessionId, TurnId, TurnOrigin, Usage,
+        ContentPart, ItemStatus, KernelError, Level, Origin, SessionId, TurnId, TurnOrigin, Usage,
     };
 
     pub(crate) struct Sinks {

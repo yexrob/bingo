@@ -361,6 +361,13 @@ impl ItemStatus {
             ItemStatus::Completed | ItemStatus::Failed | ItemStatus::Interrupted
         )
     }
+
+    /// Whether a tool call came back wrong: this status, or an output the
+    /// tool marked as an error. One question asked in one place, so the
+    /// verdict a run prints and the bullet a screen draws can never disagree.
+    pub fn failed(self, output: Option<&ToolOutput>) -> bool {
+        self == ItemStatus::Failed || output.is_some_and(|output| output.is_error)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1533,6 +1540,20 @@ mod tests {
         );
         assert_eq!(serde_json::to_value(&answer).expect("json"), both);
         assert_eq!(answer.spec(), AnswerSpec::Choice);
+    }
+
+    /// A call is wrong when its status says so or when its output does; a
+    /// completed call with a clean output is the only verdict that is right.
+    #[test]
+    fn a_call_fails_on_its_status_or_on_the_output_it_marked() {
+        let clean = ToolOutput::text("ok");
+        let wrong = ToolOutput::error("no");
+        assert!(!ItemStatus::Completed.failed(None));
+        assert!(!ItemStatus::Completed.failed(Some(&clean)));
+        assert!(ItemStatus::Completed.failed(Some(&wrong)));
+        assert!(ItemStatus::Failed.failed(None));
+        assert!(ItemStatus::Failed.failed(Some(&clean)));
+        assert!(!ItemStatus::Interrupted.failed(Some(&clean)));
     }
 
     #[test]
