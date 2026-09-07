@@ -74,11 +74,13 @@ already attributes, need no allowance.
 
 ## Consequences
 
-- An external compactor is first-class: an extractive strategy stays
-  free, a summarising one calls the session's own model rung, and the
-  spend is on the stream. The compactor slot's activation key (the
-  M26 Carried) ships with this door, so an external strategy can
-  actually run in the shipped composition.
+- An external compactor runs, but spends nothing through the host: it
+  receives the session's `ModelRequest` as a projection (ADR-0048) and
+  summarises by its own means or cuts by none
+  (`bingo-plugin-rpc/src/compactor.rs`). The session's own model rung
+  is what the deferred `complete` door would open (§3).
+  *(Amended 2026-09-07: said a summarising strategy calls the session's
+  model rung through a door that ships; only `ask` and `notice` ship.)*
 - Rings and abuse are bounded as M28 bounds them: one deadline per
   call, one grant per crossing, nothing ambient, nothing renewed.
 - An allowance grants a spend, never a permission: the verdict plane

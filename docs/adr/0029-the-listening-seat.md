@@ -42,15 +42,18 @@ turn boundary already coalesces and a queue already holds.
    *(Amended 2026-09-03, ADR-0034 §6: a bare name was live and the `~`
    sigil asked for patience; the sigil went with the default it marked,
    and an old flat roster reads all-patient where it read all-live.)*
-3. **The patience deadline.** Held mail whose origin surface is
-   `room` — only that; a standby brief (surface `agent`) must never
-   trip this, or ADR-0027's zero-cost seat dies — older than the
-   seat's patience wakes the seat once, by a nudge (`principal: None`:
-   not a post, no debt, no serial count). The woken turn absorbs the
-   backlog first, queue order. Timers keep the chaser's discipline
-   (ADR-0022 §3): bounded, die with the process, re-derived from the
-   session snapshot's queue on announce, an overdue backlog nudged
-   once.
+3. **The patience deadline.** A patient seat whose cursor has stood
+   behind the room's head for longer than its patience is woken once,
+   by a nudge (`principal: None`: not a post, no debt, no serial
+   count). Only the room's posts count; a standby brief (surface
+   `agent`) never trips this, or ADR-0027's zero-cost seat dies. The
+   woken turn reads the room first, at its head (ADR-0034 §4). Timers
+   keep the chaser's discipline (ADR-0022 §3): bounded, die with the
+   process, re-derived from the cursors on announce, a cursor found
+   behind the head nudged once.
+   *(Amended 2026-09-07: was held room mail older than the patience,
+   absorbed from the queue by the woken turn; ADR-0034 holds nothing
+   and reads by the cursor.)*
 4. **`Listen { room, patience_s }` retunes the caller's own ear** — an
    EAR delta appended to the room's journal, folded over the last
    membership payload: no read-modify-write, journal order settles
@@ -76,8 +79,8 @@ turn boundary already coalesces and a queue already holds.
   the R-shadow precedent — and the reseat is the reset lever.
 - The serial rule needs nothing: a patient seat that posts while
   behind is bounced with the missed posts quoted — the repair lane
-  already covers the ear. The pending area (ADR-0028) already hides
-  held room mail; the person can always watch the room live.
+  already covers the ear. Nothing is held for a seat — a room is read,
+  not delivered (ADR-0034) — and the person can always watch it live.
 - The roster's one reader grows one arm (the EAR fold); the mention
   fold counts every seat, patient ones included.
 - A standby member seated with a patient ear on an active room will be

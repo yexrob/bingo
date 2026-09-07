@@ -53,9 +53,10 @@ vocabulary: `Delivery::Hold` and `Delivery::Wake`.
 ## Consequences
 
 - ADR-0025's blind-holder consequence narrows to holders off the
-  roster; for a rostered one, absorbed posts count toward *seen* at the
-  cut and its posts land like any member's. The serial module changes
-  not at all — the rule already reads only `Origin` and journal order.
+  roster; for a rostered one, its cursor counts toward *seen* at the
+  cut like any seat's (ADR-0034 §7) and its posts land like any
+  member's. The serial module changes not at all — the rule already
+  reads only `Origin`, the cursor and journal order.
 - The chaser learns one address: a debt owed by `parent` is nudged at
   the room's parent session, `Wake` like every nudge. The `owed` card
   and `/room` show the seat by the name everyone uses for it.

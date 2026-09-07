@@ -13,10 +13,10 @@ room's journal is already one ordered stream; what is missing is only the
 same discipline on the writer: a post must follow everything its author
 could have seen.
 
-The facts are in place. Every post fans out at landing, `Delivery::Wake`,
-to every member but its author, and is absorbed into the member's own
+The facts are in place. Every post is written once into the room's
 journal carrying `origin { conversation: "#name", principal: Some(author) }`
-(`post.rs`); a nudge carries `principal: None` (`chase.rs`), so posts and
+(`post.rs`), and each seat keeps a cursor there saying how far it has read
+(ADR-0034 §2); a nudge carries `principal: None` (`chase.rs`), so posts and
 nudges are distinguishable in sdk vocabulary alone. And journals are
 append-only: a landed post cannot be retracted, so any refusal must happen
 before landing.
@@ -40,15 +40,17 @@ before landing.
    *(Amended 2026-09-03, ADR-0034 §5: "seen" was counted from the posts
    copied into the caller's own journal; a post is copied nowhere now, so
    it is counted from the caller's cursor.)*
-3. **Seen = absorbed or quoted.** The bounce is a worded tool error that
+3. **Seen = read or quoted.** The bounce is a worded tool error that
    quotes the missed posts, and a journaled bounce counts toward "seen" on
-   the next attempt: seen(room) = max(posts absorbed before the cut,
-   posts quoted by a bounce journaled before the cut). So a bounce always
-   unlocks the very next attempt — even when a fan-out was lost (a frame
-   nobody observed is never re-delivered), the bounce itself is the
-   repair, arriving through the tool-result lane instead of the input
-   lane. In the normal case the fan-out copies absorb at the same barrier
-   and the quote merely stands beside them, clearly labelled.
+   the next attempt: seen(room) = max(posts before the seat's cursor,
+   posts quoted by a bounce journaled before the cut)
+   (`bingo-agents/src/serial.rs`). So a bounce always unlocks the very
+   next attempt: the cursor moves only when the seat reads the room at
+   the head of a turn (ADR-0034 §4), and mid-turn the quote is the
+   repair, arriving through the tool-result lane.
+   *(Amended 2026-09-07: was "absorbed or quoted", counting fan-out
+   copies absorbed into the member's journal; ADR-0034 §2 replaced the
+   copies with one cursor per seat.)*
 4. **A person is never bounced.** The check lives in the tool; whatever
    posts without the tool — a person's own composer — is not checked. A
    person watches the room live and outranks the protocol.
@@ -70,8 +72,8 @@ before landing.
   and is bounced once whenever a member has spoken since. That bounce is
   the only reading of the room it gets, which is the repair of §3 doing
   its work rather than an exception to it. (Narrowed by ADR-0028: a
-  roster that names `parent` seats the holder — its posts are then
-  delivered to it and absorbed like any member's, and only an
-  off-roster holder still posts blind.)
+  roster that names `parent` seats the holder — it then reads the room
+  by a cursor like any member (ADR-0034 §7), and only an off-roster
+  holder still posts blind.)
 - Restart-safe by construction: both ledgers are re-derived from journals;
   process death loses timers, never the discipline.
