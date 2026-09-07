@@ -689,6 +689,9 @@ fn scripted_run(
         .arg(prompt))
 }
 
+#[path = "../support/python.rs"]
+mod python;
+
 mod acp;
 mod agents;
 mod batch;

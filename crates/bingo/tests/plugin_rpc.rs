@@ -6,7 +6,8 @@
 //! it, a prompt, and what came out.
 //!
 //! Every test skips where `python3` is absent, so a machine without it says so
-//! rather than failing.
+//! rather than failing — except on CI, where a missing interpreter is a
+//! failure rather than a suite that passes without running (`support/python`).
 
 // An integration test is not `cfg(test)`; the test-only lint relief is spelled out.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -16,19 +17,13 @@ use std::process::{Command, Output, Stdio};
 
 use bingo_sdk::{Event, Frame, InteractionKind, ItemBody};
 
+#[path = "support/python.rs"]
+mod python;
+use python::python3;
+
 /// The example this repository ships, which is what a person would copy.
 fn example() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/wordcount")
-}
-
-/// Whether a plugin written in Python can run here at all.
-fn python3() -> bool {
-    Command::new("python3")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 /// A home with the example installed the way a person installs one, and a

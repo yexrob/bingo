@@ -6,7 +6,6 @@
 //! message it was actually sent.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
