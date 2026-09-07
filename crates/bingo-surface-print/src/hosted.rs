@@ -25,8 +25,8 @@ use tokio::sync::mpsc;
 use crate::input::{self, Decision, Line};
 use crate::render::write_line;
 use crate::{
-    Attached, Next, SURFACE_ID, close_message, closed, error_report, exit_for, notice_report,
-    refuse, stdio_error,
+    Attached, Next, SURFACE_ID, close_message, closed, error_report, notice_report, refuse,
+    stdio_error,
 };
 
 impl Attached<'_> {
@@ -323,7 +323,7 @@ impl Hosted {
 
     /// Every prompt this turn carried has been answered.
     fn completed(&mut self, turn: &TurnId, status: &TurnStatus, state: &SessionState) {
-        let exit = exit_for(status);
+        let exit = Exit::for_turn(status);
         if exit.code != 0 {
             self.failure = Some(exit);
         }

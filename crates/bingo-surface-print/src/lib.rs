@@ -27,7 +27,7 @@ use bingo_sdk::{
     Delivery, ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId,
     IntentOutcome, Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin,
     PluginError, PluginManifest, Question, Registrar, SessionHandle, SessionId, SessionState,
-    Surface, SurfaceKind, SurfaceOptions, TurnStatus,
+    Surface, SurfaceKind, SurfaceOptions,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -407,7 +407,7 @@ fn react(
             handle.answer(IntentId::mint(), interaction.id.clone(), answer, activation);
             Ok(Next::Await)
         }
-        Event::TurnCompleted { status, .. } => Ok(Next::Exit(exit_for(status))),
+        Event::TurnCompleted { status, .. } => Ok(Next::Exit(Exit::for_turn(status))),
         Event::SessionClosed { reason } => {
             closed(&close_message(reason), err, console.human()).map(Next::Exit)
         }
@@ -450,14 +450,6 @@ fn closed(message: &str, err: &mut (dyn Write + Send), human: bool) -> Result<Ex
     )
     .map_err(stdio_error)?;
     Ok(Exit { code: 1 })
-}
-
-fn exit_for(status: &TurnStatus) -> Exit {
-    match status {
-        TurnStatus::Completed => Exit { code: 0 },
-        TurnStatus::Failed { .. } => Exit { code: 1 },
-        TurnStatus::Interrupted { .. } => Exit { code: 130 },
-    }
 }
 
 fn close_message(reason: &CloseReason) -> String {
@@ -638,7 +630,7 @@ pub(crate) mod tests {
         HistoryChunk, HistoryPage, HostApi, InteractionId, InterruptReason, InterruptScope, Item,
         ItemBody, ItemId, ItemStatus, QuestionOption, Seq, SessionFilter, SessionHandle, SessionId,
         SessionPort, SessionSelector, SessionState, SessionSummary, ToolOutput, TurnId, TurnOrigin,
-        Usage,
+        TurnStatus, Usage,
     };
     use jiff::Timestamp;
     use serde_json::{Value, json};
