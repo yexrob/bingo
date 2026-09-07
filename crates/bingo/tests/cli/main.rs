@@ -42,6 +42,29 @@ fn run(cmd: &mut Command) -> Output {
     cmd.output().expect("the binary runs")
 }
 
+/// How long any one wait here may take before it is called a hang.
+///
+/// A ceiling and not a wait: a test polls for the thing it is waiting for and
+/// goes on the moment it is there, so a fast box never feels this and a slow
+/// one is not failed for being slow. Generous, because CI has fewer cores than
+/// a developer's box and a run here spawns real subprocesses.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// Poll until something is there, or fail saying what never happened.
+///
+/// The one shape a test waits in: no test sleeps for a guess at how long a
+/// machine takes, because that guess is the machine it was written on.
+fn until<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
+    let started = Instant::now();
+    loop {
+        if let Some(found) = look() {
+            return found;
+        }
+        assert!(started.elapsed() < PATIENCE, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// `run`, for a scenario whose failure is a hang: past `limit` the process is
 /// killed and the test fails, instead of the suite waiting on it. The output
 /// is read once the process has exited, so it must fit the pipe.

@@ -13,10 +13,6 @@ use jiff::{SignedDuration, Timestamp};
 
 use super::*;
 
-/// Long enough for a process to boot, take the claim and fire; a schedule
-/// that has not fired by then is a failure, not a slow machine.
-const PATIENCE: Duration = Duration::from_secs(30);
-
 fn schedules(home: &Path) -> PathBuf {
     home.join(".bingo/data/schedules")
 }
@@ -72,6 +68,17 @@ fn only_entry(home: &Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// The pid in the runner's claim, if a process holds it. Written by
+/// `bingo-schedule`'s `Claim` when the timer loop starts, so a test that sees
+/// its own process's pid there knows that process is looking at the store.
+fn held_by(home: &Path) -> Option<u32> {
+    std::fs::read_to_string(schedules(home).join("runner.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// The journal of the session a schedule fires on, once there is one.
 fn transcript(home: &Path, key: &str) -> Option<String> {
     for session in std::fs::read_dir(sessions(home)).ok()?.flatten() {
@@ -84,18 +91,6 @@ fn transcript(home: &Path, key: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Poll until something is there, or fail saying what never happened.
-fn until<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
-    let started = Instant::now();
-    loop {
-        if let Some(found) = look() {
-            return found;
-        }
-        assert!(started.elapsed() < PATIENCE, "{what} never happened");
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// A bingo that stays up while the test watches the disk: `serve --stdio`
@@ -132,6 +127,13 @@ impl Running {
             .expect("the binary runs");
         let stdin = child.stdin.take();
         Self { child, stdin }
+    }
+
+    /// What this process writes into the runner's claim when it takes it,
+    /// which is how a test knows the store is this one's and not the last
+    /// one's.
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Close stdin and wait: the surface ends, the host shuts down, and the
@@ -288,7 +290,16 @@ fn an_overdue_schedule_fires_once_however_long_it_was_overdue() {
     // The clock moved, so the next process owes nothing until the hour is up.
     let restart = super::script(r#"{"responses":[{"steps":[{"text":"the second run"}]}]}"#);
     let second = Running::start(home.path(), &restart);
-    std::thread::sleep(Duration::from_secs(2));
+    // Wait for the restart to hold the runner's claim rather than for a
+    // clock: until it does it has not looked at the store at all, and a fixed
+    // wait would be a guess at how long this box takes to boot a bingo.
+    until("the restart took the runner's claim", || {
+        held_by(home.path()).filter(|pid| *pid == second.pid())
+    });
+    // A negative: no wait can prove a fire will never come, only that none
+    // came. Short and fixed on purpose — it is a window after the runner is
+    // known to be looking, not a guess at when it started.
+    std::thread::sleep(Duration::from_millis(500));
     let journal = transcript(home.path(), "schedule/cccc3333").expect("the session is still there");
     assert!(
         !journal.contains("the second run"),

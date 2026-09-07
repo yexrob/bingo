@@ -3,7 +3,9 @@
 //! `--input-format stream-json` it drives it for as long as it likes.
 
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Child, ChildStdin, ChildStdout};
+use std::process::{Child, ChildStdin};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
 
 use serde_json::{Value, json};
 
@@ -152,10 +154,32 @@ fn a_sub_sessions_lines_carry_the_call_that_spawned_it() {
 pub(crate) struct Host {
     child: Child,
     pub(crate) stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// stdout is read by a thread rather than in place, so that waiting for a
+    /// line can have a deadline: a blocking read has none on either platform
+    /// this ships on, and a test that waited in one would hang the suite where
+    /// it should fail.
+    said: Receiver<String>,
+    reading: JoinHandle<()>,
     /// Every line read so far, so what the run said before the test looked is
     /// still part of the transcript it ends with.
     lines: Vec<Value>,
+}
+
+/// Every line is JSON or the test fails: that is the contract this mode keeps.
+fn parsed(line: &str) -> Value {
+    serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"))
+}
+
+/// The next line the run wrote, or `None` once its stdout has ended. A wait
+/// that runs out is a hang, and a hang is a failure rather than a longer wait.
+fn heard(said: &Receiver<String>, waiting_for: &str) -> Option<Value> {
+    match said.recv_timeout(PATIENCE) {
+        Ok(line) => Some(parsed(&line)),
+        Err(RecvTimeoutError::Disconnected) => None,
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("the run said nothing for {PATIENCE:?} while a test waited for {waiting_for}")
+        }
+    }
 }
 
 /// What was left when stdin closed.
@@ -185,11 +209,21 @@ impl Host {
     pub(crate) fn start(cmd: &mut Command) -> Self {
         let mut child = cmd.stdin(Stdio::piped()).spawn().expect("the binary runs");
         let stdin = child.stdin.take().expect("a pipe");
-        let stdout = BufReader::new(child.stdout.take().expect("a pipe"));
+        let stdout = child.stdout.take().expect("a pipe");
+        let (say, said) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { return };
+                if say.send(line).is_err() {
+                    return;
+                }
+            }
+        });
         Self {
             child,
             stdin,
-            stdout,
+            said,
+            reading,
             lines: Vec::new(),
         }
     }
@@ -207,14 +241,9 @@ impl Host {
         }));
     }
 
-    /// The next line; `None` at the end of stdout. Every line is JSON or the
-    /// test fails: that is the contract this mode keeps.
-    fn line(&mut self) -> Option<Value> {
-        let mut line = String::new();
-        if self.stdout.read_line(&mut line).expect("utf-8 stdout") == 0 {
-            return None;
-        }
-        let value: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
+    /// The next line, kept in the transcript; `None` at the end of stdout.
+    fn line(&mut self, waiting_for: &str) -> Option<Value> {
+        let value = heard(&self.said, waiting_for)?;
         self.lines.push(value.clone());
         Some(value)
     }
@@ -226,7 +255,7 @@ impl Host {
     pub(crate) fn until_event(&mut self, kind: &str) -> Value {
         loop {
             let line = self
-                .line()
+                .line(&format!("a {kind} event"))
                 .unwrap_or_else(|| panic!("stdout ended before a {kind} event"));
             if line["event"]["type"] == kind {
                 return line;
@@ -238,7 +267,7 @@ impl Host {
     pub(crate) fn until(&mut self, kind: &str) -> Value {
         loop {
             let line = self
-                .line()
+                .line(&format!("a {kind} line"))
                 .unwrap_or_else(|| panic!("stdout ended before a {kind} line"));
             if line["type"] == kind {
                 return line;
@@ -272,6 +301,7 @@ impl Host {
     pub(crate) fn kill(mut self) {
         self.child.kill().expect("the run is killed");
         self.child.wait().expect("the binary is reaped");
+        let _ = self.reading.join();
     }
 
     /// Close stdin and collect what the run had left to say.
@@ -279,15 +309,15 @@ impl Host {
         let Host {
             mut child,
             stdin,
-            mut stdout,
+            said,
+            reading,
             mut lines,
         } = self;
         drop(stdin);
-        let mut line = String::new();
-        while stdout.read_line(&mut line).expect("utf-8 stdout") > 0 {
-            lines.push(serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}")));
-            line.clear();
+        while let Some(value) = heard(&said, "the rest of the run") {
+            lines.push(value);
         }
+        let _ = reading.join();
         let mut err = String::new();
         if let Some(mut stderr) = child.stderr.take() {
             stderr.read_to_string(&mut err).expect("utf-8 stderr");

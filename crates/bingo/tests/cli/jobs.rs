@@ -63,9 +63,14 @@ fn logs(home: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 fn log_text(home: &std::path::Path) -> String {
+    log_of(home).unwrap_or_else(|| panic!("one job, one log: {:?}", logs(home)))
+}
+
+/// The same, for a test waiting on a log that is not written yet.
+fn log_of(home: &std::path::Path) -> Option<String> {
     let paths = logs(home);
-    assert_eq!(paths.len(), 1, "one job, one log: {paths:?}");
-    std::fs::read_to_string(&paths[0]).unwrap_or_default()
+    let [only] = &paths[..] else { return None };
+    std::fs::read_to_string(only).ok()
 }
 
 /// Turn one starts a job and reads the head of it; turn two reads on from the
@@ -97,7 +102,11 @@ fn a_job_is_pulled_by_cursor_across_two_turns_and_then_killed() {
     // Only now may the job write its second line, so the cursor pull of the
     // next turn has something new to find and the first pull had not.
     std::fs::write(dir.path().join("go"), "").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    // The line itself, not a clock: the cursor pull of the next turn is only
+    // a pull once the job has written what it is meant to find.
+    until("the job wrote its second line", || {
+        log_of(dir.path()).filter(|log| log.contains("two"))
+    });
     host.prompt("read the rest and stop it");
     host.until("result");
     let ended = host.finish();
@@ -198,8 +207,9 @@ fn a_finished_job_opens_a_turn_on_a_headless_run() {
     let first = host.until("result");
     assert_eq!(first["result"], "started");
 
-    // Nothing more is sent: only the job's end can open the next turn.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // Nothing more is sent, so a second result can only be the job's end
+    // opening a turn. Waited for rather than slept through.
+    host.until("result");
     let ended = host.finish();
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
 

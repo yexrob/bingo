@@ -179,8 +179,9 @@ fn a_finished_background_agent_wakes_the_run_that_spawned_it() {
     let first = host.until("result");
     assert_eq!(first["result"], "spawned, or the work itself");
 
-    // Nothing more is sent: only the agent's end can open the next turn.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // Nothing more is sent, so a second result can only be the woken turn's.
+    // Waited for rather than slept through: the run says when it is there.
+    host.until("result");
     let ended = host.finish();
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
     let results = ended.results();
@@ -226,7 +227,14 @@ fn a_wake_that_finds_the_parent_busy_is_never_lost() {
     let first = host.until("result");
     assert_eq!(first["result"], "still the first turn, or the work");
 
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // The completion reaches the parent either way — absorbed into the turn
+    // it is in, or as a turn of its own — so what is waited for is the line
+    // in its journal, which is the invariant below, and not a clock.
+    until("the completion reached the parent", || {
+        journal_text(&dir.path().join(".bingo/data"))
+            .contains("finished.")
+            .then_some(())
+    });
     let ended = host.finish();
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
     let results = ended.results();
@@ -253,15 +261,20 @@ fn a_wake_that_finds_the_parent_busy_is_never_lost() {
 /// carries: an agent's is `agent/<root>/<name>`. Read for what a session
 /// heard, which no stream of the root's shows.
 fn agent_journal(home: &std::path::Path, key: &str) -> String {
+    journal_of(home, key).unwrap_or_else(|| panic!("no session is keyed {key}"))
+}
+
+/// The same, for a test waiting on a session that is not written yet.
+fn journal_of(home: &std::path::Path, key: &str) -> Option<String> {
     let sessions = home.join(".bingo/data/sessions");
-    let dirs = std::fs::read_dir(&sessions).expect("the run wrote its sessions");
-    for dir in dirs.flatten().map(|entry| entry.path()) {
+    for dir in std::fs::read_dir(&sessions).ok()?.flatten() {
+        let dir = dir.path();
         let summary = std::fs::read_to_string(dir.join("summary.json")).unwrap_or_default();
         if summary.contains(&format!("\"{key}\"")) {
-            return std::fs::read_to_string(dir.join("journal.jsonl")).unwrap_or_default();
+            return Some(std::fs::read_to_string(dir.join("journal.jsonl")).unwrap_or_default());
         }
     }
-    panic!("no session is keyed {key}");
+    None
 }
 
 /// One session's journal by its id: `<data_dir>/sessions/<id>/journal.jsonl`
@@ -518,12 +531,15 @@ fn a_resumed_root_is_told_which_child_was_mid_turn_when_the_process_ended() {
             .as_str()
             .unwrap_or_else(|| panic!("{done}")),
     );
-    // The root's turn ended as the child's began; give the child's first
-    // frames time to reach its journal before the process is taken down.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // The root's turn ended as the child's began. What the process may not be
+    // taken down before is the child's turn reaching its journal, which is
+    // what the assertions below read — so that is what is waited for.
+    let key = format!("agent/{root}/slow");
+    until("the child's turn reached its journal", || {
+        journal_of(home.path(), &key).filter(|j| j.contains(r#""type":"turnStarted""#))
+    });
     host.kill();
 
-    let key = format!("agent/{root}/slow");
     let before = agent_journal(home.path(), &key);
     assert!(before.contains(r#""type":"turnStarted""#), "{before}");
     assert!(

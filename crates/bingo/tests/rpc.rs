@@ -233,18 +233,36 @@ async fn one_interrupt_ends_the_turn_and_the_command_it_was_running() {
 
     // Nothing in the group is writing any more, the loop the shell put in the
     // background included.
-    tokio::time::sleep(SETTLE).await;
-    let after = std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
-    tokio::time::sleep(SETTLE).await;
-    let later = std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
-    assert_eq!(after, later, "the process group outlived the interrupt");
+    assert!(
+        settled(&ticks).await,
+        "the process group outlived the interrupt"
+    );
     kernel.shutdown().await.unwrap();
 }
 
-/// Long enough that a killed group has certainly stopped writing, short
-/// enough to wait twice.
+/// One look-to-look window: long enough that a group still running has
+/// certainly written into it, short enough to look many times.
 #[cfg(unix)]
 const SETTLE: Duration = Duration::from_millis(400);
+
+/// Whether the file stops growing, polled until it does or the patience runs
+/// out. The negative it stands for cannot be waited for directly — no length
+/// of sleep proves nothing will be written — but a group that outlived the
+/// interrupt writes a tick every fiftieth of a second, so it never stands
+/// still through one window and this runs out on it instead.
+#[cfg(unix)]
+async fn settled(path: &std::path::Path) -> bool {
+    let mut last = u64::MAX;
+    for _ in 0..(LIMIT.as_millis() / SETTLE.as_millis()) {
+        tokio::time::sleep(SETTLE).await;
+        let now = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if now == last {
+            return true;
+        }
+        last = now;
+    }
+    false
+}
 
 /// Poll until the file has something in it, bounded generously.
 #[cfg(unix)]
