@@ -123,6 +123,9 @@ impl SessionState {
         self.unread = false;
     }
 
+    /// Derived, never stored: a turn is running. The same fact reaches a
+    /// client that holds only a [`SessionSummary`] as `summary.busy`, which
+    /// the kernel stamps; the reducer writes it nowhere.
     pub fn busy(&self) -> bool {
         self.turn.is_some()
     }
@@ -261,7 +264,6 @@ impl SessionState {
             usage: Usage::default(),
             retrying: None,
         });
-        self.summary.busy = true;
         Applied::Turn
     }
 
@@ -286,7 +288,6 @@ impl SessionState {
 
     fn turn_completed(&mut self, status: &TurnStatus) -> Applied {
         self.turn = None;
-        self.summary.busy = false;
         self.last_turn = Some(status.clone());
         self.unread = true;
         Applied::Turn

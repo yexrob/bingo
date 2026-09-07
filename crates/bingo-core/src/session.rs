@@ -163,7 +163,7 @@ impl Actor {
                 let _ = reply.send(self.history(&page));
             }
             Msg::Summary { reply } => {
-                let _ = reply.send(self.state.summary.clone());
+                let _ = reply.send(self.stamped(self.state.summary.clone()));
             }
             Msg::Emit { turn, event } => self.emit(turn, *event).await,
             Msg::Ask {
@@ -244,6 +244,23 @@ impl Actor {
             updated_at: Timestamp::now(),
             ..self.state.summary.clone()
         };
+        self.publish_summary(summary).await;
+    }
+
+    /// A summary as it leaves the actor. `busy` is decided here and nowhere
+    /// else: a summary travels without the turn it describes — a host listing
+    /// carries no `SessionState` — so the actor stamps its own running turn on
+    /// it, which is what [`SessionState::busy`] derives from the same fact.
+    fn stamped(&self, summary: SessionSummary) -> SessionSummary {
+        SessionSummary {
+            busy: self.running.is_some(),
+            ..summary
+        }
+    }
+
+    /// The one way a summary reaches the journal.
+    async fn publish_summary(&mut self, summary: SessionSummary) {
+        let summary = self.stamped(summary);
         self.publish(Event::SessionUpdated { summary }, None).await;
     }
 
@@ -279,12 +296,11 @@ impl Actor {
     /// The start hooks it hands back run while the session opens for reads.
     async fn open(&mut self) -> Starting {
         let summary = SessionSummary {
-            busy: false,
             title: self.title(),
             ..self.restated()
         };
         self.observe_journal();
-        self.publish(Event::SessionUpdated { summary }, None).await;
+        self.publish_summary(summary).await;
         self.restate_extensions().await;
         self.refresh_config().await;
         self.recover().await;
@@ -390,7 +406,7 @@ impl Actor {
     async fn reconfigure(&mut self, config: Arc<TurnConfig>) {
         self.config = config;
         let summary = self.restated();
-        self.publish(Event::SessionUpdated { summary }, None).await;
+        self.publish_summary(summary).await;
         self.refresh_config().await;
     }
 

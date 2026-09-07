@@ -836,6 +836,10 @@ pub struct SessionSummary {
     pub updated_at: Timestamp,
     #[serde(default)]
     pub usage: Usage,
+    /// A turn is running. A summary travels without the turn it describes —
+    /// a host listing carries no `SessionState` — so the kernel stamps this
+    /// on every summary it publishes and nothing else writes it. A client
+    /// that holds the state derives the same fact with `SessionState::busy`.
     #[serde(default)]
     pub busy: bool,
     /// How many messages have been said in this session, by
