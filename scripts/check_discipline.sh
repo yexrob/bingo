@@ -174,4 +174,16 @@ for f in sorted(pathlib.Path("crates").rglob("*.rs")):
 sys.exit(1 if bad else 0)
 PY
 
+# 7. Record length (CLAUDE.md, Records): a plan warns above 150 lines, an ADR above 120.
+#    A warning, never a failure — the records already written are history, and history is
+#    not rewritten to satisfy a check added after it.
+long_records() { # directory, name glob, limit
+  while IFS= read -r f; do
+    n=$(awk 'END{print NR}' "$f")
+    if [ "$n" -gt "$3" ]; then say "warn $f: $n lines (>$3)"; fi
+  done < <(find "$1" -name "$2" | sort)
+}
+long_records docs/plans 'M*.md' 150
+long_records docs/adr '0*.md' 120
+
 [ "$fail" -eq 0 ] && say "discipline ok" || { say "discipline FAILED"; exit 1; }
