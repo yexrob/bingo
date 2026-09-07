@@ -31,58 +31,51 @@ const DEFAULT_NAME: &str = "agent";
 const SPAWN_AGENT: &str = "SpawnAgent";
 
 const DESCRIPTION: &str = "\
-Start a sub-agent: a session of its own, with its own transcript and its own \
-context window, working in the same directory. Use one for a large, separable \
-piece of work — a search, a review, a build-and-fix loop — that would \
-otherwise fill this conversation, or to run several such pieces at once. It \
-sees nothing of this conversation and cannot ask the user anything, so the \
-prompt has to stand on its own: what to do, what it may assume, and what to \
-report back. In the background, which is the default, the call returns the \
-agent's name at once and its reply arrives as a message when it finishes: \
+Start a sub-agent: a session of its own, working in the same directory. Use \
+one for a large, separable piece of work — a search, a review, a \
+build-and-fix loop — that would otherwise fill this conversation, or several \
+at once. It sees nothing of this conversation and cannot ask the user \
+anything, so the prompt has to stand on its own: what to do, what it may \
+assume, and what to report back. In the background, the default, the call \
+returns the agent's name and its reply arrives later as a message: \
 carry on with whatever does not depend on it, or end your turn — the reply \
-wakes you, and there is nothing to poll. Until it comes, the agent is still \
+wakes you, and there is nothing to poll. Until it comes the agent is still \
 running; say so if asked, and never guess at what it will say. With \
 `background: false` the call waits and returns the agent's final text — for \
 when you cannot go on without it. \
 When several agents are to work with each other rather than each report back, \
-seat them instead of tasking them: `OpenRoom` naming the roles — and \
-`parent` among them when you want to read the room yourself — one \
-`standby: true` spawn per role, then a single `SendMessage` to `#room` \
-carrying the kickoff and naming with `@name` whoever it is for. A member reads \
-its room at the head of its own turn, and being named is what opens that turn \
-now, so one post starts everyone it names and each reads its own brief first; \
-writing to them one at a time instead makes you the switchboard every step has \
+seat them instead of tasking them: `OpenRoom` naming the roles — and `parent` \
+among them when you want to read the room yourself — one `standby: true` spawn \
+per role, then a single `SendMessage` to `#room` carrying the kickoff and \
+naming with `@name` whoever it is for, so one post starts everyone it names. \
+Writing to them one at a time instead makes you the switchboard every step has \
 to pass back through. A brief that tells an agent to stand by has to say what \
 to stand by for: everything reaching it from elsewhere is labelled — \
 `[from <name>]`, `[in #<room>]` — and an unlabelled line in its own \
-conversation is the person it works for, or you, writing to it directly, which \
-it answers whatever else it was told.";
+conversation is the person it works for, or you, writing directly, which it \
+answers whatever else it was told.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SpawnArgs {
-    /// The task, in full: what to do, what it may assume, and what to report
-    /// back. The sub-agent reads nothing of this conversation.
+    /// The task, in full.
     pub prompt: String,
     /// A named definition, `.bingo/agents/<name>.md`: its system prompt,
-    /// model, thinking level and tool set. Without one the sub-agent inherits
-    /// this session's.
+    /// model, thinking level and tool set. Without one it inherits this
+    /// session's.
     pub agent: Option<String>,
     /// What to call this one, for `SendMessage`. Defaults to
     /// the definition's name; a name a sibling already holds gets `-2`, `-3`.
     pub name: Option<String>,
     /// Return at once and be told when it finishes (the default), or `false`
-    /// to wait for its reply as the result of this call.
+    /// to wait for the reply.
     pub background: Option<bool>,
-    /// Seat it silent: the prompt is its standing brief, kept unread, and it
-    /// runs no turn until something wakes it — a post naming it in a room it
-    /// is in, or a message. Nothing here is told when it finishes. Use it for
-    /// the members of a room, so one kickoff post starts everyone it names.
+    /// Seat it silent: its prompt is a standing brief, kept unread until
+    /// something wakes it. Nothing here is told when its turns end.
     pub standby: Option<bool>,
     /// The model the sub-agent runs on; this session's by default. Call
     /// `ListModels` to see what is available instead of guessing an id.
     pub model: Option<String>,
-    /// The provider the sub-agent runs on; this session's by default. Call
-    /// `ListModels` to see what is available instead of guessing an id.
+    /// The provider the sub-agent runs on; this session's by default.
     pub provider: Option<String>,
     /// The tools the sub-agent may call, by name. By default it has every
     /// tool this session has, except `SpawnAgent`.
@@ -325,9 +318,9 @@ fn named(name: &str, session: &SessionId) -> String {
 /// turns end (ADR-0027 §3).
 fn seated(name: &str, session: &SessionId) -> String {
     format!(
-        "{}\n{name} is seated and idle: its brief is held unread and no turn \
-         has opened. Whatever wakes it — a post in a room it is in, a message \
-         — opens the turn that reads the brief first. Nothing will be reported \
+        "{}\n{name} is seated and idle: no turn has opened, and its brief is \
+         held unread until whatever wakes it — a post in a room it is in, a \
+         message — opens the turn that reads it first. Nothing is reported \
          back here when its turns end.",
         named(name, session)
     )
@@ -591,7 +584,7 @@ mod tests {
         let named: Value = serde_json::from_str(address).expect("a name and a session");
         assert_eq!(named["name"], "counter");
         assert!(truth.contains("seated and idle"), "{truth}");
-        assert!(truth.contains("Nothing will be reported back"), "{truth}");
+        assert!(truth.contains("Nothing is reported back"), "{truth}");
 
         let delivered = host.delivered();
         assert_eq!(delivered.len(), 1);
