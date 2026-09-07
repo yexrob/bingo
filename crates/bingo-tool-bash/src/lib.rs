@@ -380,8 +380,13 @@ static MANIFEST: PluginManifest = PluginManifest {
     config: None,
 };
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BashPlugin;
+/// The plugin holds the job table rather than handing it out and forgetting
+/// it: ending what this run started is the plugin's own work, and `stop` is
+/// where it happens.
+#[derive(Debug, Default)]
+pub struct BashPlugin {
+    jobs: Arc<Jobs>,
+}
 
 #[async_trait]
 impl Plugin for BashPlugin {
@@ -390,17 +395,26 @@ impl Plugin for BashPlugin {
     }
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
-        let jobs = Arc::new(Jobs::new());
         let promotions = Arc::new(Promotions::new());
-        registrar.tool(Arc::new(BashTool::new(jobs.clone(), promotions.clone())) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(BashOutputTool::new(jobs.clone())) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(KillShellTool::new(jobs)) as Arc<dyn Tool>);
+        registrar
+            .tool(Arc::new(BashTool::new(self.jobs.clone(), promotions.clone())) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(BashOutputTool::new(self.jobs.clone())) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(KillShellTool::new(self.jobs.clone())) as Arc<dyn Tool>);
         registrar.add(Contribution::Command(
             Arc::new(ShellCommand) as Arc<dyn Command>
         ));
         registrar.add(Contribution::Command(
             Arc::new(PromoteCommand::new(promotions)) as Arc<dyn Command>,
         ));
+        Ok(())
+    }
+
+    /// A job lives exactly as long as this process (ADR-0018), and here is
+    /// where that ends: every group still running is asked to stop and then
+    /// made to, and waited for. `run::Group`'s drop was doing this alone —
+    /// unawaited, and only as far as tearing the runtime down ever got.
+    async fn stop(&self) -> Result<(), PluginError> {
+        self.jobs.end_all(kill::WAIT).await;
         Ok(())
     }
 }
@@ -659,7 +673,8 @@ pub(crate) mod tests {
             Value::Null,
             bingo_sdk::Env::rooted("/tmp"),
         );
-        BashPlugin.register(&mut registrar).expect("register");
+        let plugin = BashPlugin::default();
+        plugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
         let names: Vec<String> = contributions
             .iter()
@@ -673,9 +688,9 @@ pub(crate) mod tests {
             names,
             ["Bash", "BashOutput", "KillShell", "!", "bash.promote"]
         );
-        assert_eq!(BashPlugin.manifest().id, "bingo.tools.bash");
+        assert_eq!(plugin.manifest().id, "bingo.tools.bash");
         assert_eq!(
-            BashPlugin.manifest().provides,
+            plugin.manifest().provides,
             &[
                 "tool:Bash",
                 "tool:BashOutput",
@@ -1118,6 +1133,47 @@ pub(crate) mod tests {
         panic!(
             "the log never said the session was gone: {:?}",
             std::fs::read_to_string(&job.log)
+        );
+    }
+
+    /// Nothing this run started outlives it: `stop` ends every job the way
+    /// `KillShell` does — asked, then made to — and waits for it, instead of
+    /// leaving the group to a drop nobody observes.
+    ///
+    /// Unix only, as every test here that spawns is: `run::shell` resolves
+    /// `/bin/bash` or `/bin/sh`, so on Windows there is nothing to end.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_the_plugin_ends_every_job_it_had_running() {
+        let (_dir, _kernel, cx) = scratch();
+        let plugin = BashPlugin::default();
+        let mut registrar = Registrar::new(
+            "bingo.tools.bash",
+            Value::Null,
+            bingo_sdk::Env::rooted("/tmp"),
+        );
+        plugin.register(&mut registrar).expect("register");
+        let contributions = registrar.into_contributions();
+        let Some(Contribution::Tool(bash)) = contributions.first() else {
+            panic!("the first contribution is the Bash tool");
+        };
+        let out = bash
+            .call(
+                serde_json::json!({"command": "sleep 30", "background": true}),
+                &cx,
+            )
+            .await
+            .expect("the call answered");
+        assert!(!out.is_error, "{}", text(&out));
+        let job = only_job(&plugin.jobs);
+        assert_eq!(job.state(), jobs::State::Running);
+
+        plugin.stop().await.expect("the plugin stopped");
+
+        assert_eq!(job.state(), jobs::State::Killed, "the group was ended");
+        assert!(
+            plugin.jobs.running().is_empty(),
+            "and `stop` waited for it, rather than leaving it to a drop"
         );
     }
 

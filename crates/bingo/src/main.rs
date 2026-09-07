@@ -663,7 +663,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(JsonlStorePlugin::default()),
         Box::new(ContextPlugin),
         Box::new(FsPlugin),
-        Box::new(BashPlugin),
+        Box::new(BashPlugin::default()),
         Box::new(WebPlugin),
         Box::new(SkillsPlugin),
         Box::new(McpPlugin::default()),

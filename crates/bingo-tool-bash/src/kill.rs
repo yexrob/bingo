@@ -21,8 +21,9 @@ use serde_json::Value;
 use crate::jobs::Jobs;
 
 /// Longer than the grace the job's task gives the group plus the reaping after
-/// it, so a call only gives up when something is truly stuck.
-const WAIT: Duration = Duration::from_secs(8);
+/// it, so a caller only gives up when something is truly stuck. The plugin's
+/// `stop` waits on the same clock: one ending, one deadline.
+pub(crate) const WAIT: Duration = Duration::from_secs(8);
 
 const DESCRIPTION: &str = "\
 End a background shell command and everything it started. `id` is the job id \
