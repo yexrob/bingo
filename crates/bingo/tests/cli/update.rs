@@ -191,3 +191,32 @@ fn packed(dir: &std::path::Path, name: &str) -> (Vec<u8>, String) {
     let list = format!("{}  {name}\n", sha256::hex(&sha256::digest(&bytes)));
     (bytes, list)
 }
+
+/// `update.check` decides something before a host exists, so the bin reads it
+/// off the settings layers; the key itself is claimed by the terminal surface,
+/// which owns the box that says what the check found (ADR-0043 §4). Every run
+/// composes that plugin, headless or not, so a person who turns the check off
+/// for a `--print` run is never told the key is unknown.
+#[test]
+fn a_headless_run_that_turns_the_check_off_is_not_told_the_key_is_unknown() {
+    let responses = script(r#"{"responses":[{"steps":[{"text":"ok"}]}]}"#);
+    let settings = script(r#"{"update": {"check": false}, "notAKey": 1}"#);
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", responses.path())
+        .args(["--print", "--provider", "fake", "--settings"])
+        .arg(settings.path())
+        .arg("hello"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "ok\n");
+    let said = stderr(&out);
+    assert!(
+        !said.contains("`update`"),
+        "the claim reaches a run with no box in it: {said}"
+    );
+    // The control, so the line above cannot pass because nothing was read at
+    // all: an unclaimed key in the same file is still named.
+    assert!(
+        said.contains("`notAKey`"),
+        "an unclaimed key is reported by source: {said}"
+    );
+}
