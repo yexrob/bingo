@@ -38,7 +38,11 @@ otherwise fill this conversation, or to run several such pieces at once. It \
 sees nothing of this conversation and cannot ask the user anything, so the \
 prompt has to stand on its own: what to do, what it may assume, and what to \
 report back. In the background, which is the default, the call returns the \
-agent's name at once and its reply arrives as a message when it finishes; \
+agent's name at once and its reply arrives as a message when it finishes: \
+carry on with whatever does not depend on it, or end your turn — the reply \
+wakes you, and there is nothing to poll. Until it comes, the agent is still \
+running; say so if asked, and never guess at what it will say. `WaitAgent` \
+holds the turn for it only when you cannot go on without the result; \
 with `background: false` the call waits and returns the agent's final text. \
 When several agents are to work with each other rather than each report back, \
 seat them instead of tasking them: `OpenRoom` naming the roles — and \
@@ -726,6 +730,26 @@ mod tests {
         assert!(args.background(), "background is the default");
         let picked = definition.expect("the definition");
         assert_eq!(picked.provider.as_deref(), Some("other"));
+    }
+
+    /// A finished agent wakes the parent (`watch::report`), so the turn may
+    /// end with the agent still running. Said where the spawn is chosen, or
+    /// the model reaches for `WaitAgent` and holds the person's turn.
+    #[test]
+    fn the_description_says_the_turn_may_end_and_the_reply_wakes_it() {
+        assert!(
+            DESCRIPTION.contains("or end your turn — the reply wakes you"),
+            "{DESCRIPTION}"
+        );
+        assert!(DESCRIPTION.contains("nothing to poll"), "{DESCRIPTION}");
+        assert!(
+            DESCRIPTION.contains("never guess at what it will say"),
+            "{DESCRIPTION}"
+        );
+        assert!(
+            DESCRIPTION.contains("only when you cannot go on without the result"),
+            "{DESCRIPTION}"
+        );
     }
 
     /// The room pattern where the model reads it (ADR-0027 §4): the shape is
