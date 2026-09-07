@@ -9,35 +9,35 @@ mod interactions;
 mod invoke;
 mod mailbox;
 mod queue;
+mod running;
 mod spawn;
 mod subscribers;
 mod title;
 
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bingo_sdk::*;
-use futures::FutureExt;
 use jiff::Timestamp;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
 
 use commands::Commands;
 pub use commands::Services;
+pub(crate) use inputs::user_parts;
 pub use interactions::INTERACTION_GUARD_MS;
 use interactions::Pending;
 pub use mailbox::Mailbox;
-use mailbox::{Msg, TurnMail};
+use mailbox::Msg;
 use queue::Queue;
+use running::Running;
 pub use spawn::{head_summary, replayed, resume, spawn};
 pub use subscribers::SUBSCRIBER_CAPACITY;
 use subscribers::Subscribers;
 
-use crate::turn::{HookSet, TurnConfig, TurnKind, TurnOutcome, TurnRun, run_turn};
+use crate::turn::{HookSet, TurnConfig, TurnKind, TurnOutcome};
 
 /// How long a stopping actor waits for the work it spawned after its turns
 /// (ADR-0008 §7) before it lets go.
@@ -45,19 +45,6 @@ pub const AFTER_TURN_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The start hooks, still running.
 type Starting = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-
-struct Running {
-    turn: TurnId,
-    cancel: CancellationToken,
-    task: JoinHandle<()>,
-    /// The config this turn started under; the session's may have been
-    /// rebuilt since, and a call is judged by the turn's own.
-    config: Arc<TurnConfig>,
-    /// The tools it resolved, once it has said so (`Msg::Offered`). Empty
-    /// until then, which is the fail-closed reading: a call naming a tool
-    /// nothing has offered yet is refused.
-    tools: Vec<Arc<dyn Tool>>,
-}
 
 #[derive(PartialEq, Eq)]
 enum Flow {
@@ -112,8 +99,7 @@ impl Actor {
             flow = self.handle(msg).await;
         }
         if let Some(running) = self.running.take() {
-            running.cancel.cancel();
-            running.task.abort();
+            running.abandon();
         }
         drop(self.observed.take());
         self.tracker.close();
@@ -151,20 +137,10 @@ impl Actor {
                 reply,
             } => drop(reply.send(self.withdraw(intent, surface).await)),
             Msg::Answer(answered) => self.answer(answered).await,
-            Msg::Attach { reply } => {
-                let snapshot = self.state.clone();
-                let stream = self.subscribe(snapshot.seq);
-                let _ = reply.send((snapshot, stream));
-            }
-            Msg::EventsSince { since, reply } => {
-                let _ = reply.send(self.subscribe(since));
-            }
-            Msg::History { page, reply } => {
-                let _ = reply.send(self.history(&page));
-            }
-            Msg::Summary { reply } => {
-                let _ = reply.send(self.stamped(self.state.summary.clone()));
-            }
+            Msg::Attach { reply } => drop(reply.send(self.attached())),
+            Msg::EventsSince { since, reply } => drop(reply.send(self.subscribe(since))),
+            Msg::History { page, reply } => drop(reply.send(self.history(&page))),
+            Msg::Summary { reply } => drop(reply.send(self.stamped(self.state.summary.clone()))),
             Msg::Emit { turn, event } => self.emit(turn, *event).await,
             Msg::Ask {
                 item,
@@ -172,14 +148,9 @@ impl Actor {
                 answers,
                 reply,
             } => self.open_interaction(item, kind, answers, reply).await,
-            Msg::Absorb { turn, reply } => {
-                let _ = reply.send(self.absorb(&turn).await);
-            }
+            Msg::Absorb { turn, reply } => drop(reply.send(self.absorb(&turn).await)),
             Msg::TurnFinished { turn, outcome } => return self.turn_finished(turn, outcome).await,
-            Msg::Record { body, reply } => {
-                let id = self.record(body).await;
-                let _ = reply.send(id);
-            }
+            Msg::Record { body, reply } => drop(reply.send(self.record(body).await)),
             Msg::Progress { item, tail } => self.progress(item, tail).await,
             Msg::CommandFinished { intent, outcome } => {
                 self.command_finished(intent, outcome).await
@@ -598,6 +569,14 @@ impl Actor {
         frame.seq
     }
 
+    /// What a client attaches to: the snapshot it starts from, and every
+    /// frame after it.
+    fn attached(&mut self) -> (SessionState, FrameStream) {
+        let snapshot = self.state.clone();
+        let stream = self.subscribe(snapshot.seq);
+        (snapshot, stream)
+    }
+
     fn subscribe(&mut self, since: Seq) -> FrameStream {
         let replay: Vec<Frame> = self
             .journal
@@ -674,135 +653,6 @@ impl Actor {
                 .then(|| slice.first().map(|i| i.id.clone()))
                 .flatten(),
             generation: self.generation,
-        }
-    }
-
-    // ----- submissions -----
-
-    async fn start_turn(
-        &mut self,
-        inputs: Vec<(IntentId, Input)>,
-        origin: TurnOrigin,
-        kind: TurnKind,
-    ) {
-        let turn = TurnId::mint();
-        let (ids, acks) = self.record_inputs(&turn, inputs).await;
-        self.publish(
-            Event::TurnStarted {
-                turn: turn.clone(),
-                inputs: ids,
-                origin,
-            },
-            None,
-        )
-        .await;
-        // A queued intent was acknowledged `Queued` when it waited; the turn
-        // that runs it acknowledges it again, so a client learns which turn
-        // is its own without matching items.
-        self.ack_turn_started(&turn, acks).await;
-        let running = self.spawn_turn(turn, CancellationToken::new(), kind);
-        // Registered after the spawn: the task's first mail is handled only
-        // once this function returns, so nothing can race the registration.
-        self.running = Some(running);
-    }
-
-    /// Journal one user item per text input; the item ids open the turn and
-    /// the intents behind them are the ones to acknowledge.
-    async fn record_inputs(
-        &mut self,
-        turn: &TurnId,
-        inputs: Vec<(IntentId, Input)>,
-    ) -> (Vec<ItemId>, Vec<IntentId>) {
-        let mut ids = Vec::new();
-        let mut acks = Vec::new();
-        for (intent, input) in inputs {
-            let Input::Text {
-                text,
-                images,
-                origin,
-                ..
-            } = input
-            else {
-                continue;
-            };
-            acks.push(intent.clone());
-            ids.push(
-                self.journal_prose(Some(turn.clone()), intent, text, images, origin)
-                    .await,
-            );
-        }
-        (ids, acks)
-    }
-
-    /// A person's prose enters the journal here and nowhere else, which is why
-    /// the name an unnamed session earns from its first ask is minted at one
-    /// site rather than wherever an item happens to be built.
-    pub(super) async fn journal_prose(
-        &mut self,
-        turn: Option<TurnId>,
-        intent: IntentId,
-        text: String,
-        images: Vec<Image>,
-        origin: Origin,
-    ) -> ItemId {
-        let body = ItemBody::User {
-            parts: user_parts(text, images),
-            origin,
-        };
-        let item = self.fresh(turn, Some(intent.clone()), body);
-        let id = item.id.clone();
-        self.publish(Event::ItemCompleted { item }, Some(intent))
-            .await;
-        self.mint_title().await;
-        id
-    }
-
-    async fn ack_turn_started(&mut self, turn: &TurnId, intents: Vec<IntentId>) {
-        for intent in intents {
-            self.publish(
-                Event::IntentAck {
-                    intent: intent.clone(),
-                    outcome: IntentOutcome::TurnStarted { turn: turn.clone() },
-                },
-                Some(intent),
-            )
-            .await;
-        }
-    }
-
-    /// The turn loop runs in its own task and reports back by mail; a panic in
-    /// it becomes a failed turn rather than a lost session.
-    fn spawn_turn(&self, turn: TurnId, cancel: CancellationToken, kind: TurnKind) -> Running {
-        let run = TurnRun {
-            turn: turn.clone(),
-            history: self.journal.clone(),
-            generation: self.generation,
-            cancel: cancel.clone(),
-            kind,
-        };
-        let cfg = Arc::clone(&self.config);
-        let mailbox = self.mailbox.clone();
-        let host = TurnMail {
-            mailbox: mailbox.clone(),
-            turn: turn.clone(),
-        };
-        let config = Arc::clone(&cfg);
-        let task = tokio::spawn(async move {
-            let outcome = AssertUnwindSafe(run_turn(&cfg, run, &host))
-                .catch_unwind()
-                .await
-                .map_err(panic_message);
-            mailbox.send(Msg::TurnFinished {
-                turn: host.turn.clone(),
-                outcome,
-            });
-        });
-        Running {
-            turn,
-            cancel,
-            task,
-            config,
-            tools: Vec::new(),
         }
     }
 
@@ -897,47 +747,8 @@ async fn run_session_hooks(hooks: HookSet, phase: Phase, cx: HookContext) {
     }
 }
 
-/// The parts a person's ask becomes (ADR-0040 §3): the words, when there are
-/// any, then the pictures in the order they were sent — an image-only ask
-/// carries no empty text part. The turn's barrier records a steer through
-/// the same function, so a picture steered in mid-turn is not dropped.
-pub(crate) fn user_parts(text: String, images: Vec<Image>) -> Vec<ContentPart> {
-    let mut parts = Vec::with_capacity(images.len() + 1);
-    if !text.is_empty() {
-        parts.push(ContentPart::text(text));
-    }
-    parts.extend(images.into_iter().map(ContentPart::Image));
-    parts
-}
-
-/// What the kernel accepts as prose: words, a picture, or both — an ask with
-/// neither is empty, and a picture the table or the cap refuses names why.
-pub(super) fn validate(input: &Input) -> Result<(), String> {
-    match input {
-        Input::Text { text, images, .. } => {
-            if text.trim().is_empty() && images.is_empty() {
-                return Err("empty input".into());
-            }
-            images.iter().try_for_each(validate_image)
-        }
-        Input::Action { action } => Err(format!("unknown action: {}", action.name)),
-    }
-}
-
-fn validate_image(image: &Image) -> Result<(), String> {
-    if !Image::is_known(&image.media_type) {
-        return Err(format!("unknown image media type `{}`", image.media_type));
-    }
-    let bytes = image.decoded_len();
-    if bytes > Image::MAX_BYTES {
-        return Err(format!(
-            "image too large: {bytes} bytes, the limit is {}",
-            Image::MAX_BYTES
-        ));
-    }
-    Ok(())
-}
-
+/// What a panicking task said, for the failure the actor reports in its
+/// place: the turn loop's, and a command's.
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     payload
         .downcast_ref::<&str>()

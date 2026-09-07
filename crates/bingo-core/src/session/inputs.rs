@@ -1,8 +1,12 @@
-//! What reaches the actor from outside: a client's submit — a command or
-//! prose — a peer's delivery, an interrupt, the queue that holds what cannot
-//! run yet (ADR-0008 §2, ADR-0010 §1, ADR-0011 §1), and a tool call handed
-//! into the running turn from outside the model (ADR-0036 §2), which is
-//! served beside the turn by [`super::invoke`].
+//! What reaches the actor from outside, and what it becomes: a client's
+//! submit — a command or prose — a peer's delivery, an interrupt, the queue
+//! that holds what cannot run yet (ADR-0008 §2, ADR-0010 §1, ADR-0011 §1),
+//! and a tool call handed into the running turn from outside the model
+//! (ADR-0036 §2), which is served beside the turn by [`super::invoke`].
+//!
+//! An input that is neither a command nor queued opens a turn, so the way
+//! prose becomes a turn — what it may be, the item it is journalled as, and
+//! the turn those items open — is here too, where its callers are.
 
 use std::sync::Arc;
 
@@ -13,7 +17,8 @@ use jiff::Timestamp;
 use serde_json::Value;
 
 use super::queue::{self, Unit};
-use super::{Actor, commands, invoke, validate};
+use super::running::Running;
+use super::{Actor, commands, invoke};
 use crate::turn::TurnKind;
 
 impl Actor {
@@ -476,6 +481,99 @@ impl Actor {
             }
         }
     }
+
+    // ----- opening a turn -----
+
+    pub(super) async fn start_turn(
+        &mut self,
+        inputs: Vec<(IntentId, Input)>,
+        origin: TurnOrigin,
+        kind: TurnKind,
+    ) {
+        let turn = TurnId::mint();
+        let (ids, acks) = self.record_inputs(&turn, inputs).await;
+        self.publish(
+            Event::TurnStarted {
+                turn: turn.clone(),
+                inputs: ids,
+                origin,
+            },
+            None,
+        )
+        .await;
+        // A queued intent was acknowledged `Queued` when it waited; the turn
+        // that runs it acknowledges it again, so a client learns which turn
+        // is its own without matching items.
+        self.ack_turn_started(&turn, acks).await;
+        let running = Running::spawn(self, turn, CancellationToken::new(), kind);
+        // Registered after the spawn: the task's first mail is handled only
+        // once this function returns, so nothing can race the registration.
+        self.running = Some(running);
+    }
+
+    /// Journal one user item per text input; the item ids open the turn and
+    /// the intents behind them are the ones to acknowledge.
+    async fn record_inputs(
+        &mut self,
+        turn: &TurnId,
+        inputs: Vec<(IntentId, Input)>,
+    ) -> (Vec<ItemId>, Vec<IntentId>) {
+        let mut ids = Vec::new();
+        let mut acks = Vec::new();
+        for (intent, input) in inputs {
+            let Input::Text {
+                text,
+                images,
+                origin,
+                ..
+            } = input
+            else {
+                continue;
+            };
+            acks.push(intent.clone());
+            ids.push(
+                self.journal_prose(Some(turn.clone()), intent, text, images, origin)
+                    .await,
+            );
+        }
+        (ids, acks)
+    }
+
+    /// A person's prose enters the journal here and nowhere else, which is why
+    /// the name an unnamed session earns from its first ask is minted at one
+    /// site rather than wherever an item happens to be built.
+    pub(super) async fn journal_prose(
+        &mut self,
+        turn: Option<TurnId>,
+        intent: IntentId,
+        text: String,
+        images: Vec<Image>,
+        origin: Origin,
+    ) -> ItemId {
+        let body = ItemBody::User {
+            parts: user_parts(text, images),
+            origin,
+        };
+        let item = self.fresh(turn, Some(intent.clone()), body);
+        let id = item.id.clone();
+        self.publish(Event::ItemCompleted { item }, Some(intent))
+            .await;
+        self.mint_title().await;
+        id
+    }
+
+    async fn ack_turn_started(&mut self, turn: &TurnId, intents: Vec<IntentId>) {
+        for intent in intents {
+            self.publish(
+                Event::IntentAck {
+                    intent: intent.clone(),
+                    outcome: IntentOutcome::TurnStarted { turn: turn.clone() },
+                },
+                Some(intent),
+            )
+            .await;
+        }
+    }
 }
 
 /// The delivery the caller asked for, written into the line itself: from here
@@ -503,4 +601,45 @@ fn gone(intent: &IntentId) -> KernelError {
         ErrorCode::NotFound,
         format!("no line of {intent} is waiting in this queue"),
     )
+}
+
+/// The parts a person's ask becomes (ADR-0040 §3): the words, when there are
+/// any, then the pictures in the order they were sent — an image-only ask
+/// carries no empty text part. The turn's barrier records a steer through
+/// the same function, so a picture steered in mid-turn is not dropped.
+pub(crate) fn user_parts(text: String, images: Vec<Image>) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        parts.push(ContentPart::text(text));
+    }
+    parts.extend(images.into_iter().map(ContentPart::Image));
+    parts
+}
+
+/// What the kernel accepts as prose: words, a picture, or both — an ask with
+/// neither is empty, and a picture the table or the cap refuses names why.
+fn validate(input: &Input) -> Result<(), String> {
+    match input {
+        Input::Text { text, images, .. } => {
+            if text.trim().is_empty() && images.is_empty() {
+                return Err("empty input".into());
+            }
+            images.iter().try_for_each(validate_image)
+        }
+        Input::Action { action } => Err(format!("unknown action: {}", action.name)),
+    }
+}
+
+fn validate_image(image: &Image) -> Result<(), String> {
+    if !Image::is_known(&image.media_type) {
+        return Err(format!("unknown image media type `{}`", image.media_type));
+    }
+    let bytes = image.decoded_len();
+    if bytes > Image::MAX_BYTES {
+        return Err(format!(
+            "image too large: {bytes} bytes, the limit is {}",
+            Image::MAX_BYTES
+        ));
+    }
+    Ok(())
 }
