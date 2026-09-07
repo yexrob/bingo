@@ -7,6 +7,7 @@ use super::*;
 use crate::test_support::*;
 
 mod commands;
+mod completion;
 mod images;
 mod invoke;
 mod log;
@@ -313,6 +314,17 @@ async fn events_of(mailbox: &Mailbox) -> Vec<Frame> {
     out
 }
 
+/// One frame of a journal a test writes by hand.
+fn journal_frame(seq: u64, event: Event) -> Frame {
+    Frame {
+        seq: Seq(seq),
+        ts: jiff::Timestamp::from_second(0).unwrap(),
+        session: SessionId::from_raw("ses_1"),
+        cause: None,
+        event,
+    }
+}
+
 fn state_ack(frames: &[Frame], intent: &IntentId) -> Option<IntentOutcome> {
     frames.iter().find_map(|f| match &f.event {
         Event::IntentAck { intent: i, outcome } if i == intent => Some(outcome.clone()),
@@ -519,22 +531,14 @@ async fn history_pages_backwards_from_the_newest_item() {
 #[tokio::test]
 async fn a_journal_cut_inside_a_turn_resumes_with_that_turn_lost() {
     let head = summary("ses_1");
-    let ts = jiff::Timestamp::from_second(0).unwrap();
-    let frame = |seq: u64, event: Event| Frame {
-        seq: Seq(seq),
-        ts,
-        session: SessionId::from_raw("ses_1"),
-        cause: None,
-        event,
-    };
     let frames = vec![
-        frame(
+        journal_frame(
             1,
             Event::SessionUpdated {
                 summary: head.clone(),
             },
         ),
-        frame(
+        journal_frame(
             2,
             Event::TurnStarted {
                 turn: TurnId::from_raw("trn_old"),
@@ -578,27 +582,19 @@ fn a_journal_without_its_head_cannot_be_resumed() {
 
 #[tokio::test]
 async fn a_journal_that_ends_closed_resumes_open() {
-    let head = summary("ses_1");
-    let ts = jiff::Timestamp::from_second(0).unwrap();
     let frames = vec![
-        Frame {
-            seq: Seq(1),
-            ts,
-            session: SessionId::from_raw("ses_1"),
-            cause: None,
-            event: Event::SessionUpdated {
-                summary: head.clone(),
+        journal_frame(
+            1,
+            Event::SessionUpdated {
+                summary: summary("ses_1"),
             },
-        },
-        Frame {
-            seq: Seq(2),
-            ts,
-            session: SessionId::from_raw("ses_1"),
-            cause: None,
-            event: Event::SessionClosed {
+        ),
+        journal_frame(
+            2,
+            Event::SessionClosed {
                 reason: CloseReason::Shutdown,
             },
-        },
+        ),
     ];
     let provider = ScriptedProvider::new(vec![Script::Events(text("open again"))]);
     let mailbox = resume(frames, None, Services::none(), |_| {

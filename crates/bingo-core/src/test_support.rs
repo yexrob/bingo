@@ -22,6 +22,9 @@ pub enum Script {
     Events(Vec<Result<ModelEvent, ProviderError>>),
     Hang(Vec<ModelEvent>),
     Fail(ProviderError),
+    /// The stream call itself explodes, so the turn loop panics where no
+    /// `Result` can carry the news back.
+    Panic,
 }
 
 pub struct ScriptedProvider {
@@ -140,6 +143,7 @@ impl Provider for ScriptedProvider {
                 message: "script exhausted".into(),
             }),
             Some(Script::Fail(e)) => Err(e),
+            Some(Script::Panic) => panic!("provider exploded"),
             Some(Script::Events(evs)) => Ok(Box::pin(futures::stream::iter(evs))),
             Some(Script::Hang(evs)) => Ok(Box::pin(
                 futures::stream::iter(evs.into_iter().map(Ok)).chain(futures::stream::pending()),
