@@ -45,7 +45,7 @@ finish`).
 - [x] a parent idle over running children shows the wait row; a wake's
       turn replaces it; no children, no row
 - [x] `TestBackend` tests for the four states; snapshot updated
-- [ ] a tmux hands-on drive before release (TUI-visible)
+- [x] a tmux hands-on drive before release (TUI-visible)
 - [x] every gate green
 
 ## Non-goals
@@ -113,3 +113,11 @@ run hung in `acp_bridge` for 22 minutes and was killed; that is the
 flake memory already names (its address keys on `std::process::id()`),
 and every run since has passed it. The tmux hands-on drive is the
 parent session's and is not ticked here.
+
+- tmux drive (2026-09-07, 120×40, fake provider, harness-owned server): after
+  `review the plan` the root's turn ends and the pane reads
+  `⏺ reviewer(…)` / `⎿  Running… 0 tools · 0 tokens` / the root's line /
+  `✶ Waiting for 1 background agent to finish`, status line `1 running`, no
+  parentheses on the row. Eight seconds later the wake's turn has taken the
+  row: `⎿  Done (0 tools · 10.0k tokens · 8s)`, `⏺ reviewer: finished.`,
+  the root's answer, status line back to `? for shortcuts`.
