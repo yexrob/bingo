@@ -25,7 +25,6 @@ pub(super) async fn entries(
         CatalogKind::Providers => providers(resolved),
         CatalogKind::Tools => tools(registry).await,
         CatalogKind::Commands => commands(registry).await,
-        CatalogKind::Skills => Vec::new(),
         CatalogKind::Plugins => plugins(registry),
     }
 }

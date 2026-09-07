@@ -216,7 +216,6 @@ pub enum CatalogKind {
     Providers,
     Tools,
     Commands,
-    Skills,
     Plugins,
 }
 
