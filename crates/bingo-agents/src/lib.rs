@@ -4,15 +4,14 @@
 //! a roster is `sessions{parent}`, and `@name` is a submit hook that
 //! redirects.
 //!
-//! Six tools, two hooks, two commands:
+//! Five tools, two hooks, two commands:
 //!
 //! - `SpawnAgent` mints a child under the calling tool item and delivers the
 //!   prompt. In the foreground it waits for the child's final text; in the
 //!   background it returns the name and leaves a watcher to wake the parent.
 //! - `SendMessage` wakes an agent — a child, a teammate beside the caller, or
-//!   `parent` — or posts into a room's journal, `WaitAgent` joins one or
-//!   several agents under one deadline and reads what each said,
-//!   `ListAgents` reads the tree, `ListModels` reads the model catalogue,
+//!   `parent` — or posts into a room's journal, `ListAgents` reads the
+//!   tree, `ListModels` reads the model catalogue,
 //!   `SetThinking` moves how hard this session or a child thinks.
 //! - `@name rest` in the composer reaches the child of that name.
 //! - A root session opening in a project with a `.bingo/team.json` seats the
@@ -37,7 +36,6 @@ mod serial;
 mod spawn;
 mod team;
 mod thinking;
-mod wait;
 mod watch;
 
 use std::sync::Arc;
@@ -57,7 +55,6 @@ pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
 pub use team::{SeatHook, TeamCommand};
 pub use thinking::SetThinkingTool;
-pub use wait::WaitAgentTool;
 
 static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.agents",
@@ -66,7 +63,6 @@ static MANIFEST: PluginManifest = PluginManifest {
     provides: &[
         "tool:SpawnAgent",
         "tool:SendMessage",
-        "tool:WaitAgent",
         "tool:ListAgents",
         "tool:ListModels",
         "tool:SetThinking",
@@ -109,7 +105,6 @@ impl Plugin for AgentsPlugin {
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.tool(Arc::new(SpawnAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(MessageTool) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(WaitAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListModelsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(SetThinkingTool) as Arc<dyn Tool>);
@@ -147,7 +142,6 @@ mod plugin_tests {
             [
                 "tool:SpawnAgent",
                 "tool:SendMessage",
-                "tool:WaitAgent",
                 "tool:ListAgents",
                 "tool:ListModels",
                 "tool:SetThinking",
@@ -179,7 +173,6 @@ mod plugin_tests {
             [
                 "SpawnAgent",
                 "SendMessage",
-                "WaitAgent",
                 "ListAgents",
                 "ListModels",
                 "SetThinking"

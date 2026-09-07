@@ -41,9 +41,9 @@ report back. In the background, which is the default, the call returns the \
 agent's name at once and its reply arrives as a message when it finishes: \
 carry on with whatever does not depend on it, or end your turn — the reply \
 wakes you, and there is nothing to poll. Until it comes, the agent is still \
-running; say so if asked, and never guess at what it will say. `WaitAgent` \
-holds the turn for it only when you cannot go on without the result; \
-with `background: false` the call waits and returns the agent's final text. \
+running; say so if asked, and never guess at what it will say. With \
+`background: false` the call waits and returns the agent's final text — for \
+when you cannot go on without it. \
 When several agents are to work with each other rather than each report back, \
 seat them instead of tasking them: `OpenRoom` naming the roles — and \
 `parent` among them when you want to read the room yourself — one \
@@ -67,7 +67,7 @@ pub struct SpawnArgs {
     /// model, thinking level and tool set. Without one the sub-agent inherits
     /// this session's.
     pub agent: Option<String>,
-    /// What to call this one, for `SendMessage` and `WaitAgent`. Defaults to
+    /// What to call this one, for `SendMessage`. Defaults to
     /// the definition's name; a name a sibling already holds gets `-2`, `-3`.
     pub name: Option<String>,
     /// Return at once and be told when it finishes (the default), or `false`
@@ -734,7 +734,7 @@ mod tests {
 
     /// A finished agent wakes the parent (`watch::report`), so the turn may
     /// end with the agent still running. Said where the spawn is chosen, or
-    /// the model reaches for `WaitAgent` and holds the person's turn.
+    /// the model holds the person's turn on a foreground spawn it did not need.
     #[test]
     fn the_description_says_the_turn_may_end_and_the_reply_wakes_it() {
         assert!(
@@ -747,7 +747,7 @@ mod tests {
             "{DESCRIPTION}"
         );
         assert!(
-            DESCRIPTION.contains("only when you cannot go on without the result"),
+            DESCRIPTION.contains("when you cannot go on without it"),
             "{DESCRIPTION}"
         );
     }

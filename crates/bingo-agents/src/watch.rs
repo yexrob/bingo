@@ -55,8 +55,8 @@ impl Reply {
 /// fresh snapshot already knows whether the turn ended inside the gap, and
 /// a child still at work is watched on from the new attachment. Before
 /// this, a chatty child's end could fall in the gap and the watcher went
-/// deaf: the parent was never woken, though `WaitAgent` could still read
-/// the reply from a fresh snapshot.
+/// deaf: the parent was never woken, though a fresh snapshot held the
+/// reply all along.
 pub async fn next_reply(
     host: &HostHandle,
     attachment: &mut Attachment,
@@ -118,7 +118,7 @@ fn reply_to(state: &SessionState, turn: &TurnId) -> String {
 /// session nothing has woken carries no turn and no items — and calling that
 /// a completed turn with nothing to say would be a lie about a teammate that
 /// has not started. The caller says what is true of it instead.
-pub fn last_reply(state: &SessionState) -> Option<Reply> {
+fn last_reply(state: &SessionState) -> Option<Reply> {
     let status = state.last_turn.clone()?;
     let text = state
         .items
@@ -163,7 +163,7 @@ pub fn output(name: &str, session: &SessionId, reply: &Reply) -> ToolOutput {
 }
 
 /// Who answered, which session it was, and what came of it.
-pub fn replied(name: &str, session: &SessionId, reply: &Reply) -> String {
+fn replied(name: &str, session: &SessionId, reply: &Reply) -> String {
     let who = format!("{name} ({session})");
     if let Some(cut) = cut_short(reply) {
         return format!("{who} {cut}");
