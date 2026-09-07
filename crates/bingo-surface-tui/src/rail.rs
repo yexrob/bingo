@@ -88,11 +88,14 @@ pub fn cards(state: &SessionState, session: &SessionId, pinned: &BTreeSet<Pin>) 
 fn published(
     lanes: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, Value>>,
 ) -> impl Iterator<Item = Card> + '_ {
-    lanes.iter().flat_map(|(plugin, kinds)| {
-        kinds
-            .iter()
-            .map(|(kind, payload)| card(plugin, kind, payload))
-    })
+    lanes
+        .iter()
+        .filter(|(plugin, _)| !bingo_sdk::is_internal_extension(plugin))
+        .flat_map(|(plugin, kinds)| {
+            kinds
+                .iter()
+                .map(|(kind, payload)| card(plugin, kind, payload))
+        })
 }
 
 /// A payload as a card: a `Panel` lends the card its own title, anything else

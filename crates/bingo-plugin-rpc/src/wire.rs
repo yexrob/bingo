@@ -47,11 +47,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The major the host speaks. A process that answers with another one is
-/// refused rather than guessed at (ADR-0015 §Consequences). Five since
-/// ADR-0032 opened hooks, whose declaration is read at the handshake: a plugin
-/// written for one major says so and is refused, rather than being asked what
-/// it cannot answer.
-pub const PROTOCOL: u32 = 5;
+/// refused rather than guessed at (ADR-0015 §Consequences). Six since
+/// ADR-0048 made compaction request-bearing and its observed failures typed.
+/// A plugin written for another major is refused during the handshake.
+pub const PROTOCOL: u32 = 6;
 
 /// Every name that travels on the wire, in one place.
 pub mod name {
@@ -326,7 +325,7 @@ pub struct CompactorContext {
     pub items: Vec<Item>,
     pub usage: ContextUsage,
     pub capabilities: ModelCapabilities,
-    pub model: String,
+    pub request: ModelRequest,
     /// Consecutive compactions the kernel discarded; at `BREAKER_TRIP` the
     /// breaker is tripped and a strategy takes its rung that needs no model.
     pub failures: u32,
@@ -340,7 +339,7 @@ impl From<&CompactContext<'_>> for CompactorContext {
             items: cx.items.to_vec(),
             usage: cx.usage,
             capabilities: cx.capabilities.clone(),
-            model: cx.model.to_string(),
+            request: cx.request.clone(),
             failures: cx.failures,
             keep_budget: cx.keep_budget,
         }
@@ -356,10 +355,17 @@ pub struct CompactorCompactParams {
     pub reason: CompactReason,
 }
 
+/// Declared failures retain observed usage; generic transport errors cannot
+/// report what a process spent before the connection failed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactorCompactResult {
-    pub compaction: Compaction,
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CompactorCompactResult {
+    Completed { compaction: Compaction },
+    Failed { error: bingo_sdk::CompactError },
 }
 
 /// One model response, asked for. The request crosses as the sdk writes it —
@@ -839,7 +845,7 @@ mod tests {
                 items: Vec::new(),
                 usage: usage(),
                 capabilities: capabilities(),
-                model: "m".into(),
+                request: request(),
                 failures: 1,
                 keep_budget: 250,
             },
@@ -1357,8 +1363,28 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_compaction_failure_preserves_native_usage_in_its_tagged_fixture() {
+        let fixture = json!({
+            "kind": "failed",
+            "error": {
+                "error": {"code": "CONTEXT_OVERFLOW", "message": "remote summary too long"},
+                "usage": {"inputTokens": 101, "outputTokens": 17, "cacheReadTokens": 23, "cacheWriteTokens": 31, "reasoningTokens": 5}
+            }
+        });
+        let result: CompactorCompactResult =
+            serde_json::from_value(fixture.clone()).expect("typed failure fixture");
+        assert_eq!(serde_json::to_value(result).expect("roundtrip"), fixture);
+        let schema = schemars::schema_for!(CompactorCompactResult);
+        let encoded = serde_json::to_string(&schema).expect("schema");
+        assert!(encoded.contains("CompactError"));
+        assert!(encoded.contains("completed"));
+        assert!(encoded.contains("failed"));
+    }
+
+    #[test]
     fn a_compaction_comes_back_as_the_sdk_writes_it() {
         let result: CompactorCompactResult = serde_json::from_value(json!({
+            "kind": "completed",
             "compaction": {
                 "summary": "what happened",
                 "boundary": "itm_7",
@@ -1367,10 +1393,13 @@ mod tests {
             }
         }))
         .expect("a compaction");
-        assert_eq!(result.compaction.boundary.as_str(), "itm_7");
-        assert!(result.compaction.kept.is_empty());
+        let CompactorCompactResult::Completed { compaction } = result else {
+            panic!("completed fixture");
+        };
+        assert_eq!(compaction.boundary.as_str(), "itm_7");
+        assert!(compaction.kept.is_empty());
         assert_eq!(
-            result.compaction.usage,
+            compaction.usage,
             bingo_sdk::Usage::default(),
             "a strategy that spends nothing says nothing"
         );

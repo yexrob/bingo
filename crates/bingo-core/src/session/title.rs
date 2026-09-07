@@ -17,16 +17,17 @@ const LIMIT: usize = 48;
 /// only — an ask that carried nothing but an image names nothing.
 pub fn first_ask(items: &[Item]) -> Option<&str> {
     items.iter().find_map(|item| match &item.body {
-        ItemBody::User { parts, origin } if !from_a_command(origin) => parts.iter().find_map(prose),
+        ItemBody::User { parts, origin } if !provided_context(origin) => {
+            parts.iter().find_map(prose)
+        }
         _ => None,
     })
 }
 
-/// Whether a user item is a command's own prompt rather than something asked.
-/// `/guide` puts a whole skill body in the journal, and a session named after
-/// that page is named after nothing anyone said (ADR-0008 §3).
-fn from_a_command(origin: &Origin) -> bool {
-    origin.surface == commands::SURFACE
+/// Command prompts and contributor snapshots are context, not the ask that
+/// names a session. Both may precede its first actual question.
+fn provided_context(origin: &Origin) -> bool {
+    origin.surface == commands::SURFACE || origin.is_context()
 }
 
 fn prose(part: &ContentPart) -> Option<&str> {

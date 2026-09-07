@@ -1,23 +1,15 @@
-//! The request that buys a summary.
+//! A summary is a side question on the parent's exact prefix.
 
-use bingo_sdk::{Item, Message, ModelRequest, ProviderMetadata, Role, SystemBlock};
+use bingo_sdk::{ContentPart, Message, ModelCapabilities, ModelRequest, Role, tokens};
 
-use crate::{estimate, tail, transcript};
-
-/// What the summary may cost. The old ceiling of 1,024 was the real limit on
-/// summary quality: no instruction puts a long session's decisions, paths and
-/// pending work into that.
 const MAX_TOKENS: u32 = 4_096;
-
-/// Slack over the request's own budget: the estimate is an estimate, and being
-/// a little under costs nothing next to a summary request that overflows on
-/// the way out of an overflow.
-const RESERVE: u64 = 2_000;
-
+const RESERVE: u64 = 256;
+pub const OMITTED: &str = "[Some earlier conversation was omitted from the summary input after a context overflow; this summary may be incomplete.]";
 const COMPACT: &str = "\
-You are compacting an agent conversation. Your summary replaces the transcript below, and it is \
-all the agent will have of that work — anything you leave out is lost. Write it under these \
-headings, skipping any heading with nothing to report:
+You are compacting the agent conversation above. Do not call tools. Output only a summary.
+The summary replaces the older turns; the newest turns will also remain verbatim, so overlap
+is intentional. Anything you leave out of the older work is lost. Write under these headings,
+skipping any heading with nothing to report:
 
 ## Task and current state
 What the user asked for, and exactly where the work stands now.
@@ -34,144 +26,200 @@ What is not done yet, in the order it should be tackled.
 ## Constraints and preferences
 Rules, conventions and user preferences that still apply.
 
-Reproduce identifiers, paths, commands and error text exactly; never invent anything the \
-transcript does not contain. Let the length follow the content — usually several hundred to a \
-thousand words.";
+Reproduce identifiers, paths, commands and error text exactly; never invent anything the
+conversation does not contain. Let the length follow the content — usually several hundred
+to a thousand words.";
 
-/// The summary request: the headings as the system prompt, the transcript as
-/// one user message, trimmed from its oldest line until the whole thing sits
-/// `RESERVE` tokens under the window it has to fit through.
-pub fn request(model: &str, window: u64, instructions: Option<&str>, old: &[Item]) -> ModelRequest {
-    let system = system(instructions);
-    let budget = window
-        .saturating_sub(RESERVE)
-        .saturating_sub(estimate::blocks(&system));
-    ModelRequest {
-        model: model.to_string(),
-        max_tokens: MAX_TOKENS,
-        system,
-        messages: vec![Message::text(Role::User, body(old, budget))],
-        tools: Vec::new(),
-        reasoning: None,
-        // A side question, not the session's turn (ADR-0035 §3).
-        session: None,
-        provider_options: ProviderMetadata::new(),
-    }
-}
-
-/// A manual compaction says what the person wants kept, after the headings so
-/// it reads as an amendment to them.
-fn system(instructions: Option<&str>) -> Vec<SystemBlock> {
-    let text = match instructions.map(str::trim).filter(|i| !i.is_empty()) {
+/// Preserve system, tools, session/cache identity, reasoning and provider options.
+/// `window` is the full model window, not the core's input-only usage window.
+pub fn request(
+    parent: &ModelRequest,
+    capabilities: &ModelCapabilities,
+    instructions: Option<&str>,
+) -> Option<ModelRequest> {
+    let mut request = parent.clone();
+    let instruction = match instructions.map(str::trim).filter(|s| !s.is_empty()) {
         Some(extra) => format!("{COMPACT}\n\n{extra}"),
         None => COMPACT.to_string(),
     };
-    vec![SystemBlock { text, cache: false }]
+    request
+        .messages
+        .push(Message::text(Role::User, instruction));
+    request
+        .provider_options
+        .entry("bingo".into())
+        .or_default()
+        .insert("purpose".into(), "compaction".into());
+    let input = tokens::estimate(&request.system, &request.messages, &request.tools);
+    let headroom = capabilities
+        .context_window
+        .saturating_sub(input)
+        // Reserve the possible retry's omission note before any history is cut.
+        .saturating_sub(RESERVE + tokens::text(OMITTED));
+    request.max_tokens = u64::from(MAX_TOKENS)
+        .min(capabilities.max_output)
+        .min(headroom) as u32;
+    (request.max_tokens > 0).then_some(request)
 }
 
-fn body(old: &[Item], budget: u64) -> String {
-    let lines = transcript::lines(old);
-    // The note is charged from the start, so dropping cannot undershoot and
-    // need a second pass; over-reserving by one absent line is free.
-    let budget = budget.saturating_sub(estimate::text(&omitted(lines.len())));
-    let dropped = tail::first_within(&lines, budget, |l| estimate::text(l) + 1);
-    let mut out = String::new();
-    if dropped > 0 {
-        out.push_str(&omitted(dropped));
-        out.push('\n');
+/// Only after an actual overflow: drop a whole oldest exchange, never split
+/// tool calls from results or rewrite signed reasoning inside a message.
+pub fn shrink(request: &mut ModelRequest) -> bool {
+    let end = request.messages.len().saturating_sub(1);
+    let boundary = (1..end).find(|&at| {
+        request.messages[at].role == Role::User
+            && !request.messages[at]
+                .parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ToolResult { .. }))
+            && closed(&request.messages[..at])
+    });
+    let Some(at) = boundary else {
+        return false;
+    };
+    request.messages.drain(..at);
+    if let Some(instruction) = request.messages.last_mut() {
+        instruction.parts.push(ContentPart::text(OMITTED));
     }
-    out.push_str(&lines[dropped..].join("\n"));
-    out
+    true
 }
 
-fn omitted(lines: usize) -> String {
-    format!("({lines} earlier lines are left out: they did not fit this request.)")
+fn closed(messages: &[Message]) -> bool {
+    let mut pending = std::collections::BTreeSet::new();
+    for part in messages.iter().flat_map(|m| &m.parts) {
+        match part {
+            ContentPart::ToolUse { id, .. } => {
+                pending.insert(id);
+            }
+            ContentPart::ToolResult { tool_use_id, .. } => {
+                pending.remove(tool_use_id);
+            }
+            _ => {}
+        }
+    }
+    pending.is_empty()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{assistant, tool, user};
-    use serde_json::json;
+    use bingo_sdk::{Effort, SessionId, SystemBlock};
 
-    fn journal() -> Vec<Item> {
-        vec![
-            user("u1", "add a compaction test"),
-            assistant("a1", "reading the compactor"),
-            tool(
-                "t1",
-                "Read",
-                r#"{"path":"crates/bingo-context/src/compact.rs"}"#,
-                Some("pub struct SummaryCompactor;"),
-            ),
-            assistant("a2", "the split is the interesting part"),
-            user("u2", "keep the tool pairs together"),
-        ]
-    }
-
-    fn tokens(request: &ModelRequest) -> u64 {
-        estimate::blocks(&request.system)
-            + request
-                .messages
-                .iter()
-                .map(|m| {
-                    m.parts
-                        .iter()
-                        .filter_map(|p| p.as_text())
-                        .map(estimate::text)
-                        .sum::<u64>()
-                })
-                .sum::<u64>()
-    }
-
-    #[test]
-    fn the_summary_request_is_the_headings_and_the_transcript() {
-        let request = request("model-x", 200_000, None, &journal());
-        assert_eq!(request.max_tokens, MAX_TOKENS);
-        assert!(request.reasoning.is_none());
-        assert!(request.tools.is_empty());
-        assert!(request.provider_options.is_empty());
-        insta::assert_json_snapshot!(json!({
-            "system": request.system,
-            "messages": request.messages,
-        }));
-    }
-
-    #[test]
-    fn manual_instructions_amend_the_headings() {
-        let request = request("model-x", 200_000, Some("keep the SQL"), &journal());
-        let system = &request.system[0].text;
-        assert!(system.starts_with("You are compacting"));
-        assert!(system.ends_with("\n\nkeep the SQL"));
-    }
-
-    #[test]
-    fn blank_instructions_amend_nothing() {
-        let request = request("model-x", 200_000, Some("  "), &journal());
-        assert_eq!(request.system[0].text, COMPACT);
-    }
-
-    #[test]
-    fn a_transcript_too_large_for_the_window_loses_its_oldest_lines() {
-        let mut items = journal();
-        for i in 0..200 {
-            items.insert(0, user(&format!("old{i}"), &"x".repeat(400)));
+    pub fn parent() -> ModelRequest {
+        ModelRequest {
+            model: "model-x".into(),
+            max_tokens: 8_000,
+            system: vec![SystemBlock {
+                text: "stable system".into(),
+                cache: true,
+            }],
+            messages: vec![
+                Message::text(Role::User, "old"),
+                Message::text(Role::Assistant, "answer"),
+                Message::text(Role::User, "new"),
+            ],
+            tools: vec![bingo_sdk::ToolSpec {
+                name: "Read".into(),
+                description: "Read source".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                meta: Default::default(),
+            }],
+            reasoning: Some(Effort::High),
+            session: Some(SessionId::from_raw("ses_parent")),
+            provider_options: serde_json::from_value(
+                serde_json::json!({"openai":{"seed":7}, "bingo":{"other":"preserved"}}),
+            )
+            .unwrap(),
         }
-        let window = 4_000;
-        let request = request("model-x", window, None, &items);
+    }
+
+    #[test]
+    fn the_parent_prefix_is_unchanged_and_only_the_instruction_is_appended() {
+        let parent = parent();
+        let caps = ModelCapabilities {
+            context_window: 20_000,
+            max_output: 8_000,
+            images: false,
+            reasoning: true,
+            count_tokens: false,
+            caching: true,
+        };
+        let summary = request(&parent, &caps, Some("keep SQL")).expect("headroom");
+        assert_eq!(summary.system, parent.system);
+        assert_eq!(summary.tools, parent.tools);
+        assert_eq!(summary.reasoning, parent.reasoning);
+        assert_eq!(summary.session, parent.session);
+        assert_eq!(&summary.messages[..parent.messages.len()], &parent.messages);
         assert!(
-            tokens(&request) <= window - RESERVE,
-            "{} tokens against a {window} window",
-            tokens(&request)
+            summary.messages.last().unwrap().parts[0]
+                .as_text()
+                .unwrap()
+                .ends_with("keep SQL")
         );
-        let body = request.messages[0].parts[0].as_text().unwrap_or_default();
+        assert_eq!(summary.provider_options["bingo"]["purpose"], "compaction");
+        assert_eq!(summary.provider_options["bingo"]["other"], "preserved");
+        assert_eq!(
+            summary.provider_options["openai"],
+            parent.provider_options["openai"]
+        );
         assert!(
-            body.starts_with("("),
-            "the cut says what it left out: {body:.60}"
+            tokens::estimate(&summary.system, &summary.messages, &summary.tools)
+                + u64::from(summary.max_tokens)
+                + RESERVE
+                <= caps.context_window
         );
-        assert!(
-            body.contains("keep the tool pairs together"),
-            "the newest line stays"
-        );
+    }
+
+    #[test]
+    fn overflow_never_leaves_an_orphaned_tool_result() {
+        let mut request = parent();
+        request.messages = vec![
+            Message::text(Role::User, "old task"),
+            Message::assistant(vec![ContentPart::ToolUse {
+                id: "c".into(),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+            }]),
+            Message::user(vec![ContentPart::ToolResult {
+                tool_use_id: "c".into(),
+                parts: vec![ContentPart::text("result")],
+                is_error: false,
+            }]),
+            Message::text(Role::Assistant, "done"),
+            Message::text(Role::User, "next task"),
+            Message::text(Role::User, COMPACT),
+        ];
+        assert!(shrink(&mut request));
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].parts[0].as_text(), Some("next task"));
+        assert!(!shrink(&mut request));
+    }
+
+    #[test]
+    fn a_tiny_window_never_sends_an_oversized_request() {
+        let caps = ModelCapabilities {
+            context_window: 1,
+            max_output: 8_000,
+            images: false,
+            reasoning: false,
+            count_tokens: false,
+            caching: false,
+        };
+        assert!(request(&parent(), &caps, None).is_none());
+    }
+
+    #[test]
+    fn overflow_shrinks_only_complete_exchanges_and_preserves_purpose() {
+        let mut request = parent();
+        request.messages.push(Message::text(Role::User, COMPACT));
+        request
+            .provider_options
+            .entry("bingo".into())
+            .or_default()
+            .insert("purpose".into(), "compaction".into());
+        assert!(shrink(&mut request));
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.provider_options["bingo"]["purpose"], "compaction");
+        assert!(!shrink(&mut request));
     }
 }

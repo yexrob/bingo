@@ -1,0 +1,7 @@
+{
+  "historyGeneration": 7,
+  "blocks": [
+    { "text": "# Instructions\n\nKeep this exact text.\n", "cache": true },
+    { "text": "# Memory\n\nRead the index only.", "cache": false }
+  ]
+}

@@ -329,7 +329,7 @@ pub fn activity(state: &SessionState) -> Option<String> {
 /// nothing rather than a placeholder.
 pub fn brief(state: &SessionState) -> Option<String> {
     state.items.iter().find_map(|item| match &item.body {
-        ItemBody::User { parts, .. } => opening(parts),
+        ItemBody::User { parts, origin } if !origin.is_context() => opening(parts),
         _ => None,
     })
 }

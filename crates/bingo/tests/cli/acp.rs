@@ -513,13 +513,20 @@ fn the_agents_session_id_is_journaled_once_as_an_extension() {
     let out = adapter.turn("hello");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
-        extensions(frames_of(&out)),
+        extensions(frames_of(&out))
+            .into_iter()
+            .filter(|(plugin, _)| plugin == "bingo.acp")
+            .collect::<Vec<_>>(),
         [("bingo.acp".to_string(), "session:scripted".to_string())]
     );
     let written = frames_of(&out)
         .into_iter()
         .find_map(|frame| match frame.event {
-            Event::Extension { payload, .. } => Some(payload),
+            Event::Extension {
+                plugin,
+                kind,
+                payload,
+            } if plugin == "bingo.acp" && kind == "session:scripted" => Some(payload),
             _ => None,
         })
         .expect("the pointer is on the stream");

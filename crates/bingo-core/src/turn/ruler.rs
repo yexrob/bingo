@@ -58,18 +58,6 @@ impl Ruler {
         self.anchor = None;
     }
 
-    /// How many recent tool results the wire keeps whole: everything below
-    /// the micro line, fewer on the retry after an overflow.
-    pub fn keep_recent(&self, overflowed: bool, usage: &ContextUsage) -> Option<usize> {
-        if overflowed {
-            Some(budget::KEEP_RECENT_AFTER_OVERFLOW)
-        } else if usage.used >= self.lines.micro {
-            Some(budget::KEEP_RECENT_RESULTS)
-        } else {
-            None
-        }
-    }
-
     /// The warning the person gets once per turn past the warn line.
     pub fn warning(&mut self, usage: &ContextUsage) -> Option<String> {
         if self.warned || self.lines.warn == 0 || usage.used < self.lines.warn {

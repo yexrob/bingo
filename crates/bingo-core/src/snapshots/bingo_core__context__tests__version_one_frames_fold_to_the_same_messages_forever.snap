@@ -8,6 +8,10 @@ expression: messages
     "parts": [
       {
         "type": "text",
+        "text": "[from the person you work for]"
+      },
+      {
+        "type": "text",
         "text": "what is in notes.txt?"
       }
     ]

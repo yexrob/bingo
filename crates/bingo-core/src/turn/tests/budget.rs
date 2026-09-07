@@ -54,6 +54,245 @@ fn run_on(
     )
 }
 
+struct ReissuedContext;
+
+#[async_trait]
+impl ContextContributor for ReissuedContext {
+    fn id(&self) -> &str {
+        "reissued"
+    }
+    fn placement(&self) -> Placement {
+        Placement::RoundStart
+    }
+    async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
+        let mut pieces: Vec<_> =
+            ContextPiece::snapshot(self.id(), "runtime state ".repeat(100), query.items)
+                .into_iter()
+                .collect();
+        pieces.push(ContextPiece::User {
+            parts: vec![ContentPart::text("retained tail")],
+            label: "tail".into(),
+        });
+        Ok(pieces)
+    }
+}
+
+struct AcceptedCuts(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl Compactor for AcceptedCuts {
+    async fn compact(
+        &self,
+        cx: CompactContext<'_>,
+        _: CompactReason,
+    ) -> Result<Compaction, CompactError> {
+        let calls = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        assert!(
+            calls <= 2,
+            "automatic compaction must progress instead of buying a third summary"
+        );
+        let at = cx.items.len() - 1;
+        Ok(Compaction {
+            summary: "s".into(),
+            boundary: cx.items[at].id.clone(),
+            kept: vec![],
+            before: bingo_sdk::tokens::items(&cx.items[..at]),
+            after: 1,
+            usage: Usage {
+                output_tokens: 7,
+                ..Usage::default()
+            },
+        })
+    }
+}
+
+#[tokio::test]
+async fn accepted_threshold_cuts_are_bounded_when_system_and_reissued_context_stay_large() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("normal progress"))]);
+    let compactor = Arc::new(AcceptedCuts(std::sync::atomic::AtomicUsize::new(0)));
+    let mut cfg = config(provider.clone(), vec![]);
+    cfg.system = vec![SystemBlock {
+        text: "unchanged system ".repeat(4_000),
+        cache: true,
+    }];
+    cfg.model.as_mut().unwrap().capabilities.context_window = 10_000;
+    cfg.compactor = CompactorSet::fixed(Some(compactor.clone()));
+    cfg.contributors = ContributorSet {
+        fixed: vec![Arc::new(ReissuedContext)],
+        sources: vec![],
+    };
+    let host = RecordingHost::new();
+    let outcome = run_on(&cfg, &host, frames_with_results(2, 4_000)).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(compactor.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        cfg.compaction.failures(),
+        0,
+        "accepted cuts reset only the consecutive-failure breaker"
+    );
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(outcome.usage.output_tokens, 2 * 7 + 3);
+    let events = host.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Compacted { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(events.iter().filter(|event| matches!(event, Event::ItemCompleted { item }
+        if matches!(&item.body, ItemBody::User { origin, parts } if origin.surface == "contributor:reissued"
+            && parts.iter().any(|part| part.as_text().is_some_and(|text| text.starts_with("runtime state")))))).count(), 3);
+}
+
+struct FailedSummary {
+    cancel: Option<CancellationToken>,
+}
+
+#[async_trait]
+impl Compactor for FailedSummary {
+    async fn compact(
+        &self,
+        _: CompactContext<'_>,
+        _: CompactReason,
+    ) -> Result<Compaction, CompactError> {
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+        Err(CompactError {
+            error: KernelError::new(ErrorCode::InvalidInput, "summary failed after usage"),
+            usage: Usage {
+                output_tokens: 17,
+                ..Usage::default()
+            },
+        })
+    }
+}
+
+#[tokio::test]
+async fn failed_and_cancelled_summary_usage_is_billed_once_without_cutting() {
+    for interrupted in [false, true] {
+        let provider = ScriptedProvider::new(vec![]);
+        let mut cfg = config(provider.clone(), vec![]);
+        let cancel = CancellationToken::new();
+        cfg.compactor = CompactorSet::fixed(Some(Arc::new(FailedSummary {
+            cancel: interrupted.then(|| cancel.clone()),
+        })));
+        let frames = frames_with_results(10, 4_000);
+        let original = ContextView::items(&frames);
+        let host = RecordingHost::new();
+        let out = run_turn(
+            &cfg,
+            TurnRun {
+                turn: TurnId::mint(),
+                history: frames,
+                generation: 0,
+                cancel,
+                kind: TurnKind::Compact { instructions: None },
+            },
+            &host,
+        )
+        .await;
+        assert_eq!(out.usage.output_tokens, 17);
+        assert_eq!(cfg.compaction.failures(), 1);
+        assert_eq!(out.items, original);
+        assert!(!host.kinds().contains(&"compacted".to_string()));
+        assert!(provider.requests().is_empty());
+        assert_eq!(
+            matches!(out.status, TurnStatus::Interrupted { .. }),
+            interrupted
+        );
+    }
+}
+
+struct PrefixContributor;
+
+#[async_trait]
+impl ContextContributor for PrefixContributor {
+    fn id(&self) -> &str {
+        "prefix-system"
+    }
+    fn placement(&self) -> Placement {
+        Placement::System { order: 10 }
+    }
+    async fn contribute(&self, _: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
+        Ok(vec![ContextPiece::System(SystemBlock {
+            text: "contributed baseline".into(),
+            cache: true,
+        })])
+    }
+}
+
+#[tokio::test]
+async fn manual_threshold_and_overflow_receive_the_assembled_parent_request() {
+    for mode in 0..3 {
+        let mut scripts = vec![];
+        if mode == 2 {
+            scripts.push(Script::Fail(ProviderError::ContextOverflow {
+                message: "too long".into(),
+            }));
+        }
+        scripts.push(Script::Events(text("normal continuation")));
+        let provider = ScriptedProvider::new(scripts);
+        let compactor = ScriptedCompactor::new(vec![ScriptedCompactor::cut("itm_t8", 9_000, 1)]);
+        let mut cfg = config(
+            provider.clone(),
+            vec![Arc::new(EchoTool { read_only: true })],
+        );
+        cfg.compactor = CompactorSet::fixed(Some(compactor.clone()));
+        cfg.contributors = ContributorSet {
+            fixed: vec![Arc::new(PrefixContributor)],
+            sources: vec![],
+        };
+        cfg.model.as_mut().unwrap().reasoning = Some(Effort::High);
+        if mode == 1 {
+            cfg.model.as_mut().unwrap().capabilities.context_window = 10_000;
+        }
+        let frames = frames_with_results(10, 4_000);
+        let expected = ContextView::fold(&frames);
+        let host = RecordingHost::new();
+        let kind = if mode == 0 {
+            TurnKind::Compact {
+                instructions: Some("keep paths".into()),
+            }
+        } else {
+            TurnKind::Respond
+        };
+        let outcome = run_turn(
+            &cfg,
+            TurnRun {
+                turn: TurnId::mint(),
+                history: frames,
+                generation: 0,
+                cancel: CancellationToken::new(),
+                kind,
+            },
+            &host,
+        )
+        .await;
+        assert_eq!(outcome.status, TurnStatus::Completed);
+        let requests = compactor.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let parent = &requests[0];
+        assert_eq!(parent.messages, expected);
+        assert_eq!(parent.system.last().unwrap().text, "contributed baseline");
+        assert_eq!(parent.tools.len(), 1);
+        assert_eq!(parent.reasoning, Some(Effort::High));
+        assert_eq!(parent.session, Some(cfg.session.id.clone()));
+        let sent = provider.requests();
+        if mode == 2 {
+            assert_eq!(parent, &sent[0]);
+        }
+        if mode != 0 {
+            let fresh = sent.last().unwrap();
+            assert_ne!(fresh.messages, parent.messages);
+            assert_eq!(fresh.system, parent.system);
+            assert_eq!(fresh.tools, parent.tools);
+            assert!(!fresh.provider_options.contains_key("bingo"));
+        }
+    }
+}
+
 fn elided_results(request: &ModelRequest) -> (usize, usize) {
     let results: Vec<&ContentPart> = request
         .messages
@@ -72,33 +311,63 @@ fn elided_results(request: &ModelRequest) -> (usize, usize) {
 }
 
 #[tokio::test]
-async fn past_the_micro_line_stale_results_leave_the_wire_only() {
-    let provider = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
-    let mut cfg = config(provider.clone(), vec![]);
+async fn normal_long_turns_preserve_old_results_and_the_request_prefix() {
+    let provider = ScriptedProvider::new(vec![
+        Script::Events(tool_call("Echo", json!({"say": "new result"}))),
+        Script::Events(text("ok")),
+    ]);
+    let mut cfg = config(
+        provider.clone(),
+        vec![Arc::new(EchoTool { read_only: true })],
+    );
     cfg.model
         .as_mut()
         .expect("a model")
         .capabilities
         .context_window = 10_000;
-    cfg.model.as_mut().expect("a model").max_tokens = 1_000; // effective 9 000, micro 4 500
+    cfg.model.as_mut().expect("a model").max_tokens = 1_000; // effective 9 000, trigger 8 100
     let host = RecordingHost::new();
-    let out = run_on(&cfg, &host, frames_with_results(12, 2_000)).await;
+    let frames = frames_with_results(12, 2_000);
+    let expected = ContextView::fold(&frames);
+    let out = run_on(&cfg, &host, frames).await;
     assert_eq!(out.status, TurnStatus::Completed);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(elided_results(&requests[0]), (12, 0));
+    assert_eq!(elided_results(&requests[1]), (13, 0));
+    assert_eq!(requests[0].messages, expected);
+    assert_eq!(requests[1].system, requests[0].system);
     assert_eq!(
-        elided_results(&provider.requests()[0]),
-        (12, 2),
-        "the last ten stay"
+        &requests[1].messages[..requests[0].messages.len()],
+        requests[0].messages
     );
+    assert!(!host.kinds().contains(&"compacted".to_string()));
+}
 
-    let roomy = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
-    let cfg = config(roomy.clone(), vec![]);
-    let out = run_on(&cfg, &RecordingHost::new(), frames_with_results(12, 2_000)).await;
-    assert_eq!(out.status, TurnStatus::Completed);
-    assert_eq!(
-        elided_results(&roomy.requests()[0]),
-        (12, 0),
-        "below the line nothing is touched"
-    );
+#[tokio::test]
+async fn overflow_recovery_elides_only_the_wire_and_retries_once() {
+    let provider = ScriptedProvider::new(vec![
+        Script::Fail(ProviderError::ContextOverflow {
+            message: "too long".into(),
+        }),
+        Script::Fail(ProviderError::ContextOverflow {
+            message: "still too long".into(),
+        }),
+        Script::Events(text("must not be reached")),
+    ]);
+    let cfg = config(provider.clone(), vec![]);
+    let host = RecordingHost::new();
+    let frames = frames_with_results(12, 2_000);
+    let original = ContextView::items(&frames);
+    let out = run_on(&cfg, &host, frames).await;
+    assert!(matches!(out.status, TurnStatus::Failed { .. }));
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2, "overflow recovery is bounded");
+    assert_eq!(elided_results(&requests[0]), (12, 0));
+    assert_eq!(elided_results(&requests[1]), (12, 8));
+    assert_eq!(requests[1].system, requests[0].system);
+    assert_eq!(&out.items[..original.len()], original);
+    assert!(!host.kinds().contains(&"compacted".to_string()));
 }
 
 #[tokio::test]

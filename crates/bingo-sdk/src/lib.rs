@@ -29,8 +29,10 @@ pub mod tool;
 pub mod view;
 
 pub use command::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, Completion};
-pub use compactor::{CompactContext, CompactReason, Compaction, Compactor};
-pub use contributor::{ContextContributor, ContextError, ContextPiece, ContextQuery, Placement};
+pub use compactor::{CompactContext, CompactError, CompactReason, Compaction, Compactor};
+pub use contributor::{
+    CONTRIBUTOR_PREFIX, ContextContributor, ContextError, ContextPiece, ContextQuery, Placement,
+};
 pub use error::{ErrorCode, KernelError};
 pub use event::*;
 pub use hook::{Hook, HookContext, HookMatcher, HookOutcome, HookPoint, Phase};

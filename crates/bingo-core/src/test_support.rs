@@ -379,6 +379,7 @@ pub fn config(
 pub struct ScriptedCompactor {
     answers: Mutex<VecDeque<Result<Compaction, KernelError>>>,
     pub calls: Mutex<Vec<(CompactReason, u32, u64)>>,
+    pub requests: Mutex<Vec<ModelRequest>>,
 }
 
 impl ScriptedCompactor {
@@ -386,6 +387,7 @@ impl ScriptedCompactor {
         Arc::new(Self {
             answers: Mutex::new(answers.into()),
             calls: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         })
     }
 
@@ -412,7 +414,8 @@ impl Compactor for ScriptedCompactor {
         &self,
         cx: CompactContext<'_>,
         reason: CompactReason,
-    ) -> Result<Compaction, KernelError> {
+    ) -> Result<Compaction, CompactError> {
+        self.requests.lock().unwrap().push(cx.request.clone());
         self.calls
             .lock()
             .unwrap()
@@ -422,6 +425,7 @@ impl Compactor for ScriptedCompactor {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Err(KernelError::new(ErrorCode::Internal, "compactor exhausted")))
+            .map_err(Into::into)
     }
 }
 

@@ -50,7 +50,10 @@ contract — the debt ADR-0011 forbids.
 6. **The schema is the count.** Methods land in `wire`, the generated
    `schema/plugin.json` is regenerated, `PROTOCOL` is bumped; the
    ADR-0015 §3 pin "four methods" becomes a pin derived from the
-   schema, not a literal.
+   schema, not a literal. M80/ADR-0048 raises the plugin wire to major 6:
+   compaction receives the SDK ModelRequest instead of a model field, and a
+   tagged result carries either Compaction or CompactError with observed usage.
+   Major-5 peers are rejected during initialization, not after a compaction call.
 
 ## Consequences
 

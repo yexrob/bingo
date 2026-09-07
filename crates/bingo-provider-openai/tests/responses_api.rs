@@ -1,5 +1,5 @@
 //! The Responses API end of the provider, against a local mock serving the
-//! recorded fixtures in `fixtures/`. No live network call is made here, and
+//! fixtures in `fixtures/`. No live network call is made here, and
 //! none is made anywhere in this crate's tests.
 
 // An integration test is not `cfg(test)`; the test-only lint relief is spelled
@@ -13,7 +13,7 @@ use bingo_provider_openai::variant::{ORIGINATOR, Variant};
 use bingo_provider_openai::{OpenAiProvider, events};
 use bingo_sdk::{
     CancellationToken, ContentPart, Effort, FinishReason, Message, ModelEvent, ModelRequest,
-    Provider, ProviderError, Role, ToolSpec, UnifiedFinish, Usage,
+    Provider, ProviderError, Role, SessionId, ToolSpec, UnifiedFinish, Usage,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -139,6 +139,26 @@ async fn a_text_turn_streams_events_and_the_usage_the_wire_reported() {
             },
         })
     );
+}
+
+#[tokio::test]
+async fn cache_reads_and_writes_are_disjoint_from_fresh_input_tokens() {
+    let events = events_of("cache_write.sse").await;
+    let Some(ModelEvent::Finish { usage, .. }) = events.last() else {
+        panic!("the stream must finish with usage");
+    };
+    assert_eq!(
+        *usage,
+        Usage {
+            input_tokens: 1024,
+            output_tokens: 12,
+            cache_read_tokens: 2048,
+            cache_write_tokens: 1024,
+            reasoning_tokens: 4,
+        }
+    );
+    assert_eq!(usage.input_total(), 4096);
+    assert_eq!(usage.input_total() + usage.output_tokens, 4108);
 }
 
 #[tokio::test]
@@ -374,6 +394,44 @@ async fn the_body_on_the_wire_is_the_stateless_encoding_the_snapshots_pin() {
             "include": ["reasoning.encrypted_content"],
         })
     );
+}
+
+#[tokio::test]
+async fn cache_affinity_follows_the_session_unless_the_caller_overrides_it() {
+    let server = MockServer::start().await;
+    serve_stream(&server, "text.sse").await;
+    let provider = provider(&server);
+    let mut conversation = request();
+    conversation.session = Some(SessionId::from_raw("ses_first"));
+    drain(&provider, conversation.clone()).await;
+    conversation
+        .messages
+        .push(Message::text(Role::User, "next"));
+    drain(&provider, conversation.clone()).await;
+    conversation.session = Some(SessionId::from_raw("ses_second"));
+    drain(&provider, conversation.clone()).await;
+    drain(&provider, request()).await;
+    conversation.provider_options.insert(
+        events::PROVIDER.into(),
+        serde_json::Map::from_iter([("prompt_cache_key".into(), json!("caller-key"))]),
+    );
+    drain(&provider, conversation.clone()).await;
+    conversation.session = None;
+    drain(&provider, conversation).await;
+
+    let sent = server.received_requests().await.expect("recorded requests");
+    let bodies: Vec<Value> = sent
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).expect("json body"))
+        .collect();
+    assert_eq!(bodies.len(), 6);
+    assert_eq!(bodies[0]["prompt_cache_key"], json!("ses_first"));
+    assert_eq!(bodies[1]["prompt_cache_key"], bodies[0]["prompt_cache_key"]);
+    assert_eq!(bodies[2]["prompt_cache_key"], json!("ses_second"));
+    assert_ne!(bodies[2]["prompt_cache_key"], bodies[0]["prompt_cache_key"]);
+    assert!(bodies[3].get("prompt_cache_key").is_none());
+    assert_eq!(bodies[4]["prompt_cache_key"], json!("caller-key"));
+    assert_eq!(bodies[5]["prompt_cache_key"], json!("caller-key"));
 }
 
 /// A reasoning item goes back out exactly as it came in, which is the whole

@@ -5,6 +5,7 @@
 //! breaker — and this plugin owns the strategy: what a summary says, which
 //! files reach the prompt, and what a working turn leaves behind (ADR-0006).
 
+mod baseline;
 mod compact;
 mod estimate;
 mod files;
@@ -118,6 +119,7 @@ impl Plugin for ContextPlugin {
         registrar.add(Contribution::Command(
             Arc::new(MemoryCommand::new(data_dir.clone())) as Arc<dyn Command>,
         ));
+        registrar.add(Contribution::Hook(Arc::new(baseline::BaselineHook)));
         if settings.context.memory {
             registrar.add(Contribution::Hook(
                 Arc::new(MemoryHook::new(data_dir)) as Arc<dyn Hook>
@@ -171,24 +173,30 @@ mod tests {
     }
 
     #[test]
-    fn the_plugin_registers_a_compactor_two_contributors_the_command_and_the_hook() {
+    fn the_plugin_registers_a_compactor_two_contributors_the_command_and_two_hooks() {
         let contributions = contributions(json!({}));
-        assert_eq!(contributions.len(), 5);
+        assert_eq!(contributions.len(), 6);
         assert!(matches!(contributions[0], Contribution::Compactor(_)));
         assert!(matches!(contributions[1], Contribution::Context(_)));
         assert!(matches!(contributions[2], Contribution::Context(_)));
         assert!(matches!(contributions[3], Contribution::Command(_)));
         assert!(matches!(contributions[4], Contribution::Hook(_)));
+        assert!(matches!(contributions[5], Contribution::Hook(_)));
     }
 
     #[test]
-    fn memory_turned_off_registers_no_hook_and_still_contributes() {
+    fn memory_turned_off_still_registers_the_baseline_hook() {
         let contributions = contributions(json!({ "context": { "memory": false } }));
-        assert_eq!(contributions.len(), 4);
-        assert!(
-            !contributions
-                .iter()
-                .any(|c| matches!(c, Contribution::Hook(_)))
-        );
+        assert_eq!(contributions.len(), 5);
+        let hooks: Vec<_> = contributions
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Hook(hook) => Some(hook),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].id(), "context:baselines");
+        assert_eq!(hooks[0].matcher().points, [bingo_sdk::HookPoint::Session]);
     }
 }

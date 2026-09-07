@@ -34,8 +34,7 @@ use crate::{commands, seats, theme};
 /// was a skill the row is the run itself — `❖ Skill(guide) …`, the same row
 /// the model's own way to that body draws ([`skill_row`]).
 ///
-/// The set is closed, and this list is the only place it is written down: a
-/// surface nobody has put here is loud. A new subsystem chooses its side by
+/// The set is closed: a visible surface outside this list is loud. A new subsystem chooses its side by
 /// being added or left out, deliberately, and the cost of each mistake says
 /// which way to lean — a person's own words drawn as machinery is a wrong
 /// nobody can undo by reading harder.
@@ -80,9 +79,8 @@ pub(crate) fn quiet(origin: &Origin) -> bool {
 /// (ADR-0034). The two things a room still puts in a member's journal are the
 /// nudge and the reading its turn folded in; both are dropped here rather than
 /// drawn, because the room's own view is where they are read and it is one
-/// keystroke away. It is those two origins and nothing wider: a peer's message
-/// carries a conversation of its own and still draws, and every other
-/// contributor still speaks.
+/// keystroke away. A peer's message still draws. Internal contributor context
+/// has already been omitted at the item-block boundary.
 pub fn lines(
     item: &Item,
     parts: &[ContentPart],

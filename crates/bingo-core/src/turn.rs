@@ -38,6 +38,7 @@ use crate::models::vision;
 pub const INTERRUPTED_MARKER: &str = "[Request interrupted by user]";
 pub const CONTINUE_PROMPT: &str = "Continue from where you left off.";
 pub const MAX_LENGTH_RECOVERIES: u32 = 3;
+const MAX_THRESHOLD_COMPACTIONS: u32 = 2;
 
 /// The session actor as the turn sees it: a place to publish, a way to ask, a queue to absorb.
 #[async_trait]
@@ -99,6 +100,8 @@ struct Turn<'a> {
     recoveries: u32,
     empty_retry_used: bool,
     overflow_compacted: bool,
+    /// Accepted cuts can reissue context without making the whole request fit.
+    threshold_compactions: u32,
     generation: u64,
     usage: Usage,
     hook_cx: HookContext,
@@ -168,6 +171,7 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         recoveries: 0,
         empty_retry_used: false,
         overflow_compacted: false,
+        threshold_compactions: 0,
         generation: run.generation,
         usage: Usage::default(),
         hook_cx,
@@ -210,12 +214,12 @@ impl Turn<'_> {
                 ),
             };
         };
-        let usage = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
-        let usage = self.ruler.anchored(usage);
+        let (request, usage) = self.assemble_request().await;
         self.compact(
             compactor.as_ref(),
             CompactReason::Manual { instructions },
             usage,
+            &request,
         )
         .await;
         if self.cancel.is_cancelled() {
@@ -315,13 +319,18 @@ impl Turn<'_> {
         self.ruler.measure(estimate)
     }
 
-    /// Stale tool results leave the wire past the micro line; after an
-    /// overflow the retry keeps fewer. The items are untouched.
-    fn microcompact(&self, messages: Vec<Message>, usage: &ContextUsage) -> Vec<Message> {
-        let Some(keep) = self.ruler.keep_recent(self.overflow_compacted, usage) else {
+    /// Only overflow recovery projects away stale results; normal requests
+    /// preserve the prefix already sent. The journal items are untouched.
+    fn elide_after_overflow(&self, messages: Vec<Message>) -> Vec<Message> {
+        if !self.overflow_compacted {
             return messages;
-        };
-        elide::elide_old_results(&messages, keep, budget::ELIDE_MIN_CHARS).unwrap_or(messages)
+        }
+        elide::elide_old_results(
+            &messages,
+            budget::KEEP_RECENT_AFTER_OVERFLOW,
+            budget::ELIDE_MIN_CHARS,
+        )
+        .unwrap_or(messages)
     }
 
     /// An exact count when the endpoint offers one and the estimate has
@@ -364,11 +373,11 @@ impl Turn<'_> {
             Assembled::Request { request, usage } => (request, usage),
             Assembled::Compacted => return Step::Assembling,
         };
-        let finished = match self.stream(request).await {
+        let finished = match self.stream(request.clone()).await {
             Streamed::Done(f) => f,
             Streamed::Cancelled => return self.interrupted(),
             Streamed::Failed(error, dropped) => {
-                return self.failed_stream(error, dropped, usage).await;
+                return self.failed_stream(error, dropped, usage, &request).await;
             }
         };
         self.account(&finished, usage);
@@ -380,7 +389,7 @@ impl Turn<'_> {
 
     /// Let the contributors speak, then measure. A first round that is already
     /// over the compaction threshold compacts before it sends anything.
-    async fn assemble(&mut self) -> Assembled {
+    async fn assemble_request(&mut self) -> (ModelRequest, ContextUsage) {
         let preliminary = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
         let extra_system = self
             .contribute(
@@ -391,8 +400,7 @@ impl Turn<'_> {
         let mut system = self.cfg.system.clone();
         system.extend(extra_system);
         let full = self.without_images(ContextView::fold_items(&self.items));
-        let usage = self.measure(&system, &full);
-        let messages = self.microcompact(full, &usage);
+        let messages = self.elide_after_overflow(full);
         let usage = self.measure(&system, &messages);
         let request = ModelRequest {
             model: self.model.id.clone(),
@@ -409,9 +417,14 @@ impl Turn<'_> {
         self.recount(&request).await;
         let usage = self.ruler.anchored(usage);
         self.warn_once(&usage);
+        (request, usage)
+    }
+
+    async fn assemble(&mut self) -> Assembled {
+        let (request, usage) = self.assemble_request().await;
         if usage.used >= self.ruler.lines.trigger
             && self.round == 0
-            && self.try_compact(usage).await
+            && self.try_compact(usage, &request).await
         {
             return Assembled::Compacted;
         }
@@ -420,10 +433,17 @@ impl Turn<'_> {
 
     /// A threshold compaction, unless the breaker says the last three bought
     /// nothing; then the turn goes on and the person is told.
-    async fn try_compact(&mut self, usage: ContextUsage) -> bool {
+    async fn try_compact(&mut self, usage: ContextUsage, request: &ModelRequest) -> bool {
         let Some(compactor) = self.late.compactor.clone() else {
             return false;
         };
+        if self.threshold_compactions >= MAX_THRESHOLD_COMPACTIONS {
+            self.warn(
+                "COMPACTION_SKIPPED",
+                "automatic compaction limit reached for this turn; continuing without another summary",
+            );
+            return false;
+        }
         if self.cfg.compaction.tripped() {
             self.warn(
                 "COMPACTION_SKIPPED",
@@ -434,7 +454,8 @@ impl Turn<'_> {
             );
             return false;
         }
-        self.compact(compactor.as_ref(), CompactReason::Threshold, usage)
+        self.threshold_compactions += 1;
+        self.compact(compactor.as_ref(), CompactReason::Threshold, usage, request)
             .await
     }
 
@@ -561,6 +582,7 @@ impl Turn<'_> {
         compactor: &dyn Compactor,
         reason: CompactReason,
         usage: ContextUsage,
+        request: &ModelRequest,
     ) -> bool {
         let started = std::time::Instant::now();
         for hook in self.hooks(HookPoint::Compact).await {
@@ -571,7 +593,7 @@ impl Turn<'_> {
             usage,
             capabilities: &self.model.capabilities,
             provider: self.model.provider.clone(),
-            model: &self.model.id,
+            request,
             cancel: self.cancel.child_token(),
             failures: self.cfg.compaction.failures(),
             keep_budget: self.ruler.lines.keep,
@@ -581,7 +603,7 @@ impl Turn<'_> {
             hook.on_compact(Phase::End, &self.hook_cx).await;
         }
         match outcome {
-            Ok(c) if c.after < c.before => {
+            Ok(c) if c.after < c.before && !self.cancel.is_cancelled() => {
                 self.usage.add(c.usage);
                 self.cfg.compaction.succeeded();
                 self.absorb_compaction(c, started.elapsed());
@@ -598,6 +620,8 @@ impl Turn<'_> {
                 false
             }
             Err(e) => {
+                self.usage.add(e.usage);
+                self.cfg.compaction.failed();
                 self.warn("COMPACTION_FAILED", e.to_string());
                 false
             }

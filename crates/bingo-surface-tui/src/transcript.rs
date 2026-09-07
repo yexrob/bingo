@@ -303,6 +303,9 @@ pub fn item_block(
     rows: &Rows<'_>,
     cue: Cue,
 ) -> Block {
+    if matches!(&item.body, ItemBody::User { origin, .. } if origin.is_context()) {
+        return Block::default();
+    }
     // How much of this block is on the screen — what `ctrl+o` and a click both
     // write, over the start its kind has. One question, asked once, here.
     let fold = fold::fold_of(rows.folds, item);
@@ -1085,7 +1088,62 @@ mod tests {
                 None,
                 "you have seen this before"
             )]),
-            vec!["> you have seen this before".to_string()],
+            Vec::<String>::new(),
+        );
+    }
+
+    #[test]
+    fn internal_context_never_appears_as_a_transcript_row() {
+        let text = format!(
+            "Memory index\n{}",
+            (0..40).map(|n| format!("fact-{n}\n")).collect::<String>()
+        );
+        let state = stated(vec![
+            person("itm_ask", "Show the current state"),
+            delivered("itm_context", "contributor:context:memory", None, &text),
+            delivered("itm_peer", "agent", Some("reviewer"), "Review completed"),
+            crate::test_support::assistant(
+                "itm_answer",
+                "Here is the result",
+                ItemStatus::Completed,
+            ),
+        ]);
+        let hidden = Folds::from([(ItemId::from_raw("itm_context"), Fold::Open)]);
+        for lines in [rendered(&state), rendered_with(&state, &hidden, &[])] {
+            let text = lines.join("\n");
+            assert!(text.contains("Show the current state"), "{text}");
+            assert!(text.contains("Review completed"), "{text}");
+            assert!(text.contains("Here is the result"), "{text}");
+            assert!(!text.contains("Memory index"), "{text}");
+            assert!(!text.contains("fact-"), "{text}");
+            assert!(!text.contains("context:memory"), "{text}");
+        }
+        let (ui, now) = scene();
+        let screen = crate::test_support::draw_sized(80, 24, &state, &ui, now);
+        assert!(screen.contains("Show the current state"), "{screen}");
+        assert!(screen.contains("Review completed"), "{screen}");
+        assert!(!screen.contains("Memory index"), "{screen}");
+        assert!(!screen.contains("fact-"), "{screen}");
+        assert_eq!(
+            state.items.len(),
+            4,
+            "presentation must not erase the journal"
+        );
+    }
+
+    #[test]
+    fn internal_context_does_not_supply_a_session_brief_or_rewind_prompt() {
+        let state = stated(vec![delivered(
+            "itm_context",
+            "contributor:runtime",
+            None,
+            "Hidden runtime state",
+        )]);
+        assert_eq!(crate::tree::brief(&state), None);
+        assert!(
+            crate::rewind::turns(&state)
+                .iter()
+                .all(|turn| turn.asked.is_none())
         );
     }
 

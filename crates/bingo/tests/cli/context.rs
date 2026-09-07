@@ -78,9 +78,8 @@ fn an_overflow_after_many_rounds_is_summarised_and_the_turn_goes_on() {
     let script = script(&format!(
         r#"{{"responses":[{rounds},
             {{"steps":[{{"error":{{"kind":"contextOverflow","message":"too long: 9000 tokens > 8000 maximum"}}}}]}},
-            {{"steps":[{{"text":"Summary: globbing markdown files."}}]}},
             {{"steps":[{{"text":"Recovered."}}]}}
-        ]}}"#
+        ],"side":[{{"steps":[{{"text":"Summary: globbing markdown files."}}]}}]}}"#
     ));
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
@@ -111,6 +110,10 @@ fn an_overflow_after_many_rounds_is_summarised_and_the_turn_goes_on() {
     });
     let (summary, replaced, before, after) = summary.expect("a Compaction item");
     assert!(summary.contains("globbing markdown files"), "{summary}");
+    assert!(frames.iter().any(|frame| matches!(&frame.event,
+        Event::ItemCompleted { item }
+            if matches!(&item.body, bingo_sdk::ItemBody::Assistant { text } if text == "Recovered.")
+    )), "the conversation must consume its own retry response");
     assert!(
         replaced >= 2 && after < before,
         "{replaced} replaced, {before} -> {after}"

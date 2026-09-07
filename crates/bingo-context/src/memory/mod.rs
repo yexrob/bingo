@@ -19,7 +19,7 @@ use bingo_sdk::{
     ContextContributor, ContextError, ContextPiece, ContextQuery, Placement, SystemBlock,
 };
 
-use crate::{files, root};
+use crate::{baseline, files, root};
 
 /// Lines an index may spend in the prompt. Past it the newest are kept and
 /// the cut is said: a memory written this morning outranks one from last
@@ -29,6 +29,8 @@ pub const INDEX_LINES: usize = 200;
 /// After the instructions, before anything a turn adds: what the agent
 /// remembers is context, not a rule.
 const ORDER: i32 = -5;
+
+pub(crate) const ID: &str = "context:memory";
 
 /// What an empty scope says, so a directory that is not there yet is still a
 /// directory the model knows to write in.
@@ -49,24 +51,24 @@ impl MemoryContributor {
 #[async_trait]
 impl ContextContributor for MemoryContributor {
     fn id(&self) -> &str {
-        "context:memory"
+        ID
     }
 
     fn placement(&self) -> Placement {
         Placement::System { order: ORDER }
     }
 
-    /// The teaching is cached and the indexes are not: the words never change,
-    /// and the hook writes an index at the end of every working turn while the
-    /// model may write one in the middle of it.
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
-        let root = root::of(query.cwd).await;
-        migrate::once(&self.data_dir, &root).await;
-        Ok(vec![
-            ContextPiece::System(teach::block()),
-            ContextPiece::System(scope("the user", &dir::user(&self.data_dir)).await),
-            ContextPiece::System(scope("this project", &dir::project(&self.data_dir, &root)).await),
-        ])
+        baseline::contribute(self.id(), query, async {
+            let root = root::of(query.cwd).await;
+            migrate::once(&self.data_dir, &root).await;
+            vec![
+                teach::block(),
+                scope("the user", &dir::user(&self.data_dir)).await,
+                scope("this project", &dir::project(&self.data_dir, &root)).await,
+            ]
+        })
+        .await
     }
 }
 
@@ -86,19 +88,17 @@ async fn scope(whose: &str, at: &Path) -> SystemBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::baseline::testing::Journal;
     use crate::memory::file::{Kind, Memory};
-    use crate::query::Asked;
 
     fn contributor(data: &tempfile::TempDir) -> MemoryContributor {
         MemoryContributor::new(data.path().to_path_buf())
     }
 
     async fn blocks(data: &tempfile::TempDir, cwd: &Path) -> Vec<String> {
-        let asked = Asked::at(cwd);
-        contributor(data)
-            .contribute(asked.query())
+        Journal::at(cwd)
+            .contribute(&contributor(data), cwd)
             .await
-            .expect("memory never fails a turn")
             .iter()
             .map(text)
             .collect()
@@ -107,7 +107,7 @@ mod tests {
     fn text(piece: &ContextPiece) -> String {
         match piece {
             ContextPiece::System(block) => block.text.clone(),
-            ContextPiece::User { .. } => String::new(),
+            ContextPiece::User { .. } => panic!("memory is system context, not a user item"),
         }
     }
 
@@ -118,6 +118,33 @@ mod tests {
             kind: Kind::Project,
             body: "a body no prompt ever carries\n".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn indexes_are_retained_until_the_history_generation_changes() {
+        let data = tempfile::tempdir().expect("a data dir");
+        let cwd = tempfile::tempdir().expect("a cwd");
+        let journal = Journal::at(cwd.path());
+        let contributor = contributor(&data);
+        let first = journal.contribute(&contributor, cwd.path()).await;
+        assert_eq!(first.len(), 3);
+        let user = dir::user(data.path());
+        store::save(&user, &a_fact("a-habit", "new preference"))
+            .await
+            .expect("a memory");
+        assert_eq!(journal.contribute(&contributor, cwd.path()).await, first);
+
+        journal.state().history_generation += 1;
+        let changed = journal.contribute(&contributor, cwd.path()).await;
+        assert_eq!(text(&changed[0]), text(&first[0]));
+        assert!(text(&changed[1]).contains("new preference"));
+        std::fs::write(dir::index(&user), "").expect("clear index");
+        assert_eq!(journal.contribute(&contributor, cwd.path()).await, changed);
+
+        journal.state().history_generation += 1;
+        let cleared = journal.contribute(&contributor, cwd.path()).await;
+        assert_eq!(cleared, first);
+        assert_eq!(journal.state().seq.0, 3, "one capture per generation");
     }
 
     #[test]

@@ -124,6 +124,7 @@ impl Turn<'_> {
         error: ProviderError,
         dropped: Vec<ItemId>,
         usage: ContextUsage,
+        request: &ModelRequest,
     ) -> Step {
         self.items.retain(|i| !dropped.contains(&i.id));
         if let ProviderError::ContextOverflow { message } = &error {
@@ -143,6 +144,7 @@ impl Turn<'_> {
                         message: error.to_string(),
                     },
                     usage,
+                    request,
                 )
                 .await;
             }

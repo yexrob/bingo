@@ -80,6 +80,20 @@ async fn a_killed_process_leaves_one_notice_empty_sources_and_a_working_respawn(
 }
 
 #[tokio::test]
+async fn protocol_five_is_refused_before_any_compactor_is_registered() {
+    let started = started_with(&[("stub", &["--protocol", "5"])]).await;
+    let (_, text) = started.heard("PLUGIN_UNAVAILABLE").await;
+    assert!(text.contains("protocol 5"), "{text}");
+    assert!(text.contains("speaks 6"), "{text}");
+    assert!(
+        started.manager.compactors().await.is_empty(),
+        "no old-contract compactor can be dispatched"
+    );
+    assert!(started.manager.tools().await.is_empty());
+    started.manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_unknown_protocol_major_refuses_the_handshake_with_a_notice() {
     let started = started_with(&[("stub", &["--protocol", "99"])]).await;
     let (_, text) = started.heard("PLUGIN_UNAVAILABLE").await;

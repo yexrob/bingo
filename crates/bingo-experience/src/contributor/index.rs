@@ -1,4 +1,4 @@
-//! The index in the system prompt: ten lines saying what this project has
+//! The appended index snapshot: ten lines saying what this project has
 //! learned and what each has been worth, so the model knows there is
 //! something to search for. The steps are not here — an index is a pointer,
 //! and `ExperienceQuery` is how a playbook is read.
@@ -6,17 +6,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bingo_sdk::{
-    ContextContributor, ContextError, ContextPiece, ContextQuery, Placement, SystemBlock,
-};
+use bingo_sdk::{ContextContributor, ContextError, ContextPiece, ContextQuery, Placement};
 
 use crate::entry::Entry;
 use crate::render;
 use crate::store::Library;
-
-/// After the instructions and the skills list: what a project has learned is
-/// context, not the frame the request is read in.
-const ORDER: i32 = 10;
 
 /// Past this the index is a wall of text; the rest is one line saying so.
 const MAX: usize = 10;
@@ -48,24 +42,20 @@ impl ContextContributor for IndexContributor {
     }
 
     fn placement(&self) -> Placement {
-        Placement::System { order: ORDER }
+        Placement::RoundStart
     }
 
-    /// Never cached: a commit within the turn changes this block, and a
-    /// cached copy would be stale in the session that wrote it.
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
-        if !self.library.occupied(query.cwd) {
-            return Ok(Vec::new());
-        }
         let shelf = self.library.load(query.cwd);
         let active = render::by_worth(shelf.active());
-        if active.is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(vec![ContextPiece::System(SystemBlock {
-            text: format!("{HEADING}\n\n{PREAMBLE}\n\n{}", listing(&active)),
-            cache: false,
-        })])
+        let text = if active.is_empty() {
+            format!("{HEADING}\n\nNo active playbooks.")
+        } else {
+            format!("{HEADING}\n\n{PREAMBLE}\n\n{}", listing(&active))
+        };
+        Ok(ContextPiece::snapshot(self.id(), text, query.items)
+            .into_iter()
+            .collect())
     }
 }
 
@@ -122,15 +112,90 @@ mod tests {
             .await
             .expect("the index never fails a turn");
         pieces.into_iter().next().map(|piece| match piece {
-            ContextPiece::System(block) => block.text,
-            ContextPiece::User { .. } => panic!("an index is a system block"),
+            ContextPiece::System(_) => panic!("an index is an appended user snapshot"),
+            ContextPiece::User { parts, .. } => parts
+                .iter()
+                .filter_map(|part| match part {
+                    bingo_sdk::ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         })
     }
 
+    async fn visible(fixture: &Fixture, items: Vec<bingo_sdk::Item>) -> Vec<ContextPiece> {
+        let asked = fixture.asked(items);
+        IndexContributor::new(fixture.library.clone())
+            .contribute(asked.query())
+            .await
+            .expect("experience context")
+    }
+
+    fn recorded(pieces: &[ContextPiece]) -> bingo_sdk::Item {
+        let ContextPiece::User { parts, .. } = &pieces[0] else {
+            panic!("experience indexes are appended user snapshots");
+        };
+        let mut item = crate::tests::said("", "contributor:experience:index");
+        let bingo_sdk::ItemBody::User { parts: content, .. } = &mut item.body else {
+            unreachable!();
+        };
+        *content = parts.clone();
+        item
+    }
+
     #[tokio::test]
-    async fn an_empty_library_says_nothing_at_all() {
+    async fn changed_and_retired_entries_append_and_visible_journal_suppresses_repeats() {
         let fixture = Fixture::new();
-        assert_eq!(block(&fixture).await, None);
+        scored(&fixture, "aaaa1111", 1, 0);
+        let first = visible(&fixture, Vec::new()).await;
+        let mut items = vec![recorded(&first)];
+        assert!(visible(&fixture, items.clone()).await.is_empty());
+
+        scored(&fixture, "aaaa1111", 2, 0);
+        let changed = visible(&fixture, items.clone()).await;
+        assert_eq!(changed.len(), 1);
+        let changed_item = recorded(&changed);
+        let bingo_sdk::ItemBody::User { parts, .. } = &changed_item.body else {
+            unreachable!();
+        };
+        assert!(
+            matches!(&parts[0], bingo_sdk::ContentPart::Text { text } if text.contains("helpful 2"))
+        );
+        items.push(changed_item);
+        assert!(visible(&fixture, items.clone()).await.is_empty());
+
+        fixture
+            .library
+            .save(
+                &fixture.cwd(),
+                &Entry {
+                    id: "aaaa1111".into(),
+                    status: Status::Retired,
+                    ..entry()
+                },
+            )
+            .expect("retire the entry");
+        let cleared = visible(&fixture, items.clone()).await;
+        assert_eq!(cleared.len(), 1);
+        let cleared_item = recorded(&cleared);
+        assert!(
+            matches!(&cleared_item.body, bingo_sdk::ItemBody::User { parts, .. }
+            if parts == &vec![bingo_sdk::ContentPart::text("# Experience\n\nNo active playbooks.")])
+        );
+        items.push(cleared_item);
+        assert!(visible(&fixture, items).await.is_empty());
+        // A new contributor restores state when compaction removes its visible record.
+        assert_eq!(visible(&fixture, Vec::new()).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_library_says_there_are_no_active_playbooks() {
+        let fixture = Fixture::new();
+        assert_eq!(
+            block(&fixture).await.as_deref(),
+            Some("# Experience\n\nNo active playbooks.")
+        );
         // A store with nothing active in it is an empty index too.
         fixture
             .library
@@ -142,7 +207,10 @@ mod tests {
                 },
             )
             .expect("an entry");
-        assert_eq!(block(&fixture).await, None);
+        assert_eq!(
+            block(&fixture).await.as_deref(),
+            Some("# Experience\n\nNo active playbooks.")
+        );
     }
 
     #[tokio::test]
@@ -177,10 +245,10 @@ mod tests {
     }
 
     #[test]
-    fn it_sits_after_the_skills_and_is_never_cached() {
+    fn it_refreshes_at_the_start_of_each_round() {
         let fixture = Fixture::new();
         let contributor = IndexContributor::new(fixture.library.clone());
         assert_eq!(contributor.id(), "experience:index");
-        assert_eq!(contributor.placement(), Placement::System { order: 10 });
+        assert_eq!(contributor.placement(), Placement::RoundStart);
     }
 }

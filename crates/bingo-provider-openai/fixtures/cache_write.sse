@@ -1,0 +1,7 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_cache_write","model":"gpt-5.4","status":"in_progress"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_cache_write","model":"gpt-5.4","status":"completed","usage":{"input_tokens":4096,"input_tokens_details":{"cached_tokens":2048,"cache_write_tokens":1024},"output_tokens":12,"output_tokens_details":{"reasoning_tokens":4},"total_tokens":4108}}}
+
+: End of fixture.

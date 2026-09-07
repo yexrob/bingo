@@ -3,9 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use bingo_sdk::{ContextContributor, ContextError, ContextPiece, ContextQuery, Placement};
+use bingo_sdk::{
+    ContextContributor, ContextError, ContextPiece, ContextQuery, Placement, SystemBlock,
+};
 
-use crate::{files, root};
+use crate::{baseline, files, root};
 
 /// The file a directory speaks through, in order of preference: a project that
 /// has written for this agent is not also asked what it told another one.
@@ -14,6 +16,8 @@ const NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 /// Before everything else in the system prompt: instructions are the frame the
 /// rest of the prompt is read in.
 const ORDER: i32 = -10;
+
+pub(crate) const ID: &str = "context:instructions";
 
 /// Contributes the user's instructions and every project file from the root
 /// down to the working directory.
@@ -52,24 +56,19 @@ async fn present(dir: &Path) -> Option<PathBuf> {
 
 /// A file that cannot be read is a file that is not there: an unreadable
 /// AGENTS.md must not cost the turn.
-async fn block(path: &Path) -> Option<ContextPiece> {
+async fn block(path: &Path) -> Option<SystemBlock> {
     let text = tokio::fs::read_to_string(path).await.ok()?;
     if text.trim().is_empty() {
         return None;
     }
     let heading = format!("# Instructions from {}", path.display());
-    Some(ContextPiece::System(files::block(
-        &heading,
-        &text,
-        true,
-        files::MAX_LINES,
-    )))
+    Some(files::block(&heading, &text, true, files::MAX_LINES))
 }
 
 #[async_trait]
 impl ContextContributor for InstructionsContributor {
     fn id(&self) -> &str {
-        "context:instructions"
+        ID
     }
 
     fn placement(&self) -> Placement {
@@ -77,19 +76,22 @@ impl ContextContributor for InstructionsContributor {
     }
 
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
-        let mut pieces = Vec::new();
-        for path in self.paths(query.cwd).await {
-            pieces.extend(block(&path).await);
-        }
-        Ok(pieces)
+        baseline::contribute(self.id(), query, async {
+            let mut blocks = Vec::new();
+            for path in self.paths(query.cwd).await {
+                blocks.extend(block(&path).await);
+            }
+            blocks
+        })
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::baseline::testing::Journal;
     use crate::git::{self, Repo};
-    use crate::query::Asked;
 
     fn headings(pieces: &[ContextPiece]) -> Vec<String> {
         pieces
@@ -102,11 +104,9 @@ mod tests {
     }
 
     async fn contribute(config_dir: &Path, cwd: &Path) -> Vec<ContextPiece> {
-        let asked = Asked::at(cwd);
-        InstructionsContributor::new(config_dir.to_path_buf())
-            .contribute(asked.query())
+        Journal::at(cwd)
+            .contribute(&InstructionsContributor::new(config_dir.to_path_buf()), cwd)
             .await
-            .expect("instructions never fail a turn")
     }
 
     #[test]

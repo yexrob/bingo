@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::contributor::CONTRIBUTOR_PREFIX;
 use crate::error::KernelError;
 use crate::ids::{IntentId, InteractionId, ItemId, Seq, SessionId, TurnId};
 use crate::model::{ContentPart, ProviderMetadata, Usage};
@@ -17,6 +18,13 @@ use crate::view::View;
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Namespaces beginning with `_` hold internal extension state. Journals and
+/// raw RPC retain it, but ordinary surfaces must not offer it as a panel/card.
+pub fn is_internal_extension(plugin: &str) -> bool {
+    // Keep the pre-release baseline namespace private without rewriting journals.
+    plugin.starts_with('_') || plugin == "bingo.context"
 }
 
 fn is_empty_meta(m: &ProviderMetadata) -> bool {
@@ -226,6 +234,11 @@ pub struct Origin {
 }
 
 impl Origin {
+    /// Model context, not a person's utterance or an agent's reply.
+    pub fn is_context(&self) -> bool {
+        self.surface.starts_with(CONTRIBUTOR_PREFIX)
+    }
+
     pub fn surface(name: impl Into<String>) -> Self {
         Self {
             surface: name.into(),
@@ -439,10 +452,14 @@ pub enum ItemBody {
 
 impl ItemBody {
     /// What a person reads as a message: their own prose and the model's
-    /// answers. A tool call, a receipt, a notice is the work around a message
-    /// rather than one, and counting it would make a busy session look chatty.
+    /// answers. Tool calls, receipts, notices and contributor context are work
+    /// around messages; counting them would make a busy session look chatty.
     pub fn is_message(&self) -> bool {
-        matches!(self, ItemBody::User { .. } | ItemBody::Assistant { .. })
+        match self {
+            ItemBody::User { origin, .. } => !origin.is_context(),
+            ItemBody::Assistant { .. } => true,
+            _ => false,
+        }
     }
 }
 
@@ -868,6 +885,30 @@ mod tests {
             session: SessionId::from_raw("ses_1"),
             cause: None,
             event,
+        }
+    }
+
+    #[test]
+    fn contributor_context_does_not_count_as_a_conversation_message() {
+        for (surface, counted) in [
+            ("tui", true),
+            ("peer", true),
+            ("contributor:inventory", false),
+            ("contributor-extra", true),
+        ] {
+            let event = Event::ItemCompleted {
+                item: item(
+                    "itm_context",
+                    ItemBody::User {
+                        parts: vec![ContentPart::text("current state")],
+                        origin: Origin::surface(surface),
+                    },
+                ),
+            };
+            let restored: Event =
+                serde_json::from_value(serde_json::to_value(&event).unwrap()).unwrap();
+            assert_eq!(event.completes_a_message(), counted, "{surface}");
+            assert_eq!(restored.completes_a_message(), counted, "{surface}");
         }
     }
 

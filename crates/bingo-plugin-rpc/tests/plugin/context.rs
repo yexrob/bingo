@@ -98,6 +98,47 @@ async fn a_plugin_s_contributor_speaks_at_the_placement_it_declared() {
     manager.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_remote_declared_compaction_failure_preserves_each_observed_usage_counter_once() {
+    let (manager, _home, _project) = started(&[]).await;
+    let compactor = manager.compactors().await.remove(0);
+    let (_, _, capabilities) = round();
+    let request: ModelRequest = serde_json::from_value(json!({
+        "model": "fail-compaction", "maxTokens": 100, "system": [], "messages": [], "tools": []
+    }))
+    .expect("failure request fixture");
+    let error = compactor
+        .compact(
+            CompactContext {
+                items: &[],
+                usage: Default::default(),
+                capabilities: &capabilities,
+                provider: Arc::new(NoProvider),
+                request: &request,
+                cancel: CancellationToken::new(),
+                failures: 0,
+                keep_budget: 250,
+            },
+            CompactReason::Threshold,
+        )
+        .await
+        .expect_err("declared remote failure");
+    assert_eq!(error.error.code, bingo_sdk::ErrorCode::ContextOverflow);
+    assert_eq!(error.error.message, "remote summary too long");
+    assert_eq!(
+        error.usage,
+        bingo_sdk::Usage {
+            input_tokens: 101,
+            output_tokens: 17,
+            cache_read_tokens: 23,
+            cache_write_tokens: 31,
+            reasoning_tokens: 5,
+        },
+        "the bridge neither loses nor adds to the declared cost"
+    );
+    manager.shutdown().await;
+}
+
 /// And for compaction: the summary is written in the other process.
 #[tokio::test]
 async fn a_plugin_s_compaction_strategy_answers_a_compaction() {
@@ -117,7 +158,7 @@ async fn a_plugin_s_compaction_strategy_answers_a_compaction() {
                 },
                 capabilities: &capabilities,
                 provider: Arc::new(NoProvider),
-                model: "m",
+                request: &serde_json::from_value(serde_json::json!({"model":"m", "maxTokens":100, "system":[], "messages":[], "tools":[]})).expect("request"),
                 cancel: CancellationToken::new(),
                 failures: 0,
                 keep_budget: 250,

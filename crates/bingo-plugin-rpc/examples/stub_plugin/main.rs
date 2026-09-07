@@ -376,8 +376,26 @@ fn compact(params: Value) -> Value {
     let Ok(params) = serde_json::from_value::<CompactorCompactParams>(params) else {
         return Value::Null;
     };
+    if params.context.request.model == "fail-compaction" {
+        return serde_json::to_value(CompactorCompactResult::Failed {
+            error: bingo_sdk::CompactError {
+                error: bingo_sdk::KernelError::new(
+                    bingo_sdk::ErrorCode::ContextOverflow,
+                    "remote summary too long",
+                ),
+                usage: Usage {
+                    input_tokens: 101,
+                    output_tokens: 17,
+                    cache_read_tokens: 23,
+                    cache_write_tokens: 31,
+                    reasoning_tokens: 5,
+                },
+            },
+        })
+        .unwrap_or(Value::Null);
+    }
     let used = params.context.usage.used;
-    serde_json::to_value(CompactorCompactResult {
+    serde_json::to_value(CompactorCompactResult::Completed {
         compaction: Compaction {
             summary: format!("{} cut on {}", params.id, why(&params.reason)),
             boundary: params

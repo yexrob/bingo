@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "bingo plugin",
-  "protocol": 5,
+  "protocol": 6,
   "$defs": {
     "Action": {
       "type": "object",
@@ -533,6 +533,28 @@
         "family"
       ]
     },
+    "CompactError": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/KernelError"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage",
+          "default": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 0
+          }
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "description": "A rejected summary still bills any usage observed before it failed."
+    },
     "CompactReason": {
       "oneOf": [
         {
@@ -651,15 +673,41 @@
       ]
     },
     "CompactorCompactResult": {
-      "type": "object",
-      "properties": {
-        "compaction": {
-          "$ref": "#/$defs/Compaction"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "compaction": {
+              "$ref": "#/$defs/Compaction"
+            },
+            "kind": {
+              "type": "string",
+              "const": "completed"
+            }
+          },
+          "required": [
+            "kind",
+            "compaction"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/CompactError"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
         }
-      },
-      "required": [
-        "compaction"
-      ]
+      ],
+      "description": "Declared failures retain observed usage; generic transport errors cannot\nreport what a process spent before the connection failed."
     },
     "CompactorContext": {
       "type": "object",
@@ -677,8 +725,8 @@
         "capabilities": {
           "$ref": "#/$defs/ModelCapabilities"
         },
-        "model": {
-          "type": "string"
+        "request": {
+          "$ref": "#/$defs/ModelRequest"
         },
         "failures": {
           "type": "integer",
@@ -696,7 +744,7 @@
       "required": [
         "usage",
         "capabilities",
-        "model",
+        "request",
         "failures",
         "keepBudget"
       ],

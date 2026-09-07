@@ -194,7 +194,13 @@ async fn a_text_only_turn_streams_one_assistant_item_and_completes() {
     );
     let req = provider.requests();
     assert_eq!(req.len(), 1);
-    assert_eq!(req[0].messages[0].parts[0].as_text(), Some("hello"));
+    assert_eq!(
+        req[0].messages[0].parts,
+        vec![
+            ContentPart::text("[from the person you work for]"),
+            ContentPart::text("hello"),
+        ]
+    );
     assert_eq!(req[0].system[0].text, "You are bingo.");
 }
 
@@ -422,7 +428,11 @@ async fn queued_input_is_absorbed_at_the_barrier() {
         matches!(&user.parts[0], ContentPart::ToolResult { .. }),
         "results first"
     );
-    assert_eq!(user.parts[1].as_text(), Some("also do this"));
+    assert_eq!(
+        user.parts[1].as_text(),
+        Some("[from the person you work for]")
+    );
+    assert_eq!(user.parts[2].as_text(), Some("also do this"));
 }
 
 /// A steer that carries a picture reaches the model with it: the barrier
@@ -451,11 +461,15 @@ async fn a_picture_steered_in_at_the_barrier_is_kept() {
     run(&cfg, &host, CancellationToken::new()).await;
     let second = &provider.requests()[1].messages;
     let user = &second[2];
-    assert_eq!(user.parts[1].as_text(), Some("and this"));
+    assert_eq!(
+        user.parts[1].as_text(),
+        Some("[from the person you work for]")
+    );
+    assert_eq!(user.parts[2].as_text(), Some("and this"));
     // The scripted model has no vision, so the part that reaches it is the
     // projection's note — which exists only because the picture was kept.
     assert_eq!(
-        user.parts[2].as_text(),
+        user.parts[3].as_text(),
         Some(crate::models::vision::omitted_note("m").as_str())
     );
 }
@@ -619,13 +633,16 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
     assert_eq!(
         sent,
         &vec![
+            ContentPart::text("[from the person you work for]"),
             ContentPart::text("look at this"),
             ContentPart::text("[image omitted: m has no vision]"),
         ]
     );
 }
 
+mod attribution;
 mod budget;
+mod snapshots;
 
 #[tokio::test]
 async fn a_stream_that_ends_without_a_finish_is_retried_like_a_dropped_connection() {
@@ -747,91 +764,6 @@ async fn a_source_contributor_speaks_when_the_turn_starts_with_its_own_origin() 
     let host = RecordingHost::new();
     run(&cfg, &host, CancellationToken::new()).await;
     assert_eq!(origins(&host), ["contributor:notes"]);
-}
-
-/// Two inputs the session coalesced into one turn (ADR-0010 §1): what woke it,
-/// and the line a person typed straight at it.
-fn a_nudge_then_a_line() -> Vec<Frame> {
-    let ts = Timestamp::from_second(0).unwrap();
-    let said = |seq: u64, id: &str, origin: Origin, text: &str| Frame {
-        seq: Seq(seq),
-        ts,
-        session: SessionId::from_raw("ses_1"),
-        cause: None,
-        event: Event::ItemCompleted {
-            item: Item {
-                id: ItemId::from_raw(id),
-                turn: Some(TurnId::from_raw("trn_1")),
-                round: 0,
-                status: ItemStatus::Completed,
-                started_at: ts,
-                completed_at: None,
-                intent: None,
-                body: ItemBody::User {
-                    parts: vec![ContentPart::text(text)],
-                    origin,
-                },
-                meta: Default::default(),
-            },
-        },
-    };
-    vec![
-        said(
-            1,
-            "itm_nudge",
-            Origin {
-                surface: "peer".into(),
-                principal: None,
-                conversation: Some("#collab".into()),
-            },
-            "there is something unread",
-        ),
-        said(2, "itm_line", Origin::surface("tui"), "Hi"),
-    ]
-}
-
-/// The field failure the mark is for: one turn carried both a nudge and a
-/// direct line, and a model briefed to stand by read the unlabeled line as
-/// more of the chatter. Everything in the request now says what it is — and
-/// what the kernel itself adds still says nothing, being nobody.
-#[tokio::test]
-async fn a_turn_that_mixes_tells_the_model_which_line_is_the_persons() {
-    let provider = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
-    let mut cfg = config(provider.clone(), vec![]);
-    cfg.contributors = ContributorSet {
-        fixed: vec![fixed_contributor("notes")],
-        sources: vec![],
-    };
-    let host = RecordingHost::new();
-    run_turn(
-        &cfg,
-        TurnRun {
-            turn: TurnId::from_raw("trn_1"),
-            history: a_nudge_then_a_line(),
-            generation: 0,
-            cancel: CancellationToken::new(),
-            kind: TurnKind::Respond,
-        },
-        &host,
-    )
-    .await;
-    let requests = provider.requests();
-    let read: Vec<&str> = requests[0]
-        .messages
-        .iter()
-        .flat_map(|m| m.parts.iter())
-        .filter_map(|part| part.as_text())
-        .collect();
-    assert_eq!(
-        read,
-        [
-            "[in #collab]",
-            "there is something unread",
-            "[from the person you work for]",
-            "Hi",
-            "notes said so",
-        ]
-    );
 }
 
 #[tokio::test]

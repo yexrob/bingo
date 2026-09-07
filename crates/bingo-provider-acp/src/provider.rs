@@ -58,6 +58,19 @@ impl AcpProvider {
     /// have to ask again, and a copy of the fold would be the conversation
     /// twice in memory.
     fn asking(&self, request: ModelRequest) -> Result<Asking, ProviderError> {
+        // ACP delegates execution: even a text-only compaction may run tools.
+        // Any explicit purpose is unsupported, including unknown/malformed tags.
+        if request
+            .provider_options
+            .get("bingo")
+            .is_some_and(|meta| meta.contains_key("purpose"))
+        {
+            return Err(ProviderError::Unsupported {
+                message:
+                    "ACP does not support requests with an explicit purpose (including compaction)"
+                        .into(),
+            });
+        }
         let session = request.session.ok_or_else(nobody)?;
         let (history, asked) = split(request.messages);
         Ok(Asking {
@@ -422,6 +435,56 @@ mod tests {
     use super::*;
     use bingo_sdk::Env;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn explicit_purposes_never_delegate_even_with_a_session_and_tools() {
+        let provider = AcpProvider::new(
+            "unreachable".into(),
+            serde_json::from_value(json!({"command":"bingo-compaction-must-never-spawn"})).unwrap(),
+            Sessions::new(Env::rooted(std::env::temp_dir())),
+        );
+        for purpose in [
+            json!("compaction"),
+            json!("unknown"),
+            json!(null),
+            json!(3),
+            json!({}),
+        ] {
+            for session in [None, Some(SessionId::from_raw("ses_parent"))] {
+                let mut request = request(vec![Message::text(Role::User, "execute a tool")]);
+                request.session = session;
+                request.tools.push(ToolSpec {
+                    name: "Write".into(),
+                    description: "must not run".into(),
+                    input_schema: json!({}),
+                    meta: Default::default(),
+                });
+                request
+                    .provider_options
+                    .entry("bingo".into())
+                    .or_default()
+                    .insert("purpose".into(), purpose.clone());
+                let result = provider.stream(request, CancellationToken::new()).await;
+                assert!(
+                    matches!(result, Err(ProviderError::Unsupported { message }) if message.contains("explicit purpose"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn absent_purpose_keeps_ordinary_session_extraction_unchanged() {
+        let mut request = request(vec![]);
+        request
+            .provider_options
+            .entry("bingo".into())
+            .or_default()
+            .insert("other".into(), json!(true));
+        let result = provider().asking(request);
+        assert!(
+            matches!(result, Err(ProviderError::Config { message }) if message.contains("session"))
+        );
+    }
 
     fn adapter() -> Adapter {
         serde_json::from_value(json!({ "command": "true" })).expect("an adapter")

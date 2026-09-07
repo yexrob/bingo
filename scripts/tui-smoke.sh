@@ -159,6 +159,11 @@ step 'a reply reaches the transcript'
 start '{"responses":[{"steps":[{"text":"Hello from the smoke test."}]}]}'
 keys 'say hello' Enter
 await 'Hello from the smoke test.'
+if pane | grep -Eq '# (Tasks|Experience|Memories)|Context injection|context:memory'; then
+  echo 'tui-smoke: internal context appeared in the conversation' >&2
+  pane >&2
+  exit 1
+fi
 finish
 
 step 'esc interrupts a turn that is still waiting'
