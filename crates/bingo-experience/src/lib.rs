@@ -87,14 +87,24 @@ pub struct Settings {
 
 /// A typo here would silently leave the library off when a person meant it
 /// on, so an unknown key is a startup failure rather than a silence.
-#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Experience {
-    /// Whether this project keeps playbooks at all. Off by default: four tool
-    /// descriptions and a prompt block ride every request, and a project that
-    /// has written no playbook pays for all of it to be told it has none.
-    #[serde(default)]
+    /// Whether this project keeps playbooks at all. On by default, as the
+    /// user ruled (2026-09-08): a person who wants no playbooks writes
+    /// `false` once, and the plugin then contributes nothing at all.
+    #[serde(default = "on")]
     pub enabled: bool,
+}
+
+impl Default for Experience {
+    fn default() -> Self {
+        Self { enabled: on() }
+    }
+}
+
+fn on() -> bool {
+    true
 }
 
 /// Registers the four tools, the two prompt blocks and `/experience`, all
@@ -155,33 +165,33 @@ mod plugin_tests {
             Some(&[("experience", Merge::Replace)][..])
         );
         assert!(
-            !Experience::default().enabled,
-            "playbooks are off until asked for"
+            Experience::default().enabled,
+            "playbooks are on until turned off"
         );
     }
 
-    /// The one setting: what a person turns on, and what a typo does.
+    /// The one setting: what a person turns off, and what a typo does.
     #[test]
     fn the_settings_slice_says_whether_this_project_keeps_playbooks() {
         let read = |slice| serde_json::from_value::<Settings>(slice);
-        assert!(!read(json!({})).expect("an empty slice").experience.enabled);
+        assert!(read(json!({})).expect("an empty slice").experience.enabled);
         assert!(
-            read(json!({"experience": {"enabled": true}}))
+            !read(json!({"experience": {"enabled": false}}))
                 .expect("a slice")
                 .experience
                 .enabled
         );
         assert!(
-            read(json!({"experience": {"enable": true}})).is_err(),
-            "a typo leaves the library off silently unless it is refused"
+            read(json!({"experience": {"enable": false}})).is_err(),
+            "a typo leaves the library on silently unless it is refused"
         );
     }
 
     /// Nothing registered is nothing in the prompt: no tool description, no
-    /// index block, and no `/experience` for a person who has not asked.
+    /// index block, and no `/experience` for a person who turned it off.
     #[test]
-    fn a_project_that_did_not_ask_for_playbooks_is_offered_none() {
-        let mut registrar = registrar(json!({}));
+    fn a_project_that_turned_playbooks_off_is_offered_none() {
+        let mut registrar = registrar(json!({"experience": {"enabled": false}}));
         ExperiencePlugin
             .register(&mut registrar)
             .expect("registering does no i/o");
