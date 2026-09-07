@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bingo_sdk::{
     Activation, ArgSpec, Attachment, Catalog, CatalogEntry, CatalogKind, ClientIdentity,
-    CloseReason, CommandSpec, Delivery, Event, FrameStream, GatewayEvent, GatewayStream,
-    HistoryChunk, HistoryPage, HostApi, HostHandle, Input, IntentId, InterruptScope, KernelError,
-    OpenOptions, Seq, SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector,
-    SessionState, SessionSummary,
+    CloseReason, CommandSpec, Delivery, FrameStream, GatewayEvent, GatewayStream, HistoryChunk,
+    HistoryPage, HostApi, HostHandle, Input, IntentId, InterruptScope, KernelError, OpenOptions,
+    Seq, SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionState,
+    SessionSummary,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -34,19 +34,11 @@ pub struct TestSession {
     submitted: Mutex<Vec<Input>>,
     answers: Mutex<Vec<(bingo_sdk::InteractionId, bingo_sdk::Answer, Activation)>>,
     interrupts: Mutex<usize>,
-    resyncs: Mutex<Vec<Seq>>,
 }
 
 impl TestSession {
-    /// The live stream ends at a lag marker, as the kernel's does.
     fn live(&self) -> FrameStream {
-        let mut frames = Vec::new();
-        for frame in &self.frames {
-            frames.push(frame.clone());
-            if matches!(frame.event, Event::Lagged { .. }) {
-                break;
-            }
-        }
+        let frames = self.frames.clone();
         if self.pace.is_zero() {
             return Box::pin(futures::stream::iter(frames));
         }
@@ -67,10 +59,6 @@ impl TestSession {
 
     pub fn interrupts(&self) -> usize {
         *self.interrupts.lock().expect("no poisoned lock")
-    }
-
-    pub fn resyncs(&self) -> Vec<Seq> {
-        self.resyncs.lock().expect("no poisoned lock").clone()
     }
 }
 
@@ -107,7 +95,6 @@ impl SessionPort for TestSession {
 
     /// The journal replay: durable frames only, like the kernel's.
     async fn events_since(&self, since: Seq) -> Result<FrameStream, KernelError> {
-        self.resyncs.lock().expect("no poisoned lock").push(since);
         let frames: Vec<_> = self
             .frames
             .iter()

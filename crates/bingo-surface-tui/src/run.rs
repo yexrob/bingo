@@ -76,7 +76,6 @@ pub(crate) type Keys = Pin<Box<dyn Stream<Item = Term> + Send>>;
 /// The results of the host calls the loop spawns.
 enum Reply {
     Attached(Box<Attachment>),
-    Resynced(FrameStream),
     /// A child's mailbox, so a line typed in its view reaches it. The
     /// attachment's own stream is dropped: the tree's carries the child.
     Handle(SessionId, SessionHandle),
@@ -485,9 +484,6 @@ impl Run {
         }
         self.refocus();
         match &frame.event {
-            // The lagged stream ends at its marker; the reducer left `seq` at
-            // the last frame it applied, so replay from there fills the gap.
-            Event::Lagged { .. } => self.resync(),
             Event::InteractionOpened { .. } => {
                 screen.bell().map_err(stdio)?;
                 self.announce(Notification::NeedsYou, screen)?;
@@ -744,15 +740,6 @@ impl Run {
         intent
     }
 
-    /// The tree's stream is the root's, and so is the replay that heals it.
-    fn resync(&mut self) {
-        let Some(handle) = self.session.root() else {
-            return;
-        };
-        let since = self.session.tree.root().seq;
-        self.spawn(async move { handle.events_since(since).await.map(Reply::Resynced) });
-    }
-
     /// `/clear` and `/resume` replace the whole tree, children and all.
     fn open(&mut self, selector: SessionSelector) {
         self.ui.opening = true;
@@ -871,7 +858,6 @@ impl Run {
     fn reply(&mut self, reply: Reply, events: &mut Option<FrameStream>) {
         match reply {
             Reply::Attached(attachment) => self.attach(*attachment, events),
-            Reply::Resynced(stream) => *events = Some(stream),
             Reply::Handle(session, handle) => {
                 self.session.handles.insert(session, handle);
             }
@@ -951,7 +937,7 @@ pub(crate) fn terminal_keys() -> Keys {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use bingo_sdk::{CloseReason, ItemStatus, Seq, TurnStatus};
+    use bingo_sdk::{CloseReason, ItemStatus, TurnStatus};
     use bingo_sdk::{Image, Input};
     use crossterm::event::KeyCode;
 
@@ -1028,41 +1014,6 @@ mod tests {
             session.submitted(),
             vec![Input::text("hello", bingo_sdk::Origin::surface("tui"))]
         );
-    }
-
-    #[tokio::test]
-    async fn a_lag_marker_makes_the_loop_re_read_the_journal() {
-        let mut harness = Harness::new();
-        let frames = vec![
-            frame(
-                1,
-                Event::ConfigChanged {
-                    config: Default::default(),
-                },
-            ),
-            frame(
-                9,
-                Event::Lagged {
-                    from: Seq(2),
-                    to: Seq(9),
-                },
-            ),
-            frame(
-                4,
-                Event::ItemCompleted {
-                    item: assistant("itm_2", "replayed", ItemStatus::Completed),
-                },
-            ),
-            closed(5),
-        ];
-        let (exit, session) = harness.go(frames, vec![], None).await;
-        assert_eq!(exit, Exit { code: 0 });
-        assert_eq!(
-            session.resyncs(),
-            vec![Seq(1)],
-            "the reducer left seq at the last frame it applied"
-        );
-        assert!(harness.recorder.last().contains("replayed"));
     }
 
     #[tokio::test]

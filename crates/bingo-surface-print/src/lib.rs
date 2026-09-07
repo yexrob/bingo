@@ -153,7 +153,9 @@ pub(crate) async fn drive(
             // The whole tree, whatever the mode: a sub-session's permission
             // prompt reaches a run only through it (ADR-0010 §3), and a run
             // that cannot see the prompt waits on it forever. What of the
-            // tree is reported is the renderer's decision.
+            // tree is reported is the renderer's decision. The tree's
+            // forwarder heals a lag itself and back-pressures rather than
+            // dropping frames, so no `Lagged` marker reaches this stream.
             OpenOptions::with_children(),
         )
         .await?;
@@ -291,17 +293,6 @@ impl<'a> Attached<'a> {
         self.states.get_mut(&frame.session)
     }
 
-    fn root(&self) -> &SessionState {
-        &self.states[&self.root]
-    }
-
-    /// Re-read the journal from the last frame applied, filling the gap a lag
-    /// marker announced.
-    async fn resync(&mut self) -> Result<(), KernelError> {
-        self.events = self.handle.events_since(self.root().seq).await?;
-        Ok(())
-    }
-
     /// A sub-session's frame concerns the run only when it needs a person:
     /// its turns, acks and closing are the root's business to report.
     fn concerns_the_run(&self, frame: &Frame) -> bool {
@@ -321,7 +312,6 @@ impl<'a> Attached<'a> {
                 &mut *self.err,
             )? {
                 Next::Await => {}
-                Next::Resync => self.resync().await?,
                 Next::Exit(exit) => return Ok(exit),
             }
         }
@@ -401,8 +391,6 @@ fn asks_a_person(event: &Event) -> bool {
 enum Next {
     /// Keep reading the current stream.
     Await,
-    /// Re-read the journal from the last applied frame.
-    Resync,
     Exit(Exit),
 }
 
@@ -419,9 +407,6 @@ fn react(
             handle.answer(IntentId::mint(), interaction.id.clone(), answer, activation);
             Ok(Next::Await)
         }
-        // The lagged stream ends at its marker; the reducer left `seq` at the
-        // last frame it applied, so replay from there fills the gap.
-        Event::Lagged { .. } => Ok(Next::Resync),
         Event::TurnCompleted { status, .. } => Ok(Next::Exit(exit_for(status))),
         Event::SessionClosed { reason } => {
             closed(&close_message(reason), err, console.human()).map(Next::Exit)
@@ -1681,24 +1666,6 @@ pub(crate) mod tests {
     async fn a_question_answered_with_nonsense_is_cancelled() {
         let run = answering(opened(question(&[("a", "Cargo.toml")])), "z").await;
         assert_eq!(run.session.answers()[0].1, Answer::Cancel);
-    }
-
-    /// The live stream ends at the marker; the surface re-reads the journal
-    /// from the last frame it applied and finds the completion there.
-    #[tokio::test]
-    async fn a_lag_marker_re_reads_the_journal_and_the_turn_still_ends() {
-        let run = headless(vec![
-            frame(
-                3,
-                Event::Lagged {
-                    from: Seq(2),
-                    to: Seq(3),
-                },
-            ),
-            completed(4),
-        ])
-        .await;
-        assert_eq!(run.exit, Ok(Exit { code: 0 }));
     }
 
     #[tokio::test]

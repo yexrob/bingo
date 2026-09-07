@@ -1,6 +1,8 @@
 //! The sessions one attachment carries: the root this surface opened with
 //! `OpenOptions::with_children()` and every live descendant whose frames the
 //! same stream delivers, each stamped with its own `session` (ADR-0010 §3).
+//! The tree's forwarder heals a lag itself and back-pressures rather than
+//! dropping frames, so no `Lagged` marker ever reaches this surface.
 //!
 //! Every state here is the reducer's — one `SessionState` per session, folded
 //! by `frame.session`. What is the surface's own is which of them is on

@@ -116,12 +116,6 @@ impl Runner {
     }
 
     async fn saw(&mut self, frame: &Frame) {
-        // A lag marker ends the live stream at the gap; the reducer left
-        // `seq` at the last frame applied, so replaying from there fills it.
-        if matches!(frame.event, Event::Lagged { .. }) {
-            self.resync().await;
-            return;
-        }
         let Some(state) = self.state_of(frame) else {
             return;
         };
@@ -157,16 +151,6 @@ impl Runner {
                 .insert(frame.session.clone(), SessionState::new(summary.clone()));
         }
         self.states.get_mut(&frame.session)
-    }
-
-    async fn resync(&mut self) {
-        let since = self.states[&self.root].seq;
-        match self.handle.events_since(since).await {
-            Ok(events) => self.events = events,
-            Err(error) => {
-                tracing::warn!(%error, key = %self.key, "the journal could not be re-read")
-            }
-        }
     }
 
     async fn perform(&mut self, ops: Vec<Op>) {
@@ -464,7 +448,9 @@ async fn attach(
         surface: SURFACE_ID.to_string(),
     };
     // The whole tree: a sub-agent's permission prompt reaches a person only
-    // through the attachment that can see it (ADR-0010 §3).
+    // through the attachment that can see it (ADR-0010 §3). Its forwarder
+    // heals a lag itself and back-pressures rather than dropping frames, so
+    // no `Lagged` marker reaches this stream.
     let options = OpenOptions::with_children();
     match host
         .open(

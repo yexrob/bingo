@@ -54,7 +54,6 @@ impl Attached<'_> {
                         }
                         match self.reaction(&frame, &mut host)? {
                             Next::Await => {}
-                            Next::Resync => self.resync().await?,
                             Next::Exit(exit) => return Ok(exit),
                         }
                     }
@@ -252,7 +251,6 @@ impl Hosted {
                 Ok(Next::Await)
             }
             Event::IntentAck { intent, outcome } => self.acked(intent, outcome, err),
-            Event::Lagged { .. } => Ok(Next::Resync),
             Event::SessionClosed { reason } => {
                 closed(&close_message(reason), err, self.human).map(Next::Exit)
             }
