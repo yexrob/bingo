@@ -27,19 +27,19 @@ before landing.
    most one bounce and a same-turn retry — accepted, and the retry is a
    genuine re-decision point ("half of what I meant to say was just said").
 2. **The checkpoint is `SendMessage`'s room arm, before `deliver`.** Two
-   derived ledgers, no stored watermark: the room's journal (posts by
-   others) against what the caller has *seen* — reading only the caller's
-   journal **before the assistant item that issued this call** (`cx.item`
-   is the cut; what was absorbed at this turn's barriers after the model
-   spoke was not seen by it). Behind → bounce; even → land.
+   derived ledgers, no watermark of the rule's own: the room's journal
+   (posts by others) against what the caller has *seen* — its cursor into
+   the room (ADR-0034 §2), read **before the assistant item that issued
+   this call** (`cx.item` is the cut; what the cursor took at this turn's
+   barriers after the model spoke was not seen by it). Behind → bounce;
+   even → land.
    The room's ledger starts at the caller's own `created_at`: a post that
-   landed before the session existed was fanned out to nobody, so no
-   author can be behind on it, and a member spawned into a running room
-   is level with it rather than behind its whole history.
-   (Amended 2026-09-03, ADR-0034 §5: a post is copied into no member's
-   journal any more, so "seen" is the caller's cursor into the room —
-   still derived, still no stored watermark of its own, and the quoted
-   bounce still counts beside it.)
+   landed before the session existed reached nobody, so no author can be
+   behind on it, and a member spawned into a running room is level with
+   it rather than behind its whole history.
+   *(Amended 2026-09-03, ADR-0034 §5: "seen" was counted from the posts
+   copied into the caller's own journal; a post is copied nowhere now, so
+   it is counted from the caller's cursor.)*
 3. **Seen = absorbed or quoted.** The bounce is a worded tool error that
    quotes the missed posts, and a journaled bounce counts toward "seen" on
    the next attempt: seen(room) = max(posts absorbed before the cut,

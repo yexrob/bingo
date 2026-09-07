@@ -27,21 +27,15 @@ vocabulary: `Delivery::Hold` and `Delivery::Wake`.
    the room hangs under — the name its members already call it, and the
    name a root holder's posts already sign. No other holder address is
    introduced.
-2. **A post fans to a rostered holder as `Wake`, like to any member.**
-   A busy holder reads it at its next barrier — a steer, not a
-   conversation — and an idle one opens a turn that drains whatever
-   queued behind it: the kernel's own batching, no timers. (Amended
-   2026-09-01: the first cut delivered `Hold` and woke only on
-   `@parent` — a digest that priced liveness away, and a mention read
-   for routing, the thing ADR-0022 refuses. The noise the old tree's
-   debounce fought is already carried by M22's quiet notices; what
-   remains is tokens and context, and the roster itself is that dial —
-   a room that should not spend the holder's attention leaves `parent`
-   off it.)
-   (Amended 2026-09-03, ADR-0034 §7: nothing fans to a holder at all —
-   a rostered `parent` is a cursor and an ear like any other seat, and
-   reads the room at the head of its own turn; its transcript shows no
-   post.)
+2. **A rostered holder reads the room like any other seat.** Nothing
+   fans to it at all: `parent` is a cursor and an ear, it reads the
+   room at the head of its own turn, and its transcript shows no post.
+   *(Amended 2026-09-01: the first cut delivered `Hold` and woke only
+   on `@parent` — a digest that priced liveness away, and a mention
+   read for routing, the thing ADR-0022 refuses — so every post fanned
+   to the holder as `Wake` instead, like to any member.)*
+   *(Amended 2026-09-03, ADR-0034 §7: that `Wake` fan-out is gone;
+   nothing is delivered to a holder, it reads through its cursor.)*
 3. **`@parent` opens an ordinary mention debt** (ADR-0022) against the
    seat, closed by the seat's next post — obligation only, never a
    delivery mode. One delivery per post; the exactly-once pin stands.

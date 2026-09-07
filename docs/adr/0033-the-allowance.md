@@ -1,9 +1,6 @@
 # ADR-0033 — The allowance: a host capability, lent for one crossing
 
-Status: accepted · 2026-09-01 · Plan: M30 · amended 2026-09-01
-(scope: the table and the `complete` door are deferred to demand — no
-external strategy exists to spend through them; `ask` and `notice`,
-which mint nothing, land first as M30)
+Status: accepted · 2026-09-01 · Plan: M30 · amended 2026-09-01 (M30)
 
 ## Context
 
@@ -39,20 +36,27 @@ already attributes, need no allowance.
    the crossing's params, the door validates against the table, and
    the reply (or the crossing's deadline) removes the entry. A grant
    never outlives its crossing; there is no ambient spend.
-3. **v1 opens two doors.** `complete {allowance, request} →
+3. **v1 opens one door; the second is designed and waits.** `ask
+   {call, question} → {answer}`: **nothing is minted** — the bridge
+   already tracks running calls for progress and cancel, and that
+   liveness is the grant: the call id the plugin holds names the
+   crossing, and an ended call or another connection's is refused in
+   words. The question rides the live call's own asking machinery,
+   exactly the way an in-process tool's does; no second question path
+   exists. The door that waits is `complete {allowance, request} →
    {response}`: minted for `compactor/compact`, routed to the provider
-   the session already chose; **usage is measured by the host** and
-   folded into the crossing's accounting, so the person sees the spend
-   on the stream and a claim is never the ledger. `ask {call,
-   question} → {answer}`: **nothing is minted** — the bridge already
-   tracks running calls for progress and cancel, and that liveness is
-   the grant: the call id the plugin holds names the crossing, and an
-   ended call or another connection's is refused in words. The
-   question rides the live call's own asking machinery, exactly the
-   way an in-process tool's does; no second question path exists.
-   (Amended 2026-09-01 in review: the first cut minted an Ask
+   the session already chose, **usage measured by the host** and folded
+   into the crossing's accounting, so the person sees the spend on the
+   stream and a claim is never the ledger. It is deferred to demand
+   with §2's minting table — no external strategy exists to spend
+   through them — so `bingo.host` speaks `ask` and `notice`, and says
+   so to anything else asked of it.
+   *(Amended 2026-09-01 in review: the first cut minted an Ask
    allowance — a second id for a fact the running-call map already
-   carries is the ADR-0011 debt.)
+   carries is the ADR-0011 debt.)*
+   *(Amended 2026-09-01: was two doors in v1; the table and `complete`
+   are deferred to demand, and `ask` and `notice`, which mint nothing,
+   land first as M30.)*
 4. **`notice {level, message}` takes no allowance.** A plugin may tell
    the person something at any time, under its own name, on the
    bridge's existing notice path. It is the one unscoped method; it

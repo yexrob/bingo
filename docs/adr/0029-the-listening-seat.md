@@ -16,33 +16,32 @@ turn boundary already coalesces and a queue already holds.
 ## Decision
 
 1. **Every seat has an ear: a patience, in seconds.** Patience 0 is a
-   live ear — every post `Wake`s it; today's seat, and the default. A
-   patience of 30 s or more is a patient ear — posts land `Hold`, read
-   whole at the seat's next turn, whoever opens it. The band (0, 30) is
-   refused in words: under thirty seconds of patience, take the live
-   seat you are describing. There is no seat-kind enum; working and
-   listening are readings of one number.
-   (Amended 2026-09-03, ADR-0034 §6: the default is reversed — a bare
-   name is a patient ear at 300 s, and a live one is asked for by the
-   number that says so, `name:0` / `patience_s: 0`. A patient seat holds
-   nothing: it reads the room at its next turn through its cursor, and
-   the deadline wakes it once when the room has stood unread that long.)
-2. **The roster declares the initial ear.** `/room design scout
-   ~parent` seats a patient ear at the default; `~parent:120` a custom
-   one; `OpenRoom { listeners: [...] }` (a name, or `{name,
-   patience_s}`) and `team.json`'s `listeners` say the same. A bare
-   name is live. The membership payload becomes `{members, listeners}`;
-   a flat array read from an old journal is all-live. `patience_s`
-   stores what was asked — absent means default, applied by one reader,
-   so the constant lives in one place: the chaser's own 300 s.
-   (Amended 2026-09-03, ADR-0034 §6: the `~` sigil is gone. It meant
-   "patient", which is what a bare name means now, so it had nothing
-   left to say; patience is one number, and `name:120` / `name:0` is the
-   whole of the syntax. A `~name` left in an old roster is not a
-   patience — it is a member name nobody holds, kept and skipped, as any
-   unheld name is. And a roster read from an old journal is now
-   all-*patient* where this said all-live: the absence of `listeners`
-   means the default, and the default is the thing that changed.)
+   live ear — every post `Wake`s it. A patience of 30 s or more is a
+   patient ear: it holds nothing, reads the room at its next turn
+   through its cursor, and its deadline wakes it once when the room has
+   stood unread that long. The default is a patient ear at 300 s; a live
+   one is asked for by the number that says so, `name:0` /
+   `patience_s: 0`. The band (0, 30) is refused in words: under thirty
+   seconds of patience, take the live seat you are describing. There is
+   no seat-kind enum; working and listening are readings of one number.
+   *(Amended 2026-09-03, ADR-0034 §6: live was the default and a patient
+   seat held its posts as `Hold` mail; the default is patient at 300 s
+   and a patient seat holds nothing.)*
+2. **The roster declares the initial ear.** `/room design scout parent`
+   seats both at the default patience; `parent:120` asks for a custom
+   one and `parent:0` for a live ear — `name:120` / `name:0` is the
+   whole of the syntax. `OpenRoom { listeners: [...] }` (a name, or `{name,
+   patience_s}`) and `team.json`'s `listeners` say the same. The
+   membership payload becomes `{members, listeners}`; a flat array read
+   from an old journal is all-patient, because the absence of
+   `listeners` means the default. `patience_s` stores what was asked —
+   absent means default, applied by one reader, so the constant lives in
+   one place: the chaser's own 300 s. A `~name` left in an old roster is
+   not a patience: it is a member name nobody holds, kept and skipped,
+   as any unheld name is.
+   *(Amended 2026-09-03, ADR-0034 §6: a bare name was live and the `~`
+   sigil asked for patience; the sigil went with the default it marked,
+   and an old flat roster reads all-patient where it read all-live.)*
 3. **The patience deadline.** Held mail whose origin surface is
    `room` — only that; a standby brief (surface `agent`) must never
    trip this, or ADR-0027's zero-cost seat dies — older than the

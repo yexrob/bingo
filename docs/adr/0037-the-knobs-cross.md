@@ -31,14 +31,16 @@ drops `ModelRequest.reasoning` on the floor for an ACP session, and
    stays the label for "the agent's default". A chosen model is
    applied the same way — the model-shaped option, or the agent's
    legacy `session/set_model` where that is what it has.
-3. **Nothing new is invented for the asking.** `/model`, `/thinking`,
-   `SpawnAgent`'s `model` field and every path that reconfigures a
-   session already end in the next request's `model` and `reasoning`.
-   The instance reads the two fields it always received and applies
-   what changed. No kernel word moves, no new tool, no new door.
-   *(Amended 2026-09-05, ADR-0047: a new field and a new tool after
-   all — `SpawnAgent{thinking}` and `SetThinking` — both ending here,
-   in the next request's `reasoning`.)*
+3. **The asking ends in the two fields the instance already receives.**
+   `/model`, `/thinking`, `SpawnAgent`'s `model` and `thinking` fields,
+   `SetThinking` and every path that reconfigures a session end in the
+   next request's `model` and `reasoning`. The instance reads the two
+   fields it always received and applies what changed. No kernel word
+   moves and no new door opens.
+   *(Amended 2026-09-05, ADR-0047: was "nothing new is invented for the
+   asking — no new tool"; `SpawnAgent{thinking}` and `SetThinking` are a
+   new field and a new tool, both ending here, in the next request's
+   `reasoning`.)*
 4. **Applied between turns, never inside one** — the moment those
    knobs take effect for every provider already.
 
