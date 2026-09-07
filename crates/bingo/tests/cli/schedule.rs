@@ -510,11 +510,13 @@ fn the_wake_command_answers_under_print_and_finds_nothing_standing() {
     assert!(asked("/wake off").contains("no wake is standing"));
 }
 
-/// The bound a person sets (ADR-0019 §8): the tool is still offered, so a
-/// model that reaches for it is told whose decision it was, and nothing is
-/// written.
+/// The bound a person sets (ADR-0019 §8, amended 2026-09-07): the tool is not
+/// offered at all, so its description costs nothing on every request of a
+/// person who has none of it. A model that reaches for it anyway finds no such
+/// tool — the same answer a child asking for `SpawnAgent` gets — and the run
+/// still ends well with nothing written.
 #[test]
-fn wakes_a_person_turned_off_are_refused_and_the_run_still_ends_well() {
+fn a_person_who_turned_wakes_off_is_offered_no_wake_tool() {
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join(".bingo");
     std::fs::create_dir_all(&config).unwrap();
@@ -535,12 +537,13 @@ fn wakes_a_person_turned_off_are_refused_and_the_run_still_ends_well() {
     let out = scripted_run(home.path(), &script, &[], "watch the build");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let said = stdout(&out);
+    assert!(!said.contains("Waking you at"), "nothing was set: {said}");
     assert!(
-        said.contains("schedule.wakes"),
-        "the model is told why: {said}"
+        said.contains("tool not found: Wake"),
+        "the call found no such tool: {said}"
     );
     assert!(
-        !said.contains("Waking you at"),
-        "and nothing was set: {said}"
+        !said.contains("`schedule.wakes` is false"),
+        "and there is no description left to explain itself with: {said}"
     );
 }

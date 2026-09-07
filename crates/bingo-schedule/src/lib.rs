@@ -136,12 +136,12 @@ impl Plugin for SchedulePlugin {
         registrar.tool(Arc::new(ScheduleCreateTool::new(schedules.clone())) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ScheduleListTool::new(schedules.clone())) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ScheduleForgetTool::new(schedules.clone())) as Arc<dyn Tool>);
-        // Offered whether or not wakes are on: a model told why it may not
-        // wake itself does something else, where one that never saw the tool
-        // reaches for a schedule of its own instead.
-        registrar.tool(
-            Arc::new(WakeTool::new(schedules.clone(), settings.schedule.wakes)) as Arc<dyn Tool>,
-        );
+        // A tool a person has switched off is not offered. Registering it to
+        // refuse at the call spends its description on every request of every
+        // turn to say what the absence says for nothing.
+        if settings.schedule.wakes {
+            registrar.tool(Arc::new(WakeTool::new(schedules.clone())) as Arc<dyn Tool>);
+        }
         registrar.add(Contribution::Command(
             Arc::new(ScheduleCommand::new(schedules.clone())) as Arc<dyn Command>,
         ));
@@ -218,6 +218,30 @@ mod plugin_tests {
             !home.path().join(".bingo/data/schedules").exists(),
             "registering creates no directory"
         );
+    }
+
+    /// A tool a person switched off is not offered (ADR-0019 §8, amended):
+    /// the schedules are still there, and only `Wake` is gone.
+    #[test]
+    fn a_person_who_turned_wakes_off_is_offered_no_wake_tool() {
+        let home = tempfile::tempdir().expect("a temp home");
+        let mut registrar = Registrar::new(
+            MANIFEST.id,
+            json!({"schedule": {"wakes": false}}),
+            Env::rooted(home.path()),
+        );
+        SchedulePlugin::default()
+            .register(&mut registrar)
+            .expect("registering does no i/o");
+        let tools: Vec<String> = registrar
+            .into_contributions()
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Tool(tool) => Some(tool.spec().name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools, ["ScheduleCreate", "ScheduleList", "ScheduleForget"]);
     }
 
     #[tokio::test]

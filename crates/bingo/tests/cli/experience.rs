@@ -20,6 +20,19 @@ fn adversarial() -> Value {
     })
 }
 
+/// The library is off unless a person asks for it (ADR-0014, amended
+/// 2026-09-07), so every run here asks. `--cwd` and `HOME` are the same
+/// directory in these tests, which is where the settings are read from.
+fn with_experience(home: &Path) {
+    let config = home.join(".bingo");
+    std::fs::create_dir_all(&config).expect("a config directory");
+    std::fs::write(
+        config.join("settings.json"),
+        r#"{ "experience": { "enabled": true } }"#,
+    )
+    .expect("the settings");
+}
+
 fn call(name: &str, input: Value) -> Value {
     json!({"steps": [{"toolCall": {"name": name, "input": input}}]})
 }
@@ -122,6 +135,7 @@ fn contributed(out: &Output, id: &str) -> Vec<String> {
 #[test]
 fn a_commit_is_proposed_as_the_file_it_would_write() {
     let home = tempfile::tempdir().unwrap();
+    with_experience(home.path());
     let script = script(&scripted(vec![
         call("ExperienceCommit", adversarial()),
         json!({"steps": [{"text": "Could not."}]}),
@@ -164,6 +178,7 @@ fn a_commit_is_proposed_as_the_file_it_would_write() {
 #[test]
 fn commit_query_outcome_and_revise_round_trip_on_disk() {
     let home = tempfile::tempdir().unwrap();
+    with_experience(home.path());
     let allowed = ["--allowed-tools", "ExperienceCommit,ExperienceOutcome"];
 
     let first = script(&scripted(vec![
@@ -263,6 +278,7 @@ fn commit_query_outcome_and_revise_round_trip_on_disk() {
 #[test]
 fn an_outcome_without_evidence_is_an_input_error() {
     let home = tempfile::tempdir().unwrap();
+    with_experience(home.path());
     let first = script(&scripted(vec![
         call("ExperienceCommit", adversarial()),
         json!({"steps": [{"text": "Written."}]}),
@@ -297,6 +313,7 @@ fn an_outcome_without_evidence_is_an_input_error() {
 #[test]
 fn the_command_folds_the_library_into_a_table() {
     let home = tempfile::tempdir().unwrap();
+    with_experience(home.path());
     let empty = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script(&scripted(Vec::new())).path())
