@@ -13,17 +13,46 @@
 //! Order: whatever opened the turn is already in the journal (a held briefing
 //! first of all, ADR-0027 §2), and this piece follows it, because a round-start
 //! contributor speaks after the inputs the turn absorbed.
+//!
+//! The protocol itself is said here too, once, ahead of the first reading: a
+//! seat learns what a room is at the moment it has one, and a session that
+//! never sits in one is never told. Nowhere else may say it — a rule stated
+//! twice is a rule somebody has to remember to change twice.
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContentPart, ContextContributor, ContextError, ContextPiece, ContextQuery, Placement,
-    SessionFilter, SessionId, SessionState, SessionSummary,
+    CONTRIBUTOR_PREFIX, ContentPart, ContextContributor, ContextError, ContextPiece, ContextQuery,
+    Item, ItemBody, Placement, SessionFilter, SessionId, SessionState, SessionSummary,
 };
 
 use crate::cursor::{self, Unread};
 use crate::mentions::Post;
 use crate::name::{self, PARENT};
 use crate::room::{self, Room};
+
+/// The name this contributor's pieces are journaled under.
+const ID: &str = "rooms";
+
+/// What being in a room means, in the words a member acts on: how it reaches
+/// you, what opens a turn for you, and what you owe for a post that calls on
+/// you (ADR-0028 §2, ADR-0029, ADR-0034 §3–4).
+const PROTOCOL: &str = "\
+# Rooms
+
+You are seated in a room: a conversation every member reads. It is read, not \
+delivered — at the head of each of your turns you are handed everything each of \
+your rooms has said since you last read it, under `[#<room>, since you last \
+read]`, and nothing of it reaches you between turns.
+
+A turn opens for you when a post says `@<your name>`, when it says `@all` — \
+which calls on every member but the one who wrote it — and once your patience \
+runs out with something unread: 300 seconds, unless your seat was given \
+another. `Listen` retunes your own seat and nobody else's.
+
+Being called on is owed an answer: post it back to the room with \
+`SendMessage(to: \"#<room>\")` so whoever is next can carry it on, and say \
+`@<name>` when it falls to someone in particular. When what a post names is not \
+yours, end your turn without posting rather than answering for someone else.";
 
 /// What a member reads of its rooms, at the head of its own turn.
 #[derive(Debug, Default, Clone, Copy)]
@@ -32,7 +61,7 @@ pub struct Reader;
 #[async_trait]
 impl ContextContributor for Reader {
     fn id(&self) -> &str {
-        "rooms"
+        ID
     }
 
     fn placement(&self) -> Placement {
@@ -40,14 +69,34 @@ impl ContextContributor for Reader {
     }
 
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
-        let mut pieces = Vec::new();
-        for seat in seated_in(&query).await {
+        let seats = seated_in(&query).await;
+        let mut pieces = Vec::from_iter(protocol(&seats, query.items));
+        for seat in seats {
             if let Some(piece) = read(&query, &seat).await {
                 pieces.push(piece);
             }
         }
         Ok(pieces)
     }
+}
+
+/// The protocol, for a session that has a seat and has not been handed it.
+/// What it has already been told is in its own journal, so nothing beside the
+/// journal remembers, and a compaction that dropped the piece says it again.
+fn protocol(seats: &[Seated], items: &[Item]) -> Option<ContextPiece> {
+    let unsaid = !seats.is_empty() && !items.iter().any(spoken_here);
+    unsaid.then(|| ContextPiece::User {
+        parts: vec![ContentPart::text(PROTOCOL)],
+        label: ID.to_string(),
+    })
+}
+
+/// Whether an item is one this contributor put in the journal.
+fn spoken_here(item: &Item) -> bool {
+    let ItemBody::User { origin, .. } = &item.body else {
+        return false;
+    };
+    origin.surface.strip_prefix(CONTRIBUTOR_PREFIX) == Some(ID)
 }
 
 /// One room this session sits in, as its own journal has it: which session it
@@ -157,16 +206,19 @@ mod tests {
     use super::*;
     use crate::ear::Seat;
     use crate::seat;
-    use crate::tests::{Fleet, ts};
-    use bingo_sdk::{ContextUsage, HostHandle, ItemId, ModelCapabilities, SessionState, TurnId};
+    use crate::tests::{Fleet, item, ts};
+    use bingo_sdk::{
+        ContextUsage, HostHandle, ItemId, ModelCapabilities, Origin, SessionState, TurnId,
+    };
     use std::path::Path;
 
-    /// The turn's own facts, none of which a room reads: what a contributor is
-    /// handed beside the session it speaks for.
+    /// The turn's own facts, and the journal the session opens the round with
+    /// — which is all a reading reads of it: whether the protocol was said.
     struct Turn {
         turn: TurnId,
         usage: ContextUsage,
         capabilities: ModelCapabilities,
+        items: Vec<Item>,
     }
 
     impl Default for Turn {
@@ -182,11 +234,24 @@ mod tests {
                     count_tokens: false,
                     caching: false,
                 },
+                items: Vec::new(),
             }
         }
     }
 
     impl Turn {
+        /// A session that has already been handed the protocol, which is
+        /// every turn but a seat's first.
+        fn told() -> Turn {
+            Turn {
+                items: vec![item(ItemBody::User {
+                    parts: vec![ContentPart::text(PROTOCOL)],
+                    origin: Origin::surface(format!("{CONTRIBUTOR_PREFIX}{ID}")),
+                })],
+                ..Turn::default()
+            }
+        }
+
         fn query<'a>(
             &'a self,
             session: &'a SessionSummary,
@@ -197,7 +262,7 @@ mod tests {
                 host,
                 turn: &self.turn,
                 round: 0,
-                items: &[],
+                items: &self.items,
                 usage: &self.usage,
                 capabilities: &self.capabilities,
                 cwd: Path::new("/work/project"),
@@ -226,11 +291,20 @@ mod tests {
         (fleet, root, scout, room)
     }
 
-    /// What one session's turn would be handed at its head.
+    /// What one session's turn would be handed at its head, for a seat the
+    /// protocol has already reached — every turn but its first.
     async fn read_by(fleet: &Fleet, session: &SessionId) -> Vec<String> {
+        handed(fleet, session, &Turn::told()).await
+    }
+
+    /// The same, for a seat that has never been handed anything.
+    async fn first_read_by(fleet: &Fleet, session: &SessionId) -> Vec<String> {
+        handed(fleet, session, &Turn::default()).await
+    }
+
+    async fn handed(fleet: &Fleet, session: &SessionId, turn: &Turn) -> Vec<String> {
         let summary = fleet.summary(session);
         let host = fleet.handle();
-        let turn = Turn::default();
         let pieces = Reader
             .contribute(turn.query(&summary, &host))
             .await
@@ -431,5 +505,69 @@ mod tests {
     fn it_speaks_at_the_head_of_a_round_under_its_own_name() {
         assert_eq!(Reader.id(), "rooms");
         assert_eq!(Reader.placement(), Placement::RoundStart);
+    }
+
+    /// The protocol comes before the first thing a seat reads, and never
+    /// again: what it was told is the journal's to say, so nothing beside it
+    /// remembers.
+    #[tokio::test]
+    async fn a_seat_is_told_the_protocol_once_ahead_of_its_first_reading() {
+        let (fleet, _, scout, room) = tree(&["scout", "reviewer"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
+
+        let first = first_read_by(&fleet, &scout).await;
+        assert_eq!(
+            first,
+            [
+                PROTOCOL.to_string(),
+                "[#design, since you last read]\nreviewer: the build is green".to_string(),
+            ]
+        );
+
+        fleet.post(&room, "and the tests pass", Some("reviewer"), ts());
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            ["[#design, since you last read]\nreviewer: and the tests pass"],
+            "a seat that has it is not told twice"
+        );
+    }
+
+    /// A seated member is told before it has anything to read: a standby
+    /// member's first turn opens on its brief, and the room it will work in
+    /// is part of what it was seated for.
+    #[tokio::test]
+    async fn a_seat_with_nothing_to_read_is_still_told_what_a_room_is() {
+        let (fleet, _, scout, _) = tree(&["scout"]).await;
+        assert_eq!(first_read_by(&fleet, &scout).await, [PROTOCOL]);
+    }
+
+    /// And a session no room seats is told nothing: the protocol costs the
+    /// prompts that have a room in them and no others.
+    #[tokio::test]
+    async fn a_session_in_no_room_is_told_nothing() {
+        let (fleet, _, _, _) = tree(&["reviewer"]).await;
+        let stranger = fleet.child(&fleet.root(), "stranger");
+        assert!(first_read_by(&fleet, &stranger).await.is_empty());
+    }
+
+    /// The rules the protocol is the one owner of (ADR-0034 §3–4). Each was
+    /// stated in a plugin that owns no rooms until M83; the words may move,
+    /// but a member that is not told one of them cannot act on it.
+    #[test]
+    fn the_protocol_says_how_a_room_is_read_what_wakes_a_seat_and_what_it_owes() {
+        for rule in [
+            "[#<room>, since you last read]",
+            "`@<your name>`",
+            "`@all`",
+            "every member but the one who wrote it",
+            "once your patience runs out with something unread",
+            "300 seconds",
+            "`Listen`",
+            "post it back to the room",
+            "SendMessage(to: \"#<room>\")",
+            "end your turn without posting",
+        ] {
+            assert!(PROTOCOL.contains(rule), "{rule} is unsaid: {PROTOCOL}");
+        }
     }
 }

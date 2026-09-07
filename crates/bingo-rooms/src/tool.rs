@@ -27,10 +27,9 @@ and say who is in it. Post into it afterwards with `SendMessage` to `#name`. \
 By default the room hangs under you, so the agents you started are the ones \
 who read it; with `shared: true` it hangs under the agent that started you \
 instead, so your peers read it. Members are names, not sessions: a name \
-nobody holds yet is kept and skipped until someone does. A post is written \
-once, into the room, and every member reads what it has not read yet at the \
-head of its next turn — so a seat is patient by default: it is woken when a \
-post says `@name`, and once when the room has stood unread for 300 seconds. \
+nobody holds yet is kept and skipped until someone does. A seat is patient by \
+default: it is woken when a post says `@name`, and once when the room has \
+stood unread for 300 seconds. \
 Name it in `listeners` with `patience_s` to say how long it may stand instead, \
 or `patience_s: 0` for a seat every post wakes as it lands. Name `parent` among \
 the members to read the room yourself, and to owe an answer to a post that says \

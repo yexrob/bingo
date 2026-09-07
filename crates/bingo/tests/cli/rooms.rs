@@ -370,11 +370,21 @@ fn until_posted(home: &Path, n: usize) {
     });
 }
 
-/// What a session read of its rooms: the pieces the rooms contributor folded
-/// into the head of a turn (ADR-0034 §4). A contributor\'s piece is journaled
-/// under `contributor:<id>`, so this is exactly the room\'s own reading and
-/// nothing else the session was told.
+/// What a session read of its rooms: the folds the rooms contributor opened a
+/// turn with (ADR-0034 §4), each under its own room\'s label. The same
+/// contributor states the protocol once ahead of the first of them, which is
+/// [`rooms_pieces`] and not a reading.
 fn readings(dir: &Path) -> Vec<String> {
+    rooms_pieces(dir)
+        .into_iter()
+        .filter(|said| said.starts_with('['))
+        .collect()
+}
+
+/// Everything the rooms contributor folded into this session\'s turns. A
+/// contributor\'s piece is journaled under `contributor:<id>`, so this is
+/// exactly what the rooms plugin said and nothing else the session was told.
+fn rooms_pieces(dir: &Path) -> Vec<String> {
     posts(&frames_at(dir))
         .into_iter()
         .filter(|(_, origin)| origin.surface == "contributor:rooms")
@@ -643,6 +653,44 @@ fn a_patient_holder_reads_the_room_at_the_head_of_its_next_turn() {
         turns(&frames_at(&root)),
         1,
         "all of it in the one turn the person opened"
+    );
+}
+
+/// The room protocol has one owner. It is said by the plugin that owns rooms,
+/// to a seat that has one, ahead of the first thing it reads — and once: a
+/// second turn that reads the room is told the posts and nothing else. No
+/// plugin that owns no rooms says it, so the whole of a member\'s instruction
+/// is here.
+#[test]
+fn a_seat_is_told_what_a_room_is_once_before_its_first_reading() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_listening_room(home.path(), r#"["parent"]"#);
+    let script = script(A_BURST);
+    let mut host = Host::start(&mut hosting(home.path(), &script));
+
+    host.prompt("@scout post what you found in #design");
+    until_posted(home.path(), 2);
+    host.prompt("what did they say?");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let root = root_dir(home.path()).expect("a root session");
+    let pieces = rooms_pieces(&root);
+    let [protocol, reading] = pieces.as_slice() else {
+        panic!("the protocol, then the reading: {pieces:?}");
+    };
+    assert!(protocol.starts_with("# Rooms"), "{protocol}");
+    for rule in [
+        "[#<room>, since you last read]",
+        "`@all`",
+        "SendMessage(to: \"#<room>\")",
+        "end your turn without posting",
+    ] {
+        assert!(protocol.contains(rule), "{rule} is unsaid: {protocol}");
+    }
+    assert!(
+        reading.starts_with("[#design, since you last read]"),
+        "{reading}"
     );
 }
 

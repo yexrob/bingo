@@ -25,9 +25,9 @@ pub const LISTEN: &str = "Listen";
 const DESCRIPTION: &str = "\
 Set how much patience your own seat in a room has. `patience_s: 0` is a live \
 ear: every post wakes you as it lands. Thirty seconds or more is a patient \
-ear: posts wait and you read them whole at your next turn, and you are woken \
-once when the oldest has waited that long. Either way a post that says your \
-name reaches you at once and is owed an answer. Use a patient ear when you \
+ear: posts wait for your next turn, and you are woken once when the oldest has \
+waited that long. Either way a post that says your name reaches you at once \
+and is owed an answer. Use a patient ear when you \
 convene a room you want to be informed of rather than interrupted by; use a \
 live one when the work arrives as posts. This changes your seat only — who is \
 in the room is the seater's to say.";
