@@ -51,7 +51,7 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     };
     render_transcript(tree, ui, frame, regions.transcript, now, live);
     render_rail(ui, frame, regions.rail, &drawn);
-    render_activity(tree.viewed(), ui, frame, regions.activity, now);
+    render_activity(tree, ui, frame, regions.activity, now);
     render_strip(
         ui,
         frame,
@@ -73,7 +73,7 @@ fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
         // while idle, so a turn starting or ending moves nothing — the
         // bottom-anchored transcript used to bounce by two rows at each end
         // of every stream, which read as flicker (§6: nothing still moves).
-        activity: u16::try_from(activity::lines(state, ui, usize::from(width), now).len())
+        activity: u16::try_from(activity::lines(tree, ui, usize::from(width), now).len())
             .unwrap_or(u16::MAX)
             .max(2),
         rail,
@@ -138,13 +138,15 @@ fn render_status(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) 
     frame.render_widget(Paragraph::new(vec![line]), area);
 }
 
-/// The activity row and whatever is queued behind it.
-fn render_activity(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
+/// The activity row and whatever is queued behind it. It takes the tree
+/// rather than the session on screen: between turns the row says what the
+/// sessions *around* this one are still doing (M82).
+fn render_activity(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
     frame.render_widget(
-        Paragraph::new(activity::lines(state, ui, usize::from(area.width), now)),
+        Paragraph::new(activity::lines(tree, ui, usize::from(area.width), now)),
         area,
     );
 }
@@ -1295,7 +1297,10 @@ mod tests {
         let (ui, now) = scene();
         let rows = |entries: &[(&str, &str, bool)]| {
             activity::lines(
-                &folded(vec![frame(1, started("trn_1")), queue_frame(2, entries)]),
+                &solo(&folded(vec![
+                    frame(1, started("trn_1")),
+                    queue_frame(2, entries),
+                ])),
                 &ui,
                 80,
                 now,

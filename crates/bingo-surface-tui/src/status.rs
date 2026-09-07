@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::{self, Now};
-use crate::tree::{self, Status, Tree};
+use crate::tree::{self, Scope, Tree, Wants};
 use crate::ui::Ui;
 use crate::{keys, permission, shells, theme, wake};
 
@@ -57,13 +57,13 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
     if ui.exit_armed(now.instant) {
         parts.push(Span::styled(crate::input::ARM_HINT, theme::text()));
     }
-    if let Some(waiting) = count(tree, Wants::Attention) {
+    if let Some(waiting) = tree::count(tree, Wants::Attention, Scope::Others) {
         parts.push(Span::styled(
             format!("{waiting} needs you (ctrl+g)"),
             theme::attention(now),
         ));
     }
-    if let Some(running) = count(tree, Wants::Running) {
+    if let Some(running) = tree::count(tree, Wants::Running, Scope::Others) {
         parts.push(Span::styled(format!("{running} running"), theme::dim()));
     }
     parts.extend(shells::counted(tree.viewed()));
@@ -73,27 +73,6 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
         parts.push(Span::styled(HINT, theme::dim()));
     }
     join(parts)
-}
-
-/// What the sessions other than the one on screen are doing. The session in
-/// view speaks for itself: its turn is the activity row and its card is the
-/// brightest thing on the screen.
-enum Wants {
-    Attention,
-    Running,
-}
-
-fn count(tree: &Tree, wants: Wants) -> Option<usize> {
-    let n = tree
-        .rows()
-        .iter()
-        .filter(|row| row.session != tree.view())
-        .filter(|row| match wants {
-            Wants::Attention => row.attention,
-            Wants::Running => row.status == Some(Status::Running),
-        })
-        .count();
-    (n > 0).then_some(n)
 }
 
 /// The wake the model set on this session, counted down against the frame's

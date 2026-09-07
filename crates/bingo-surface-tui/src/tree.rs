@@ -226,6 +226,60 @@ impl Tree {
     }
 }
 
+/// What a counted session is doing.
+pub enum Wants {
+    Attention,
+    Running,
+}
+
+/// Which sessions a count is over. One count with a scope rather than two
+/// counts: what "somebody else is at it" means depends on who is asking.
+#[derive(Clone, Copy)]
+pub enum Scope<'a> {
+    /// Every session but the one on screen — the status line's sense. The
+    /// session in view speaks for itself: its turn is the activity row and
+    /// its card is the brightest thing on the screen.
+    Others,
+    /// The sessions hanging under this one, however deep — the activity
+    /// row's sense. A child looking up at a running parent is not waiting on
+    /// an agent, and must not be told that it is.
+    Under(&'a SessionId),
+}
+
+/// How many of them there are, and nothing at all where there are none. The
+/// one reading of "somebody else is at it": the status line counts it into
+/// its middle and the activity row says it in words (M82), so the two can
+/// never disagree about a session they both count.
+pub fn count(tree: &Tree, wants: Wants, scope: Scope<'_>) -> Option<usize> {
+    let within = covered(tree, scope);
+    let n = tree
+        .rows()
+        .iter()
+        .filter(|row| within.contains(&row.session))
+        .filter(|row| match wants {
+            Wants::Attention => row.attention,
+            Wants::Running => row.status == Some(Status::Running),
+        })
+        .count();
+    (n > 0).then_some(n)
+}
+
+/// The sessions a scope covers, resolved once for the whole count rather than
+/// walked again for every row. Neither scope covers the session it is written
+/// from: the one on screen is never one of its own notices.
+fn covered<'a>(tree: &'a Tree, scope: Scope<'_>) -> Vec<&'a SessionId> {
+    let listed: Vec<&SessionSummary> = tree.sessions().map(|state| &state.summary).collect();
+    listed
+        .iter()
+        .copied()
+        .filter(|summary| match scope {
+            Scope::Others => &summary.id != tree.view(),
+            Scope::Under(root) => reaches(root, summary, &listed),
+        })
+        .map(|summary| &summary.id)
+        .collect()
+}
+
 /// The switcher's rows: what this attachment carries, then the root's stored
 /// descendants that are not among them. Live wins — a session that is both
 /// live and stored is one row, and it is the live one.
@@ -242,23 +296,26 @@ pub fn roster<'a>(tree: &'a Tree, stored: &'a [SessionSummary]) -> Vec<Row<'a>> 
     rows
 }
 
-/// The listed sessions whose parent chain reaches `root`. The listing is the
-/// only map there is, so the walk goes no further than it is long — which is
-/// also what stops a chain that points at itself.
+/// The listed sessions whose parent chain reaches `root`.
 fn descendants<'a>(root: &SessionId, listed: &'a [SessionSummary]) -> Vec<&'a SessionSummary> {
-    listed
-        .iter()
-        .filter(|summary| reaches(root, summary, listed))
+    let all: Vec<&'a SessionSummary> = listed.iter().collect();
+    all.iter()
+        .copied()
+        .filter(|summary| reaches(root, summary, &all))
         .collect()
 }
 
-fn reaches(root: &SessionId, summary: &SessionSummary, listed: &[SessionSummary]) -> bool {
+/// Whether `summary` hangs under `root`, however deep. `listed` is the only
+/// map there is — a store's answer or the live tree's own sessions — so the
+/// walk goes no further than it is long, which is also what stops a chain
+/// that points at itself. A session is never under itself.
+fn reaches(root: &SessionId, summary: &SessionSummary, listed: &[&SessionSummary]) -> bool {
     let of = |summary: &SessionSummary| summary.parent.as_ref().map(|link| link.session.clone());
     let mut parent = of(summary);
     for _ in 0..listed.len() {
         match parent {
             Some(id) if &id == root => return true,
-            Some(id) => parent = listed.iter().find(|s| s.id == id).and_then(of),
+            Some(id) => parent = listed.iter().find(|s| s.id == id).copied().and_then(of),
             None => return false,
         }
     }
@@ -609,6 +666,56 @@ mod tests {
                 ("#design".to_string(), None),
                 ("reviewer".to_string(), Some(Status::Running)),
             ]
+        );
+    }
+
+    /// One count, two senses (M82). The status line asks about every session
+    /// but the one on screen; the activity row asks only about what hangs
+    /// under it, however deep — a child looking up at a running parent is
+    /// waiting on nothing of its own, and the row must not say that it is.
+    #[test]
+    fn a_count_is_scoped_to_who_is_asking() {
+        let mut tree = Tree::new(state());
+        tree.apply(&frame(1, started("trn_1")));
+        tree.apply(&child_frame(1, announced("reviewer")));
+        tree.apply(&child_frame(2, started("trn_9")));
+        let under_the_child = SessionSummary {
+            parent: Some(bingo_sdk::ParentLink {
+                session: child_id(),
+                item: None,
+            }),
+            ..agent_summary(3, "scout")
+        };
+        tree.apply(&agent_frame(
+            3,
+            1,
+            Event::SessionUpdated {
+                summary: under_the_child,
+            },
+        ));
+        tree.apply(&agent_frame(3, 2, started("trn_8")));
+        tree.show(&child_id());
+
+        assert_eq!(
+            count(&tree, Wants::Running, Scope::Others),
+            Some(2),
+            "the running root and the running grandchild, neither in view"
+        );
+        assert_eq!(
+            count(&tree, Wants::Running, Scope::Under(&child_id())),
+            Some(1),
+            "the grandchild alone hangs under the child; the root is above it"
+        );
+        assert_eq!(
+            count(&tree, Wants::Running, Scope::Under(tree.root_id())),
+            Some(2),
+            "and both hang under the root, however deep"
+        );
+        assert_eq!(
+            count(&tree, Wants::Running, Scope::Under(&agent_id(3))),
+            None,
+            "nothing hangs under the deepest one, and a session is never \
+             under itself"
         );
     }
 

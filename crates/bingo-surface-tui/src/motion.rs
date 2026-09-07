@@ -216,6 +216,30 @@ fn the_input_box_glows_on_the_same_breath_and_is_dim_when_idle() {
     );
 }
 
+/// The wait row has no turn to read a pace from, so it takes the one that
+/// already means the waiting is somebody else's (M82) — and the box stays
+/// dim, because nothing is arriving *here*.
+#[test]
+fn the_wait_breathes_at_the_pace_a_tool_holds_a_turn_and_leaves_the_box_dim() {
+    let (ui, now) = scene();
+    let at = later(now, 250);
+    let tree = waited_on(1);
+    crate::theme::with(crate::painted::truecolor(), || {
+        assert_eq!(
+            leading_style(&tree, &ui, at, "Waiting for"),
+            theme::as_drawn(theme::breath(crate::clock::breath(
+                at,
+                Duration::from_millis(2_200)
+            ))),
+        );
+    });
+    assert_eq!(
+        leading_style(&tree, &ui, at, keys::PLACEHOLDER),
+        theme::as_drawn(theme::dim()),
+        "nothing is arriving here"
+    );
+}
+
 #[test]
 fn nothing_of_the_presence_is_on_screen_while_no_turn_runs() {
     let (ui, now) = mid_turn();

@@ -1,17 +1,19 @@
 //! The activity band: the rows between the transcript and the input box
 //! (design §3), which are what is going on rather than what was said — the
-//! verb row while a turn runs, the task list under it or in its place
-//! ([`crate::tasks`], M74), and whatever the person has queued behind it.
+//! verb row while a turn runs, what the session is waiting on between turns
+//! (M82), the task list under it or in its place ([`crate::tasks`], M74), and
+//! whatever the person has queued behind it.
 //!
 //! Two rows are always held — the air and the verb row's slot — so a turn
 //! starting or ending moves nothing; what the slot says is the one thing that
-//! changes. Everything here is derived from `SessionState` and the clock, so a
-//! frame is a pure function of the two.
+//! changes. Everything here is derived from the tree of states and the clock,
+//! so a frame is a pure function of the two.
 
 use bingo_sdk::{LiveTurn, Origin, QueueEntry, SessionState};
 use ratatui::text::{Line, Span};
 
 use crate::clock::{self, Now};
+use crate::tree::{self, Scope, Tree, Wants};
 use crate::ui::Ui;
 use crate::{tasks, theme, transcript};
 
@@ -42,11 +44,13 @@ const VERBS: [&str; 8] = [
     "Percolating",
 ];
 
-/// The rows between the transcript and the input box: what the turn is doing,
-/// the session's task list, and whatever the person has queued behind it.
-pub(crate) fn lines(state: &SessionState, ui: &Ui, width: usize, now: Now) -> Vec<Line<'static>> {
+/// The rows between the transcript and the input box: what the turn is doing
+/// — or, between turns, what it is waiting on — the session's task list, and
+/// whatever the person has queued behind it.
+pub(crate) fn lines(tree: &Tree, ui: &Ui, width: usize, now: Now) -> Vec<Line<'static>> {
+    let state = tree.viewed();
     let tasks = tasks::of(state);
-    let mut out = band(state, ui, &tasks, width, now);
+    let mut out = band(tree, ui, &tasks, width, now);
     out.extend(queued(state));
     // A blank row between the transcript and these, as between any two blocks
     // (§3): they are not the tail of what was said, they are what is going on.
@@ -63,15 +67,12 @@ pub(crate) fn lines(state: &SessionState, ui: &Ui, width: usize, now: Now) -> Ve
 /// rows hang from (§3: nothing jumps). `ctrl+t` keeps the rows and the summary
 /// off the band and leaves the verb: the task being done is still what the
 /// turn is doing.
-fn band(
-    state: &SessionState,
-    ui: &Ui,
-    tasks: &[tasks::Task],
-    width: usize,
-    now: Now,
-) -> Vec<Line<'static>> {
+///
+/// The turn's row comes first and the wait comes after it (M82): the wake
+/// that ends a wait opens a turn, and that turn is what the row is then for.
+fn band(tree: &Tree, ui: &Ui, tasks: &[tasks::Task], width: usize, now: Now) -> Vec<Line<'static>> {
     let listed = !ui.tasks_hidden && !tasks.is_empty();
-    match working(state, ui, tasks, now) {
+    match working(tree.viewed(), ui, tasks, now).or_else(|| waiting(tree, now)) {
         Some(row) => {
             let mut out = vec![row];
             if listed {
@@ -175,6 +176,45 @@ fn working(
     Some(Line::from(spans))
 }
 
+/// `✻ Waiting for 2 background agents to finish` — what an idle session says
+/// while agents it started are still at work (M82). A turn that ended to be
+/// woken (M81) is not finished work, and the row that left with
+/// `TurnCompleted` made it look finished: an empty composer over a dim
+/// `2 running` in the status line, which the eye does not find.
+///
+/// The wait is not a turn, so it wears none of a turn's furniture: no `esc to
+/// interrupt`, because there is no turn to end, and no clock and no token
+/// count, which are what a turn has spent. The sparkle cycles and breathes at
+/// [`BREATH_BLOCKED`] — the pace that already means the waiting is somebody
+/// else's — and the input box's border stays dim, because nothing is arriving
+/// here ([`crate::view`]'s `border` reads `busy`, which this session is not).
+///
+/// What it counts is what hangs *under* this session, not every other row the
+/// status line counts: a child looking up at a running parent is waiting on
+/// nothing of its own.
+fn waiting(tree: &Tree, now: Now) -> Option<Line<'static>> {
+    let viewed = tree.viewed();
+    if viewed.busy() {
+        return None;
+    }
+    let running = tree::count(tree, Wants::Running, Scope::Under(&viewed.summary.id))?;
+    Some(Line::from(vec![
+        Span::styled(
+            format!("{} ", sparkle(now)),
+            breathing_at(BREATH_BLOCKED, now),
+        ),
+        Span::styled(waiting_for(running), theme::text()),
+    ]))
+}
+
+/// The row's words, in the number of agents there are.
+fn waiting_for(running: usize) -> String {
+    format!(
+        "Waiting for {running} background agent{} to finish",
+        if running == 1 { "" } else { "s" }
+    )
+}
+
 /// How long one light takes to cross the working word and come round again.
 /// Slower than the sparkle's breath, so the two are read as two things.
 const BEAM: std::time::Duration = std::time::Duration::from_millis(2400);
@@ -233,11 +273,17 @@ fn sparkle(now: Now) -> &'static str {
 }
 
 /// bingo breathing: the sparkle and the input box's border share one clock,
-/// so the whole surface inhales together. Still, it rests at `presence` —
-/// what breathes is the brightness, not the fact that it is working.
+/// so the whole surface inhales together.
 pub(crate) fn breathing(state: &SessionState, now: Now) -> ratatui::style::Style {
+    breathing_at(breath_of(state), now)
+}
+
+/// The same breath at a pace the caller names — what the wait row takes,
+/// having no turn to read one from. Still, it rests at `presence`: what
+/// breathes is the brightness, not the fact that something is at work.
+fn breathing_at(period: std::time::Duration, now: Now) -> ratatui::style::Style {
     match now.motion {
-        true => theme::breath(clock::breath(now, breath_of(state))),
+        true => theme::breath(clock::breath(now, period)),
         false => theme::presence(),
     }
 }
@@ -276,6 +322,89 @@ fn blocking(item: &bingo_sdk::Item) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::*;
+
+    /// The band's one row, as the terminal drew it, without the quotes a test
+    /// backend prints around each row or the padding it is drawn into.
+    fn row(tree: &Tree, now: Now) -> String {
+        let (ui, _) = scene();
+        draw_tree(80, 24, tree, &ui, now)
+            .lines()
+            .find(|line| line.contains("Waiting for"))
+            .map(|line| line.trim_matches('"').trim_end().to_string())
+            .unwrap_or_default()
+    }
+
+    /// What an idle session says while the agents it started are still at
+    /// work, counted the way a person counts (M82).
+    #[test]
+    fn a_session_idle_over_running_agents_says_how_many_it_waits_for() {
+        let (_, now) = scene();
+        let one = row(&waited_on(1), now);
+        assert!(
+            one.ends_with("Waiting for 1 background agent to finish"),
+            "{one}"
+        );
+        let two = row(&waited_on(2), now);
+        assert!(
+            two.ends_with("Waiting for 2 background agents to finish"),
+            "{two}"
+        );
+    }
+
+    /// The wait is not a turn, so it wears none of a turn's furniture — every
+    /// piece of which rides in the row's one pair of parentheses.
+    #[test]
+    fn the_wait_carries_no_key_no_clock_and_no_token_count() {
+        let (_, now) = scene();
+        let drawn = row(&waited_on(1), now);
+        assert!(!drawn.contains('('), "{drawn}");
+    }
+
+    /// Nothing at work, nothing to wait for: an agent that has finished is
+    /// not waited on, and a session with none never was.
+    #[test]
+    fn a_session_with_no_agent_at_work_says_nothing_at_all() {
+        let (_, now) = scene();
+        assert_eq!(row(&waited_on(0), now), "");
+        let mut done = waited_on(1);
+        done.apply(&agent_frame(
+            2,
+            3,
+            completed("trn_9", bingo_sdk::TurnStatus::Completed),
+        ));
+        assert_eq!(row(&done, now), "");
+    }
+
+    /// The row counts what hangs under this session, not everything else
+    /// that is running: a child looking up at a running parent is waiting on
+    /// nothing of its own. The status line's `1 running` is the other sense
+    /// of the same count and is unchanged — furniture counts, the row speaks.
+    #[test]
+    fn a_child_under_a_running_root_is_not_waiting_on_an_agent() {
+        let (ui, now) = scene();
+        let mut tree = folded_tree(vec![
+            frame(1, started("trn_1")),
+            child_frame(1, announced("reviewer")),
+        ]);
+        tree.show(&child_id());
+        assert_eq!(row(&tree, now), "");
+        let drawn = draw_tree(80, 24, &tree, &ui, now);
+        assert!(drawn.contains("1 running"), "{drawn}");
+    }
+
+    /// The wake that ends the wait opens a turn, and the turn's own row is
+    /// what the band then says: one row's slot either way (§3).
+    #[test]
+    fn a_turn_on_the_viewed_session_takes_the_row_back_from_the_wait() {
+        let (ui, now) = scene();
+        let mut woken = waited_on(1);
+        woken.apply(&frame(2, started("trn_1")));
+        let at = later(now, 1_600);
+        assert_eq!(row(&woken, at), "");
+        let drawn = draw_tree(80, 24, &woken, &ui, at);
+        assert!(drawn.contains("esc to interrupt"), "{drawn}");
+    }
 
     /// The working word carries one light across itself while the turn runs:
     /// two frames apart, different cells are lit; with motion off it is the

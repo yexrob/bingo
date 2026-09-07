@@ -875,6 +875,18 @@ pub fn started_tool(seq: u64, item: Item) -> Frame {
     frame(seq, Event::ItemStarted { item })
 }
 
+/// A root whose own turn has ended while `agents` it started are still at
+/// work: the shape a parent that ended its turn to be woken is in (M81).
+pub fn waited_on(agents: u64) -> Tree {
+    let mut tree = Tree::new(state());
+    for agent in 2..2 + agents {
+        let announced = agent_announced(agent, &format!("agent-{agent}"));
+        tree.apply(&agent_frame(agent, 1, announced));
+        tree.apply(&agent_frame(agent, 2, started("trn_9")));
+    }
+    tree
+}
+
 /// A transcript whose tool call spawned a sub-session, and that child's own
 /// frames after it, in the order one stream delivers them.
 pub fn spawned_tree(child: Vec<Frame>) -> Tree {
