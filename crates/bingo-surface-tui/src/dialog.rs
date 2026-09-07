@@ -8,7 +8,7 @@
 
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Interaction, InteractionId, InteractionKind, LoginFlow,
-    Preview, Question, QuestionOption,
+    Preview, Question, Rung,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -254,91 +254,88 @@ pub fn shape(interaction: &Interaction) -> layers::Shape {
     }
 }
 
-/// The rows this interaction offers, in the order they are shown.
+/// The rows this interaction offers, in the order they are shown: the rungs
+/// the kernel will accept ([`Interaction::rungs`]), each in this card's own
+/// words, and the row that takes words of one's own where it takes any.
 pub fn options(interaction: &Interaction) -> Vec<Opt> {
+    let rungs = interaction
+        .rungs()
+        .into_iter()
+        .map(|rung| row(&interaction.kind, rung));
     match &interaction.kind {
-        InteractionKind::Permission { session_scope, .. } => {
-            permission_options(interaction, session_scope.as_deref())
-        }
-        InteractionKind::Question(Question { options, multi, .. }) => {
-            question_options(interaction, options, *multi)
+        // A paste flow's credential goes above the way out; a browser or
+        // device flow finishes on its own and asks for nothing.
+        InteractionKind::Login { flow, .. } => {
+            paste(interaction, flow).into_iter().chain(rungs).collect()
         }
         // The form has a card of its own (M53); the dialog answers no key of
         // it, so `esc` is the only way out of one drawn here.
         InteractionKind::Form { .. } => Vec::new(),
-        InteractionKind::Confirm { .. } => interaction
-            .answers
-            .iter()
-            .filter_map(|spec| match spec {
-                AnswerSpec::Confirm => Some(plain("Confirm", Choice::Send(Answer::Confirm))),
-                AnswerSpec::Cancel => Some(plain("Cancel (esc)", Choice::Send(Answer::Cancel))),
-                _ => None,
-            })
-            .collect(),
-        InteractionKind::Login { flow, .. } => login_options(interaction, flow),
+        // Words of one's own are the last row, under the options they stand
+        // as an alternative to.
+        _ => rungs.chain(other(interaction)).collect(),
     }
 }
 
-/// A browser or device flow finishes on its own; the one row is the way
-/// out. A paste flow opens the words row for the credential.
-fn login_options(interaction: &Interaction, flow: &LoginFlow) -> Vec<Opt> {
-    let mut out = Vec::new();
-    if matches!(flow, LoginFlow::Paste) && interaction.answers.contains(&AnswerSpec::Text) {
-        out.push(plain("Paste it here", Choice::Words));
+/// One rung as this card draws it. The kernel says which answers there are;
+/// the words they are put in, and the gesture each row takes, are the
+/// surface's own.
+fn row(kind: &InteractionKind, rung: Rung) -> Opt {
+    Opt {
+        label: label(&rung),
+        choice: gesture(kind, &rung.answer),
+        description: rung.description,
     }
-    if interaction.answers.contains(&AnswerSpec::Cancel) {
-        out.push(plain("Cancel (esc)", Choice::Send(Answer::Cancel)));
-    }
-    out
 }
 
-fn permission_options(interaction: &Interaction, scope: Option<&str>) -> Vec<Opt> {
-    let mut out = Vec::new();
-    let offers = |spec| interaction.answers.contains(&spec);
-    if offers(AnswerSpec::AllowOnce) {
-        out.push(plain("Yes", Choice::Send(Answer::AllowOnce)));
+/// What this card calls a rung: a permission is a plain yes or no in the
+/// second person, and a question wears the words the asker wrote.
+fn label(rung: &Rung) -> String {
+    match &rung.answer {
+        Answer::AllowOnce => "Yes".into(),
+        Answer::AllowSession { scope } => format!("Yes, allow {scope} during this session"),
+        Answer::Deny { .. } => "No, and tell bingo what to do differently (esc)".into(),
+        Answer::Confirm => "Confirm".into(),
+        Answer::Cancel => "Cancel (esc)".into(),
+        _ => rung.label.clone(),
     }
-    if let Some(scope) = scope.filter(|_| offers(AnswerSpec::AllowSession)) {
-        out.push(plain(
-            &format!("Yes, allow {scope} during this session"),
-            Choice::Send(Answer::AllowSession {
-                scope: scope.to_string(),
-            }),
-        ));
-    }
-    if offers(AnswerSpec::Deny) {
-        out.push(plain(
-            "No, and tell bingo what to do differently (esc)",
-            Choice::Words,
-        ));
-    }
-    out
 }
 
-fn question_options(
-    interaction: &Interaction,
-    options: &[QuestionOption],
-    multi: bool,
-) -> Vec<Opt> {
-    let mut out: Vec<Opt> = options
-        .iter()
-        .map(|option| Opt {
-            label: option.label.clone(),
-            description: option.description.clone(),
-            choice: if multi {
-                Choice::Toggle(option.id.clone())
-            } else {
-                Choice::Send(Answer::Choice {
-                    ids: vec![option.id.clone()],
-                    other: None,
-                })
-            },
-        })
-        .collect();
-    if interaction.answers.contains(&AnswerSpec::Text) {
-        out.push(plain("Other", Choice::Words));
+/// What choosing a row does: a refusal wants a reason, so it opens the words
+/// row rather than sending as it stands, and a member of a multiple-choice
+/// set is ticked rather than sent.
+fn gesture(kind: &InteractionKind, answer: &Answer) -> Choice {
+    match answer {
+        Answer::Deny { .. } => Choice::Words,
+        Answer::Choice { ids, .. } if ticks(kind) => match ids.first() {
+            Some(id) => Choice::Toggle(id.clone()),
+            None => Choice::Send(answer.clone()),
+        },
+        _ => Choice::Send(answer.clone()),
     }
-    out
+}
+
+/// Whether this question is answered by ticking a set rather than by picking
+/// one of a list.
+fn ticks(kind: &InteractionKind) -> bool {
+    matches!(
+        kind,
+        InteractionKind::Question(Question { multi: true, .. })
+    )
+}
+
+/// The row for words of one's own, where the interaction takes them.
+fn other(interaction: &Interaction) -> Option<Opt> {
+    interaction
+        .answers
+        .contains(&AnswerSpec::Text)
+        .then(|| plain("Other", Choice::Words))
+}
+
+/// The row a paste flow's credential goes in.
+fn paste(interaction: &Interaction, flow: &LoginFlow) -> Option<Opt> {
+    (matches!(flow, LoginFlow::Paste) && interaction.answers.contains(&AnswerSpec::Text))
+        .then(|| plain("Paste it here", Choice::Words))
 }
 
 fn plain(label: &str, choice: Choice) -> Opt {

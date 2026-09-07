@@ -560,6 +560,91 @@ pub struct Interaction {
     pub answers: Vec<AnswerSpec>,
 }
 
+/// One way to answer an interaction: the answer picking it sends, and the
+/// words that name it. What a surface draws for a rung — a button, a numbered
+/// line, a keystroke — is its own business; whether the rung is there at all
+/// is the kernel's, and [`Interaction::rungs`] is where that is read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rung {
+    pub answer: Answer,
+    pub label: String,
+    /// The longer words the asker wrote under an option, where it wrote any.
+    pub description: Option<String>,
+}
+
+impl Interaction {
+    /// The answers this interaction offers, in the order they are shown:
+    /// exactly the ones `answers` allows, so a row can never promise
+    /// something the kernel would refuse. Words of one's own are not among
+    /// them — they are a door and not an answer waiting to be sent — so a
+    /// surface reads [`AnswerSpec::Text`] for that itself.
+    ///
+    /// A form is answered question by question rather than by picking one of
+    /// a list, so it has no rungs.
+    pub fn rungs(&self) -> Vec<Rung> {
+        match &self.kind {
+            InteractionKind::Permission { session_scope, .. } => {
+                self.permission_rungs(session_scope.as_deref())
+            }
+            InteractionKind::Question(question) => self.question_rungs(question),
+            InteractionKind::Confirm { .. } => self
+                .rung(Answer::Confirm, "Yes")
+                .into_iter()
+                .chain(self.rung(Answer::Cancel, "No"))
+                .collect(),
+            InteractionKind::Login { .. } => {
+                self.rung(Answer::Cancel, "Cancel").into_iter().collect()
+            }
+            InteractionKind::Form { .. } => Vec::new(),
+        }
+    }
+
+    /// One rung, when the kernel would take the answer it sends.
+    fn rung(&self, answer: Answer, label: &str) -> Option<Rung> {
+        self.answers.contains(&answer.spec()).then(|| Rung {
+            answer,
+            label: label.to_string(),
+            description: None,
+        })
+    }
+
+    /// The permission rungs, widest first. `AllowSession` without a scope
+    /// would install no rule, so it is not offered as if it would.
+    fn permission_rungs(&self, session_scope: Option<&str>) -> Vec<Rung> {
+        let session = session_scope.and_then(|scope| {
+            self.rung(
+                Answer::AllowSession {
+                    scope: scope.to_string(),
+                },
+                &format!("Allow {scope} for this session"),
+            )
+        });
+        self.rung(Answer::AllowOnce, "Allow once")
+            .into_iter()
+            .chain(session)
+            .chain(self.rung(Answer::Deny { feedback: None }, "Deny"))
+            .collect()
+    }
+
+    /// One rung per option the asker named, in its own words.
+    fn question_rungs(&self, question: &Question) -> Vec<Rung> {
+        question
+            .options
+            .iter()
+            .filter_map(|option| {
+                let answer = Answer::Choice {
+                    ids: vec![option.id.clone()],
+                    other: None,
+                };
+                Some(Rung {
+                    description: option.description.clone(),
+                    ..self.rung(answer, &option.label)?
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "kind",
@@ -1540,6 +1625,175 @@ mod tests {
         );
         assert_eq!(serde_json::to_value(&answer).expect("json"), both);
         assert_eq!(answer.spec(), AnswerSpec::Choice);
+    }
+
+    fn asking(kind: InteractionKind, answers: Vec<AnswerSpec>) -> Interaction {
+        Interaction {
+            id: InteractionId::from_raw("int_1"),
+            session: SessionId::from_raw("ses_1"),
+            turn: None,
+            item: None,
+            opened_at: ts(),
+            guard_until: None,
+            expires_at: None,
+            kind,
+            answers,
+        }
+    }
+
+    fn permission(session_scope: Option<&str>) -> InteractionKind {
+        InteractionKind::Permission {
+            tool: "Read".into(),
+            summary: "Read Cargo.toml".into(),
+            preview: None,
+            session_scope: session_scope.map(str::to_string),
+        }
+    }
+
+    fn answers_of(interaction: &Interaction) -> Vec<Answer> {
+        interaction
+            .rungs()
+            .into_iter()
+            .map(|rung| rung.answer)
+            .collect()
+    }
+
+    /// The widest first, and only the ones the kernel said it would take.
+    #[test]
+    fn a_permission_offers_the_answers_it_says_it_takes() {
+        let all = asking(
+            permission(Some("Read(src/)")),
+            vec![
+                AnswerSpec::AllowOnce,
+                AnswerSpec::AllowSession,
+                AnswerSpec::Deny,
+            ],
+        );
+        assert_eq!(
+            answers_of(&all),
+            vec![
+                Answer::AllowOnce,
+                Answer::AllowSession {
+                    scope: "Read(src/)".into()
+                },
+                Answer::Deny { feedback: None },
+            ]
+        );
+        assert_eq!(
+            all.rungs()[1].label,
+            "Allow Read(src/) for this session",
+            "the scope is named in the words of the rung that installs it"
+        );
+
+        let narrow = asking(permission(None), vec![AnswerSpec::Deny]);
+        assert_eq!(answers_of(&narrow), vec![Answer::Deny { feedback: None }]);
+    }
+
+    /// A session rule needs a scope to be a rule; without one the rung would
+    /// promise something no policy could hold.
+    #[test]
+    fn a_permission_with_no_scope_offers_no_session_rule() {
+        let scopeless = asking(
+            permission(None),
+            vec![
+                AnswerSpec::AllowOnce,
+                AnswerSpec::AllowSession,
+                AnswerSpec::Deny,
+            ],
+        );
+        assert_eq!(
+            answers_of(&scopeless),
+            vec![Answer::AllowOnce, Answer::Deny { feedback: None }]
+        );
+    }
+
+    #[test]
+    fn a_question_offers_one_rung_per_option_in_the_askers_own_words() {
+        let asked = asking(
+            InteractionKind::Question(Question {
+                question: "which one?".into(),
+                header: None,
+                options: vec![option("a", None), option("b", None)],
+                free_text: true,
+                multi: false,
+            }),
+            vec![AnswerSpec::Choice, AnswerSpec::Text, AnswerSpec::Cancel],
+        );
+        let rungs = asked.rungs();
+        assert_eq!(
+            rungs.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "words of one's own are a door, not a rung, and cancel is not offered"
+        );
+        assert_eq!(
+            rungs[0].answer,
+            Answer::Choice {
+                ids: vec!["a".into()],
+                other: None,
+            }
+        );
+
+        let words_only = asking(
+            InteractionKind::Question(Question {
+                question: "what shall I call it?".into(),
+                header: None,
+                options: vec![option("a", None)],
+                free_text: true,
+                multi: false,
+            }),
+            vec![AnswerSpec::Text, AnswerSpec::Cancel],
+        );
+        assert!(
+            words_only.rungs().is_empty(),
+            "an option the kernel would refuse is not offered"
+        );
+    }
+
+    #[test]
+    fn a_confirm_offers_both_ways_out_and_a_form_offers_no_rung() {
+        let confirm = asking(
+            InteractionKind::Confirm {
+                title: "Delete it?".into(),
+                detail: "for good".into(),
+            },
+            vec![AnswerSpec::Confirm, AnswerSpec::Cancel],
+        );
+        assert_eq!(answers_of(&confirm), vec![Answer::Confirm, Answer::Cancel]);
+
+        let one_way = asking(
+            InteractionKind::Confirm {
+                title: "Delete it?".into(),
+                detail: "for good".into(),
+            },
+            vec![AnswerSpec::Confirm],
+        );
+        assert_eq!(answers_of(&one_way), vec![Answer::Confirm]);
+
+        let form = asking(
+            InteractionKind::Form {
+                title: None,
+                questions: Vec::new(),
+            },
+            vec![AnswerSpec::Form, AnswerSpec::Cancel],
+        );
+        assert!(
+            form.rungs().is_empty(),
+            "a form is answered question by question"
+        );
+    }
+
+    /// A browser flow finishes on its own; the one rung is the way out, and
+    /// the credential a paste flow wants is words, not a rung.
+    #[test]
+    fn a_login_offers_the_way_out() {
+        let paste = asking(
+            InteractionKind::Login {
+                provider: "anthropic".into(),
+                flow: LoginFlow::Paste,
+            },
+            vec![AnswerSpec::Text, AnswerSpec::Cancel],
+        );
+        assert_eq!(answers_of(&paste), vec![Answer::Cancel]);
     }
 
     /// A call is wrong when its status says so or when its output does; a

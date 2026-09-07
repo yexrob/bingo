@@ -698,6 +698,7 @@ mod python;
 
 mod acp;
 mod agents;
+mod asking;
 mod batch;
 mod board;
 mod checkpoints;

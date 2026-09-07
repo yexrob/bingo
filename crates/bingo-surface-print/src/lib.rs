@@ -26,7 +26,7 @@ use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
     Delivery, ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId,
     IntentOutcome, Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin,
-    PluginError, PluginManifest, Question, Registrar, SessionHandle, SessionId, SessionState,
+    PluginError, PluginManifest, Question, Registrar, Rung, SessionHandle, SessionId, SessionState,
     Surface, SurfaceKind, SurfaceOptions,
 };
 use futures::StreamExt;
@@ -479,12 +479,9 @@ fn decide(
         ));
     }
     let answer = match &interaction.kind {
-        InteractionKind::Permission {
-            tool,
-            summary,
-            session_scope,
-            ..
-        } => ask_permission(tool, summary, session_scope.as_deref(), console, err)?,
+        InteractionKind::Permission { tool, summary, .. } => {
+            ask_permission(interaction, tool, summary, console, err)?
+        }
         InteractionKind::Question(question) => ask_question(interaction, question, console, err)?,
         InteractionKind::Form { questions, .. } => ask_form(questions, console, err)?,
         _ => refuse(interaction, "this surface cannot answer that"),
@@ -492,30 +489,48 @@ fn decide(
     Ok((answer, Activation::Keyboard))
 }
 
+/// The rungs this interaction offers, each behind the key that picks it, and
+/// nothing else: a key for an answer the kernel would refuse is not offered
+/// and does not answer. A line that names none of them is a refusal.
 fn ask_permission(
+    interaction: &Interaction,
     tool: &str,
     summary: &str,
-    session_scope: Option<&str>,
     console: &mut (dyn Console + Send),
     err: &mut (dyn Write + Send),
 ) -> io::Result<Answer> {
+    let rungs = interaction.rungs();
+    let keys: Vec<(char, &str, &Answer)> = rungs.iter().filter_map(keyed).collect();
+    let offered: Vec<&str> = keys.iter().map(|(_, words, _)| *words).collect();
     writeln!(
         err,
-        "[permission] {tool}: {summary}  [y]es / [a]lways this session / [n]o"
+        "[permission] {tool}: {summary}  {}",
+        offered.join(" / ")
     )?;
     err.flush()?;
-    Ok(match console.read_line()?.trim().chars().next() {
-        Some('y' | 'Y') => Answer::AllowOnce,
-        // Without a scope there is no session rule to install, so the
-        // widest honest answer is this one call.
-        Some('a' | 'A') => match session_scope {
-            Some(scope) => Answer::AllowSession {
-                scope: scope.to_string(),
-            },
-            None => Answer::AllowOnce,
+    let typed = console
+        .read_line()?
+        .trim()
+        .chars()
+        .next()
+        .map(|c| c.to_ascii_lowercase());
+    Ok(
+        match typed.and_then(|typed| keys.iter().find(|(key, ..)| *key == typed)) {
+            Some((.., answer)) => (*answer).clone(),
+            None => refuse(interaction, "no answer was picked"),
         },
-        _ => Answer::Deny { feedback: None },
-    })
+    )
+}
+
+/// The key a person types for a permission rung, and the words that offer it.
+fn keyed(rung: &Rung) -> Option<(char, &'static str, &Answer)> {
+    let (key, words) = match &rung.answer {
+        Answer::AllowOnce => ('y', "[y]es"),
+        Answer::AllowSession { .. } => ('a', "[a]lways this session"),
+        Answer::Deny { .. } => ('n', "[n]o"),
+        _ => return None,
+    };
+    Some((key, words, &rung.answer))
 }
 
 fn ask_question(
@@ -1554,7 +1569,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn at_a_terminal_yes_allows_the_call_once() {
-        let run = answering(opened(permission(None)), "y").await;
+        let run = answering(opened(permission(Some("Read(//tmp)"))), "y").await;
         let answers = run.session.answers();
         assert_eq!(answers[0].1, Answer::AllowOnce);
         assert_eq!(answers[0].2, Activation::Keyboard);
@@ -1575,16 +1590,32 @@ pub(crate) mod tests {
         );
     }
 
+    /// Without a scope there is no session rule to install, so the line does
+    /// not offer one and the key that would have picked it answers nothing.
     #[tokio::test]
-    async fn always_without_a_scope_falls_back_to_allowing_once() {
+    async fn a_rung_the_interaction_does_not_carry_is_not_offered() {
         let run = answering(opened(permission(None)), "a").await;
-        assert_eq!(run.session.answers()[0].1, Answer::AllowOnce);
+        assert_eq!(
+            run.err,
+            "[permission] Read: Read Cargo.toml  [y]es / [n]o\n"
+        );
+        assert_eq!(
+            run.session.answers()[0].1,
+            Answer::Deny {
+                feedback: Some("no answer was picked".into())
+            }
+        );
     }
 
     #[tokio::test]
     async fn anything_else_denies() {
         let run = answering(opened(permission(None)), "").await;
-        assert_eq!(run.session.answers()[0].1, Answer::Deny { feedback: None });
+        assert_eq!(
+            run.session.answers()[0].1,
+            Answer::Deny {
+                feedback: Some("no answer was picked".into())
+            }
+        );
     }
 
     #[tokio::test]

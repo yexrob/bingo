@@ -59,53 +59,30 @@ pub fn ladder(interaction: &Interaction) -> Option<Question> {
     if let InteractionKind::Form { questions, .. } = &interaction.kind {
         return form(interaction, questions);
     }
-    let offered = |spec: AnswerSpec| interaction.answers.contains(&spec);
-    let (prompt, mut answers) = match &interaction.kind {
-        InteractionKind::Permission {
-            tool,
-            summary,
-            session_scope,
-            ..
-        } => (
-            format!("{tool}: {summary}"),
-            permission(session_scope.as_deref(), &offered),
-        ),
-        InteractionKind::Question(asked) => (
-            prompt_of(asked),
-            asked
-                .options
-                .iter()
-                .map(|option| {
-                    (
-                        option.label.clone(),
-                        Answer::Choice {
-                            ids: vec![option.id.clone()],
-                            other: None,
-                        },
-                    )
-                })
-                .collect(),
-        ),
-        InteractionKind::Confirm { title, detail } => (
-            format!("{title}\n{detail}"),
-            vec![
-                ("Yes".to_string(), Answer::Confirm),
-                ("No".to_string(), Answer::Cancel),
-            ],
-        ),
+    let prompt = match &interaction.kind {
+        InteractionKind::Permission { tool, summary, .. } => format!("{tool}: {summary}"),
+        InteractionKind::Question(asked) => prompt_of(asked),
+        InteractionKind::Confirm { title, detail } => format!("{title}\n{detail}"),
         // A form has its own way in, above; a browser login is nobody's chat
         // message.
         InteractionKind::Form { .. } | InteractionKind::Login { .. } => return None,
     };
-    answers.retain(|(_, answer)| offered(answer.spec()));
-    if answers.is_empty() && !offered(AnswerSpec::Text) {
+    let free_text = interaction.answers.contains(&AnswerSpec::Text);
+    let choices = numbered(
+        interaction
+            .rungs()
+            .into_iter()
+            .map(|rung| (rung.label, rung.answer))
+            .collect(),
+    );
+    if choices.is_empty() && !free_text {
         return None;
     }
     Some(Question {
         id: interaction.id.clone(),
         prompt,
-        choices: numbered(answers),
-        free_text: offered(AnswerSpec::Text),
+        choices,
+        free_text,
         rest: None,
     })
 }
@@ -161,25 +138,6 @@ fn prompt_of(question: &bingo_sdk::Question) -> String {
         Some(header) => format!("{header}: {}", question.question),
         None => question.question.clone(),
     }
-}
-
-/// The permission rungs, widest first. `AllowSession` without a scope would
-/// install no rule, so it is not offered as if it would.
-fn permission(
-    session_scope: Option<&str>,
-    offered: &impl Fn(AnswerSpec) -> bool,
-) -> Vec<(String, Answer)> {
-    let mut answers = vec![("Allow once".to_string(), Answer::AllowOnce)];
-    if let Some(scope) = session_scope.filter(|_| offered(AnswerSpec::AllowSession)) {
-        answers.push((
-            format!("Allow {scope} for this session"),
-            Answer::AllowSession {
-                scope: scope.to_string(),
-            },
-        ));
-    }
-    answers.push(("Deny".to_string(), Answer::Deny { feedback: None }));
-    answers
 }
 
 fn numbered(answers: Vec<(String, Answer)>) -> Vec<Choice> {
