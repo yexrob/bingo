@@ -18,7 +18,7 @@ use crate::effect::Effect;
 use crate::search::Search;
 use crate::tree::Tree;
 use crate::ui::{Open, Ui};
-use crate::{acp, markdown, search, theme, thoughts, transcript, wrap};
+use crate::{acp, markdown, memory, search, theme, thoughts, transcript, wrap};
 
 /// The rows the sheet spends on itself: what it is, and the air under it.
 pub const HEAD: usize = 2;
@@ -131,8 +131,9 @@ fn reasoning(state: &SessionState, item: &Item, width: usize) -> Vec<Line<'stati
     }
 }
 
-/// What the sheet is of, on its first row.
-pub fn title(item: &Item) -> String {
+/// What the sheet is of, on its first row: the row's own signature, a call
+/// on a memory file included (M84).
+pub fn title(item: &Item, state: &SessionState) -> String {
     match &item.body {
         ItemBody::Reasoning { .. } => match acp::call(item) {
             Some(call) => format!("{}({})", call.name, call.about),
@@ -140,7 +141,9 @@ pub fn title(item: &Item) -> String {
         },
         ItemBody::Assistant { .. } => "Answer".to_string(),
         ItemBody::ToolCall { name, input, .. } => {
-            format!("{name}({})", transcript::summarize(input))
+            let (name, about) = memory::call(name, input, &state.summary.cwd, &memory::of(state))
+                .unwrap_or_else(|| (name.as_str(), transcript::summarize(input)));
+            format!("{name}({about})")
         }
         ItemBody::Shell { command, .. } => format!("$ {command}"),
         _ => String::new(),
@@ -376,7 +379,7 @@ mod tests {
         let content = sheet_of(&item, 60);
         assert_eq!(content.len(), 40);
         assert_eq!(content[39].to_string(), "line 40");
-        assert_eq!(title(&item), "Read(src/lib.rs)");
+        assert_eq!(title(&item, &state()), "Read(src/lib.rs)");
     }
 
     #[test]
@@ -396,7 +399,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["The manifest first, then the lockfile.".to_string()],
         );
-        assert_eq!(title(&item), "Thinking");
+        assert_eq!(title(&item, &state()), "Thinking");
     }
 
     /// A run of thoughts draws as one block (M79), so it opens as one sheet:
@@ -426,7 +429,7 @@ mod tests {
             ],
         );
         assert_eq!(shown("itm_1"), shown("itm_3"), "one run, one sheet");
-        assert_eq!(title(&run[2]), "Thinking");
+        assert_eq!(title(&run[2], &state()), "Thinking");
     }
 
     fn thought(id: &str, text: &str) -> Item {
@@ -467,7 +470,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["42 passed".to_string()],
         );
-        assert_eq!(title(&call), "Run(npm test)");
+        assert_eq!(title(&call, &state()), "Run(npm test)");
     }
 
     /// And a call that said nothing shows everything it has on its row, so
@@ -483,7 +486,7 @@ mod tests {
             }),
         );
         assert!(sheet_of(&call, 60).is_empty());
-        assert_eq!(title(&call), "Mode(plan)");
+        assert_eq!(title(&call, &state()), "Mode(plan)");
     }
 
     /// A table never wraps: it folds to the width it is laid out in (design

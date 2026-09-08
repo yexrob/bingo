@@ -2298,6 +2298,40 @@
       ],
       "description": "An error as it appears on the wire and in the journal."
     },
+    "LastTurn": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "status": {
+          "$ref": "#/$defs/TurnStatus"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "endedAt": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage",
+          "default": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 0
+          }
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "startedAt",
+        "endedAt"
+      ],
+      "description": "The turn that last ended: its verdict, the clocks it ran between and what\nit spent, folded from the turn it closes and the frame that closed it.\nNothing here is on the wire that was not already — the clocks are two\nframes' own, the usage is `TurnCompleted`'s — so a row that says `Worked\nfor 15m 11s` is derived, as every view is (ADR-0002)."
+    },
     "Level": {
       "type": "string",
       "enum": [
@@ -3006,12 +3040,13 @@
         "lastTurn": {
           "anyOf": [
             {
-              "$ref": "#/$defs/TurnStatus"
+              "$ref": "#/$defs/LastTurn"
             },
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The turn that last ended, whole: what a surface says after a turn is\ndrawn from this rather than kept by the surface (M84)."
         },
         "unread": {
           "type": "boolean",

@@ -124,7 +124,7 @@ async fn open_submit_and_the_events_arrive_in_seq_order_with_the_clients_intent(
     );
     let state: &SessionState = &attachment.snapshot;
     assert!(state.items.iter().any(|i| matches!(&i.body, bingo_sdk::ItemBody::Assistant { text } if text == "Hello over the wire.")));
-    assert_eq!(state.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(state.last_status(), Some(&TurnStatus::Completed));
     kernel.shutdown().await.unwrap();
 }
 
@@ -313,7 +313,10 @@ async fn a_permission_is_answered_over_the_wire_and_the_tool_runs() {
             .iter()
             .any(|f| matches!(f.event, Event::InteractionResolved { .. }))
     );
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     assert_eq!(
         std::fs::read_to_string(server.cwd().join("made.txt")).unwrap(),
         "by the wire\n"
@@ -343,7 +346,10 @@ async fn a_retry_is_visible_on_the_wire() {
             .iter()
             .any(|f| matches!(f.event, Event::TurnRetrying { attempt: 1, .. }))
     );
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     kernel.shutdown().await.unwrap();
 }
 
@@ -533,7 +539,10 @@ async fn a_shell_line_and_a_permission_mode_dispatch_as_commands() {
             .all(|f| !matches!(f.event, Event::InteractionOpened { .. })),
         "acceptEdits asks nothing for a Write"
     );
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     assert_eq!(
         std::fs::read_to_string(server.cwd().join("quiet.txt")).unwrap(),
         "no prompt\n"
@@ -622,7 +631,10 @@ async fn an_mcp_server_from_mcp_config_offers_its_tool_through_the_gate() {
         Activation::Pointer,
     );
     until_completed(&mut attachment).await;
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     let echoed = attachment
         .snapshot
         .items

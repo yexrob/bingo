@@ -48,7 +48,7 @@ pub use provider::{AuthStatus, LoginMethod, ModelInfo, Provider};
 /// `Service` and `Services` stay behind `service::`: the kernel has a bundle
 /// of its own by that name, and a glob import must not make either ambiguous.
 pub use service::{ServiceError, ServiceHandle, WireService};
-pub use state::{Applied, LiveTurn, Retry, SessionState};
+pub use state::{Applied, LastTurn, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};
 pub use tool::{

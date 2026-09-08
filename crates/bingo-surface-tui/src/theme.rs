@@ -119,13 +119,16 @@ pub struct Glyphs {
     pub tick: &'static str,
     /// The permission mode on the status line.
     pub mode: &'static str,
-    /// A tree node with siblings under it, and the last one.
-    pub branch: &'static str,
-    pub corner: &'static str,
+    /// A tree node: `[0]` with siblings under it, `[1]` the last one. One
+    /// field because it is one fact in two states, as the todo box is.
+    pub tree: [&'static str; 2],
     /// What is left where something was folded away or cut short.
     pub ellipsis: &'static str,
     /// What opens an item of a list.
     pub point: &'static str,
+    /// What opens the recap under the worked row (M84): a reference mark,
+    /// because the row refers to the turn above it.
+    pub recap: &'static str,
     pub border: border::Set<'static>,
 }
 
@@ -141,10 +144,10 @@ pub const UNICODE: Glyphs = Glyphs {
     task: ["◻", "◼", "✔"],
     tick: "✔",
     mode: "⏵⏵",
-    branch: "├",
-    corner: "└",
+    tree: ["├", "└"],
     ellipsis: "…",
     point: "•",
+    recap: "※",
     border: border::ROUNDED,
 };
 
@@ -169,10 +172,10 @@ pub const ASCII: Glyphs = Glyphs {
     task: ["-", "*", "x"],
     tick: "x",
     mode: ">>",
-    branch: "+",
-    corner: "+",
+    tree: ["+", "+"],
     ellipsis: "...",
     point: "-",
+    recap: "*",
     border: border::Set {
         top_left: "+",
         top_right: "+",
@@ -998,6 +1001,11 @@ pub fn tick() -> &'static str {
     glyphs().tick
 }
 
+/// What opens the recap under the worked row (M84).
+pub fn recap_mark() -> &'static str {
+    glyphs().recap
+}
+
 /// A rule between blocks: the same stroke a box draws its edge with, because
 /// they are one line and not two facts.
 pub fn rule() -> &'static str {
@@ -1006,11 +1014,11 @@ pub fn rule() -> &'static str {
 
 /// A tree node that has siblings under it; [`corner`] is the last of them.
 pub fn branch() -> &'static str {
-    glyphs().branch
+    glyphs().tree[0]
 }
 
 pub fn corner() -> &'static str {
-    glyphs().corner
+    glyphs().tree[1]
 }
 
 /// What is left where something was folded away, cut short, or is still on
@@ -1147,6 +1155,7 @@ mod tests {
                     "panel.rs",
                     "preview.rs",
                     "rail.rs",
+                    "recap.rs",
                     "rewind.rs",
                     // The row a person is on in the one list of sessions:
                     // weight rather than hue, so `NO_COLOR` still says which
@@ -1195,6 +1204,7 @@ mod tests {
                     "panel.rs",
                     "preview.rs",
                     "rail.rs",
+                    "recap.rs",
                     "rewind.rs",
                     "roster.rs",
                     "search.rs",

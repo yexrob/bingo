@@ -128,7 +128,7 @@ async fn submit_starts_a_turn_and_streams_it_to_the_end() {
         ]
     );
     assert!(!state.busy());
-    assert_eq!(state.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(state.last_status(), Some(&TurnStatus::Completed));
     let user = &state.items[0];
     assert_eq!(user.intent.as_ref(), Some(&intent));
     assert_eq!(
@@ -193,7 +193,7 @@ async fn a_busy_session_queues_and_the_queue_opens_the_next_turn() {
     let labels = drive(&mut events, &mut state, turn_completed).await;
     assert!(labels.contains(&"ack:Applied".to_string()));
     assert!(
-        matches!(state.last_turn, Some(TurnStatus::Interrupted { .. })),
+        matches!(state.last_status(), Some(TurnStatus::Interrupted { .. })),
         "{:?}",
         state.last_turn
     );
@@ -278,7 +278,7 @@ async fn a_permission_is_answered_once_and_late_answers_are_rejected() {
     assert_eq!(labels[0], "interactionResolved");
     assert_eq!(labels[1], "ack:Applied");
     assert!(state.interactions.is_empty());
-    assert_eq!(state.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(state.last_status(), Some(&TurnStatus::Completed));
     let tool = state
         .items
         .iter()
@@ -454,7 +454,7 @@ async fn closing_cancels_the_turn_and_ends_the_journal() {
     .await;
     assert!(labels.contains(&"ack:Rejected".to_string()), "{labels:?}");
     assert!(matches!(
-        state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Interrupted { .. })
     ));
     assert!(state.closed);
@@ -479,7 +479,7 @@ async fn a_panicking_turn_is_reported_as_lost_not_hung() {
     );
     drive(&mut events, &mut state, turn_completed).await;
     assert!(matches!(
-        &state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost && error.message.contains("tool exploded")
     ));
     assert!(!state.busy());
@@ -561,7 +561,7 @@ async fn a_journal_cut_inside_a_turn_resumes_with_that_turn_lost() {
     );
     assert!(state.turn.is_none() && !state.busy());
     assert!(
-        matches!(&state.last_turn, Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost),
+        matches!(state.last_status(), Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost),
         "{:?}",
         state.last_turn
     );

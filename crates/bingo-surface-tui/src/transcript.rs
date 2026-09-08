@@ -19,7 +19,7 @@ use crate::fold::{self, Fold, Folds};
 use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, markdown, paths, shells, tasks, theme, thoughts, wrap};
+use crate::{acp, markdown, memory, paths, shells, tasks, theme, thoughts, wrap};
 
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
@@ -105,6 +105,9 @@ pub struct Rows<'a> {
     /// read from the set the shell's plugin signals: what the row under a
     /// backgrounded call says is true of now, not of when the call closed.
     pub shells: Vec<String>,
+    /// Where the session's memories are (M84), read from what the memory
+    /// plugin publishes: a call on one of them is drawn as remembering.
+    pub memory: memory::Directories,
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
@@ -145,6 +148,7 @@ impl<'a> Rows<'a> {
             pictures,
             linked,
             shells: shells::running(state),
+            memory: memory::of(state),
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
             update: None,
@@ -416,13 +420,15 @@ fn called(
     else {
         return Vec::new();
     };
+    let (name, about) = memory::call(name, input, rows.cwd, &rows.memory)
+        .unwrap_or_else(|| (name.as_str(), summarize(input)));
     match agents.get(&item.id) {
         Some(child) => child_row(child, input, rows),
         None => tool_call(
             Call {
                 status: item.status,
                 name,
-                about: summarize(input),
+                about,
                 output: output.as_ref(),
                 progress: progress.as_deref(),
                 fold,
@@ -884,8 +890,7 @@ fn calls(item: &Item, tool: &str) -> bool {
 /// rather than kept as a line of the surface's own. It belongs to no item, so
 /// it is the transcript's last block rather than one of them.
 pub fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let Some(TurnStatus::Failed { error }) = state.last_turn.as_ref().filter(|_| !state.busy())
-    else {
+    let Some(TurnStatus::Failed { error }) = state.last_status().filter(|_| !state.busy()) else {
         return Vec::new();
     };
     speaks(
@@ -912,8 +917,8 @@ fn rule(text: &str, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::test_support::{
-        agent_call, assistant, completed, delivered, folded, frame, item, post, receipt_item,
-        running_tool, scene, started, started_tool, tool, ts, user as person,
+        agent_call, assistant, completed, delivered, extended, folded, frame, item, post,
+        receipt_item, running_tool, scene, started, started_tool, tool, ts, user as person,
     };
     use bingo_sdk::{Event, ItemId};
 
@@ -964,6 +969,67 @@ mod tests {
     /// own: these tests are about the grammar under it.
     fn rendered(state: &SessionState) -> Vec<String> {
         rendered_with(state, &Folds::new(), &[])
+    }
+
+    /// A call on a memory file is drawn as remembering (M84): the verb for the
+    /// tool, the memory's own name — and the same call on any other file is
+    /// what it was.
+    #[test]
+    fn a_call_on_a_memory_file_is_drawn_as_remembering() {
+        let published = frame(
+            1,
+            extended(
+                "_bingo.context",
+                "memory",
+                serde_json::json!({"user": "/data/memory/user", "project": "/data/memory/web-2bf6c26a7362cd1f"}),
+            ),
+        );
+        let calls = [
+            tool(
+                "itm_1",
+                "Read",
+                serde_json::json!({"file_path": "/data/memory/web-2bf6c26a7362cd1f/the-build.md"}),
+                Some(ToolOutput::text("run cargo test")),
+                ItemStatus::Completed,
+            ),
+            tool(
+                "itm_2",
+                "Write",
+                serde_json::json!({"file_path": "/data/memory/user/MEMORY.md", "content": "- …"}),
+                Some(ToolOutput::text("written")),
+                ItemStatus::Completed,
+            ),
+            tool(
+                "itm_3",
+                "Read",
+                serde_json::json!({"file_path": "src/lib.rs"}),
+                Some(ToolOutput::text("mod a;")),
+                ItemStatus::Completed,
+            ),
+        ];
+        let mut frames = vec![published];
+        frames.extend(
+            calls
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| frame(i as u64 + 2, Event::ItemCompleted { item })),
+        );
+        let lines = rendered(&folded(frames));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Recall from memory(the-build)")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Write memory(MEMORY.md)")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Read(src/lib.rs)")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("Read(/data")), "{lines:?}");
     }
 
     /// A call that moved the task list is no row: the list under the activity

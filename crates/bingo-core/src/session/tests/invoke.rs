@@ -207,7 +207,7 @@ async fn an_interrupt_drops_a_bridged_call_and_the_caller_is_told() {
 
     drive(&mut events, &mut state, turn_completed).await;
     assert!(matches!(
-        state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Interrupted { .. })
     ));
     assert_eq!(

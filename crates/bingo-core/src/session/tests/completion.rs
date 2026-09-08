@@ -48,7 +48,7 @@ async fn a_turn_that_runs_to_its_end_is_completed_once() {
     let (mut state, mut events) = mailbox.attach().await.unwrap();
     mailbox.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
     drive(&mut events, &mut state, turn_completed).await;
-    assert_eq!(state.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(state.last_status(), Some(&TurnStatus::Completed));
     assert_closed_once(&mailbox, 1).await;
 }
 
@@ -66,7 +66,7 @@ async fn an_interrupted_turn_is_completed_once() {
     mailbox.interrupt(IntentId::mint(), InterruptScope::Head);
     drive(&mut events, &mut state, turn_completed).await;
     assert!(matches!(
-        state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Interrupted { .. })
     ));
     assert_closed_once(&mailbox, 1).await;
@@ -83,7 +83,7 @@ async fn a_turn_whose_tool_panics_is_completed_once() {
     );
     drive(&mut events, &mut state, turn_completed).await;
     assert!(matches!(
-        &state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost
     ));
     assert_closed_once(&mailbox, 1).await;
@@ -99,7 +99,7 @@ async fn a_turn_whose_provider_panics_is_completed_once() {
     );
     drive(&mut events, &mut state, turn_completed).await;
     assert!(matches!(
-        &state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost
     ));
     assert_closed_once(&mailbox, 1).await;

@@ -34,8 +34,10 @@ pub struct SessionState {
     pub interactions: Vec<Interaction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextUsage>,
+    /// The turn that last ended, whole: what a surface says after a turn is
+    /// drawn from this rather than kept by the surface (M84).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_turn: Option<TurnStatus>,
+    pub last_turn: Option<LastTurn>,
     /// A turn ended and nobody has looked since. Cleared by `mark_read`.
     #[serde(default)]
     pub unread: bool,
@@ -64,6 +66,24 @@ pub struct LiveTurn {
     pub usage: Usage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrying: Option<Retry>,
+}
+
+/// The turn that last ended: its verdict, the clocks it ran between and what
+/// it spent, folded from the turn it closes and the frame that closed it.
+/// Nothing here is on the wire that was not already — the clocks are two
+/// frames' own, the usage is `TurnCompleted`'s — so a row that says `Worked
+/// for 15m 11s` is derived, as every view is (ADR-0002).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LastTurn {
+    pub id: TurnId,
+    pub status: TurnStatus,
+    #[schemars(with = "String")]
+    pub started_at: Timestamp,
+    #[schemars(with = "String")]
+    pub ended_at: Timestamp,
+    #[serde(default)]
+    pub usage: Usage,
 }
 
 /// A stream attempt failed and the turn is waiting to try again.
@@ -126,6 +146,12 @@ impl SessionState {
     /// Derived, never stored: a turn is running. The same fact reaches a
     /// client that holds only a [`SessionSummary`] as `summary.busy`, which
     /// the kernel stamps; the reducer writes it nowhere.
+    /// The verdict of the turn that last ended, for the readers that want
+    /// only that.
+    pub fn last_status(&self) -> Option<&TurnStatus> {
+        self.last_turn.as_ref().map(|turn| &turn.status)
+    }
+
     pub fn busy(&self) -> bool {
         self.turn.is_some()
     }
@@ -170,7 +196,11 @@ impl SessionState {
                 ..
             } => self.turn_retrying(*attempt, *max, dropped),
             Event::TurnUsage { usage, context, .. } => self.turn_usage(*usage, *context),
-            Event::TurnCompleted { status, .. } => self.turn_completed(status),
+            Event::TurnCompleted {
+                turn,
+                status,
+                usage,
+            } => self.turn_completed(turn, status, *usage, frame.ts),
             Event::ItemStarted { item }
             | Event::ItemUpdated { item }
             | Event::ItemCompleted { item } => self.upsert(item),
@@ -286,9 +316,28 @@ impl SessionState {
         Applied::Turn
     }
 
-    fn turn_completed(&mut self, status: &TurnStatus) -> Applied {
-        self.turn = None;
-        self.last_turn = Some(status.clone());
+    /// The live turn is put away as the last one. A completion for a turn
+    /// this state never saw start — a journal read from the middle — began,
+    /// as far as anyone here knows, when it ended.
+    fn turn_completed(
+        &mut self,
+        turn: &TurnId,
+        status: &TurnStatus,
+        usage: Usage,
+        ended_at: Timestamp,
+    ) -> Applied {
+        let started_at = self
+            .turn
+            .take()
+            .filter(|live| live.id == *turn)
+            .map_or(ended_at, |live| live.started_at);
+        self.last_turn = Some(LastTurn {
+            id: turn.clone(),
+            status: status.clone(),
+            started_at,
+            ended_at,
+            usage,
+        });
         self.unread = true;
         Applied::Turn
     }

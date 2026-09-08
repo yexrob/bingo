@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContextContributor, ContextError, ContextPiece, ContextQuery, Placement, SystemBlock,
+    ContextContributor, ContextError, ContextPiece, ContextQuery, HostHandle, Placement, SessionId,
+    SystemBlock,
 };
 
 use crate::{baseline, files, root};
@@ -70,6 +71,27 @@ impl ContextContributor for MemoryContributor {
             ]
         })
         .await
+    }
+}
+
+/// The kind the two directories are published under, beside the baselines:
+/// `{ "user": <dir>, "project": <dir> }`, the same paths the headings carry
+/// for the model, as data for a surface that draws a call on a memory file as
+/// what it is (M84). A session's directories are fixed by its cwd, so they are
+/// written once, when the session starts; a surface that cannot read them
+/// draws the call as any other.
+pub(crate) const DIRECTORIES: &str = "memory";
+
+pub(crate) async fn publish(host: &HostHandle, session: &SessionId, data_dir: &Path, cwd: &Path) {
+    let payload = serde_json::json!({
+        "user": dir::user(data_dir).display().to_string(),
+        "project": project_dir(data_dir, cwd).await.display().to_string(),
+    });
+    if let Err(error) = host
+        .extend(session, baseline::PLUGIN, DIRECTORIES, payload)
+        .await
+    {
+        tracing::warn!(%error, "memory: the directories were not published");
     }
 }
 

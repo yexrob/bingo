@@ -60,7 +60,9 @@ impl Fixture {
             host: self.journal.handle(),
         };
         self.journal.opening(true);
-        BaselineHook.on_session(phase, &cx).await;
+        BaselineHook::new(self.data.path().to_path_buf())
+            .on_session(phase, &cx)
+            .await;
         self.journal.opening(false);
     }
 }
@@ -83,6 +85,28 @@ async fn a_replayed_baseline_needs_no_private_contributor_state() {
     );
 }
 
+/// The surface reads these by name (`tui::memory`), so the shape here is the
+/// whole of the contract: two absolute directories under one kind.
+#[tokio::test]
+async fn session_start_publishes_where_the_memories_are() {
+    let fixture = Fixture::new();
+    fixture.session(Phase::Start).await;
+    let project = crate::memory::project_dir(fixture.data.path(), fixture.cwd.path()).await;
+    let published = fixture.journal.state().extensions[PLUGIN][crate::memory::DIRECTORIES].clone();
+    assert_eq!(
+        published["user"],
+        crate::memory::dir::user(fixture.data.path())
+            .display()
+            .to_string()
+    );
+    assert_eq!(published["project"], project.display().to_string());
+    fixture.session(Phase::End).await;
+    assert!(
+        !fixture.journal.state().extensions[PLUGIN][crate::memory::DIRECTORIES].is_null(),
+        "the end of a session takes nothing away"
+    );
+}
+
 #[tokio::test]
 async fn session_start_invalidates_both_keys_without_opening_the_session() {
     let fixture = Fixture::new();
@@ -100,8 +124,8 @@ async fn session_start_invalidates_both_keys_without_opening_the_session() {
     assert_eq!(fixture.capture().await, refreshed);
     assert_eq!(
         fixture.journal.state().seq.0,
-        6,
-        "capture, invalidate, recapture"
+        7,
+        "capture, invalidate and the directories, recapture"
     );
 }
 
@@ -161,7 +185,9 @@ async fn disk_changes_remain_hidden_when_compaction_does_not_advance_history() {
             model: None,
             host: fixture.journal.handle(),
         };
-        BaselineHook.on_compact(phase, &cx).await;
+        BaselineHook::new(fixture.data.path().to_path_buf())
+            .on_compact(phase, &cx)
+            .await;
     }
     assert_eq!(fixture.capture().await, first);
     assert_eq!(fixture.journal.state().seq.0, 2);

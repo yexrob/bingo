@@ -75,6 +75,7 @@ mod late;
 mod layers;
 mod markdown;
 mod matching;
+mod memory;
 mod mentions;
 /// The opening (M72): the welcome box drawing itself, out of the motions the
 /// product already has.
@@ -87,6 +88,7 @@ mod pictures;
 mod pointer;
 mod preview;
 mod rail;
+mod recap;
 mod rewind;
 mod roster;
 mod run;
@@ -117,6 +119,7 @@ mod views;
 mod wake;
 mod welcome;
 mod window;
+mod worked;
 mod wrap;
 
 use std::sync::Arc;

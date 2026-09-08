@@ -79,7 +79,7 @@ async fn a_session_opens_on_a_provider_that_did_not_exist_at_boot() {
             break;
         }
     }
-    assert_eq!(snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(snapshot.last_status(), Some(&TurnStatus::Completed));
     assert_eq!(
         provider.requests().len(),
         1,

@@ -119,7 +119,7 @@ fn reply_to(state: &SessionState, turn: &TurnId) -> String {
 /// a completed turn with nothing to say would be a lie about a teammate that
 /// has not started. The caller says what is true of it instead.
 fn last_reply(state: &SessionState) -> Option<Reply> {
-    let status = state.last_turn.clone()?;
+    let status = state.last_status().cloned()?;
     let text = state
         .items
         .iter()

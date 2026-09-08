@@ -249,7 +249,7 @@ fn paged(
         height: content.len(),
         rows: usize::from(above.height).saturating_sub(pager::HEAD),
     };
-    let lines = pager::sheet(&pager::title(item), &content, open, window);
+    let lines = pager::sheet(&pager::title(item, tree.viewed()), &content, open, window);
     sheet(frame, above, lines, reveal);
     marked(frame, above, open, window, reveal);
 }

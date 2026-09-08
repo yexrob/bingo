@@ -836,8 +836,14 @@ mod tests {
             .clone(),
         ]);
         let mut with_failure = state.clone();
-        with_failure.last_turn = Some(bingo_sdk::TurnStatus::Failed {
-            error: bingo_sdk::KernelError::new(bingo_sdk::ErrorCode::Internal, "boom"),
+        with_failure.last_turn = Some(bingo_sdk::LastTurn {
+            id: bingo_sdk::TurnId::from_raw("trn_1"),
+            status: bingo_sdk::TurnStatus::Failed {
+                error: bingo_sdk::KernelError::new(bingo_sdk::ErrorCode::Internal, "boom"),
+            },
+            started_at: ts(),
+            ended_at: ts(),
+            usage: Default::default(),
         });
         let mut blocks = cache();
         let plain = sync(&mut blocks, &state, 60);

@@ -16,6 +16,7 @@ A long session must never 400 and must not pay for a summary that does not shrin
    *(Amended 2026-09-04, M64/ADR-0044: was one project memory file `<data_dir>/memory/<name>-<hash>.md` contributed whole; two scoped directories of one-fact files behind an index replaced it, and the model can now write a memory itself.)*
    *(Amended 2026-09-07, M80/ADR-0048: was rebuilt into every request; instructions and indexes now sit in context-owned journal extensions and refresh only at lifecycle boundaries.)*
    *(Amended 2026-09-08, M83/ADR-0049: the turn-end hook, `context.memory` and the migration are gone; the model is the one writer, the project key is the root commit, and an index is capped at 60 lines.)*
+   *(Amended 2026-09-08, M84: the plugin publishes where the two memory directories are as journal state, `_bingo.context`/`memory`, once per session start, so the TUI can draw a call on a memory file as `Recall from memory(…)`; and a `Turn`/`End` hook — `context.recap`, on unless written `false` — asks the model for a recap of a turn that ran two minutes or more and signals it as `_bingo.context`/`recap`, live state the TUI draws under the worked row and nothing else reads.)*
 8. **Learned windows persist** in `<data_dir>/learned-windows.json`, written on each lesson, read at host build.
 
 ## Consequences

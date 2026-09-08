@@ -1,6 +1,7 @@
 //! Journal-owned system blocks, retained until the session or history restarts.
 
 use std::future::Future;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use bingo_sdk::{
@@ -9,7 +10,9 @@ use bingo_sdk::{
 };
 use serde::{Deserialize, Serialize};
 
-const PLUGIN: &str = "_bingo.context";
+/// The journal namespace the plugin keeps its state under: the baselines,
+/// and what the memory contributor publishes beside them.
+pub(crate) const PLUGIN: &str = "_bingo.context";
 const CONTRIBUTORS: [&str; 2] = [crate::instructions::ID, crate::memory::ID];
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -74,8 +77,19 @@ fn retained(state: &SessionState, id: &str) -> Option<Vec<SystemBlock>> {
     (baseline.history_generation == state.history_generation).then_some(baseline.blocks)
 }
 
+/// Invalidates the baselines when a session starts, and publishes where the
+/// session's memories are (M84) — both once per session, both journal
+/// state of the plugin's own.
 #[derive(Debug)]
-pub(crate) struct BaselineHook;
+pub(crate) struct BaselineHook {
+    data_dir: PathBuf,
+}
+
+impl BaselineHook {
+    pub(crate) fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+}
 
 #[async_trait]
 impl Hook for BaselineHook {
@@ -104,6 +118,7 @@ impl Hook for BaselineHook {
                 tracing::warn!(%error, contributor = id, "context: baseline was not invalidated");
             }
         }
+        crate::memory::publish(&cx.host, &cx.session, &self.data_dir, &cx.cwd).await;
     }
 }
 

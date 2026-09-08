@@ -146,7 +146,13 @@ impl HostApi for Journal {
         kind: &str,
         payload: Value,
     ) -> Result<(), KernelError> {
-        NoHost.signal(session, plugin, kind, payload).await
+        assert_eq!(session, &self.state().summary.id);
+        self.apply(Event::Signal {
+            plugin: plugin.into(),
+            kind: kind.into(),
+            payload,
+        });
+        Ok(())
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
