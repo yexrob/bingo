@@ -148,15 +148,16 @@ impl McpCommand {
     }
 }
 
-/// A sign-in nobody answered. A surface that renders no `Login` — the print
-/// one — declines the question rather than showing it, and a person reading
-/// the word *cancelled* would not know what to do next; the headless twin is
-/// what they do next (ADR-0050 §4).
+/// A sign-in nobody finished. A person's `esc` and a surface that renders no
+/// `Login` — the print one declines the question rather than showing it —
+/// arrive as the same cancel, and the word alone would leave the second
+/// reader not knowing what to do next; the headless twin is what they do
+/// next (ADR-0050 §4).
 fn unanswered(server: &str, error: bingo_auth_oauth::AuthError) -> KernelError {
     let message = match error {
         bingo_auth_oauth::AuthError::Cancelled => format!(
-            "the sign-in to {server} was not answered here; \
-             run `bingo mcp login {server}` in a terminal"
+            "the sign-in to {server} was cancelled; \
+             from a terminal, `bingo mcp login {server}` signs in without a dialog"
         ),
         other => other.to_string(),
     };
@@ -202,14 +203,15 @@ fn row(line: &Line) -> Vec<String> {
 
 const NEEDS_AUTH: &str = "needs authentication";
 
-/// A server that signs in to nothing says so with a dash, not with a blank a
-/// person would read as a state nobody knows.
+/// A dash where there is no sign-in to speak of: a server that signs in to
+/// nothing, or one nobody has signed in to — whether it wants a sign-in is
+/// the status column's word, since a server that never asked for one has
+/// nothing missing.
 fn signin(auth: Option<&bingo_auth_oauth::Status>) -> String {
     use bingo_auth_oauth::Status;
     match auth {
-        None => "-".to_string(),
+        None | Some(Status::SignedOut) => "-".to_string(),
         Some(Status::SignedIn { .. }) => "signed in".to_string(),
-        Some(Status::SignedOut) => NEEDS_AUTH.to_string(),
         Some(Status::Expired { .. }) => "expired".to_string(),
     }
 }
@@ -426,7 +428,8 @@ mod tests {
 
     /// ADR-0050 §3: the two columns are two facts. A server can want a
     /// sign-in and be signed out, or be connected on a credential that is
-    /// about to be renewed.
+    /// about to be renewed; one that never asked for a sign-in is missing
+    /// nothing, so a signed-out server reads as a dash either way.
     #[test]
     fn the_auth_column_says_where_the_sign_in_stands() {
         use bingo_auth_oauth::Status as Signin;
@@ -437,7 +440,14 @@ mod tests {
                 },
                 Some(Signin::SignedOut)
             )),
-            ["files", "needs authentication", "", "needs authentication"]
+            ["files", "needs authentication", "", "-"]
+        );
+        assert_eq!(
+            row(&line(
+                Status::Connected { tools: 3 },
+                Some(Signin::SignedOut)
+            )),
+            ["files", "connected", "3", "-"]
         );
         assert_eq!(
             row(&line(

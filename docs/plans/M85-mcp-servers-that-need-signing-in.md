@@ -78,7 +78,7 @@ depend on it, as `bingo-provider-openai` does)
    reconnect → `needs authentication`), `tools <server>` (a table: name,
    the first line of the description), and `reconnect | enable | disable`
    as today. Bare `/mcp`: the table gains an `auth` column — `-`, `signed
-   in`, `needs authentication`, `expired`. The hint names every verb.
+   in`, `expired`. The hint names every verb.
 8. **`bingo mcp` CLI** in `crates/bingo/src/main.rs`, one module `mcp.rs`:
    `list`, `get <name>`, `add [-t http|stdio] [-H "K: V"]… [-e K=V]…
    <name> <url | command [args…]>`, `remove <name>`, `login <name>
@@ -187,7 +187,7 @@ Exit criteria, item by item:
       path, and the two forgeries (a wrong `state`, a foreign `iss`).
 - [x] **`/mcp` shows `needs authentication`; the verbs work; print refuses `login` in words.**
       `tests/signing_in.rs` dials a scripted streamable-HTTP server: no entry → `NeedsAuth` and
-      an `auth` column reading *needs authentication*; a stored entry → the bearer on the wire
+      an `auth` column reading a dash (the status column already says it); a stored entry → the bearer on the wire
       and `Connected`; a mid-session `401` → the tool call fails, the manager renews and redials
       on its own task, and `at_2` is written back; a renewal that fails → `NeedsAuth`; a person's
       own `Authorization` → `Failed`, never a sign-in. `/mcp tools` is
@@ -262,3 +262,43 @@ Exit criteria, item by item:
   the surface change; `docs/design/tui.md` and the TUI crate are untouched, as the brief says.
 - **Scope step-up on `403 insufficient_scope`** stays a non-goal: `challenge::probe` reads only
   `401`, and a `403` is a plain failure with a test that says so.
+
+### Review and live drive (2026-09-08, after the merge into `dev`)
+
+Three things the review changed. **A token the issuer gave no lifetime for
+read as stale** (`Tokens::is_fresh` on `expires_at: None`), so every dial
+renewed it and one with no refresh token was retired the moment it was won;
+`McpAuth::access_token` now sends it until the server refuses it, and the
+scope the person consented to is stored. **The ask door refused the login
+in a bypass session** — `HostHandle::ask` weighed the policy's stance on an
+`InteractionKind::Login`, which names no allowing option, and rejected it
+with *this question names no allowing option*; the door now weighs the
+stance only for a question or a form (ADR-0039, dated note), so `/mcp
+login` asks as `/login` does. **The `auth` column said *needs
+authentication* for every HTTP server nobody had signed in to**, deepwiki
+included, which never asks for one; a signed-out server reads as a dash
+and the status column keeps the word.
+
+Live, against the user's own settings (ten servers) in a harness-owned
+tmux pane, `BINGO_NO_BROWSER=1`:
+
+```text
+server                    status                              tools  auth
+binlesson                 needs authentication                    –  -
+cloudflare                needs authentication                    –  -
+deepwiki                  connected                               3  -
+dokploy                   connected                              67  -
+laplace                   connected                              18  -
+```
+
+`/mcp tools laplace` listed eighteen tools with their first lines; `/mcp
+login binlesson` opened the *Sign in to binlesson* dialog with the real
+authorize URL — `binlesson.ruobin.dev/api/auth/oauth2/authorize`, a client
+id the AS registered on the spot, `code_challenge_method=S256`, `resource=
+https://binlesson.ruobin.dev/api/mcp`, `state` — and `esc` cancelled it.
+`bingo mcp login binlesson --paste < /dev/null` printed the same URL and
+refused the empty paste. The browser consent itself is the user's step and
+was not driven. Carried: each cancelled login leaves one dynamic
+registration behind on the AS, since the client is written only with its
+tokens; and with ten servers dialled at once, one or two hit the dial's 5 s
+connect timeout on each start — older than this milestone.
