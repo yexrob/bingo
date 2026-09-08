@@ -14,16 +14,44 @@ pub struct Repo {
 impl Repo {
     /// A checkout with one commit, or `None` when `git` cannot be run.
     pub fn init() -> Option<Self> {
+        Self::begun_with("seed\n")
+    }
+
+    /// A checkout whose one commit holds this text. Two checkouts begun in
+    /// the same second with the same bytes are, to `git`, the same commit,
+    /// so a test that wants two repositories seeds them differently.
+    pub fn begun_with(seed: &str) -> Option<Self> {
+        let repo = Self::empty()?;
+        let root = repo.root();
+        std::fs::write(root.join("seed"), seed).ok()?;
+        run(&root, &["add", "-A"])?;
+        run(&root, &["commit", "--quiet", "-m", "seed"])?;
+        Some(repo)
+    }
+
+    /// A repository that has not begun: initialised, nothing committed.
+    pub fn empty() -> Option<Self> {
         let dir = tempfile::tempdir().ok()?;
         let root = dir.path().join("main");
         std::fs::create_dir_all(&root).ok()?;
         run(&root, &["init", "--quiet"])?;
         run(&root, &["config", "user.email", "test@bingo"])?;
         run(&root, &["config", "user.name", "test"])?;
-        std::fs::write(root.join("seed"), "seed\n").ok()?;
-        run(&root, &["add", "-A"])?;
-        run(&root, &["commit", "--quiet", "-m", "seed"])?;
         Some(Self { dir })
+    }
+
+    /// The commit the checkout began with, as `git` itself reports it.
+    pub fn root_commit(&self) -> Option<String> {
+        let output = Command::new("git")
+            .args(["rev-list", "--max-parents=0", "HEAD"])
+            .current_dir(self.root())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     pub fn root(&self) -> PathBuf {

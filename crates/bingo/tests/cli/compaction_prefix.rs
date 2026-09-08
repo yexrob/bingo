@@ -4,11 +4,7 @@ use super::stream_json::{Ended, Host};
 use super::*;
 use serde_json::Value;
 
-fn conversation(
-    server: &wiremock::MockServer,
-    home: &std::path::Path,
-    settings: &std::path::Path,
-) -> Command {
+fn conversation(server: &wiremock::MockServer, home: &std::path::Path) -> Command {
     let mut command = bingo();
     command
         .env("OPENAI_API_KEY", "sk-test")
@@ -26,9 +22,7 @@ fn conversation(
             "json",
             "--cwd",
         ])
-        .arg(home)
-        .arg("--settings")
-        .arg(settings);
+        .arg(home);
     command
 }
 
@@ -95,8 +89,7 @@ async fn scenario(fixtures: &[&str]) -> (Ended, Vec<Value>) {
     let server = responses_server(fixtures).await;
     let home = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join("AGENTS.md"), "Old project baseline.\n").unwrap();
-    let settings = script(r#"{"context":{"memory":false}}"#);
-    let command = conversation(&server, home.path(), settings.path());
+    let command = conversation(&server, home.path());
     let root = home.path().to_path_buf();
     let ended = tokio::task::spawn_blocking(move || run_compaction(command, root))
         .await

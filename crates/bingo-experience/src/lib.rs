@@ -3,7 +3,7 @@
 //! under one directory per project, ranked back into the prompt by a
 //! zero-dependency BM25.
 //!
-//! Facts about a project are the memory extractor's; this store keeps only
+//! Facts about a project are memory's (`bingo-context`); this store keeps only
 //! procedure, and the two never share a corpus or a prompt block.
 //!
 //! Four tools, two prompt blocks, one command:

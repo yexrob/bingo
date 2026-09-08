@@ -176,8 +176,6 @@ async fn knowledge_stays_fixed_between_rounds_and_refreshes_when_resumed() {
         "--permission-mode",
         "bypassPermissions",
     ]);
-    let settings = script(r#"{"context":{"memory":false}}"#);
-    command.arg("--settings").arg(settings.path());
     let out = complete(command).await;
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let frames = frames_of(&out);
@@ -221,9 +219,7 @@ async fn knowledge_stays_fixed_between_rounds_and_refreshes_when_resumed() {
     );
 
     let mut command = openai(&server, home.path(), "Continue.");
-    command
-        .args(["--continue", "--output-format", "json", "--settings"])
-        .arg(settings.path());
+    command.args(["--continue", "--output-format", "json"]);
     let resumed = complete(command).await;
     assert_eq!(resumed.status.code(), Some(0), "{}", stderr(&resumed));
     let requests: Vec<Value> = server

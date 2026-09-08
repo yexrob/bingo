@@ -128,64 +128,9 @@ fn an_overflow_after_many_rounds_is_summarised_and_the_turn_goes_on() {
 }
 
 #[test]
-fn a_working_turn_leaves_one_file_per_fact_in_the_project_memory() {
+fn a_memory_the_model_writes_by_hand_is_what_memory_lists() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("notes.txt"), "alpha\n").unwrap();
-    // A tool round and the answer; what the extractor is told at turn end is
-    // a side answer, never one of the conversation's.
-    let first = script(
-        r#"{"responses":[
-            {"steps":[{"toolCall":{"name":"Read","input":{"file_path":"notes.txt"}}}]},
-            {"steps":[{"text":"One line."}]}
-        ],"side":[
-            {"steps":[{"text":"notes.txt holds the alpha list\nthe project has no build step"}]}
-        ]}"#,
-    );
-    let out = run(bingo()
-        .env("BINGO_FAKE_SCRIPT", first.path())
-        .envs(home_env(home.path()))
-        .args(["--print", "--cwd"])
-        .arg(home.path())
-        .arg("what is in notes.txt?"));
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert_eq!(stdout(&out), "One line.\n");
-
-    let scope = only_scope(&home.path().join(".bingo/data/memory"));
-    let index = std::fs::read_to_string(scope.join("MEMORY.md")).unwrap();
-    assert_eq!(index.lines().count(), 2, "{index}");
-    assert!(
-        index.contains("(notes-txt-holds-the-alpha-list.md)"),
-        "{index}"
-    );
-    assert!(
-        index.contains("(the-project-has-no-build-step.md)"),
-        "{index}"
-    );
-
-    let fact = std::fs::read_to_string(scope.join("notes-txt-holds-the-alpha-list.md")).unwrap();
-    assert!(
-        fact.starts_with("---\nname: notes-txt-holds-the-alpha-list\n"),
-        "{fact}"
-    );
-    assert!(fact.contains("\ntype: project\n"), "{fact}");
-    assert!(fact.contains("notes.txt holds the alpha list"), "{fact}");
-
-    // The next run reads the index back into the prompt and learns nothing new
-    // from a turn without a tool call.
-    let again = script(r#"{"responses":[{"steps":[{"text":"Still one line."}]}]}"#);
-    let out = run(bingo()
-        .env("BINGO_FAKE_SCRIPT", again.path())
-        .envs(home_env(home.path()))
-        .args(["--print", "--cwd"])
-        .arg(home.path())
-        .arg("and now?"));
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert_eq!(
-        std::fs::read_to_string(scope.join("MEMORY.md")).unwrap(),
-        index
-    );
-
-    // And `/memory` shows the person the same facts the model reads.
+    // Nothing is remembered, and `/memory` says where a memory would go.
     let listing = script(r#"{"responses":[]}"#);
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", listing.path())
@@ -194,21 +139,57 @@ fn a_working_turn_leaves_one_file_per_fact_in_the_project_memory() {
         .arg(home.path())
         .arg("/memory"));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    let table = stdout(&out);
-    assert!(table.contains("notes-txt-holds-the-alpha-list"), "{table}");
-    assert!(table.contains("the-project-has-no-build-step"), "{table}");
-    assert!(table.contains("project"), "{table}");
-}
+    let said = stdout(&out);
+    let (_, project) = said.trim().rsplit_once(" and ").expect("two directories");
+    let project = std::path::PathBuf::from(project);
+    assert!(
+        project.starts_with(home.path().join(".bingo/data/memory")),
+        "{said}"
+    );
+    assert!(!project.exists(), "saying where is not creating it");
 
-/// The one project directory under `memory/`: a scope is a directory, and
-/// this run only ever worked in one project.
-fn only_scope(memory: &std::path::Path) -> std::path::PathBuf {
-    let mut scopes: Vec<std::path::PathBuf> = std::fs::read_dir(memory)
-        .expect("a memory directory")
+    // The model writes one with the tools it has: the file, then its line.
+    let file = project.join("the-build-is-cargo-test.md");
+    let fact = "---\nname: the-build-is-cargo-test\ndescription: how this project is tested\n\
+                type: project\n---\n\nRun `cargo test` from the root.\n";
+    let index = project.join("MEMORY.md");
+    let line =
+        "- [The build is cargo test](the-build-is-cargo-test.md) — how this project is tested\n";
+    let writing = script(
+        &serde_json::json!({"responses":[
+            {"steps":[{"toolCall":{"name":"Write","input":{"file_path":file,"content":fact}}}]},
+            {"steps":[{"toolCall":{"name":"Write","input":{"file_path":index,"content":line}}}]},
+            {"steps":[{"text":"Remembered."}]}
+        ]})
+        .to_string(),
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", writing.path())
+        .envs(home_env(home.path()))
+        .args(["--print", "--permission-mode", "bypassPermissions", "--cwd"])
+        .arg(home.path())
+        .arg("remember how the tests run"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Remembered.\n");
+    assert_eq!(std::fs::read_to_string(&index).unwrap(), line);
+
+    // `/memory` shows the person what the model wrote — and nothing else
+    // wrote anything: no turn is asked what it learned.
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", listing.path())
+        .envs(home_env(home.path()))
+        .args(["--print", "--cwd"])
+        .arg(home.path())
+        .arg("/memory"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let table = stdout(&out);
+    assert!(table.contains("the-build-is-cargo-test"), "{table}");
+    assert!(table.contains("how this project is tested"), "{table}");
+    assert!(table.contains("project"), "{table}");
+    let written: Vec<String> = std::fs::read_dir(&project)
+        .unwrap()
         .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(scopes.len(), 1, "{scopes:?}");
-    scopes.remove(0)
+    assert_eq!(written.len(), 2, "{written:?}");
 }

@@ -1,12 +1,10 @@
 //! What the agent remembers: one fact per file, in two directories, with each
 //! directory's index in the prompt and the bodies only when the model opens
-//! one (ADR-0044).
+//! one (ADR-0044). The model is the one writer (ADR-0049).
 
 mod command;
 pub(crate) mod dir;
 pub(crate) mod file;
-pub(crate) mod index;
-pub(crate) mod migrate;
 pub(crate) mod store;
 mod teach;
 
@@ -23,8 +21,9 @@ use crate::{baseline, files, root};
 
 /// Lines an index may spend in the prompt. Past it the newest are kept and
 /// the cut is said: a memory written this morning outranks one from last
-/// month, and an index is read newest-last.
-pub const INDEX_LINES: usize = 200;
+/// month, and an index is read newest-last. Sixty is a hint; two hundred was
+/// a document, and the lines that do not fit are the lines to merge.
+pub const INDEX_LINES: usize = 60;
 
 /// After the instructions, before anything a turn adds: what the agent
 /// remembers is context, not a rule.
@@ -60,16 +59,27 @@ impl ContextContributor for MemoryContributor {
 
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
         baseline::contribute(self.id(), query, async {
-            let root = root::of(query.cwd).await;
-            migrate::once(&self.data_dir, &root).await;
             vec![
                 teach::block(),
                 scope("the user", &dir::user(&self.data_dir)).await,
-                scope("this project", &dir::project(&self.data_dir, &root)).await,
+                scope(
+                    "this project",
+                    &project_dir(&self.data_dir, query.cwd).await,
+                )
+                .await,
             ]
         })
         .await
     }
+}
+
+/// Where this project's memories are: the root the directory belongs to and
+/// the commit its repository began with, asked once here so the contributor
+/// and the command answer the same directory.
+pub(crate) async fn project_dir(data_dir: &Path, cwd: &Path) -> PathBuf {
+    let root = root::of(cwd).await;
+    let commit = root::commit(&root).await;
+    dir::project(data_dir, &root, commit.as_deref())
 }
 
 /// One scope's index, under a heading that says where its directory is: the
@@ -171,8 +181,7 @@ mod tests {
     async fn the_prompt_carries_the_index_and_never_a_body() {
         let data = tempfile::tempdir().expect("a data dir");
         let cwd = tempfile::tempdir().expect("a cwd");
-        let root = cwd.path().canonicalize().expect("a real path");
-        let at = dir::project(data.path(), &root);
+        let at = project_dir(data.path(), cwd.path()).await;
         store::save(&at, &a_fact("a-fact", "one line"))
             .await
             .expect("a memory");
@@ -192,8 +201,7 @@ mod tests {
     async fn a_long_index_contributes_its_newest_lines_and_says_so() {
         let data = tempfile::tempdir().expect("a data dir");
         let cwd = tempfile::tempdir().expect("a cwd");
-        let root = cwd.path().canonicalize().expect("a real path");
-        let at = dir::project(data.path(), &root);
+        let at = project_dir(data.path(), cwd.path()).await;
         let long: String = (1..=INDEX_LINES + 10)
             .map(|i| format!("- [Fact {i}](fact-{i}.md) — line {i}\n"))
             .collect();
@@ -202,21 +210,9 @@ mod tests {
 
         let blocks = blocks(&data, cwd.path()).await;
         assert!(blocks[2].contains("[… 10 earlier lines not shown]"));
-        assert!(blocks[2].contains("fact-11.md") && blocks[2].contains("fact-210.md"));
+        let oldest_kept = format!("fact-{}.md", 11);
+        let newest = format!("fact-{}.md", INDEX_LINES + 10);
+        assert!(blocks[2].contains(&oldest_kept) && blocks[2].contains(&newest));
         assert!(!blocks[2].contains("fact-10.md"));
-    }
-
-    #[tokio::test]
-    async fn the_old_single_file_is_migrated_before_it_is_read() {
-        let data = tempfile::tempdir().expect("a data dir");
-        let cwd = tempfile::tempdir().expect("a cwd");
-        let root = cwd.path().canonicalize().expect("a real path");
-        let old = dir::legacy(data.path(), &root);
-        std::fs::create_dir_all(old.parent().expect("a parent")).expect("the memory dir");
-        std::fs::write(&old, "the tests run with cargo test\n").expect("the old file");
-
-        let blocks = blocks(&data, cwd.path()).await;
-        assert!(blocks[2].contains("imported.md"), "{}", blocks[2]);
-        assert!(!old.exists());
     }
 }

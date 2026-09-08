@@ -396,7 +396,7 @@ enum Beat {
 /// Expand one response into the beats its steps describe. `index` is the
 /// response's position in the script; block ids are derived from it, so the
 /// same script always yields the same ids.
-/// A request a plugin asks beside the conversation — a memory extractor's,
+/// A request a plugin asks beside the conversation — a compaction's summary,
 /// say — carries `provider_options.bingo.purpose`. The script's responses
 /// are the conversation's, so a scenario's responses land on the turns that
 /// asked for them; a side question is answered from `side`, or with nothing.
@@ -680,7 +680,7 @@ mod side_tests {
     use bingo_sdk::{Message, ProviderMetadata, Role};
     use futures::StreamExt;
 
-    /// A memory extractor's question is not the conversation's next turn:
+    /// A side question — a compaction's — is not the conversation's next turn:
     /// it is answered with nothing and the script's cursor does not move.
     #[tokio::test]
     async fn a_side_question_is_answered_with_nothing_and_takes_no_response() {

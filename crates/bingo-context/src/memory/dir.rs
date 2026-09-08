@@ -18,28 +18,33 @@ pub fn user(data_dir: &Path) -> PathBuf {
 }
 
 /// What this project taught the agent.
-pub fn project(data_dir: &Path, root: &Path) -> PathBuf {
-    data_dir.join(ROOT).join(key(root))
-}
-
-/// The one file a project's memory used to be, before it became a directory
-/// (ADR-0006 §7, amended by ADR-0044).
-pub fn legacy(data_dir: &Path, root: &Path) -> PathBuf {
-    data_dir.join(ROOT).join(format!("{}.md", key(root)))
+pub fn project(data_dir: &Path, root: &Path, commit: Option<&str>) -> PathBuf {
+    data_dir.join(ROOT).join(key(root, commit))
 }
 
 pub fn index(dir: &Path) -> PathBuf {
     dir.join(INDEX)
 }
 
+#[cfg(test)]
 pub fn file(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.md"))
 }
 
-/// This project's directory name: a readable name and a digest of the root's
-/// full path, because two checkouts both called `web` are two projects.
-pub fn key(root: &Path) -> String {
-    format!("{}-{}", name(root), digest(root))
+/// How many characters of a commit id name it: what `git` shows, doubled.
+const COMMIT_CHARS: usize = 16;
+
+/// This project's directory name: a readable name and what the project is —
+/// the commit its repository began with, so a checkout deleted and begun
+/// again is a new project and a worktree is the same one; outside git, a
+/// digest of the root's full path, because two directories both called
+/// `web` are two projects.
+pub fn key(root: &Path, commit: Option<&str>) -> String {
+    let what = match commit {
+        Some(commit) => commit.chars().take(COMMIT_CHARS).collect(),
+        None => digest(root),
+    };
+    format!("{}-{what}", name(root))
 }
 
 fn name(root: &Path) -> String {
@@ -73,19 +78,33 @@ fn digest(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    const BEGAN: &str = "2bf6c26a7362cd1f9e0d4a5b6c7d8e9f00112233";
+
     #[test]
-    fn a_key_is_stable_and_belongs_to_one_root() {
+    fn a_repository_is_keyed_by_the_commit_it_began_with() {
         let root = Path::new("/work/alpha/web");
-        assert_eq!(key(root), key(root));
-        assert_ne!(key(root), key(Path::new("/work/beta/web")));
-        assert!(key(root).starts_with("web-"), "{}", key(root));
-        assert_eq!(key(root).len(), "web-".len() + 16);
+        assert_eq!(key(root, Some(BEGAN)), "web-2bf6c26a7362cd1f");
+        assert_eq!(
+            key(Path::new("/work/beta/web"), Some(BEGAN)),
+            key(root, Some(BEGAN)),
+            "a second clone is the same project"
+        );
+        assert_ne!(key(root, Some(BEGAN)), key(root, Some("ffff")));
+    }
+
+    #[test]
+    fn a_directory_outside_git_is_keyed_by_its_path() {
+        let root = Path::new("/work/alpha/web");
+        assert_eq!(key(root, None), key(root, None));
+        assert_ne!(key(root, None), key(Path::new("/work/beta/web"), None));
+        assert!(key(root, None).starts_with("web-"), "{}", key(root, None));
+        assert_eq!(key(root, None).len(), key(root, Some(BEGAN)).len());
     }
 
     #[test]
     fn a_name_keeps_only_what_a_file_name_may_hold() {
         assert_eq!(
-            &key(Path::new("/work/my project.v2"))[.."my_project_v2".len()],
+            &key(Path::new("/work/my project.v2"), None)[.."my_project_v2".len()],
             "my_project_v2"
         );
     }
@@ -96,23 +115,16 @@ mod tests {
         let root = Path::new("/work/web");
         assert_eq!(user(data), Path::new("/data/memory/user"));
         assert_eq!(
-            project(data, root),
-            Path::new("/data/memory").join(key(root))
+            project(data, root, None),
+            Path::new("/data/memory").join(key(root, None))
         );
-        assert_ne!(user(data), project(data, root));
+        assert_ne!(user(data), project(data, root, None));
     }
 
     #[test]
     fn a_scope_holds_its_index_and_one_file_per_memory() {
-        let dir = project(Path::new("/data"), Path::new("/work/web"));
+        let dir = project(Path::new("/data"), Path::new("/work/web"), None);
         assert_eq!(index(&dir), dir.join("MEMORY.md"));
         assert_eq!(file(&dir, "a-fact"), dir.join("a-fact.md"));
-    }
-
-    #[test]
-    fn the_old_file_sits_beside_the_directory_that_replaced_it() {
-        let data = Path::new("/data");
-        let root = Path::new("/work/web");
-        assert_eq!(legacy(data, root), project(data, root).with_extension("md"),);
     }
 }

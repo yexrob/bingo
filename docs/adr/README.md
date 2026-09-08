@@ -32,3 +32,4 @@ first record; 0036 §2 answered it before it was named).
 - [0046 — The client opens the browser](0046-client-delegated-browser.md)
 - [0047 — The knob the model turns](0047-the-knob-the-model-turns.md)
 - [0048 — Stable request prefixes](0048-stable-request-prefixes.md)
+- [0049 — Memory has one writer](0049-memory-has-one-writer.md)
