@@ -473,6 +473,7 @@ name = "bingo-mcp"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "bingo-auth-oauth",
  "bingo-sdk",
  "insta",
  "proptest",
@@ -484,6 +485,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

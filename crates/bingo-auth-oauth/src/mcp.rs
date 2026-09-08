@@ -116,13 +116,25 @@ impl McpAuth {
         let tokens = self.tokens()?;
         match tokens.is_fresh(unix_now()) {
             true => Ok(tokens.access),
-            false => self.refresh().await,
+            false => self.refreshed(&tokens.access).await,
         }
     }
 
-    /// What a `401` asks for: renew even though the token looked fresh.
-    pub async fn refreshed(&self) -> Result<String, AuthError> {
-        self.refresh().await
+    /// What a `401` asks for: renew the token that bounced, even though its
+    /// expiry said it was fine — an issuer may retire one early, and the
+    /// server's refusal is the fact, not the clock.
+    ///
+    /// `stale` is the bearer that was refused. It is also what makes this
+    /// single flight without a second rule: a caller that waited for the lock
+    /// finds a different token stored and takes it, rather than renewing the
+    /// renewal.
+    pub async fn refreshed(&self, stale: &str) -> Result<String, AuthError> {
+        let _guard = self.refreshing.lock().await;
+        let tokens = self.tokens()?;
+        if tokens.access != stale {
+            return Ok(tokens.access);
+        }
+        self.renew(tokens).await
     }
 
     /// Sign in, and answer with the line a person reads. Re-authenticating is
@@ -289,14 +301,9 @@ impl McpAuth {
         }
     }
 
-    /// Single flight: the store is the one fact, so a caller that waited for
-    /// the lock re-reads it and finds the token somebody else already renewed.
-    async fn refresh(&self) -> Result<String, AuthError> {
-        let _guard = self.refreshing.lock().await;
-        let tokens = self.tokens()?;
-        if tokens.is_fresh(unix_now()) {
-            return Ok(tokens.access);
-        }
+    /// The exchange itself, under the refresh lock. The store is the one
+    /// fact: what this writes is what every later reader sees.
+    async fn renew(&self, tokens: Tokens) -> Result<String, AuthError> {
         let Some(refresh) = tokens.refresh.clone() else {
             return Err(self.retire("the stored token expired and nothing renews it".into()));
         };

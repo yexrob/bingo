@@ -5,7 +5,7 @@
 //! every call no matter what `readOnlyHint` said (ADR-0009 §2).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use bingo_sdk::{
@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::client::Asker;
 use crate::dial::Service;
+use crate::manager::Manager;
 
 /// The model-visible name of a server's tool.
 ///
@@ -37,6 +38,10 @@ pub struct McpTool {
     service: Arc<Service>,
     /// Who a question this server raises mid-call reaches (ADR-0039 §1).
     asker: Arc<Asker>,
+    /// Who to tell when this server refuses a call with a `401` (ADR-0050
+    /// §3). Weak: the manager owns the connection this tool answers on, and
+    /// a tool a turn is still holding must not keep the manager alive.
+    manager: Weak<Manager>,
 }
 
 impl McpTool {
@@ -45,6 +50,7 @@ impl McpTool {
         listed: &rmcp::model::Tool,
         service: Arc<Service>,
         asker: Arc<Asker>,
+        manager: Weak<Manager>,
     ) -> Self {
         Self {
             server: server.to_string(),
@@ -57,6 +63,17 @@ impl McpTool {
             input_schema: input_schema(&listed.input_schema),
             service,
             asker,
+            manager,
+        }
+    }
+
+    /// The call was refused with a `401`: the bearer this connection was
+    /// dialled with has stopped working mid-session. The model is told the
+    /// call failed; the renewal and the redial happen on the manager's own
+    /// task, because a tool call must not wait seconds for a handshake.
+    async fn signed_out(&self) {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.signed_out(&self.server).await;
         }
     }
 }
@@ -159,7 +176,15 @@ impl Tool for McpTool {
             () = cx.cancel.cancelled() => return Err(ToolError::Cancelled),
             answered = self.service.call_tool(params) => answered,
         };
-        let result = answered.map_err(|e| ToolError::Failed(format!("{}: {e}", self.server)))?;
+        let result = match answered {
+            Ok(result) => result,
+            Err(refused) => {
+                if crate::auth::call_wants_authorization(&refused) {
+                    self.signed_out().await;
+                }
+                return Err(ToolError::Failed(format!("{}: {refused}", self.server)));
+            }
+        };
         Ok(output(result))
     }
 }

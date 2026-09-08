@@ -78,11 +78,22 @@ async fn connected() -> (Arc<Manager>, tempfile::TempDir) {
     );
     manager.dial_enabled().await;
     assert_eq!(
-        manager.statuses().await,
+        states(&manager).await,
         vec![("test".to_string(), Status::Connected { tools: 5 })],
         "the example server offers echo, noisy, boom, whereami and ask"
     );
     (manager, data)
+}
+
+/// What every configured server is doing, without the sign-in column the
+/// tests here have nothing to say about.
+async fn states(manager: &Arc<Manager>) -> Vec<(String, Status)> {
+    manager
+        .lines()
+        .await
+        .into_iter()
+        .map(|line| (line.server, line.status))
+        .collect()
 }
 
 async fn tool_named(manager: &Arc<Manager>, name: &str) -> Arc<dyn Tool> {
@@ -99,7 +110,7 @@ async fn tool_named(manager: &Arc<Manager>, name: &str) -> Arc<dyn Tool> {
 /// asynchronous, so a test that asks about it polls rather than sleeps.
 async fn settles(manager: &Arc<Manager>, name: &str, wanted: impl Fn(&Status) -> bool) -> Status {
     for _ in 0..600 {
-        let statuses = manager.statuses().await;
+        let statuses = states(manager).await;
         let status = statuses
             .iter()
             .find(|(server, _)| server == name)
@@ -587,8 +598,7 @@ async fn a_server_that_hangs_holds_up_neither_the_others_nor_the_source() {
         "the server that answered is offered while the other is still dialling"
     );
     assert_eq!(
-        manager
-            .statuses()
+        states(&manager)
             .await
             .iter()
             .find(|(name, _)| name == "slow")
@@ -605,7 +615,7 @@ async fn a_server_that_hangs_holds_up_neither_the_others_nor_the_source() {
 async fn a_server_that_never_answers_fails_at_the_deadline() {
     let (manager, _data) = manager(&[("slow", stdio("sleep", &["30"]))], &[]);
     assert_eq!(
-        manager.statuses().await,
+        states(&manager).await,
         vec![("slow".to_string(), Status::Connecting)],
         "connecting, from the moment it was configured"
     );
@@ -618,7 +628,7 @@ async fn a_server_that_never_answers_fails_at_the_deadline() {
         waited <= bingo_mcp::CONNECT_TIMEOUT + Duration::from_secs(1),
         "the dial took {waited:?}"
     );
-    let statuses = manager.statuses().await;
+    let statuses = states(&manager).await;
     let Some((_, Status::Failed { why })) = statuses.first() else {
         panic!("a server that answers nothing failed: {statuses:?}");
     };
@@ -643,7 +653,7 @@ async fn disabling_a_server_takes_its_tools_out_of_the_source() {
         }
     );
     assert!(source.tools().await.is_empty());
-    assert_eq!(manager.statuses().await[0].1, Status::Disabled);
+    assert_eq!(states(&manager).await[0].1, Status::Disabled);
 }
 
 #[tokio::test]
