@@ -1,5 +1,6 @@
-//! Slash commands. One registry serves dispatch, the catalog, completion and
-//! help. The session actor parses `/name args`, `!line` and `Input::Action`,
+//! Slash commands. One registry serves dispatch, the catalog and help; a
+//! surface completes a command's argument from the `ArgSpec` its catalogue
+//! entry carries, never by asking the command. The session actor parses `/name args`, `!line` and `Input::Action`,
 //! runs the command on its own task and answers with an `IntentAck` whose
 //! `Applied.result` is `{"message"}`, `{"view"}` or `{"item"}` (ADR-0008).
 
@@ -42,14 +43,6 @@ pub enum ArgSpec {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Completion {
-    pub value: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct CommandContext {
     pub session: SessionId,
@@ -90,10 +83,6 @@ pub enum CommandOutcome {
 #[async_trait]
 pub trait Command: Send + Sync {
     fn spec(&self) -> CommandSpec;
-
-    fn complete(&self, _partial: &str, _cx: &CommandContext) -> Vec<Completion> {
-        Vec::new()
-    }
 
     async fn run(&self, args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError>;
 }

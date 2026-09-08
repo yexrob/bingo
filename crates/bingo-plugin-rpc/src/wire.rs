@@ -3,7 +3,7 @@
 //!
 //! Every params and result type is an sdk type or a struct of sdk types. The
 //! bridge adds envelopes, never shapes: `ToolSpec`, `CommandSpec`,
-//! `ToolOutput`, `CommandOutcome`, `Completion`, `ContextPiece`, `Compaction`,
+//! `ToolOutput`, `CommandOutcome`, `ContextPiece`, `Compaction`,
 //! `ModelRequest`, `ModelEvent` and `ProviderError` cross verbatim, so a plugin
 //! author writes against the kernel's own vocabulary. What a process may not
 //! hold — the host handle a `ContextQuery` carries, the provider a
@@ -36,11 +36,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bingo_sdk::{
-    CommandOutcome, CommandSpec, CompactContext, CompactReason, Compaction, Completion,
-    ContextPiece, ContextQuery, ContextUsage, EndpointCapabilities, Env, Frame, HookContext,
-    HookMatcher, HookOutcome, Input, Item, ModelCapabilities, ModelEvent, ModelInfo, ModelRequest,
-    Phase, Placement, ProviderError, SessionId, SessionSummary, ToolCall, ToolOutput, ToolSpec,
-    TurnId,
+    CommandOutcome, CommandSpec, CompactContext, CompactReason, Compaction, ContextPiece,
+    ContextQuery, ContextUsage, EndpointCapabilities, Env, Frame, HookContext, HookMatcher,
+    HookOutcome, Input, Item, ModelCapabilities, ModelEvent, ModelInfo, ModelRequest, Phase,
+    Placement, ProviderError, SessionId, SessionSummary, ToolCall, ToolOutput, ToolSpec, TurnId,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
@@ -61,8 +60,6 @@ pub mod name {
     pub const TOOL_CALL: &str = "tool/call";
     /// Kernel → plugin: run one `/name`.
     pub const COMMAND_RUN: &str = "command/run";
-    /// Kernel → plugin: what could follow this `/name`'s partial argument.
-    pub const COMMAND_COMPLETE: &str = "command/complete";
     /// Kernel → plugin: what this contributor adds to the round in the query.
     pub const CONTEXT_CONTRIBUTE: &str = "context/contribute";
     /// Kernel → plugin: summarise this transcript.
@@ -248,21 +245,6 @@ pub struct CommandRunParams {
 #[serde(rename_all = "camelCase")]
 pub struct CommandRunResult {
     pub outcome: CommandOutcome,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandCompleteParams {
-    pub name: String,
-    pub partial: String,
-    pub cwd: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandCompleteResult {
-    #[serde(default)]
-    pub completions: Vec<Completion>,
 }
 
 /// One round, as a process that is not in the host can read it.
@@ -608,11 +590,6 @@ pub static METHODS: &[Method] = &[
         name::COMMAND_RUN,
         schema_of::<CommandRunParams>,
         schema_of::<CommandRunResult>,
-    ),
-    (
-        name::COMMAND_COMPLETE,
-        schema_of::<CommandCompleteParams>,
-        schema_of::<CommandCompleteResult>,
     ),
     (
         name::CONTEXT_CONTRIBUTE,

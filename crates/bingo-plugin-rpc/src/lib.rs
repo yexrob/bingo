@@ -22,7 +22,6 @@ pub mod bridge;
 pub mod codec;
 pub mod command;
 pub mod compactor;
-pub mod completions;
 pub mod config;
 pub mod connection;
 pub mod contributor;

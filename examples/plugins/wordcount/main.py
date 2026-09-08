@@ -133,21 +133,9 @@ def command_run(request_id, params):
     answer(request_id, {"outcome": {"kind": "view", "view": table(path, counts)}})
 
 
-def command_complete(request_id, params):
-    """What could follow `/wordcount `: the files in the working directory."""
-    partial = params.get("partial", "")
-    try:
-        names = sorted(os.listdir(params.get("cwd", ".")))
-    except OSError:
-        names = []
-    found = [{"value": name} for name in names if name.startswith(partial)]
-    answer(request_id, {"completions": found[:20]})
-
-
 METHODS = {
     "tool/call": tool_call,
     "command/run": command_run,
-    "command/complete": command_complete,
 }
 
 

@@ -28,7 +28,7 @@ pub mod tokens;
 pub mod tool;
 pub mod view;
 
-pub use command::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, Completion};
+pub use command::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec};
 pub use compactor::{CompactContext, CompactError, CompactReason, Compaction, Compactor};
 pub use contributor::{
     CONTRIBUTOR_PREFIX, ContextContributor, ContextError, ContextPiece, ContextQuery, Placement,

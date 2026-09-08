@@ -29,17 +29,16 @@ use bingo_plugin_rpc::codec::{
 };
 use bingo_plugin_rpc::doors;
 use bingo_plugin_rpc::wire::{
-    CommandCompleteParams, CommandCompleteResult, CommandRunParams, CommandRunResult,
-    CompactorCompactParams, CompactorCompactResult, CompactorSpec, ContextContributeParams,
-    ContextContributeResult, ContributorSpec, InitializeResult, PROTOCOL, ProviderCancelParams,
-    ProviderDeltaParams, ProviderSpec, ProviderStreamParams, ProviderStreamResult,
-    ServiceCallParams, ServiceCallResult, ServiceSpec, ToolCallParams, ToolCallResult,
-    ToolCancelParams, ToolProgressParams, name,
+    CommandRunParams, CommandRunResult, CompactorCompactParams, CompactorCompactResult,
+    CompactorSpec, ContextContributeParams, ContextContributeResult, ContributorSpec,
+    InitializeResult, PROTOCOL, ProviderCancelParams, ProviderDeltaParams, ProviderSpec,
+    ProviderStreamParams, ProviderStreamResult, ServiceCallParams, ServiceCallResult, ServiceSpec,
+    ToolCallParams, ToolCallResult, ToolCancelParams, ToolProgressParams, name,
 };
 use bingo_sdk::{
-    ArgSpec, CommandOutcome, CommandSpec, CompactReason, Compaction, Completion, ContentPart,
-    ContextPiece, EndpointCapabilities, FinishReason, ItemId, ModelEvent, ModelInfo, ModelRequest,
-    Placement, ProviderError, Role, ToolOutput, ToolSpec, UnifiedFinish, Usage,
+    ArgSpec, CommandOutcome, CommandSpec, CompactReason, Compaction, ContentPart, ContextPiece,
+    EndpointCapabilities, FinishReason, ItemId, ModelEvent, ModelInfo, ModelRequest, Placement,
+    ProviderError, Role, ToolOutput, ToolSpec, UnifiedFinish, Usage,
 };
 use serde_json::{Value, json};
 
@@ -151,7 +150,6 @@ fn request_line(request: Request, options: &Options, state: &mut State) -> bool 
         }
         name::TOOL_CALL => return call(request.id, request.params, state),
         name::COMMAND_RUN => answer(request.id, run(request.params)),
-        name::COMMAND_COMPLETE => answer(request.id, complete(request.params)),
         name::CONTEXT_CONTRIBUTE => answer(request.id, contribute(request.params)),
         name::COMPACTOR_COMPACT => answer(request.id, compact(request.params)),
         name::PROVIDER_STREAM => return stream(request.id, request.params, state),
@@ -641,19 +639,6 @@ fn run(params: Value) -> Value {
         outcome: CommandOutcome::Applied {
             message: Some(format!("stub in {}: {}", params.cwd.display(), params.args)),
         },
-    })
-    .unwrap_or(Value::Null)
-}
-
-fn complete(params: Value) -> Value {
-    let Ok(params) = serde_json::from_value::<CommandCompleteParams>(params) else {
-        return Value::Null;
-    };
-    serde_json::to_value(CommandCompleteResult {
-        completions: vec![Completion {
-            value: format!("{}-one", params.partial),
-            label: None,
-        }],
     })
     .unwrap_or(Value::Null)
 }

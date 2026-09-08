@@ -45,7 +45,6 @@ write your own. In short:
   and leave the rest out.
 - **Calls** are `tool/call {callId, name, input, cwd, session, turn}` →
   `{output}`, `command/run {name, args, cwd, session}` → `{outcome}`,
-  `command/complete {name, partial, cwd}` → `{completions}`,
   `context/contribute {id, query}` → `{pieces}` and
   `compactor/compact {id, context, reason}` → `{compaction}`.
 - **Services** are the one method that travels both ways: `service/call

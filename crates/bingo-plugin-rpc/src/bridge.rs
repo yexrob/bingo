@@ -28,7 +28,6 @@ use tokio::time::Instant;
 
 use crate::command::PluginCommand;
 use crate::compactor::RemoteCompactor;
-use crate::completions::Completions;
 use crate::connection::Connection;
 use crate::contributor::RemoteContributor;
 use crate::deadline;
@@ -117,9 +116,6 @@ pub struct Bridge {
     /// Where this plugin's own `service/call` is routed, and where the
     /// services it declares are published (ADR-0031 §4).
     host: HostHandle,
-    /// One per plugin, not one per command object: a command object is built
-    /// afresh on every source read.
-    completions: Arc<Completions>,
     state: Mutex<State>,
 }
 
@@ -150,7 +146,6 @@ impl Bridge {
             notices: setting.notices,
             doors: setting.doors,
             host: setting.host,
-            completions: Arc::new(Completions::default()),
             state: Mutex::new(State::default()),
         }
     }
@@ -241,7 +236,6 @@ impl Bridge {
                     &self.name,
                     spec.clone(),
                     Arc::clone(&live.connection),
-                    Arc::clone(&self.completions),
                 )) as Arc<dyn SdkCommand>
             })
             .collect()

@@ -306,7 +306,6 @@ mod tests {
             "CommandSpec",
             "ToolOutput",
             "CommandOutcome",
-            "Completion",
             "View",
             "ContextPiece",
             "Placement",

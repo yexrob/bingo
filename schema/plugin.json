@@ -360,37 +360,6 @@
         }
       ]
     },
-    "CommandCompleteParams": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "partial": {
-          "type": "string"
-        },
-        "cwd": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "partial",
-        "cwd"
-      ]
-    },
-    "CommandCompleteResult": {
-      "type": "object",
-      "properties": {
-        "completions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Completion"
-          },
-          "default": []
-        }
-      }
-    },
     "CommandOutcome": {
       "oneOf": [
         {
@@ -761,23 +730,6 @@
         "id"
       ],
       "description": "A compaction strategy a process says it has. One field, and the same shape\nas every other declaration: a plugin's answer to \"what do you contribute\"\nreads the same way whatever the kind."
-    },
-    "Completion": {
-      "type": "object",
-      "properties": {
-        "value": {
-          "type": "string"
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "value"
-      ]
     },
     "ConfigView": {
       "type": "object",
@@ -5053,14 +5005,6 @@
       },
       "result": {
         "$ref": "#/$defs/CommandRunResult"
-      }
-    },
-    "command/complete": {
-      "params": {
-        "$ref": "#/$defs/CommandCompleteParams"
-      },
-      "result": {
-        "$ref": "#/$defs/CommandCompleteResult"
       }
     },
     "context/contribute": {
