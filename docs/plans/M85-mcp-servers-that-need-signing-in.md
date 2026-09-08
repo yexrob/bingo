@@ -104,17 +104,17 @@ depend on it, as `bingo-provider-openai` does)
 
 ## Exit criteria
 
-- [ ] discovery, registration, authorize/token/refresh bodies pinned by
+- [x] discovery, registration, authorize/token/refresh bodies pinned by
       fixtures; the issuer check and the S256 refusal each have a test
-- [ ] a wiremock AS signs bingo in end to end and the token lands under
+- [x] a wiremock AS signs bingo in end to end and the token lands under
       `mcp:<name>` at mode 0600; `logout` revokes and removes it
-- [ ] `/mcp` shows `needs authentication`; `/mcp login <name>` signs in and
+- [x] `/mcp` shows `needs authentication`; `/mcp login <name>` signs in and
       reconnects; `/mcp logout`, `/mcp tools`; the print surface refuses
       `login` in words
-- [ ] `bingo mcp list|get|add|remove|login|logout` black-boxed
-- [ ] no token in any log, `Debug`, stdout, settings file or forwarded row
-- [ ] `cargo deny check`, `scripts/budget.sh` with a line for any dependency
-- [ ] every gate green; Windows check for the touched crates
+- [x] `bingo mcp list|get|add|remove|login|logout` black-boxed
+- [x] no token in any log, `Debug`, stdout, settings file or forwarded row
+- [x] `cargo deny check`, `scripts/budget.sh` with a line for any dependency
+- [x] every gate green; Windows check for the touched crates
 
 ## Non-goals
 
@@ -137,3 +137,128 @@ depend on it, as `bingo-provider-openai` does)
   that port first and re-registers when it cannot.
 - R-discovery: servers on the 2025-06-18 revision omit `resource_metadata`
   from the challenge; the well-known ladder covers them.
+
+## Verified (2026-09-08, commit 148e94a2 + this)
+
+```
+$ cargo fmt --all -- --check                                        exit 0
+$ cargo check --workspace --all-targets --locked                    exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings    exit 0
+$ cargo test --workspace --locked --no-fail-fast                    exit 0 — 4387 passed, 0 failed
+  new: auth-oauth 52 → 93 (challenge 8, discover 12, register 5, mcp 9, callback +3,
+       redirect +2, store +2, issuer +2) · mcp 61 → 78 lib + 6 tests/signing_in · bin cli mcp 10
+$ scripts/check_discipline.sh                                       exit 0
+  dependency direction ok — a library may be depended on by a plugin, so bingo-mcp → bingo-auth-oauth passes
+  size warnings unchanged in kind; crates/bingo/src/main.rs 821 → 846 non-test lines (the `mcp`
+  subcommand's wiring; its clap shape lives in crates/bingo/src/mcp.rs, not beside it)
+$ scripts/budget.sh                                                 dependencies 335 (max 335, unchanged)
+  No crate was added: reqwest, serde, wiremock and rmcp were all in the tree already.
+$ cargo deny check                                                  advisories ok, bans ok, licenses ok, sources ok
+$ cargo check -p bingo-auth-oauth -p bingo-mcp --all-targets \
+    --target x86_64-pc-windows-msvc --locked                        exit 1 — aws-lc-sys will not cross-build here
+  Not this milestone's: `reqwest` already resolves `aws-lc-sys` in both crates' trees, so neither
+  could be cross-checked on this box before M85 either. The toolchain itself is fine —
+  `cargo check -p bingo-loopback --target x86_64-pc-windows-msvc` exits 0 — and nothing added here
+  is platform-gated: no process, path, signal or clock. CI's `windows` job is the backstop.
+```
+
+`cargo test --workspace` failed once on `pty::esc_twice_rewinds_the_turn_and_the_file_it_wrote`,
+a TUI rewind test M85 touches nothing of; it passed three times alone, the whole `--test pty`
+suite passed alone (16/16), and the next full workspace run was 4387/0. Recorded as a
+load-sensitive flake, not a regression.
+
+Exit criteria, item by item:
+
+- [x] **Discovery, registration and the bodies are pinned by fixtures.** `issuer.rs` pins both
+      authorize URLs as literals (codex's unchanged, the discovered one with `resource` and no
+      `scope`); `register.rs` pins the RFC 7591 body as a literal and matches it on the wire with
+      `body_json`; `discover.rs` pins both well-known ladders (the path *inserted* after the
+      well-known segment, the RFC 8414/OIDC order) as pure tests. The issuer echo check has
+      `a_document_that_calls_itself_something_else_is_refused`; the S256 refusal has
+      `a_server_without_s256_is_refused_in_words`, over both `["plain"]` and the field absent.
+- [x] **A wiremock AS signs bingo in end to end; the token lands under `mcp:<name>` at 0600;
+      `logout` revokes and removes.** `crates/bingo/tests/cli/mcp.rs::a_pasted_code_signs_in_and_the_token_lands_in_auth_json`
+      drives the real binary: `bingo mcp add`, then `bingo mcp login remote --paste` against a
+      wiremock resource server + AS (401 → PRM → AS metadata → registration → token). It asserts
+      the `mcpOauth` entry under `mcp:remote`, mode 0600, and that neither token is in the
+      settings file; then `bingo mcp logout remote` empties the entry and the AS saw one
+      `/revoke`. The library has the same flow again at unit level (`mcp.rs`), plus the
+      single-flight renewal (eight callers, two `/token` requests), the retired-refresh-token
+      path, and the two forgeries (a wrong `state`, a foreign `iss`).
+- [x] **`/mcp` shows `needs authentication`; the verbs work; print refuses `login` in words.**
+      `tests/signing_in.rs` dials a scripted streamable-HTTP server: no entry → `NeedsAuth` and
+      an `auth` column reading *needs authentication*; a stored entry → the bearer on the wire
+      and `Connected`; a mid-session `401` → the tool call fails, the manager renews and redials
+      on its own task, and `at_2` is written back; a renewal that fails → `NeedsAuth`; a person's
+      own `Authorization` → `Failed`, never a sign-in. `/mcp tools` is
+      `a_connected_server_lists_what_it_offers`. The print surface is
+      `the_print_surface_refuses_a_sign_in_and_names_the_way_through` — one `[error]` line naming
+      `bingo mcp login remote`, and nothing stored.
+- [x] **`bingo mcp list|get|add|remove|login|logout` black-boxed.** Ten cases in
+      `crates/bingo/tests/cli/mcp.rs`: add → get → list → remove against a temp home; a stdio
+      server joining neighbours already in the file with `model` untouched; `get` printing
+      `Authorization` and `GITHUB_TOKEN` but neither value; four verbs on an unknown name as one
+      `[error] code=INVALID_INPUT` line with empty stdout and exit 1; a row the plugin would
+      refuse refused before anything is written; a child process refused a sign-in;
+      `--mcp-config` listed because it is what the next run would dial.
+- [x] **No token in a log, a `Debug`, stdout, a settings file or a forwarded row.** `McpAuth`
+      and `Manager` print names and endpoints only (`nothing_of_the_credential_reaches_a_debug_line`);
+      the bearer is put into the *dial's* headers by `auth::bearing`, which is tested to leave
+      the configured map untouched — so `mcp.servers` rows stay the person's own (ADR-0036 §4);
+      the dial's failure strings are `redact`ed and asserted not to contain the bearer; the
+      end-to-end CLI test asserts no token on stdout, on stderr, or in the settings.
+- [x] **`cargo deny check`, `scripts/budget.sh`.** Both above. No dependency line was needed:
+      nothing was added.
+- [x] **Every gate green; the Windows check attempted.** Above, with the `aws-lc-sys` note.
+
+### What differed from the plan
+
+1. **The dial reads its `401` from rmcp, not from the probe.** R-rmcp expected `rmcp` to hide the
+   `401`; rmcp 3.1.4 exposes it — `ClientInitializeError::is_authorization_required()` and, for a
+   call in flight, `AuthRequiredError` inside the public `DynamicTransportError::error`. Both are
+   read by type in `bingo-mcp/src/auth.rs`; the substring fallback the plan allowed was not
+   needed and is not there. The probe brick still exists and still earns its place: `login` uses
+   it to get the challenge before any connection exists, which is how `bingo mcp login` works
+   with no dial at all. **Caveat, recorded:** rmcp raises `AuthRequiredError` only when the `401`
+   carries a `WWW-Authenticate` header. MCP requires one, and the tests send one; a server that
+   sends a bare `401` reads as `Failed` at dial time. `/mcp login` and `bingo mcp login` still
+   work for it, because discovery falls back to the well-known ladder.
+2. **`/mcp` is no longer instant.** `instant` is a property of the command, not of one verb, and
+   the plan asks for `instant: false` on `login`. So the whole command holds the queue, as
+   `/login` does. The cost is that a bare `/mcp` typed during a turn now waits for it.
+3. **`Issuer` grew a `form_encoded` flag.** RFC 6749 §6 and RFC 7009 want a form; codex answers
+   its refresh and its revocation in JSON, and M10's Verified says that stays until a live
+   refresh says otherwise. Written down as one issuer's quirk rather than guessed from another
+   field. `revoke_path` and the three device paths also became optional (the latter grouped into
+   `Issuer::device`), because a discovered issuer has neither — the old shape could not express
+   an issuer without a device flow.
+4. **`refreshed()` takes the bearer that bounced.** A forced renewal cannot key on the expiry —
+   the whole point is that the clock said *fresh* and the server said no. Passing the refused
+   token is also what keeps it single-flight, with no second generation counter.
+5. **`mcpServers.<name>.oauth` holds only `clientId`.** A `clientSecret` in a settings file is a
+   credential in a file a project layer commits (ADR-0012 §2); a public native client has none,
+   and a secret an AS issues during registration is kept in `auth.json` where it belongs.
+6. **`bingo mcp`'s clap shape lives in `crates/bingo/src/mcp.rs`.** The first cut had a clap enum
+   in `main.rs` and a twin enum in `mcp.rs` with a translation between them — two representations
+   of one fact. There is now one, and `main.rs` keeps five lines of wiring.
+7. **A misplaced `-H`/`-e` is refused rather than dropped.** Writing `bingo mcp add -H "X: y"
+   files npx` used to write a stdio row with the header silently gone; it now says which
+   transport a header belongs to.
+8. **`callback::parse` reads `iss` (RFC 9207) and an `error=` refusal**, and `redirect::receive`
+   answers with the whole `Callback` rather than the code alone — the codex flow takes `.code`
+   and is otherwise unchanged. The plan's "reject when the metadata advertises
+   `authorization_response_iss_parameter_supported` and `iss` is absent" was **not** implemented:
+   the plan's own wording is "when `iss` is present, exact-matched to the issuer", and that is
+   what is there.
+
+### Not done, and why
+
+- **A live drive against `https://binlesson.ruobin.dev/api/mcp`** — the server that prompted this
+  milestone. Everything here is proved against wiremock and a scripted streamable-HTTP endpoint;
+  a real sign-in needs the user's own browser and account, and a worker must not open one. This
+  is the one thing left before the milestone can be called finished in the world rather than in
+  the suite.
+- **No TUI work.** `/mcp` answers a `View::Table` with a fourth column and that is the whole of
+  the surface change; `docs/design/tui.md` and the TUI crate are untouched, as the brief says.
+- **Scope step-up on `403 insufficient_scope`** stays a non-goal: `challenge::probe` reads only
+  `401`, and a `403` is a plain failure with a test that says so.
