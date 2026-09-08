@@ -41,6 +41,11 @@ pub enum ArgSpec {
     Catalog {
         source: String,
     },
+    /// One of the words the command lists itself, in the order it offers
+    /// them. A surface completes from the list; the kernel carries it.
+    Words {
+        values: Vec<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -85,4 +90,23 @@ pub trait Command: Send + Sync {
     fn spec(&self) -> CommandSpec;
 
     async fn run(&self, args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The shape a surface and a plugin both read: the variant is its `kind`,
+    /// the words are `values`, in the command's own order.
+    #[test]
+    fn a_word_list_crosses_the_wire_as_its_kind_and_its_values() {
+        let args = ArgSpec::Words {
+            values: vec!["off".into(), "low".into()],
+        };
+        let wire = serde_json::to_value(&args).expect("serialises");
+        assert_eq!(wire, json!({ "kind": "words", "values": ["off", "low"] }));
+        let back: ArgSpec = serde_json::from_value(wire).expect("deserialises");
+        assert_eq!(back, args);
+    }
 }

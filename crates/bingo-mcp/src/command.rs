@@ -301,19 +301,15 @@ fn invalid(what: String) -> KernelError {
     )
 }
 
-const HINT: &str = "[login|logout|tools|reconnect|enable|disable <server>]";
-
 #[async_trait]
 impl Command for McpCommand {
     fn spec(&self) -> CommandSpec {
         CommandSpec {
             name: "mcp".into(),
             aliases: Vec::new(),
-            hint: HINT.into(),
-            args: ArgSpec::Free {
-                hint: "login <server> | logout <server> | tools <server> | \
-                       reconnect <server> | enable <server> | disable <server>"
-                    .into(),
+            hint: format!("[{} <server>]", Verb::ALL.map(Verb::as_str).join("|")),
+            args: ArgSpec::Words {
+                values: Verb::ALL.map(|verb| verb.as_str().to_string()).to_vec(),
             },
             // A sign-in takes minutes and asks through the session's dialog,
             // so this command holds the queue as `/login` does (ADR-0012 §5).
@@ -480,11 +476,11 @@ mod tests {
         assert_eq!(spec.name, "mcp");
         assert!(!spec.instant, "a sign-in asks a person and takes minutes");
         assert_eq!(spec.family, "mcp");
-        let ArgSpec::Free { hint } = spec.args else {
-            panic!("a verb and a server are free text");
+        let ArgSpec::Words { values } = spec.args else {
+            panic!("a verb is one of the words");
         };
+        assert_eq!(values, Verb::ALL.map(|verb| verb.as_str().to_string()));
         for verb in Verb::ALL {
-            assert!(hint.contains(verb.as_str()), "{verb:?} is not in the hint");
             assert!(spec.hint.contains(verb.as_str()), "{verb:?} is not offered");
         }
     }

@@ -54,8 +54,8 @@ impl Command for PermissionCommand {
             name: "permission".into(),
             aliases: vec!["permissions".into()],
             hint: "[mode]".into(),
-            args: ArgSpec::Free {
-                hint: "default | acceptEdits | plan | bypassPermissions | dontAsk".into(),
+            args: ArgSpec::Words {
+                values: Mode::ALL.map(|mode| mode.as_str().to_string()).to_vec(),
             },
             // Reading and setting the mode touch nothing the turn is using; the
             // mode the next call is decided against is the one set last.
@@ -336,11 +336,9 @@ mod tests {
         assert_eq!(spec.aliases, ["permissions"]);
         assert!(spec.instant, "reading a mode never waits for a turn");
         assert_eq!(spec.family, "session");
-        let ArgSpec::Free { hint } = spec.args else {
-            panic!("a mode is free text");
+        let ArgSpec::Words { values } = spec.args else {
+            panic!("a mode is one of the words");
         };
-        for mode in Mode::ALL {
-            assert!(hint.contains(mode.as_str()), "{mode} is not in the hint");
-        }
+        assert_eq!(values, Mode::ALL.map(|mode| mode.as_str().to_string()));
     }
 }

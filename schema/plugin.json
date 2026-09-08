@@ -253,6 +253,26 @@
             "source"
           ],
           "description": "Completed from a catalog kind the command validates against."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "words"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "description": "One of the words the command lists itself, in the order it offers\nthem. A surface completes from the list; the kernel carries it."
         }
       ]
     },

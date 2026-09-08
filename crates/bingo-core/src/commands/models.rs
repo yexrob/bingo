@@ -22,9 +22,9 @@ impl Command for ModelsCommand {
     fn spec(&self) -> CommandSpec {
         super::spec(
             "models",
-            "[refresh]",
-            ArgSpec::Free {
-                hint: "refresh".into(),
+            &format!("[{REFRESH}]"),
+            ArgSpec::Words {
+                values: vec![REFRESH.into()],
             },
             true,
         )
@@ -38,12 +38,12 @@ impl Command for ModelsCommand {
                     text: listing(&host).await?,
                 },
             }),
-            "refresh" => Ok(CommandOutcome::Applied {
+            REFRESH => Ok(CommandOutcome::Applied {
                 message: Some(counted(&host.refresh_models().await)),
             }),
             other => Err(KernelError::new(
                 ErrorCode::InvalidInput,
-                format!("unknown argument `{other}`; usage: /models [refresh]"),
+                format!("unknown argument `{other}`; usage: /models [{REFRESH}]"),
             )),
         }
     }
@@ -108,6 +108,8 @@ fn block(provider: &str, models: &[&CatalogEntry], asked: Option<String>) -> Vec
     lines
 }
 
+/// The one word `/models` takes: ask each endpoint again.
+const REFRESH: &str = "refresh";
 const ENDPOINT: &str = "endpoint";
 const CATALOGUE: &str = "catalogue";
 

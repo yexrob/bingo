@@ -75,7 +75,9 @@ impl Command for WakeCommand {
             name: "wake".into(),
             aliases: Vec::new(),
             hint: "the wake the model set, and `off` to end it".into(),
-            args: ArgSpec::Free { hint: OFF.into() },
+            args: ArgSpec::Words {
+                values: vec![OFF.into()],
+            },
             // Not read-only, and instant anyway: a person ending a loop must
             // be able to end it while the loop is running, and waiting for
             // the turn to end is exactly the moment the next wake comes. What
@@ -204,7 +206,12 @@ mod tests {
         assert_eq!(spec.name, "wake");
         assert!(spec.aliases.is_empty());
         assert!(spec.instant, "a loop is ended while it is running");
-        assert_eq!(spec.args, ArgSpec::Free { hint: OFF.into() });
+        assert_eq!(
+            spec.args,
+            ArgSpec::Words {
+                values: vec![OFF.into()]
+            }
+        );
         assert_eq!(spec.family, "schedule");
     }
 }
