@@ -155,7 +155,8 @@ impl McpCommand {
 fn unanswered(server: &str, error: bingo_auth_oauth::AuthError) -> KernelError {
     let message = match error {
         bingo_auth_oauth::AuthError::Cancelled => format!(
-            "the sign-in to {server} was not answered here;              run `bingo mcp login {server}` in a terminal"
+            "the sign-in to {server} was not answered here; \
+             run `bingo mcp login {server}` in a terminal"
         ),
         other => other.to_string(),
     };

@@ -193,7 +193,8 @@ fn entry(
             }
             if !variables.is_empty() {
                 return Err(invalid(
-                    "an environment variable belongs to a stdio server,                      which has a child process to give it to",
+                    "an environment variable belongs to a stdio server, \
+                     which has a child process to give it to",
                 ));
             }
             json!({ "type": "http", "url": first, "headers": pairs(headers, ':')? })
@@ -201,7 +202,8 @@ fn entry(
         Transport::Stdio => {
             if !headers.is_empty() {
                 return Err(invalid(
-                    "a header belongs to an http server; a stdio server is a                      child process, and its secrets go in its environment",
+                    "a header belongs to an http server; a stdio server is a \
+                     child process, and its secrets go in its environment",
                 ));
             }
             json!({ "type": "stdio", "command": first, "args": rest, "env": pairs(variables, '=')? })

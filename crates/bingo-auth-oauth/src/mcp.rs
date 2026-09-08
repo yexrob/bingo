@@ -111,10 +111,12 @@ impl McpAuth {
     }
 
     /// The bearer for the next dial: the stored token while it is fresh, a
-    /// renewed one otherwise.
+    /// renewed one otherwise. A token the issuer gave no lifetime for is
+    /// sent as it is — RFC 6749 only recommends `expires_in` — and the
+    /// server's refusal, not the clock, is what renews it ([`Self::refreshed`]).
     pub async fn access_token(&self) -> Result<String, AuthError> {
         let tokens = self.tokens()?;
-        match tokens.is_fresh(unix_now()) {
+        match tokens.expires_at.is_none() || tokens.is_fresh(unix_now()) {
             true => Ok(tokens.access),
             false => self.refreshed(&tokens.access).await,
         }
@@ -162,7 +164,9 @@ impl McpAuth {
         let tokens = self
             .authorize(prompter, &issuer, loopback, paste, open_browser && !paste)
             .await?;
-        self.store.write(&self.key(), entry_of(&client, &tokens))?;
+        let scope = Some(issuer.scope.clone()).filter(|scope| !scope.is_empty());
+        self.store
+            .write(&self.key(), entry_of(&client, &tokens, scope))?;
         self.forget_retirement();
         Ok(format!("Signed in to {}.", self.server))
     }
@@ -315,7 +319,9 @@ impl McpAuth {
         };
         let renewed = Tokens::from_response(&reply, unix_now()).merged(&tokens);
         let client = self.registered().ok_or(AuthError::SignedOut)?;
-        self.store.write(&self.key(), entry_of(&client, &renewed))?;
+        let scope = self.stored_scope();
+        self.store
+            .write(&self.key(), entry_of(&client, &renewed, scope))?;
         Ok(renewed.access)
     }
 
@@ -379,6 +385,15 @@ impl McpAuth {
         }
     }
 
+    /// What the person consented to at login, carried through a renewal
+    /// unchanged: a refresh reply that names no scope kept the one it had.
+    fn stored_scope(&self) -> Option<String> {
+        match self.stored()? {
+            Entry::McpOAuth { scope, .. } => scope,
+            _ => None,
+        }
+    }
+
     /// An unreadable store is not a credential; it is also not a decision a
     /// person can act on mid-dial, so it reads as signed out.
     fn stored(&self) -> Option<Entry> {
@@ -413,7 +428,7 @@ fn with_client(issuer: Issuer, client: &Client) -> Issuer {
     }
 }
 
-fn entry_of(client: &Client, tokens: &Tokens) -> Entry {
+fn entry_of(client: &Client, tokens: &Tokens, scope: Option<String>) -> Entry {
     Entry::McpOAuth {
         issuer: client.issuer.clone(),
         client_id: client.id.clone(),
@@ -422,7 +437,7 @@ fn entry_of(client: &Client, tokens: &Tokens) -> Entry {
         access: tokens.access.clone(),
         refresh: tokens.refresh.clone(),
         expires: tokens.expires_at.unwrap_or_default(),
-        scope: None,
+        scope,
     }
 }
 
@@ -761,6 +776,51 @@ mod tests {
         ));
         assert!(auth.stored().is_none(), "a dead credential is not kept");
         assert!(matches!(auth.status(), Status::Expired { .. }));
+    }
+
+    /// RFC 6749 §5.1 only recommends `expires_in`. A token given no
+    /// lifetime is sent until the server refuses it; treating it as stale
+    /// would renew on every dial, and retire a credential with no refresh
+    /// token the moment it was won.
+    #[tokio::test]
+    async fn a_token_with_no_lifetime_is_used_until_the_server_refuses_it() {
+        let server = MockServer::start().await;
+        authorization_server(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "access_token": "at_1", "token_type": "Bearer" })),
+            )
+            .mount(&server)
+            .await;
+        let home = tempfile::tempdir().expect("a home");
+        let auth = auth(&server, &home);
+        auth.login(
+            Arc::new(Pasting(Mutex::new(None))),
+            Some(LoginMethod::Paste),
+            false,
+        )
+        .await
+        .expect("a sign-in");
+        assert_eq!(
+            auth.access_token().await.expect("the token as it is"),
+            "at_1"
+        );
+        assert_eq!(auth.status(), Status::SignedIn { account: None });
+        let Some(Entry::McpOAuth { scope, .. }) = auth.stored() else {
+            panic!("the entry stays");
+        };
+        assert_eq!(
+            scope.as_deref(),
+            Some("mcp:tools"),
+            "what the 401 asked for"
+        );
+        assert!(matches!(
+            auth.refreshed("at_1").await,
+            Err(AuthError::Expired(_))
+        ));
+        assert!(auth.stored().is_none(), "refused and unrenewable: gone");
     }
 
     #[tokio::test]
