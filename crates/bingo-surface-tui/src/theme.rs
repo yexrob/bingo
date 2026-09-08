@@ -1155,7 +1155,6 @@ mod tests {
                     "panel.rs",
                     "preview.rs",
                     "rail.rs",
-                    "recap.rs",
                     "rewind.rs",
                     // The row a person is on in the one list of sessions:
                     // weight rather than hue, so `NO_COLOR` still says which

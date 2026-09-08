@@ -54,10 +54,14 @@ impl Hook for RecapHook {
     }
 
     async fn on_turn(&self, phase: Phase, turn: &TurnId, items: &[Item], cx: &HookContext) {
-        if phase != Phase::End || span(items) < RECAP_AFTER {
+        if phase != Phase::End {
             return;
         }
-        let Some(text) = ask(items, cx).await else {
+        let own = of_turn(turn, items);
+        if span(&own) < RECAP_AFTER {
+            return;
+        }
+        let Some(text) = ask(&own, cx).await else {
             return;
         };
         let payload = serde_json::json!({ "turn": turn, "text": text });
@@ -65,6 +69,18 @@ impl Hook for RecapHook {
             tracing::warn!(%error, "recap: not published");
         }
     }
+}
+
+/// The items of this turn alone. The kernel hands the hook the model's whole
+/// view — every turn so far — and a recap is about the one that just ended,
+/// not the session: measured over all of them, every turn after the second
+/// minute of a session would earn one.
+fn of_turn(turn: &TurnId, items: &[Item]) -> Vec<Item> {
+    items
+        .iter()
+        .filter(|item| item.turn.as_ref() == Some(turn))
+        .cloned()
+        .collect()
 }
 
 /// How long the turn ran, by its items' own clocks: from the first to start
@@ -148,11 +164,31 @@ mod tests {
     /// and its last completes that much later.
     fn turn_of(seconds: i64) -> Vec<Item> {
         let mut first = user("u", "make the thing");
+        first.turn = Some(TurnId::from_raw("trn_1"));
         first.started_at = Timestamp::UNIX_EPOCH;
         let mut last = tool("t", "Bash", r#"{"command":"cargo test"}"#, Some("ok"));
+        last.turn = Some(TurnId::from_raw("trn_1"));
         last.started_at = Timestamp::UNIX_EPOCH + SignedDuration::from_secs(1);
         last.completed_at = Some(Timestamp::UNIX_EPOCH + SignedDuration::from_secs(seconds));
         vec![first, last]
+    }
+
+    /// What the hook is handed is the whole view: an earlier turn's long
+    /// work in front of this turn's short one.
+    fn after_a_long_earlier_turn(seconds: i64) -> Vec<Item> {
+        let mut earlier = turn_of(600);
+        for item in &mut earlier {
+            item.turn = Some(TurnId::from_raw("trn_0"));
+        }
+        let mut this = turn_of(seconds);
+        for item in &mut this {
+            item.started_at += SignedDuration::from_secs(700);
+            item.completed_at = item
+                .completed_at
+                .map(|at| at + SignedDuration::from_secs(700));
+        }
+        earlier.extend(this);
+        earlier
     }
 
     fn context(journal: &Journal, provider: Option<Arc<dyn Provider>>) -> HookContext {
@@ -217,6 +253,42 @@ mod tests {
         assert_eq!(request.max_tokens, MAX_TOKENS);
         assert!(format!("{:?}", request.messages[0]).contains("cargo test"));
         assert_eq!(request.provider_options["bingo"]["purpose"], "recap");
+    }
+
+    /// The turn that ended is measured, not the session: the items in front
+    /// of it belong to turns already recapped or too short to be.
+    #[tokio::test]
+    async fn only_the_turn_that_ended_is_measured_and_read() {
+        let journal = Journal::at(std::env::temp_dir().as_path());
+        let provider = Arc::new(Scripted::saying("Did the short thing."));
+        ended(
+            &journal,
+            &after_a_long_earlier_turn(30),
+            Some(provider.clone()),
+        )
+        .await;
+        assert!(
+            recap(&journal).is_none(),
+            "a short turn after a long one asks nothing"
+        );
+        assert!(provider.requests().is_empty());
+
+        let mut long = after_a_long_earlier_turn(150);
+        let mut read = tool(
+            "t0",
+            "Bash",
+            r#"{"command":"the earlier turn"}"#,
+            Some("ok"),
+        );
+        read.turn = Some(TurnId::from_raw("trn_0"));
+        long.insert(0, read);
+        ended(&journal, &long, Some(provider.clone())).await;
+        assert_eq!(
+            recap(&journal).map(|r| r["text"].clone()),
+            Some("Did the short thing.".into())
+        );
+        let asked = format!("{:?}", provider.requests()[0].messages[0]);
+        assert!(!asked.contains("the earlier turn"), "{asked}");
     }
 
     #[tokio::test]

@@ -244,7 +244,7 @@ fn finished(state: &SessionState, now: Now) -> Option<Line<'static>> {
     let (what, when) = worked::words(turn, now.wall, &jiff::tz::TimeZone::system());
     Some(Line::from(vec![
         Span::styled(format!("{} ", theme::spark()), theme::presence()),
-        Span::styled(what, theme::text()),
+        Span::styled(what, theme::dim()),
         Span::styled(when, theme::dim()),
     ]))
 }

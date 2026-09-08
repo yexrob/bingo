@@ -61,7 +61,7 @@ fn place(
         }
         return;
     }
-    if *used + token_width > width && *used > 0 {
+    if *used + token_width > width && *used > 0 && token_width <= width {
         break_line(out, current, used);
     }
     if token_width <= width {
@@ -69,7 +69,10 @@ fn place(
         *used += token_width;
         return;
     }
-    for piece in split_wide(token, width) {
+    // Wider than any line: it is cut anyway, so its first piece fills what
+    // is left of this one — prose with no spaces in it, a long path — and
+    // the mark or word before it keeps its company.
+    for piece in split_wide(token, width, width - *used) {
         if *used + piece.width() > width && *used > 0 {
             break_line(out, current, used);
         }
@@ -94,16 +97,20 @@ fn break_line(out: &mut Vec<Line<'static>>, current: &mut Vec<Span<'static>>, us
     *used = 0;
 }
 
-/// A word longer than the whole line is cut on grapheme boundaries.
-fn split_wide(token: &str, width: usize) -> Vec<String> {
+/// A word longer than the whole line is cut on grapheme boundaries: the
+/// first piece to `first` columns, the room left on the line it starts on,
+/// and the rest to the width.
+fn split_wide(token: &str, width: usize, first: usize) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut piece = String::new();
     let mut used = 0usize;
+    let mut limit = if first == 0 { width } else { first };
     for grapheme in token.graphemes(true) {
         let w = grapheme.width();
-        if used + w > width && !piece.is_empty() {
+        if used + w > limit && !piece.is_empty() {
             pieces.push(std::mem::take(&mut piece));
             used = 0;
+            limit = width;
         }
         piece.push_str(grapheme);
         used += w;
@@ -158,6 +165,22 @@ mod tests {
     fn a_word_wider_than_the_line_is_cut() {
         let line = Line::from("abcdefghijkl");
         assert_eq!(text(&wrap(&line, 5)), vec!["abcde", "fghij", "kl"]);
+    }
+
+    /// Prose with no spaces in it — Chinese, a long path — starts beside the
+    /// mark that introduces it rather than under it on a line of its own.
+    #[test]
+    fn a_word_wider_than_the_line_fills_the_line_it_starts_on() {
+        let line = Line::from(vec![Span::raw("ab "), Span::raw("cdefghij")]);
+        assert_eq!(text(&wrap(&line, 5)), vec!["ab cd", "efghi", "j"]);
+        let line = Line::from(vec![
+            Span::raw("※ recap: "),
+            Span::raw("已经帮你查看了记忆索引"),
+        ]);
+        assert_eq!(
+            text(&wrap(&line, 14)),
+            vec!["※ recap: 已经", "帮你查看了记忆", "索引"]
+        );
     }
 
     #[test]

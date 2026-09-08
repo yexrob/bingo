@@ -34,12 +34,12 @@ pub fn of(state: &SessionState) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// `※ recap: …`, the mark and the word dim, the words plain, wrapped to the
-/// width and cut at [`ROWS`].
+/// `※ recap: …`, all of it dim — a glance under the worked row, not a
+/// paragraph of the answer — wrapped to the width and cut at [`ROWS`].
 pub fn rows(text: &str, width: usize) -> Vec<Line<'static>> {
     let line = Line::from(vec![
         Span::styled(format!("{} recap: ", theme::recap_mark()), theme::dim()),
-        Span::styled(text.to_string(), theme::text()),
+        Span::styled(text.to_string(), theme::dim()),
     ]);
     let mut rows = wrap::wrap(&line, width);
     if rows.len() > ROWS {
