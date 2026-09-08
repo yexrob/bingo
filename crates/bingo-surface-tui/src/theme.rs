@@ -126,9 +126,6 @@ pub struct Glyphs {
     pub ellipsis: &'static str,
     /// What opens an item of a list.
     pub point: &'static str,
-    /// What opens the recap under the worked row (M84): a reference mark,
-    /// because the row refers to the turn above it.
-    pub recap: &'static str,
     pub border: border::Set<'static>,
 }
 
@@ -147,7 +144,6 @@ pub const UNICODE: Glyphs = Glyphs {
     tree: ["├", "└"],
     ellipsis: "…",
     point: "•",
-    recap: "※",
     border: border::ROUNDED,
 };
 
@@ -175,7 +171,6 @@ pub const ASCII: Glyphs = Glyphs {
     tree: ["+", "+"],
     ellipsis: "...",
     point: "-",
-    recap: "*",
     border: border::Set {
         top_left: "+",
         top_right: "+",
@@ -1001,11 +996,6 @@ pub fn tick() -> &'static str {
     glyphs().tick
 }
 
-/// What opens the recap under the worked row (M84).
-pub fn recap_mark() -> &'static str {
-    glyphs().recap
-}
-
 /// A rule between blocks: the same stroke a box draws its edge with, because
 /// they are one line and not two facts.
 pub fn rule() -> &'static str {
@@ -1203,7 +1193,6 @@ mod tests {
                     "panel.rs",
                     "preview.rs",
                     "rail.rs",
-                    "recap.rs",
                     "rewind.rs",
                     "roster.rs",
                     "search.rs",
@@ -1254,7 +1243,7 @@ mod tests {
             (
                 "presence",
                 &[
-                    // The sparkle at rest, and a turn that is retrying.
+                    // A turn that is retrying.
                     "activity.rs",
                     // Which session asked, named after a card's own title —
                     // every card's head is written in one place (ADR-0010 §3).

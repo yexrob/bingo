@@ -174,12 +174,12 @@ mod tests {
         let line = Line::from(vec![Span::raw("ab "), Span::raw("cdefghij")]);
         assert_eq!(text(&wrap(&line, 5)), vec!["ab cd", "efghi", "j"]);
         let line = Line::from(vec![
-            Span::raw("※ recap: "),
+            Span::raw("⏺ 备注: "),
             Span::raw("已经帮你查看了记忆索引"),
         ]);
         assert_eq!(
             text(&wrap(&line, 14)),
-            vec!["※ recap: 已经", "帮你查看了记忆", "索引"]
+            vec!["⏺ 备注: 已经帮", "你查看了记忆索", "引"]
         );
     }
 

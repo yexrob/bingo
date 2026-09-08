@@ -66,6 +66,9 @@ pub fn words(turn: &LastTurn, now: Timestamp, zone: &TimeZone) -> (String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::Now;
+    use crate::test_support::*;
+    use crate::tree::Tree;
     use bingo_sdk::{ErrorCode, InterruptReason, KernelError, TurnId, Usage};
 
     fn at(second: i64) -> Timestamp {
@@ -124,5 +127,125 @@ mod tests {
         let (what, when) = words(&turn(failed, 7), at(7), &zone);
         assert_eq!(what, "Failed after 7s");
         assert_eq!(when, " · 22:13");
+    }
+
+    /// The closing row after a turn, found by its verb, wherever the screen
+    /// draws it.
+    fn after(tree: &Tree, now: Now, verb: &str) -> String {
+        let (ui, _) = scene();
+        draw_tree(80, 24, tree, &ui, now)
+            .lines()
+            .find(|line| line.contains(verb))
+            .map(|line| line.trim_matches('"').trim_end().to_string())
+            .unwrap_or_default()
+    }
+
+    /// A turn that ran `seconds` and ended as `status`, the frames stamped
+    /// with the clocks a real journal stamps them with.
+    fn ended(seconds: i64, status: bingo_sdk::TurnStatus) -> Tree {
+        let opened = frame(1, started("trn_1"));
+        let closed = bingo_sdk::Frame {
+            ts: opened.ts + jiff::SignedDuration::from_secs(seconds),
+            ..frame(2, completed("trn_1", status))
+        };
+        folded_tree(vec![opened, closed])
+    }
+
+    /// Once a turn is over the transcript closes with what it cost (M84):
+    /// the verb its verdict earns, how long it ran, and the hour it ended on.
+    #[test]
+    fn a_finished_turn_says_what_it_cost_under_its_answer() {
+        let (_, now) = scene();
+        let now = later(now, 911_000);
+        let done = after(
+            &ended(911, bingo_sdk::TurnStatus::Completed),
+            now,
+            "Worked for",
+        );
+        assert!(done.contains("Worked for 15m 11s · done "), "{done}");
+        assert!(!done.contains('('), "no key, no token count: {done}");
+
+        let stopped = bingo_sdk::TurnStatus::Interrupted {
+            reason: bingo_sdk::InterruptReason::UserCancel,
+        };
+        let stopped = after(&ended(42, stopped), now, "Stopped after");
+        assert!(stopped.contains("Stopped after 42s · "), "{stopped}");
+
+        let failed = bingo_sdk::TurnStatus::Failed {
+            error: bingo_sdk::KernelError::new(bingo_sdk::ErrorCode::Internal, "boom"),
+        };
+        let failed = after(&ended(7, failed), now, "Failed after");
+        assert!(failed.contains("Failed after 7s · "), "{failed}");
+    }
+
+    /// A turn that answered at once drew no row while it ran, and draws none
+    /// after; a session no turn has run in has nothing to say either.
+    #[test]
+    fn a_turn_that_answered_at_once_and_a_session_with_no_turn_say_nothing() {
+        let (_, now) = scene();
+        assert_eq!(
+            after(
+                &ended(0, bingo_sdk::TurnStatus::Completed),
+                now,
+                "Worked for"
+            ),
+            ""
+        );
+        let fresh = folded_tree(Vec::new());
+        assert_eq!(after(&fresh, now, "Worked for"), "");
+    }
+
+    /// The next turn takes the closing away. A wait on agents does not: the
+    /// turn is over and says what it cost under its answer, and the wait is
+    /// the band's own row over the composer.
+    #[test]
+    fn a_new_turn_takes_the_closing_away_and_a_wait_stands_beside_it() {
+        let (ui, now) = scene();
+        let mut again = ended(42, bingo_sdk::TurnStatus::Completed);
+        again.apply(&frame(3, started("trn_2")));
+        let at = later(now, 1_600);
+        assert_eq!(after(&again, at, "Worked for"), "");
+        assert!(draw_tree(80, 24, &again, &ui, at).contains("esc to interrupt"));
+
+        let mut waited = waited_on(1);
+        waited.apply(&frame(8, started("trn_1")));
+        let closed = bingo_sdk::Frame {
+            ts: ts() + jiff::SignedDuration::from_secs(42),
+            ..frame(9, completed("trn_1", bingo_sdk::TurnStatus::Completed))
+        };
+        waited.apply(&closed);
+        assert!(after(&waited, at, "Worked for").contains("Worked for 42s"));
+        assert!(draw_tree(80, 24, &waited, &ui, at).contains("Waiting for"));
+    }
+
+    /// The closing is the transcript's, not the band's: it stands under the
+    /// answer and scrolls with it, above the composer's band and the box.
+    #[test]
+    fn the_closing_stands_under_the_answer_and_not_over_the_composer() {
+        let (ui, now) = scene();
+        let now = later(now, 60_000);
+        let drawn = draw_tree(
+            80,
+            24,
+            &ended(42, bingo_sdk::TurnStatus::Completed),
+            &ui,
+            now,
+        );
+        let rows: Vec<&str> = drawn.lines().map(|l| l.trim_matches('"')).collect();
+        let worked = rows
+            .iter()
+            .position(|l| l.contains("Worked for 42s"))
+            .expect("the worked row");
+        let composer = rows
+            .iter()
+            .position(|l| l.contains("ask anything"))
+            .expect("the composer");
+        assert!(worked < composer, "{drawn}");
+        assert!(
+            rows[worked + 1..composer]
+                .iter()
+                .any(|l| l.trim().is_empty()),
+            "a blank between the closing and the composer's band: {drawn}"
+        );
     }
 }

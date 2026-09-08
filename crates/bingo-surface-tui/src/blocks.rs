@@ -222,7 +222,8 @@ pub struct Blocks {
     /// The transcript's height in wrapped lines, counted while the blocks are
     /// brought up to date rather than walked for again.
     height: usize,
-    /// The failed turn's line, which belongs to no item.
+    /// What closes the last turn — its failure, its cost — which belongs to
+    /// no item.
     tail: Vec<Line<'static>>,
     /// The live cards, where there is no rail to put them in (ADR-0013 §2):
     /// they belong to no item either, and they sit under the running rows.
@@ -263,7 +264,7 @@ impl Blocks {
         }
         // Whatever is left behind the last item was rewound away.
         self.blocks.truncate(kept);
-        self.tail = transcript::failure(state, rows);
+        self.tail = transcript::closing(state, rows);
         self.live = live;
         self.moving = self.still_moving(rows.now);
         self.height = self.measure();

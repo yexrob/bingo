@@ -173,3 +173,19 @@ The recap arrived about a second after the worked row, from the fake's
 `side` deck, and the band grew by its one row; the next turn took both
 rows away. Carried: the shell tool's own 120 s ceiling ended the long
 command, which is not this plan's.
+
+### Later the same day (2026-09-08, user-directed)
+
+Two changes after the drive. **The worked row and the recap are dim, and
+neither is pinned over the composer**: both had stood in the verb's slot
+above the input box; a row about what was said belongs with it, so the
+worked row is now the transcript's last block, beside the failed turn's
+line (`transcript::closing`), and scrolls with the answer. **The recap is
+gone** — "去掉这个recap的功能吧 只保留 worked for xx": the hook, the
+`context.recap` key (the plugin claims no settings again), the signal, the
+TUI module and the glyph are deleted; `transcript.rs`, `stream::drain` and
+`schemars` in `bingo-context` went with them. Found on the way: the recap
+had measured every item the kernel hands a turn-end hook, which is the
+model's whole view, so it fired after a 1m 11s turn; and a word wider than
+the line — Chinese prose — dropped under the mark before it instead of
+filling the line it started on (`wrap::place`, fixed and kept).

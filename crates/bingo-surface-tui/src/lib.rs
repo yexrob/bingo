@@ -88,7 +88,6 @@ mod pictures;
 mod pointer;
 mod preview;
 mod rail;
-mod recap;
 mod rewind;
 mod roster;
 mod run;

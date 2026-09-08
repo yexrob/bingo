@@ -1,9 +1,9 @@
 //! The activity band: the rows between the transcript and the input box
 //! (design §3), which are what is going on rather than what was said — the
 //! verb row while a turn runs, what the session is waiting on between turns
-//! (M82), what the last turn cost once it is over ([`crate::worked`], M84),
-//! the task list under it or in its place ([`crate::tasks`], M74), and
-//! whatever the person has queued behind it.
+//! (M82), the task list under it or in its place ([`crate::tasks`], M74),
+//! and whatever the person has queued behind it. What the last turn cost is
+//! not here: it closes the transcript ([`crate::transcript::closing`]).
 //!
 //! Two rows are always held — the air and the verb row's slot — so a turn
 //! starting or ending moves nothing; what the slot says is the one thing that
@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use crate::clock::{self, Now};
 use crate::tree::{self, Scope, Tree, Wants};
 use crate::ui::Ui;
-use crate::{recap, tasks, theme, transcript, worked};
+use crate::{tasks, theme, transcript};
 
 /// How long a turn must have run before it is worth a row of its own (§6).
 const ACTIVITY_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
@@ -62,24 +62,19 @@ pub(crate) fn lines(tree: &Tree, ui: &Ui, width: usize, now: Now) -> Vec<Line<'s
 }
 
 /// The verb row with the list hung under it while the turn shows one; the
-/// worked row with the list hung under it once the turn is over (M84); the
-/// summary with the list standing under it while there are tasks and no turn
-/// has run; nothing at all otherwise (M74, Claude Code's own shape). One
-/// row's slot either way, so the end of a turn changes the row's words and
-/// moves nothing (§3: nothing jumps). `ctrl+t` keeps the rows and the summary
-/// off the band and leaves the verb: the task being done is still what the
-/// turn is doing.
+/// summary with the list standing under it while there are tasks and no
+/// turn runs; nothing at all otherwise (M74, Claude Code's own shape). One
+/// row's slot either way (§3: nothing jumps). `ctrl+t` keeps the rows and
+/// the summary off the band and leaves the verb: the task being done is
+/// still what the turn is doing. What the last turn cost is not the band's:
+/// it closes the transcript ([`crate::transcript::closing`]).
 ///
 /// The turn's row comes first, the wait after it (M82) — the wake that ends
-/// a wait opens a turn, and that turn is what the row is then for — and what
-/// the last turn cost after both, because a session still waiting on agents
-/// is not done.
+/// a wait opens a turn, and that turn is what the row is then for.
 fn band(tree: &Tree, ui: &Ui, tasks: &[tasks::Task], width: usize, now: Now) -> Vec<Line<'static>> {
     let listed = !ui.tasks_hidden && !tasks.is_empty();
-    let row = working(tree.viewed(), ui, tasks, now)
-        .or_else(|| waiting(tree, now))
-        .or_else(|| finished(tree.viewed(), now));
-    let mut out = match row {
+    let row = working(tree.viewed(), ui, tasks, now).or_else(|| waiting(tree, now));
+    match row {
         Some(row) => {
             let mut out = vec![row];
             if listed {
@@ -93,21 +88,7 @@ fn band(tree: &Tree, ui: &Ui, tasks: &[tasks::Task], width: usize, now: Now) -> 
             tasks::standing(out)
         }
         None => Vec::new(),
-    };
-    out.extend(recapped(tree.viewed(), width));
-    out
-}
-
-/// `※ recap: …` under the band once the turn is over (M84), for as long as
-/// the recap is the last turn's: a turn that has begun takes the rows away,
-/// and a recap of any earlier turn is not drawn at all ([`crate::recap`]).
-fn recapped(state: &SessionState, width: usize) -> Vec<Line<'static>> {
-    if state.busy() {
-        return Vec::new();
     }
-    recap::of(state)
-        .map(|text| recap::rows(&text, width))
-        .unwrap_or_default()
 }
 
 /// The lines the person is holding behind the turn, dim, each under its `>`.
@@ -225,27 +206,6 @@ fn waiting(tree: &Tree, now: Now) -> Option<Line<'static>> {
             breathing_at(BREATH_BLOCKED, now),
         ),
         Span::styled(waiting_for(running), theme::text()),
-    ]))
-}
-
-/// `✻ Worked for 15m 11s · done 13:48` — what the last turn cost, standing
-/// in the verb's row once it is over (M84, Claude Code's own shape) until the
-/// next turn takes the row back. The sparkle is at rest and nothing breathes:
-/// nothing is at work, and the row says what was. A turn that answered at
-/// once says nothing, as it drew no row while it ran.
-fn finished(state: &SessionState, now: Now) -> Option<Line<'static>> {
-    if state.busy() {
-        return None;
-    }
-    let turn = state.last_turn.as_ref()?;
-    if worked::ran(turn) < worked::SAY_AFTER {
-        return None;
-    }
-    let (what, when) = worked::words(turn, now.wall, &jiff::tz::TimeZone::system());
-    Some(Line::from(vec![
-        Span::styled(format!("{} ", theme::spark()), theme::presence()),
-        Span::styled(what, theme::dim()),
-        Span::styled(when, theme::dim()),
     ]))
 }
 
@@ -446,124 +406,6 @@ mod tests {
         assert_eq!(row(&woken, at), "");
         let drawn = draw_tree(80, 24, &woken, &ui, at);
         assert!(drawn.contains("esc to interrupt"), "{drawn}");
-    }
-
-    /// The band's row after a turn, found by its verb.
-    fn after(tree: &Tree, now: Now, verb: &str) -> String {
-        let (ui, _) = scene();
-        draw_tree(80, 24, tree, &ui, now)
-            .lines()
-            .find(|line| line.contains(verb))
-            .map(|line| line.trim_matches('"').trim_end().to_string())
-            .unwrap_or_default()
-    }
-
-    /// A turn that ran `seconds` and ended as `status`, the frames stamped
-    /// with the clocks a real journal stamps them with.
-    fn ended(seconds: i64, status: bingo_sdk::TurnStatus) -> Tree {
-        let opened = frame(1, started("trn_1"));
-        let closed = bingo_sdk::Frame {
-            ts: opened.ts + jiff::SignedDuration::from_secs(seconds),
-            ..frame(2, completed("trn_1", status))
-        };
-        folded_tree(vec![opened, closed])
-    }
-
-    /// Once a turn is over the row says what it cost (M84): the verb its
-    /// verdict earns, how long it ran, and the hour it ended on.
-    #[test]
-    fn a_finished_turn_says_what_it_cost_in_the_verb_row() {
-        let (_, now) = scene();
-        let now = later(now, 911_000);
-        let done = after(
-            &ended(911, bingo_sdk::TurnStatus::Completed),
-            now,
-            "Worked for",
-        );
-        assert!(done.contains("Worked for 15m 11s · done "), "{done}");
-        assert!(!done.contains('('), "no key, no token count: {done}");
-
-        let stopped = bingo_sdk::TurnStatus::Interrupted {
-            reason: bingo_sdk::InterruptReason::UserCancel,
-        };
-        let stopped = after(&ended(42, stopped), now, "Stopped after");
-        assert!(stopped.contains("Stopped after 42s · "), "{stopped}");
-
-        let failed = bingo_sdk::TurnStatus::Failed {
-            error: bingo_sdk::KernelError::new(bingo_sdk::ErrorCode::Internal, "boom"),
-        };
-        let failed = after(&ended(7, failed), now, "Failed after");
-        assert!(failed.contains("Failed after 7s · "), "{failed}");
-    }
-
-    /// A turn that answered at once drew no row while it ran, and draws none
-    /// after; a session no turn has run in has nothing to say either.
-    #[test]
-    fn a_turn_that_answered_at_once_and_a_session_with_no_turn_say_nothing() {
-        let (_, now) = scene();
-        assert_eq!(
-            after(
-                &ended(0, bingo_sdk::TurnStatus::Completed),
-                now,
-                "Worked for"
-            ),
-            ""
-        );
-        let fresh = folded_tree(Vec::new());
-        assert_eq!(after(&fresh, now, "Worked for"), "");
-    }
-
-    /// The next turn takes the row back, and a wait outranks the cost: a
-    /// session still waiting on its agents is not done.
-    #[test]
-    fn a_new_turn_or_a_wait_outranks_the_finished_row() {
-        let (ui, now) = scene();
-        let mut again = ended(42, bingo_sdk::TurnStatus::Completed);
-        again.apply(&frame(3, started("trn_2")));
-        let at = later(now, 1_600);
-        assert_eq!(after(&again, at, "Worked for"), "");
-        assert!(draw_tree(80, 24, &again, &ui, at).contains("esc to interrupt"));
-
-        let mut waited = waited_on(1);
-        let closed = bingo_sdk::Frame {
-            ts: ts() + jiff::SignedDuration::from_secs(42),
-            ..frame(9, completed("trn_1", bingo_sdk::TurnStatus::Completed))
-        };
-        waited.apply(&closed);
-        assert_eq!(after(&waited, at, "Worked for"), "");
-        assert!(row(&waited, at).contains("Waiting for"));
-    }
-
-    /// The recap draws under the worked row while it is that turn's, and
-    /// leaves with the next turn (M84).
-    #[test]
-    fn a_recap_of_the_last_turn_draws_under_the_worked_row_and_leaves_with_the_next() {
-        let (ui, now) = scene();
-        let now = later(now, 60_000);
-        let mut tree = ended(42, bingo_sdk::TurnStatus::Completed);
-        tree.apply(&frame(
-            3,
-            crate::test_lanes::signalled(
-                "_bingo.context",
-                "recap",
-                serde_json::json!({"turn": "trn_1", "text": "Built the thing. Next: push it."}),
-            ),
-        ));
-        let drawn = draw_tree(80, 24, &tree, &ui, now);
-        let rows: Vec<&str> = drawn.lines().map(|l| l.trim_matches('"')).collect();
-        let worked = rows
-            .iter()
-            .position(|l| l.contains("Worked for 42s"))
-            .expect("the worked row");
-        assert!(
-            rows[worked + 1].contains("※ recap: Built the thing. Next: push it."),
-            "{drawn}"
-        );
-        assert!(!drawn.contains("│ recap"), "no rail card: {drawn}");
-
-        tree.apply(&frame(4, started("trn_2")));
-        let drawn = draw_tree(80, 24, &tree, &ui, later(now, 1_600));
-        assert!(!drawn.contains("recap:"), "{drawn}");
     }
 
     /// The working word carries one light across itself while the turn runs:

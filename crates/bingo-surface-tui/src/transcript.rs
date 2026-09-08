@@ -19,7 +19,7 @@ use crate::fold::{self, Fold, Folds};
 use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, markdown, memory, paths, shells, tasks, theme, thoughts, wrap};
+use crate::{acp, markdown, memory, paths, shells, tasks, theme, thoughts, worked, wrap};
 
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
@@ -886,11 +886,25 @@ fn calls(item: &Item, tool: &str) -> bool {
     matches!(&item.body, ItemBody::ToolCall { name, .. } if name == tool)
 }
 
-/// A turn that failed says why on a `⏺` of its own, derived from `last_turn`
-/// rather than kept as a line of the surface's own. It belongs to no item, so
-/// it is the transcript's last block rather than one of them.
-pub fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let Some(TurnStatus::Failed { error }) = state.last_status().filter(|_| !state.busy()) else {
+/// What stands under the last turn once it is over and nothing runs: why it
+/// failed, then what it cost (`✻ Worked for 15m 11s · done 13:48`). Both are
+/// derived from `last_turn` rather than kept as lines of the surface's own,
+/// and neither belongs to an item, so this is the transcript's last block
+/// rather than one of them: it scrolls with the answer it closes (M84,
+/// 2026-09-08, user-directed — not a row pinned over the composer) and the
+/// next turn takes it away.
+pub fn closing(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    if state.busy() {
+        return Vec::new();
+    }
+    let mut out = failure(state, rows);
+    out.extend(worked(state, rows));
+    out
+}
+
+/// A turn that failed says why on a `⏺` of its own.
+fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let Some(TurnStatus::Failed { error }) = state.last_status() else {
         return Vec::new();
     };
     speaks(
@@ -901,6 +915,24 @@ pub fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
         ))],
         rows,
     )
+}
+
+/// `✻ Worked for 15m 11s · done 13:48`, dim: the verb the verdict earns, how
+/// long the turn ran, and the hour it ended on. A turn that answered at once
+/// says nothing, as it drew no row while it ran.
+fn worked(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let Some(turn) = state.last_turn.as_ref() else {
+        return Vec::new();
+    };
+    if worked::ran(turn) < worked::SAY_AFTER {
+        return Vec::new();
+    }
+    let (what, when) = worked::words(turn, rows.now.wall, &jiff::tz::TimeZone::system());
+    vec![Line::from(vec![
+        Span::styled(format!("{} ", theme::spark()), theme::presence()),
+        Span::styled(what, theme::dim()),
+        Span::styled(when, theme::dim()),
+    ])]
 }
 
 /// A full-width divider with its reason in the middle of the left run.
