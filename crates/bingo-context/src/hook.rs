@@ -1,14 +1,17 @@
 //! What the turn leaves behind: a working turn is asked, once, for the facts
 //! worth keeping.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
     CancellationToken, Hook, HookContext, HookMatcher, HookPoint, Item, ItemBody, ItemStatus,
-    Message, ModelRequest, Phase, ProviderMetadata, Role, SystemBlock, TurnId,
+    Message, ModelRequest, Phase, ProviderMetadata, Role, SessionId, SystemBlock, TurnId,
 };
+use tokio::sync::Notify;
 
 use crate::memory::file::{self, Kind, Memory};
 use crate::memory::{dir, migrate, store};
@@ -33,6 +36,10 @@ const MAX_TOKENS: u32 = 1_024;
 /// How much of the turn it reads, newest kept.
 const MAX_CHARS: u64 = 60_000;
 
+/// A short turn is kept with its neighbours so extraction pays for a useful
+/// amount of new conversation rather than one model call per turn.
+const EXTRACT_AFTER_CHARS: usize = 4_096;
+
 /// The turn is not held open for a memory. Everything here runs before the
 /// turn's outcome is returned, so the model gets one bounded chance.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -47,17 +54,122 @@ const DESCRIPTION_CHARS: usize = 120;
 #[derive(Debug, Clone)]
 pub struct MemoryHook {
     data_dir: PathBuf,
+    pending: Arc<Mutex<HashMap<SessionId, Pending>>>,
+}
+
+/// The completed tool turns waiting for their next extraction. `extracting`
+/// makes the state safe when the session actor finishes another turn while a
+/// previous side question is still in flight.
+#[derive(Debug)]
+struct Pending {
+    items: Vec<Item>,
+    chars: usize,
+    extracting: bool,
+    wake: Arc<Notify>,
 }
 
 impl MemoryHook {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir }
+        Self {
+            data_dir,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    async fn remember(&self, items: &[Item], cx: &HookContext) {
-        let Some(facts) = extract(items, cx).await else {
+    /// Adds one completed turn to its session's pending batch.
+    fn queue(&self, session: &SessionId, items: &[Item]) {
+        if !items.iter().any(worked) {
+            return;
+        }
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let session = pending.entry(session.clone()).or_insert_with(|| Pending {
+            items: Vec::new(),
+            chars: 0,
+            extracting: false,
+            wake: Arc::new(Notify::new()),
+        });
+        session.chars = session.chars.saturating_add(body(items).chars().count());
+        session.items.extend_from_slice(items);
+    }
+
+    /// Extracts ready batches. Session close forces even a short final batch.
+    async fn remember(&self, session: &SessionId, cx: &HookContext, force: bool) {
+        loop {
+            let Some((items, chars)) = self.take_batch(session, force).await else {
+                return;
+            };
+            let result = extract(&items, cx).await;
+            let retry = matches!(result, Extraction::Retry);
+            if let Extraction::Facts(facts) = result {
+                self.keep_facts(&facts, cx).await;
+            }
+            self.finish_batch(session, items, chars, retry);
+            if retry {
+                return;
+            }
+        }
+    }
+
+    /// Takes a batch, or waits for the in-flight one when a session is closing.
+    async fn take_batch(&self, session: &SessionId, force: bool) -> Option<(Vec<Item>, usize)> {
+        loop {
+            let wait = {
+                let mut pending = self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let state = pending.get_mut(session)?;
+                if state.extracting {
+                    Some(state.wake.clone())
+                } else if state.items.is_empty() {
+                    return None;
+                } else if force || state.chars >= EXTRACT_AFTER_CHARS {
+                    state.extracting = true;
+                    let chars = state.chars;
+                    state.chars = 0;
+                    return Some((std::mem::take(&mut state.items), chars));
+                } else {
+                    return None;
+                }
+            };
+            if !force {
+                return None;
+            }
+            let wake = wait?;
+            wake.notified().await;
+        }
+    }
+
+    /// Completes a batch and puts it back ahead of newer turns after a
+    /// provider failure, so a later threshold or session close can retry it.
+    fn finish_batch(&self, session: &SessionId, mut items: Vec<Item>, chars: usize, retry: bool) {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = pending.get_mut(session) else {
             return;
         };
+        if retry {
+            items.extend(std::mem::take(&mut state.items));
+            state.items = items;
+            state.chars = chars.saturating_add(state.chars);
+        }
+        state.extracting = false;
+        state.wake.notify_one();
+    }
+
+    fn forget(&self, session: &SessionId) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(session);
+    }
+
+    async fn keep_facts(&self, facts: &str, cx: &HookContext) {
         let root = root::of(&cx.cwd).await;
         migrate::once(&self.data_dir, &root).await;
         for line in facts.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -82,36 +194,53 @@ impl Hook for MemoryHook {
 
     fn matcher(&self) -> HookMatcher {
         HookMatcher {
-            points: vec![HookPoint::Turn],
+            points: vec![HookPoint::Turn, HookPoint::Session],
             tool: None,
         }
     }
 
     async fn on_turn(&self, phase: Phase, _turn: &TurnId, items: &[Item], cx: &HookContext) {
         if phase == Phase::End {
-            self.remember(items, cx).await;
+            self.queue(&cx.session, items);
+            self.remember(&cx.session, cx, false).await;
+        }
+    }
+
+    async fn on_session(&self, phase: Phase, cx: &HookContext) {
+        if phase == Phase::End {
+            self.remember(&cx.session, cx, true).await;
+            self.forget(&cx.session);
         }
     }
 }
 
 /// The facts the model found, or nothing at all: a turn that ran no tool did
 /// no work worth remembering, and a session with no provider cannot ask.
-async fn extract(items: &[Item], cx: &HookContext) -> Option<String> {
+enum Extraction {
+    Facts(String),
+    Nothing,
+    Retry,
+}
+
+async fn extract(items: &[Item], cx: &HookContext) -> Extraction {
     if !items.iter().any(worked) {
-        return None;
+        return Extraction::Nothing;
     }
-    let (provider, model) = (cx.provider.as_ref()?, cx.model.as_ref()?);
+    let (Some(provider), Some(model)) = (cx.provider.as_ref(), cx.model.as_ref()) else {
+        return Extraction::Retry;
+    };
     let request = request(model, items);
     let asked = stream::drain(provider.as_ref(), request, CancellationToken::new());
     match tokio::time::timeout(DEADLINE, asked).await {
-        Ok(Ok(answer)) => Some(answer.text).filter(|text| !text.trim().is_empty()),
+        Ok(Ok(answer)) if answer.text.trim().is_empty() => Extraction::Nothing,
+        Ok(Ok(answer)) => Extraction::Facts(answer.text),
         Ok(Err(error)) => {
             tracing::warn!(%error, "memory: the extractor did not answer");
-            None
+            Extraction::Retry
         }
         Err(_) => {
             tracing::warn!("memory: the extractor ran out of time");
-            None
+            Extraction::Retry
         }
     }
 }
@@ -258,30 +387,106 @@ mod tests {
     }
 
     fn working_turn() -> Vec<Item> {
+        working_turn_with(&"run the tests ".repeat(400))
+    }
+
+    fn working_turn_with(text: &str) -> Vec<Item> {
         vec![
-            user("u", "run the tests"),
+            user("u", text),
             tool("t", "Bash", r#"{"command":"cargo test"}"#, Some("ok")),
         ]
     }
 
+    async fn turn(
+        hook: &MemoryHook,
+        session: &Session,
+        items: &[Item],
+        provider: Option<Arc<dyn Provider>>,
+    ) {
+        hook.on_turn(
+            Phase::End,
+            &TurnId::from_raw("trn_1"),
+            items,
+            &session.context(provider),
+        )
+        .await;
+    }
+
     async fn end(session: &Session, items: &[Item], provider: Option<Arc<dyn Provider>>) {
-        session
-            .hook()
-            .on_turn(
-                Phase::End,
-                &TurnId::from_raw("trn_1"),
-                items,
-                &session.context(provider),
-            )
-            .await;
+        let hook = session.hook();
+        turn(&hook, session, items, provider).await;
     }
 
     #[test]
-    fn it_listens_at_the_turn_only() {
+    fn it_listens_at_turn_and_session_end() {
         let hook = MemoryHook::new(PathBuf::from("/data"));
         assert_eq!(hook.id(), "context:memory");
-        assert_eq!(hook.matcher().points, [HookPoint::Turn]);
+        assert_eq!(hook.matcher().points, [HookPoint::Turn, HookPoint::Session]);
         assert!(hook.matcher().tool.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_short_working_turn_waits_until_session_end() {
+        let session = Session::new();
+        let hook = MemoryHook::new(session.data.path().to_path_buf());
+        let provider = Arc::new(Scripted::saying("a fact"));
+
+        turn(
+            &hook,
+            &session,
+            &working_turn_with("run the tests"),
+            Some(provider.clone()),
+        )
+        .await;
+        assert!(provider.requests().is_empty());
+
+        hook.on_session(Phase::End, &session.context(Some(provider.clone())))
+            .await;
+        assert_eq!(provider.requests().len(), 1);
+        assert_eq!(session.memories().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn accumulated_turns_trigger_one_extraction_after_the_threshold() {
+        let session = Session::new();
+        let hook = MemoryHook::new(session.data.path().to_path_buf());
+        let provider = Arc::new(Scripted::saying("a fact"));
+        let half = "x".repeat(EXTRACT_AFTER_CHARS / 2);
+
+        turn(
+            &hook,
+            &session,
+            &working_turn_with(&half),
+            Some(provider.clone()),
+        )
+        .await;
+        assert!(provider.requests().is_empty());
+        turn(
+            &hook,
+            &session,
+            &working_turn_with(&half),
+            Some(provider.clone()),
+        )
+        .await;
+        assert_eq!(provider.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_extraction_is_retried_when_the_session_closes() {
+        let session = Session::new();
+        let hook = MemoryHook::new(session.data.path().to_path_buf());
+        let failed = Arc::new(Scripted::failing(ProviderError::Auth {
+            message: "temporary failure".into(),
+        }));
+        turn(&hook, &session, &working_turn(), Some(failed.clone())).await;
+        assert_eq!(failed.requests().len(), 1);
+        assert!(session.memories().await.is_empty());
+
+        let recovered = Arc::new(Scripted::saying("the recovered fact"));
+        hook.on_session(Phase::End, &session.context(Some(recovered.clone())))
+            .await;
+        assert_eq!(recovered.requests().len(), 1);
+        assert_eq!(session.memories().await.len(), 1);
     }
 
     #[tokio::test]
