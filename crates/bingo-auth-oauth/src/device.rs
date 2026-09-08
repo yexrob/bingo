@@ -24,9 +24,10 @@ pub struct Started {
 }
 
 pub async fn start(http: &reqwest::Client, issuer: &Issuer) -> Result<Started, AuthError> {
+    let device = flow(issuer)?;
     let body = json!({ "client_id": issuer.client_id });
     let reply = crate::exchange::read(
-        http.post(issuer.url(&issuer.device_code_path))
+        http.post(issuer.url(&device.code_path))
             .json(&body)
             .send()
             .await?,
@@ -41,8 +42,18 @@ pub async fn start(http: &reqwest::Client, issuer: &Issuer) -> Result<Started, A
             .and_then(Value::as_u64)
             .unwrap_or(5)
             .max(1),
-        verify_url: issuer.verify_url(),
+        verify_url: issuer.url(&device.verify_path),
     })
+}
+
+/// The flow, or the refusal an issuer without one earns. A device login is
+/// one issuer's own (ADR-0050 §1): a server discovered over RFC 8414 has no
+/// code to put on another screen.
+fn flow(issuer: &Issuer) -> Result<&crate::issuer::Device, AuthError> {
+    issuer
+        .device
+        .as_ref()
+        .ok_or_else(|| AuthError::Invalid(format!("{} has no device flow", issuer.base)))
 }
 
 /// Poll until the issuer grants, refuses, or the deadline passes. A 403 or a
@@ -57,7 +68,7 @@ pub async fn poll(
         "device_auth_id": started.device_auth_id,
         "user_code": started.user_code,
     });
-    let url = issuer.url(&issuer.device_token_path);
+    let url = issuer.url(&flow(issuer)?.token_path);
     loop {
         let response = http.post(&url).json(&body).send().await?;
         let status = response.status().as_u16();

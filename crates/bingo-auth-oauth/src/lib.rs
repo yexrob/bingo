@@ -12,23 +12,35 @@
 //! under `redirect` and the browser opener are `bingo_loopback`'s since M54
 //! (ADR-0042 §1); and `source` is the only place they meet.
 //!
+//! Since M85 it also knows the resource-server side (ADR-0050 §1), which a
+//! provider never needed: `challenge` reads a `401`, `discover` follows it to
+//! an authorization server, `register` becomes a client of one, and `mcp` is
+//! `source`'s twin for a server that had to be discovered before it could be
+//! signed in to.
+//!
 //! Nothing here logs a credential.
 
 pub mod callback;
+pub mod challenge;
 pub mod device;
+pub mod discover;
 pub mod error;
 pub mod exchange;
 pub mod issuer;
 pub mod jwt;
+pub mod mcp;
 mod percent;
 pub mod pkce;
 pub mod redirect;
+pub mod register;
 pub mod source;
 pub mod store;
 pub mod tokens;
 
+pub use challenge::{Challenge, Probe};
 pub use error::{AuthError, permanent};
-pub use issuer::Issuer;
+pub use issuer::{Device, Issuer};
+pub use mcp::McpAuth;
 pub use source::{Status, TokenSource};
-pub use store::{CredentialStore, Entry};
+pub use store::{CredentialStore, Entry, mcp_key};
 pub use tokens::Tokens;

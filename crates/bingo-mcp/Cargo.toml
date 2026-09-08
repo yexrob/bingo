@@ -13,6 +13,9 @@ workspace = true
 
 [dependencies]
 bingo-sdk.workspace = true
+# M85: the OAuth flows, the credential store and the MCP sign-in handle
+# (ADR-0050 §1). A library, which any plugin may depend on (ADR-0012 §1).
+bingo-auth-oauth.workspace = true
 async-trait.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -35,6 +38,8 @@ reqwest.workspace = true
 bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+# M85: the authorization server a sign-in is tested against.
+wiremock.workspace = true
 proptest.workspace = true
 insta.workspace = true
 # M7: the scripted server the tests dial is an example binary of this crate,

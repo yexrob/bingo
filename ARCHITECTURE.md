@@ -30,6 +30,8 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │                               The bin keeps only the host that `gateway run` holds (ADR-0020)
 ├── libraries (`tier = "library"`: register nothing, depend on bingo-sdk and each other, ADR-0042 §2)
 │   bingo-auth-oauth            PKCE redirect · device code · auth.json · single-flight refresh (ADR-0012)
+│                               · the resource-server side: a `401`'s challenge, RFC 9728/8414 discovery,
+│                                 RFC 7591 registration, and one MCP server's sign-in (ADR-0050)
 │   bingo-loopback              a port on 127.0.0.1 · one request at a time · the page a tool holds open
 │                               until the person answers it · the browser opener (ADR-0042)
 │   bingo-pictures              a picture as pixels: whatever a decoder reads, as the PNG a terminal

@@ -1,18 +1,21 @@
-//! `/mcp`: what every configured server is doing, and the three verbs that
-//! change it.
+//! `/mcp`: what every configured server is doing, and the verbs that change
+//! it.
 //!
-//! A verb answers the moment it has started something, not when it has
-//! finished: a handshake takes seconds, and a command that waited for one
-//! would be a command that hangs. What it did shows up in the next `/mcp`.
+//! A verb that only starts something answers the moment it has started it: a
+//! handshake takes seconds, and a command that waited for one would be a
+//! command that hangs. `login` is the exception and the reason this command
+//! is not instant — it takes minutes and asks through the session's own
+//! dialog, so the queue waits behind it, as `/login` does (ADR-0012 §5).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, ErrorCode, KernelError, View,
+    Answer, AnswerSpec, ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, ErrorCode,
+    HostHandle, InteractionKind, KernelError, Prompter, SessionId, View,
 };
 
-use crate::manager::{Manager, Status};
+use crate::manager::{Line, Manager, Status};
 
 pub struct McpCommand {
     manager: Arc<Manager>,
@@ -26,23 +29,97 @@ impl McpCommand {
     async fn table(&self) -> CommandOutcome {
         CommandOutcome::View {
             view: View::Table {
-                headers: vec!["server".into(), "status".into(), "tools".into()],
-                rows: self.manager.statuses().await.iter().map(row).collect(),
+                headers: vec![
+                    "server".into(),
+                    "status".into(),
+                    "tools".into(),
+                    "auth".into(),
+                ],
+                rows: self.manager.lines().await.iter().map(row).collect(),
             },
         }
     }
 
-    async fn act(&self, verb: Verb, server: &str) -> Result<CommandOutcome, KernelError> {
+    /// What one connected server offers, by name.
+    async fn tools(&self, server: &str) -> Result<CommandOutcome, KernelError> {
+        let Some(tools) = self.manager.tools_of(server).await else {
+            return Ok(CommandOutcome::Applied {
+                message: Some(format!(
+                    "{server} is not connected; /mcp reconnect {server}"
+                )),
+            });
+        };
+        Ok(CommandOutcome::View {
+            view: View::Table {
+                headers: vec!["tool".into(), "description".into()],
+                rows: tools
+                    .into_iter()
+                    .map(|(name, described)| vec![name, described])
+                    .collect(),
+            },
+        })
+    }
+
+    async fn act(
+        &self,
+        verb: Verb,
+        server: &str,
+        cx: &CommandContext,
+    ) -> Result<CommandOutcome, KernelError> {
         if !self.manager.knows(server) {
             return Err(unknown_server(&self.manager, server));
         }
         let message = match verb {
+            Verb::Tools => return self.tools(server).await,
+            Verb::Login => self.login(server, cx).await?,
+            Verb::Logout => self.logout(server).await?,
             Verb::Reconnect => self.reconnect(server).await,
             Verb::Enable => self.enable(server).await,
             Verb::Disable => self.disable(server).await,
         };
         Ok(CommandOutcome::Applied {
             message: Some(message),
+        })
+    }
+
+    /// Authenticate, and re-authenticate: the same flow either way, through
+    /// the session's own dialog. A server that lands signed in is dialled
+    /// again at once, because its tools are what the sign-in was for.
+    async fn login(&self, server: &str, cx: &CommandContext) -> Result<String, KernelError> {
+        let auth = self.signs_in(server)?;
+        let prompter = Arc::new(SessionPrompter {
+            host: cx.host.clone(),
+            session: cx.session.clone(),
+        });
+        let receipt = auth
+            .login(prompter, None, true)
+            .await
+            .map_err(|e| unanswered(server, e))?;
+        self.manager.reconnect(server).await;
+        Ok(format!("{receipt} Dialling {server} again."))
+    }
+
+    /// Clear the sign-in: revoked where the issuer offers it, removed here,
+    /// and the server dialled again so the table says what it now is.
+    async fn logout(&self, server: &str) -> Result<String, KernelError> {
+        let auth = self.signs_in(server)?;
+        let receipt = auth
+            .logout()
+            .await
+            .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
+        self.manager.reconnect(server).await;
+        Ok(receipt)
+    }
+
+    fn signs_in(&self, server: &str) -> Result<Arc<bingo_auth_oauth::McpAuth>, KernelError> {
+        self.manager.auth(server).cloned().ok_or_else(|| {
+            KernelError::new(
+                ErrorCode::InvalidInput,
+                format!(
+                    "{server} signs in to nothing: it is a child process, or its \
+                     Authorization header is already written in the settings"
+                ),
+            )
         })
     }
 
@@ -71,15 +148,70 @@ impl McpCommand {
     }
 }
 
-/// One server's line: what it is doing, and how many tools it gave us.
-fn row((name, status): &(String, Status)) -> Vec<String> {
-    let (state, tools) = match status {
+/// A sign-in nobody answered. A surface that renders no `Login` — the print
+/// one — declines the question rather than showing it, and a person reading
+/// the word *cancelled* would not know what to do next; the headless twin is
+/// what they do next (ADR-0050 §4).
+fn unanswered(server: &str, error: bingo_auth_oauth::AuthError) -> KernelError {
+    let message = match error {
+        bingo_auth_oauth::AuthError::Cancelled => format!(
+            "the sign-in to {server} was not answered here; \
+             run `bingo mcp login {server}` in a terminal"
+        ),
+        other => other.to_string(),
+    };
+    KernelError::new(ErrorCode::InvalidInput, message)
+}
+
+/// The session's own way of asking a person, for a command that holds the
+/// queue while a sign-in runs. The kernel's door takes the session and the
+/// question; this is the shape the library's flows want it in.
+struct SessionPrompter {
+    host: HostHandle,
+    session: SessionId,
+}
+
+#[async_trait]
+impl Prompter for SessionPrompter {
+    async fn ask(
+        &self,
+        kind: InteractionKind,
+        answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError> {
+        self.host.ask(&self.session, kind, answers).await
+    }
+}
+
+/// One server's line: what it is doing, how many tools it gave us, and where
+/// its sign-in stands.
+fn row(line: &Line) -> Vec<String> {
+    let (state, tools) = match &line.status {
         Status::Connecting => ("connecting".to_string(), String::new()),
         Status::Connected { tools } => ("connected".to_string(), tools.to_string()),
+        Status::NeedsAuth { .. } => (NEEDS_AUTH.to_string(), String::new()),
         Status::Failed { why } => (format!("failed: {why}"), String::new()),
         Status::Disabled => ("disabled".to_string(), String::new()),
     };
-    vec![name.clone(), state, tools]
+    vec![
+        line.server.clone(),
+        state,
+        tools,
+        signin(line.auth.as_ref()),
+    ]
+}
+
+const NEEDS_AUTH: &str = "needs authentication";
+
+/// A server that signs in to nothing says so with a dash, not with a blank a
+/// person would read as a state nobody knows.
+fn signin(auth: Option<&bingo_auth_oauth::Status>) -> String {
+    use bingo_auth_oauth::Status;
+    match auth {
+        None => "-".to_string(),
+        Some(Status::SignedIn { .. }) => "signed in".to_string(),
+        Some(Status::SignedOut) => NEEDS_AUTH.to_string(),
+        Some(Status::Expired { .. }) => "expired".to_string(),
+    }
 }
 
 fn unknown_server(manager: &Manager, server: &str) -> KernelError {
@@ -104,16 +236,29 @@ pub enum Request {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verb {
+    Login,
+    Logout,
+    Tools,
     Reconnect,
     Enable,
     Disable,
 }
 
 impl Verb {
-    const ALL: [Verb; 3] = [Verb::Reconnect, Verb::Enable, Verb::Disable];
+    const ALL: [Verb; 6] = [
+        Verb::Login,
+        Verb::Logout,
+        Verb::Tools,
+        Verb::Reconnect,
+        Verb::Enable,
+        Verb::Disable,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
+            Verb::Login => "login",
+            Verb::Logout => "logout",
+            Verb::Tools => "tools",
             Verb::Reconnect => "reconnect",
             Verb::Enable => "enable",
             Verb::Disable => "disable",
@@ -154,27 +299,31 @@ fn invalid(what: String) -> KernelError {
     )
 }
 
+const HINT: &str = "[login|logout|tools|reconnect|enable|disable <server>]";
+
 #[async_trait]
 impl Command for McpCommand {
     fn spec(&self) -> CommandSpec {
         CommandSpec {
             name: "mcp".into(),
             aliases: Vec::new(),
-            hint: "[reconnect|enable|disable <server>]".into(),
+            hint: HINT.into(),
             args: ArgSpec::Free {
-                hint: "reconnect <server> | enable <server> | disable <server>".into(),
+                hint: "login <server> | logout <server> | tools <server> | \
+                       reconnect <server> | enable <server> | disable <server>"
+                    .into(),
             },
-            // Reading the table and starting a dial touch nothing a turn is
-            // using; the tool set a turn already gathered stays as it was.
-            instant: true,
+            // A sign-in takes minutes and asks through the session's dialog,
+            // so this command holds the queue as `/login` does (ADR-0012 §5).
+            instant: false,
             family: "mcp".into(),
         }
     }
 
-    async fn run(&self, args: &str, _cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
+    async fn run(&self, args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
         match Request::parse(args)? {
             Request::List => Ok(self.table().await),
-            Request::Act { verb, server } => self.act(verb, &server).await,
+            Request::Act { verb, server } => self.act(verb, &server, cx).await,
         }
     }
 }
@@ -194,6 +343,14 @@ mod tests {
         Request::parse(args)
     }
 
+    fn line(status: Status, auth: Option<bingo_auth_oauth::Status>) -> Line {
+        Line {
+            server: "files".into(),
+            status,
+            auth,
+        }
+    }
+
     #[test]
     fn nothing_asks_for_the_table() {
         assert_eq!(parse("").expect("a listing"), Request::List);
@@ -201,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_verb_and_a_server_are_an_action() {
+    fn every_verb_takes_one_server() {
         assert_eq!(
             parse("reconnect files").expect("an action"),
             act(Verb::Reconnect, "files")
@@ -211,13 +368,21 @@ mod tests {
             act(Verb::Enable, "files")
         );
         assert_eq!(
-            parse("disable files").expect("an action"),
-            act(Verb::Disable, "files")
+            parse("login remote").expect("an action"),
+            act(Verb::Login, "remote")
+        );
+        assert_eq!(
+            parse("logout remote").expect("an action"),
+            act(Verb::Logout, "remote")
+        );
+        assert_eq!(
+            parse("tools remote").expect("an action"),
+            act(Verb::Tools, "remote")
         );
     }
 
     #[test]
-    fn a_verb_nobody_defined_is_refused_with_the_three_that_exist() {
+    fn a_verb_nobody_defined_is_refused_with_the_ones_that_exist() {
         let error = parse("restart files").expect_err("not a verb");
         assert_eq!(error.code, ErrorCode::InvalidInput);
         for verb in Verb::ALL {
@@ -226,14 +391,10 @@ mod tests {
     }
 
     #[test]
-    fn a_verb_without_a_server_is_refused() {
-        let error = parse("reconnect").expect_err("no server");
+    fn a_verb_without_a_server_or_with_two_is_refused() {
+        let error = parse("login").expect_err("no server");
         assert_eq!(error.code, ErrorCode::InvalidInput);
         assert!(error.message.contains("names no server"), "{error}");
-    }
-
-    #[test]
-    fn a_verb_with_two_servers_is_refused() {
         let error = parse("disable files web").expect_err("two servers");
         assert!(error.message.contains("takes one server"), "{error}");
     }
@@ -241,30 +402,65 @@ mod tests {
     #[test]
     fn a_row_says_what_a_server_is_doing_and_how_much_it_gave() {
         assert_eq!(
-            row(&("files".into(), Status::Connected { tools: 3 })),
-            ["files", "connected", "3"]
+            row(&line(Status::Connected { tools: 3 }, None)),
+            ["files", "connected", "3", "-"]
         );
         assert_eq!(
-            row(&("files".into(), Status::Connecting)),
-            ["files", "connecting", ""]
+            row(&line(Status::Connecting, None)),
+            ["files", "connecting", "", "-"]
         );
         assert_eq!(
-            row(&("files".into(), Status::Disabled)),
-            ["files", "disabled", ""]
+            row(&line(Status::Disabled, None)),
+            ["files", "disabled", "", "-"]
         );
         assert_eq!(
-            row(&(
-                "files".into(),
+            row(&line(
                 Status::Failed {
                     why: "connect timed out after 5s".into()
-                }
+                },
+                None
             )),
-            ["files", "failed: connect timed out after 5s", ""]
+            ["files", "failed: connect timed out after 5s", "", "-"]
+        );
+    }
+
+    /// ADR-0050 §3: the two columns are two facts. A server can want a
+    /// sign-in and be signed out, or be connected on a credential that is
+    /// about to be renewed.
+    #[test]
+    fn the_auth_column_says_where_the_sign_in_stands() {
+        use bingo_auth_oauth::Status as Signin;
+        assert_eq!(
+            row(&line(
+                Status::NeedsAuth {
+                    why: "handshake: 401".into()
+                },
+                Some(Signin::SignedOut)
+            )),
+            ["files", "needs authentication", "", "needs authentication"]
+        );
+        assert_eq!(
+            row(&line(
+                Status::Connected { tools: 2 },
+                Some(Signin::SignedIn { account: None })
+            )),
+            ["files", "connected", "2", "signed in"]
+        );
+        assert_eq!(
+            row(&line(
+                Status::NeedsAuth {
+                    why: "handshake: 401".into()
+                },
+                Some(Signin::Expired {
+                    reason: "refresh_token_expired".into()
+                })
+            )),
+            ["files", "needs authentication", "", "expired"]
         );
     }
 
     #[test]
-    fn the_spec_runs_now_and_takes_a_verb_and_a_server() {
+    fn the_spec_holds_the_queue_and_names_every_verb() {
         let manager = Arc::new(Manager::new(
             Default::default(),
             &[],
@@ -272,13 +468,56 @@ mod tests {
         ));
         let spec = McpCommand::new(manager).spec();
         assert_eq!(spec.name, "mcp");
-        assert!(spec.instant, "reading a table never waits for a turn");
+        assert!(!spec.instant, "a sign-in asks a person and takes minutes");
         assert_eq!(spec.family, "mcp");
         let ArgSpec::Free { hint } = spec.args else {
             panic!("a verb and a server are free text");
         };
         for verb in Verb::ALL {
             assert!(hint.contains(verb.as_str()), "{verb:?} is not in the hint");
+            assert!(spec.hint.contains(verb.as_str()), "{verb:?} is not offered");
         }
+    }
+
+    /// A surface that cannot show a sign-in declines it, and *cancelled* is
+    /// not a thing a person can act on: the refusal names the way through.
+    #[test]
+    fn a_sign_in_nobody_answered_names_the_headless_way_through() {
+        let refused = unanswered("remote", bingo_auth_oauth::AuthError::Cancelled);
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert!(
+            refused.message.contains("bingo mcp login remote"),
+            "{refused}"
+        );
+        let other = unanswered(
+            "remote",
+            bingo_auth_oauth::AuthError::Invalid("no S256".into()),
+        );
+        assert!(other.message.contains("no S256"), "{other}");
+    }
+
+    /// A server with no sign-in of its own is told so by name rather than
+    /// being sent through a flow that has nowhere to go.
+    #[tokio::test]
+    async fn a_verb_that_signs_in_refuses_a_server_that_signs_in_to_nothing() {
+        let servers = std::collections::BTreeMap::from([(
+            "files".to_string(),
+            crate::config::Server::Stdio {
+                command: "/bin/echo".into(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            },
+        )]);
+        let manager = Arc::new(Manager::new(
+            servers,
+            &[],
+            std::env::temp_dir().join("bingo-mcp-command-signin-tests"),
+        ));
+        let refused = McpCommand::new(manager)
+            .signs_in("files")
+            .expect_err("a child process signs in to nothing");
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert!(refused.message.contains("child process"), "{refused}");
     }
 }

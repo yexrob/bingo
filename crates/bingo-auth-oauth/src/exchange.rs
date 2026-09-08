@@ -13,7 +13,9 @@ use crate::error::AuthError;
 use crate::issuer::Issuer;
 use crate::percent;
 
-/// Redeem an authorization code with its PKCE verifier.
+/// Redeem an authorization code with its PKCE verifier. `resource` rides
+/// along when the issuer mints for one (RFC 8707), because a token endpoint
+/// that was asked for an audience on authorize must be asked again here.
 pub async fn authorization_code(
     http: &Client,
     issuer: &Issuer,
@@ -21,13 +23,17 @@ pub async fn authorization_code(
     redirect_uri: &str,
     verifier: &str,
 ) -> Result<Value, AuthError> {
-    let body = form(&[
+    let mut fields = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", redirect_uri),
         ("client_id", issuer.client_id.as_str()),
         ("code_verifier", verifier),
-    ]);
+    ];
+    if let Some(resource) = &issuer.resource {
+        fields.push(("resource", resource.as_str()));
+    }
+    let body = form(&fields);
     read(
         http.post(issuer.url(&issuer.token_path))
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -49,39 +55,58 @@ fn form(fields: &[(&str, &str)]) -> String {
         .join("&")
 }
 
-/// Renew an access token. The body is JSON, which is what the old project ran
-/// against the live issuer; opencode sends a form here, and the endpoint is
-/// the same one either way.
+/// Renew an access token. RFC 6749 §6 says a form; codex answers JSON there,
+/// which is what the old project ran against the live issuer, so the issuer
+/// says which it takes ([`Issuer::form_encoded`]).
 pub async fn refresh(
     http: &Client,
     issuer: &Issuer,
     refresh_token: &str,
 ) -> Result<Value, AuthError> {
-    let body = json!({
-        "client_id": issuer.client_id,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    });
-    read(
-        http.post(issuer.url(&issuer.token_path))
-            .json(&body)
-            .send()
-            .await?,
-    )
-    .await
+    let url = issuer.url(&issuer.token_path);
+    let request = if issuer.form_encoded {
+        let mut fields = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", issuer.client_id.as_str()),
+        ];
+        if let Some(resource) = &issuer.resource {
+            fields.push(("resource", resource.as_str()));
+        }
+        http.post(url)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(form(&fields))
+    } else {
+        http.post(url).json(&json!({
+            "client_id": issuer.client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }))
+    };
+    read(request.send().await?).await
 }
 
-/// Tell the issuer to forget the refresh token. Best effort by contract: a
-/// caller signing out locally has already decided.
+/// Tell the issuer to forget the refresh token (RFC 7009). Best effort by
+/// contract: a caller signing out locally has already decided, and an issuer
+/// that publishes no revocation endpoint is signed out of by forgetting.
 pub async fn revoke(http: &Client, issuer: &Issuer, token: &str) -> Result<(), AuthError> {
-    let body = json!({ "client_id": issuer.client_id, "token": token });
-    read(
-        http.post(issuer.url(&issuer.revoke_path))
-            .json(&body)
-            .send()
-            .await?,
-    )
-    .await?;
+    let Some(path) = &issuer.revoke_path else {
+        return Ok(());
+    };
+    let url = issuer.url(path);
+    let request = if issuer.form_encoded {
+        http.post(url)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(form(&[
+                ("token", token),
+                ("token_type_hint", "refresh_token"),
+                ("client_id", issuer.client_id.as_str()),
+            ]))
+    } else {
+        http.post(url)
+            .json(&json!({ "client_id": issuer.client_id, "token": token }))
+    };
+    read(request.send().await?).await?;
     Ok(())
 }
 
