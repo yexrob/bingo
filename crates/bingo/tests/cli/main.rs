@@ -734,6 +734,7 @@ mod images;
 mod instances;
 mod jobs;
 mod login;
+mod mcp;
 mod mentions;
 mod models;
 mod peers;

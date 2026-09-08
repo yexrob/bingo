@@ -94,7 +94,7 @@ impl McpCommand {
         let receipt = auth
             .login(prompter, None, true)
             .await
-            .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?;
+            .map_err(|e| unanswered(server, e))?;
         self.manager.reconnect(server).await;
         Ok(format!("{receipt} Dialling {server} again."))
     }
@@ -146,6 +146,20 @@ impl McpCommand {
             format!("{server} is already disabled")
         }
     }
+}
+
+/// A sign-in nobody answered. A surface that renders no `Login` — the print
+/// one — declines the question rather than showing it, and a person reading
+/// the word *cancelled* would not know what to do next; the headless twin is
+/// what they do next (ADR-0050 §4).
+fn unanswered(server: &str, error: bingo_auth_oauth::AuthError) -> KernelError {
+    let message = match error {
+        bingo_auth_oauth::AuthError::Cancelled => format!(
+            "the sign-in to {server} was not answered here;              run `bingo mcp login {server}` in a terminal"
+        ),
+        other => other.to_string(),
+    };
+    KernelError::new(ErrorCode::InvalidInput, message)
 }
 
 /// The session's own way of asking a person, for a command that holds the
@@ -462,6 +476,23 @@ mod tests {
             assert!(hint.contains(verb.as_str()), "{verb:?} is not in the hint");
             assert!(spec.hint.contains(verb.as_str()), "{verb:?} is not offered");
         }
+    }
+
+    /// A surface that cannot show a sign-in declines it, and *cancelled* is
+    /// not a thing a person can act on: the refusal names the way through.
+    #[test]
+    fn a_sign_in_nobody_answered_names_the_headless_way_through() {
+        let refused = unanswered("remote", bingo_auth_oauth::AuthError::Cancelled);
+        assert_eq!(refused.code, ErrorCode::InvalidInput);
+        assert!(
+            refused.message.contains("bingo mcp login remote"),
+            "{refused}"
+        );
+        let other = unanswered(
+            "remote",
+            bingo_auth_oauth::AuthError::Invalid("no S256".into()),
+        );
+        assert!(other.message.contains("no S256"), "{other}");
     }
 
     /// A server with no sign-in of its own is told so by name rather than

@@ -35,7 +35,9 @@ pub async fn logout(host: &Host, provider: &str) -> Result<String, KernelError> 
 /// A person at a terminal: told on stderr, heard on stdin. A browser or
 /// device flow completes on its own, so the ask waits until the flow drops
 /// it; ctrl-c ends the process and the flow with it.
-struct Terminal;
+///
+/// Also what `bingo mcp login` answers with (ADR-0050 §4).
+pub struct Terminal;
 
 #[async_trait]
 impl Prompter for Terminal {
@@ -51,6 +53,16 @@ impl Prompter for Terminal {
             ));
         };
         match flow {
+            // A flow that offers `Text` is one whose redirect this terminal
+            // is expected to hand back: `--paste`, for a machine whose
+            // browser lands somewhere else.
+            LoginFlow::Browser { url } if answers.contains(&AnswerSpec::Text) => {
+                eprintln!("Sign in to {provider} in a browser:\n  {url}");
+                eprint!("Then paste the address it lands on: ");
+                Ok(Answer::Text {
+                    text: line().await?,
+                })
+            }
             LoginFlow::Browser { url } => {
                 eprintln!("Sign in to {provider} in your browser. If it did not open:\n  {url}");
                 eprintln!("Waiting for the browser…");

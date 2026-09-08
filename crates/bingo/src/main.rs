@@ -5,6 +5,7 @@ mod acp_proxy;
 mod channels;
 mod env;
 mod login;
+mod mcp;
 mod provider;
 mod update;
 
@@ -182,6 +183,12 @@ enum Command {
         #[command(subcommand)]
         action: ProviderAction,
     },
+    /// The MCP servers this machine dials, and the sign-ins they need
+    /// (ADR-0050 §4).
+    Mcp {
+        #[command(subcommand)]
+        action: mcp::Action,
+    },
     /// Listen on the configured IM channels and nothing else (ADR-0016).
     Channels {
         #[command(subcommand)]
@@ -243,6 +250,7 @@ impl Command {
             Command::Serve { .. }
             | Command::Channels { .. }
             | Command::Gateway { .. }
+            | Command::Mcp { .. }
             | Command::Provider { .. }
             | Command::Update { .. }
             | Command::AcpMcpProxy => None,
@@ -473,6 +481,7 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
         // but the bytes it is carrying (ADR-0036 §3).
         Some(Command::AcpMcpProxy) => Some(acp_proxy::run().await),
         Some(Command::Provider { .. }) => Some(added_provider(&env).await),
+        Some(Command::Mcp { action }) => Some(configured_mcp(cli, &env, cwd, action).await),
         // An asked-for update always asks: the daily stamp is the start-up
         // check's discipline, not a person's.
         Some(Command::Update { check }) => Some(update::run(&env, *check).await),
@@ -487,6 +496,22 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
         }
         _ => None,
     }
+}
+
+/// `bingo mcp …`: the servers this machine dials (ADR-0050 §4). It reads the
+/// same layers a run would, `--mcp-config` included, so what it lists is what
+/// the next session dials.
+async fn configured_mcp(
+    cli: &Cli,
+    env: &Env,
+    cwd: &std::path::Path,
+    action: &mcp::Action,
+) -> Result<i32, KernelError> {
+    let extra = match &cli.mcp_config {
+        Some(path) => Some(mcp_layer(path)?),
+        None => None,
+    };
+    mcp::run(action, env, cwd, cli.settings.as_deref(), extra).await
 }
 
 /// `bingo channels add <adapter>`: app id and secret in one sitting.
