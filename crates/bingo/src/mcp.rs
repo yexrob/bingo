@@ -282,7 +282,7 @@ fn list(configured: &BTreeMap<String, Server>) -> String {
 /// environment value are secrets; their names are not.
 fn describe(name: &str, server: &Server) -> String {
     let mut lines = vec![
-        format!("{name}"),
+        name.to_string(),
         format!("  type: {}", transport_of(server)),
     ];
     match server {
