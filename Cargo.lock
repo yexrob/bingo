@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "bingo"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-agents"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-auth-oauth"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-channels"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-checkpoints"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-context"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-demo-ui"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-experience"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-gateway"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bingo-channels",
  "bingo-core",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-hooks-shell"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-loopback"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-mcp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-auth-oauth",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-permissions"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-pictures"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.23.1",
  "bingo-sdk",
@@ -523,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-plugin-rpc"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-provider-acp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-provider-anthropic"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-auth-oauth",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-provider-fake"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-provider-openai"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-rooms"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-schedule"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-sdk"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-skills"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-store-jsonl"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-surface-print"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-surface-rpc"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-surface-tui"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-tasks"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-tool-bash"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-tool-fs"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-sdk",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-tool-web"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bingo-loopback",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "bingo-update"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "jiff",
  "schemars 1.2.2",
