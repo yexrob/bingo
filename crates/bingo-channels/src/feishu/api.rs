@@ -107,6 +107,10 @@ impl Api {
         self.send(reqwest::Method::PATCH, path, Some(body)).await
     }
 
+    pub async fn delete(&self, path: &str) -> Result<Value, ApiError> {
+        self.send(reqwest::Method::DELETE, path, None).await
+    }
+
     /// A binary resource — a picture a message carried. Feishu answers these
     /// with the bytes, not the JSON envelope, so a refusal is read off the
     /// status. The type is not read off the `Content-Type`: what a picture is

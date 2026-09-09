@@ -23,6 +23,7 @@ ADR-0016 records.
    - `im:message.group_at_msg` — group messages that @ the bot.
    - `im:message:send_as_bot` — sending.
    - `cardkit:card:write` — the streaming card.
+   - `im:message.reactions:write_only` — the sign that says it is working.
 
    The `im:message.p2p_msg:readonly` / `im:message.group_msg` pair are
    *sensitive* permissions needing tenant review; they read every message in
@@ -100,6 +101,10 @@ Tick each line, and paste what you saw.
       answer it in the TUI (`bingo --channels feishu` in another terminal, or
       `/approve` wherever you are). The card in Feishu loses its buttons and
       reads `approved in the TUI`.
+- [ ] **The working sign.** Ask for anything at all. The message you sent
+      gets a `Typing` reaction while the bot works and loses it when the
+      answer is done; a failed turn leaves a ❌ in its place (stop the
+      provider, or point it at a bad key, to make one fail).
 - [ ] **A dropped connection.** Turn the wifi off for a minute and back on.
       Within about two minutes the bot answers again; nothing is said twice.
 - [ ] **Rate limits.** Ask two long questions in one chat back to back. Both

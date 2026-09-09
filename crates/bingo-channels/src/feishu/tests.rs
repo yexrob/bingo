@@ -273,6 +273,80 @@ async fn a_question_is_its_own_card_and_settling_it_edits_that_message() {
     );
 }
 
+/// The sign the platform really has: a `Typing` reaction, added when the turn
+/// begins and deleted by the id the platform gave back (ADR-0051 §5).
+#[tokio::test]
+async fn a_working_message_gets_a_typing_reaction_and_loses_it_at_the_end() {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    let at = format!("{MESSAGES}/om_1/reactions");
+    ok(&server, "POST", &at, json!({ "reaction_id": "re_1" })).await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{at}/re_1")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "code": 0 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sign = feishu.acknowledge().expect("a sign");
+    let posted = Handle::Message("om_1".into()).posted();
+    let mark = sign.begin(&posted).await.expect("a reaction");
+    assert_eq!(mark, Mark("re_1".into()));
+    assert_eq!(
+        bodies(&server, &at).await,
+        [json!({ "reaction_type": { "emoji_type": "Typing" } })]
+    );
+    sign.end(&posted, mark, Outcome::Done)
+        .await
+        .expect("taken off");
+    assert_eq!(
+        bodies(&server, &at).await.len(),
+        1,
+        "a turn that went well leaves nothing behind"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_turn_leaves_a_cross_where_the_sign_was() {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    let at = format!("{MESSAGES}/om_1/reactions");
+    ok(&server, "POST", &at, json!({ "reaction_id": "re_1" })).await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{at}/re_1")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "code": 0 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sign = feishu.acknowledge().expect("a sign");
+    let posted = Handle::Message("om_1".into()).posted();
+    sign.end(&posted, Mark("re_1".into()), Outcome::Failed)
+        .await
+        .expect("taken off");
+    assert_eq!(
+        bodies(&server, &at).await,
+        [json!({ "reaction_type": { "emoji_type": "CrossMark" } })],
+        "the cross is added after the sign came off, and stays"
+    );
+}
+
+#[tokio::test]
+async fn a_card_cannot_be_reacted_to_because_it_is_not_a_message() {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    let sign = feishu.acknowledge().expect("a sign");
+    let card = Handle::Card("ctp_1".into()).posted();
+    assert!(matches!(
+        sign.begin(&card).await,
+        Err(ChannelError::Unsupported(_))
+    ));
+    assert!(matches!(
+        sign.end(&card, Mark("re_1".into()), Outcome::Done).await,
+        Err(ChannelError::Unsupported(_))
+    ));
+}
+
 #[tokio::test]
 async fn a_card_cannot_be_settled_and_a_message_cannot_be_streamed_into() {
     let server = MockServer::start().await;

@@ -30,7 +30,9 @@ use async_trait::async_trait;
 use bingo_sdk::CancellationToken;
 use serde_json::{Value, json};
 
-use crate::adapter::{Buttons, ChannelAdapter, Edit, Inbox, Mode, Threads};
+use crate::adapter::{
+    Acknowledge, Buttons, ChannelAdapter, Edit, Inbox, Mark, Mode, Outcome, Threads,
+};
 use crate::conversation::{Conversation, Posted};
 use crate::error::ChannelError;
 use crate::limits::{Dialect, Encoding, Limits};
@@ -43,11 +45,19 @@ use send::Queue;
 /// an event, only a list of mentions to look ourselves up in.
 const WHOAMI: &str = "/open-apis/bot/v3/info";
 const MESSAGES: &str = "/open-apis/im/v1/messages";
+const REACTIONS: &str = "reactions";
 const CARDS: &str = "/open-apis/cardkit/v1/cards";
 
 /// A card is capped at 30 KB serialised, and JSON escaping is not free, so the
 /// text this surface will put in one stops short of it.
 const MAX_TEXT: usize = 20_000;
+
+/// The sign that the bot is working, and the one a failure leaves behind.
+/// Both are keys from Feishu's own emoji list; a key it does not know is
+/// refused whole.
+/// <https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce>
+const WORKING: &str = "Typing";
+const FAILED: &str = "CrossMark";
 
 pub struct Config {
     pub app_id: String,
@@ -203,6 +213,13 @@ impl Feishu {
         self.spend(self.api.put(&path, body).await)
     }
 
+    /// One emoji on one message.
+    async fn react(&self, message_id: &str, emoji: &str) -> Result<Value, ChannelError> {
+        let body = json!({ "reaction_type": { "emoji_type": emoji } });
+        let path = format!("{MESSAGES}/{message_id}/{REACTIONS}");
+        Ok(self.api.post(&path, body).await?)
+    }
+
     /// A rate limit or a busy card costs this frame, not the stream.
     fn spend(&self, outcome: Result<Value, ApiError>) -> Result<(), ChannelError> {
         match outcome {
@@ -284,6 +301,10 @@ impl ChannelAdapter for Feishu {
     }
 
     fn threads(&self) -> Option<&dyn Threads> {
+        Some(self)
+    }
+
+    fn acknowledge(&self) -> Option<&dyn Acknowledge> {
         Some(self)
     }
 }
@@ -373,6 +394,43 @@ impl Threads for Feishu {
             }
         };
         Ok(handle.posted())
+    }
+}
+
+/// A reaction on the message that spoke, taken off when the turn ends and a
+/// `CrossMark` left in its place when that turn failed (ADR-0051 §5). Wanting
+/// `im:message.reactions:write_only`.
+/// <https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create>
+/// <https://open.feishu.cn/document/server-docs/im-v1/message-reaction/delete>
+#[async_trait]
+impl Acknowledge for Feishu {
+    async fn begin(&self, at: &Posted) -> Result<Mark, ChannelError> {
+        let answer = self.react(&reactable(at)?, WORKING).await?;
+        answer["data"]["reaction_id"]
+            .as_str()
+            .map(|id| Mark(id.to_string()))
+            .ok_or_else(|| ChannelError::Platform("feishu added no reaction".into()))
+    }
+
+    /// The cross is added after the sign comes off and is left in place: it is
+    /// the record that this message's turn went wrong.
+    async fn end(&self, at: &Posted, mark: Mark, outcome: Outcome) -> Result<(), ChannelError> {
+        let message_id = reactable(at)?;
+        let path = format!("{MESSAGES}/{message_id}/{REACTIONS}/{}", mark.0);
+        self.api.delete(&path).await?;
+        if outcome == Outcome::Failed {
+            self.react(&message_id, FAILED).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Only a message carries reactions. A card sent by its id is not one, and
+/// nothing this surface knows can turn it into one.
+fn reactable(at: &Posted) -> Result<String, ChannelError> {
+    match Handle::of(at) {
+        Some(Handle::Message(id)) => Ok(id),
+        _ => Err(ChannelError::Unsupported("reacting to a card")),
     }
 }
 
