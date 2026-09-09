@@ -31,7 +31,7 @@ async fn feishu(server: &MockServer) -> Feishu {
         app_id: "cli_a".into(),
         app_secret: "secret".into(),
         base: server.uri(),
-        files: std::path::PathBuf::from("/nonexistent-bingo-feishu-files"),
+        attachments: std::path::PathBuf::from("/nonexistent-bingo-feishu-attachments"),
     })
 }
 
@@ -136,7 +136,7 @@ async fn a_channel_with_no_credential_refuses_before_it_dials() {
         app_id: "cli_a".into(),
         app_secret: String::new(),
         base: "http://127.0.0.1:1".into(),
-        files: std::path::PathBuf::from("/nonexistent-bingo-feishu-files"),
+        attachments: std::path::PathBuf::from("/nonexistent-bingo-feishu-attachments"),
     });
     let (post, _arrivals) = tokio::sync::mpsc::channel(1);
     let error = bare

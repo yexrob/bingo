@@ -26,7 +26,7 @@ use super::chunks::Chunks;
 use super::content::Resource;
 use super::event::{Seen, heard};
 use super::frame::{self, Frame, Method, header, kind};
-use super::{files, merged};
+use super::{attachments, merged};
 use crate::adapter::{Inbox, Incoming};
 use crate::error::ChannelError;
 
@@ -48,11 +48,15 @@ pub async fn listen(
     api: &Api,
     app_secret: &str,
     me: &str,
-    files: &Path,
+    attachments: &Path,
     inbox: &Inbox,
     cancel: &CancellationToken,
 ) -> Result<(), ChannelError> {
-    let delivery = Delivery { api, files, inbox };
+    let delivery = Delivery {
+        api,
+        attachments,
+        inbox,
+    };
     let mut config = ClientConfig::default();
     let mut attempt = 0u32;
     // Outlives every connection, unlike the reassembly beside it: see `Inbound`.
@@ -110,7 +114,7 @@ async fn once(
 /// (ADR-0051 §2).
 struct Delivery<'a> {
     api: &'a Api,
-    files: &'a Path,
+    attachments: &'a Path,
     inbox: &'a Inbox,
 }
 
@@ -266,7 +270,7 @@ async fn filled(
     text: String,
     step: &Step,
 ) -> (String, Vec<Image>) {
-    let fetched = files::fetch(delivery.api, delivery.files, &step.resources).await;
+    let fetched = attachments::fetch(delivery.api, delivery.attachments, &step.resources).await;
     let mut parts = vec![text, fetched.lines.join("\n")];
     if let Some(id) = &step.forwarded
         && let Some(bundle) = merged::lines(delivery.api, id, me).await

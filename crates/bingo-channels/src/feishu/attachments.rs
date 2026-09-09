@@ -381,7 +381,7 @@ mod tests {
         );
         let shown = fetched.lines.join("\n").replace(
             dir.path().to_str().expect("a utf-8 temporary directory"),
-            "<files>",
+            "<attachments>",
         );
         insta::assert_snapshot!("feishu-attachments", shown);
         for line in &fetched.lines {

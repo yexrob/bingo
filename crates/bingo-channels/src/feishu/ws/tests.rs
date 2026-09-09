@@ -20,7 +20,7 @@ const ME: &str = "ou_bot";
 
 /// Where an attachment would land. Nothing is written under it unless a test
 /// sends one.
-const FILES: &str = "bingo-feishu-files-no-test-writes-here";
+const ATTACHMENTS: &str = "bingo-feishu-attachments-no-test-writes-here";
 
 /// One event frame, as the peer sends it.
 fn event(id: &str) -> Vec<u8> {
@@ -152,9 +152,16 @@ async fn a_killed_socket_is_dialled_again_and_the_events_keep_arriving() {
     let cancel = bingo_sdk::CancellationToken::new();
     let stopping = cancel.clone();
     let listener = tokio::spawn(async move {
-        listen(&api, "secret", ME, Path::new(FILES), &inbox, &stopping)
-            .await
-            .expect("a clean stop");
+        listen(
+            &api,
+            "secret",
+            ME,
+            Path::new(ATTACHMENTS),
+            &inbox,
+            &stopping,
+        )
+        .await
+        .expect("a clean stop");
     });
 
     for expected in 0..2 {
@@ -186,7 +193,7 @@ async fn a_forbidden_handshake_stops_the_ladder_rather_than_hammering_it() {
     let cancel = bingo_sdk::CancellationToken::new();
     let error = tokio::time::timeout(
         Duration::from_secs(10),
-        listen(&api, "secret", ME, Path::new(FILES), &inbox, &cancel),
+        listen(&api, "secret", ME, Path::new(ATTACHMENTS), &inbox, &cancel),
     )
     .await
     .expect("the ladder gives up rather than retrying for ever")
@@ -203,7 +210,7 @@ async fn the_connection_limit_is_fatal_however_many_times_it_is_tried() {
     let cancel = bingo_sdk::CancellationToken::new();
     let error = tokio::time::timeout(
         Duration::from_secs(10),
-        listen(&api, "secret", ME, Path::new(FILES), &inbox, &cancel),
+        listen(&api, "secret", ME, Path::new(ATTACHMENTS), &inbox, &cancel),
     )
     .await
     .expect("the ladder gives up")
@@ -221,7 +228,7 @@ async fn a_cancelled_listener_stops_without_dialling_again() {
     let (api, _arrivals, inbox) = listening(&server);
     let cancel = bingo_sdk::CancellationToken::new();
     cancel.cancel();
-    listen(&api, "secret", ME, Path::new(FILES), &inbox, &cancel)
+    listen(&api, "secret", ME, Path::new(ATTACHMENTS), &inbox, &cancel)
         .await
         .expect("a clean stop");
     assert_eq!(accepts.load(Ordering::Relaxed), 0);
@@ -231,7 +238,7 @@ async fn a_cancelled_listener_stops_without_dialling_again() {
 /// file arrives as the words, a blank line, and the path the file landed on.
 #[tokio::test]
 async fn an_attachment_arrives_as_a_path_under_the_words() {
-    let files = tempfile::tempdir().expect("a directory");
+    let attachments = tempfile::tempdir().expect("a directory");
     let address = peer_saying(said(
         "evt_file",
         "post",
@@ -264,7 +271,7 @@ async fn an_attachment_arrives_as_a_path_under_the_words() {
     let (api, mut arrivals, inbox) = listening(&server);
     let cancel = bingo_sdk::CancellationToken::new();
     let stopping = cancel.clone();
-    let at = files.path().to_path_buf();
+    let at = attachments.path().to_path_buf();
     let listener = tokio::spawn(async move {
         listen(&api, "secret", ME, &at, &inbox, &stopping)
             .await
@@ -278,7 +285,7 @@ async fn an_attachment_arrives_as_a_path_under_the_words() {
     let Incoming::Message { text, .. } = arrival.event else {
         panic!("a message");
     };
-    let landed = files.path().join("om_1").join("notes.txt");
+    let landed = attachments.path().join("om_1").join("notes.txt");
     assert_eq!(
         text,
         format!(

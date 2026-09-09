@@ -1,8 +1,0 @@
----
-source: crates/bingo-channels/src/feishu/files.rs
-assertion_line: 386
-expression: shown
----
-[file: report.pdf → <files>/om_1/report.pdf]
-[file: audio_a.opus → <files>/om_1/audio_a.opus]
-[file: demo.mp4 → <files>/om_1/demo.mp4]

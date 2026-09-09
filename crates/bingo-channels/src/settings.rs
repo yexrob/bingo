@@ -100,7 +100,7 @@ pub struct FeishuChannel {
 
 /// Where an attachment a Feishu message carried lands, under the data
 /// directory this adapter already keeps its lock in (ADR-0051 §2).
-const FILES: &str = "files";
+const ATTACHMENTS: &str = "attachments";
 
 /// The environment variables a Feishu app is signed with.
 pub const APP_ID: &str = "BINGO_FEISHU_APP_ID";
@@ -124,11 +124,11 @@ impl FeishuChannel {
                 .base
                 .clone()
                 .unwrap_or_else(|| feishu::api::BASE.to_string()),
-            files: env
+            attachments: env
                 .data_dir
                 .join(crate::lock::DIRECTORY)
                 .join(Feishu::ID)
-                .join(FILES),
+                .join(ATTACHMENTS),
         }
     }
 }

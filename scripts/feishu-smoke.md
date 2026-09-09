@@ -116,7 +116,7 @@ Tick each line, and paste what you saw.
       message as well as on disk), a voice note, a sticker, and a bundle
       forwarded out of another chat. Every one of them is answered rather
       than ignored. The file's path is under
-      `~/.bingo/data/channels/feishu/files/<message id>/` and it is there; the
+      `~/.bingo/data/channels/feishu/attachments/<message id>/` and it is there; the
       voice note and any video get a path and nothing more — this surface
       transcribes nothing. The forwarded bundle's messages are listed under a
       `--- forwarded ---` line; if it arrives as its title alone, `im:message`

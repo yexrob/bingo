@@ -36,7 +36,7 @@ Nothing here reaches `bingo-sdk` or `bingo-core`.
 2. **An attachment lands on disk at the edge.** A `file`, `audio` or `media`
    message — or such a run in a `post` — is fetched through the resource
    endpoint (`type=file`; `audio`/`media` retried as `file`) and written to
-   `<data_dir>/channels/feishu/files/<message_id>/<name>`, the name reduced to
+   `<data_dir>/channels/feishu/attachments/<message_id>/<name>`, the name reduced to
    a safe basename. The text gains one line per attachment,
    `[file: <name> → <path>]`; a `text/plain` or `text/markdown` file of at
    most 100 KiB is also inlined under it as a fence. Voice and video get the

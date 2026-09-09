@@ -6,7 +6,7 @@
 //! — and the surface it was dropped in never says so.
 //!
 //! Nothing here does I/O. What a message carried beside its words leaves as
-//! the key the platform serves it under; [`super::files`] is what turns a key
+//! the key the platform serves it under; [`super::attachments`] is what turns a key
 //! into bytes.
 //!
 //! The field names are Feishu's own, read off 接收消息内容

@@ -12,12 +12,12 @@
 //! lives there, the secret comes from the environment.
 
 pub mod api;
+pub mod attachments;
 pub mod bootstrap;
 pub mod card;
 pub mod chunks;
 pub mod content;
 pub mod event;
-pub mod files;
 pub mod frame;
 pub mod merged;
 pub mod posted;
@@ -73,13 +73,13 @@ pub struct Config {
     /// Where the API lives. Overridable so a test can be Feishu.
     pub base: String,
     /// Where an attachment a message carried lands (ADR-0051 §2).
-    pub files: PathBuf,
+    pub attachments: PathBuf,
 }
 
 pub struct Feishu {
     api: Api,
     app_secret: String,
-    files: PathBuf,
+    attachments: PathBuf,
     limits: Limits,
     queue: Queue,
     /// This bot's own open id, once `run` has asked for it.
@@ -105,7 +105,7 @@ impl Feishu {
         Self {
             api: Api::new(config.base, &config.app_id, &config.app_secret),
             app_secret: config.app_secret,
-            files: config.files,
+            attachments: config.attachments,
             limits: Limits {
                 max_text: (MAX_TEXT, Encoding::Utf8Bytes),
                 dialect: Dialect::Markdown,
@@ -347,7 +347,7 @@ impl ChannelAdapter for Feishu {
             &self.api,
             &self.app_secret,
             &me,
-            &self.files,
+            &self.attachments,
             &inbox,
             &cancel,
         )
