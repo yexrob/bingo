@@ -25,8 +25,8 @@ use super::bootstrap::{ClientConfig, Refusal, handshake};
 use super::chunks::Chunks;
 use super::content::Resource;
 use super::event::{Seen, heard};
-use super::files;
 use super::frame::{self, Frame, Method, header, kind};
+use super::{files, merged};
 use crate::adapter::{Inbox, Incoming};
 use crate::error::ChannelError;
 
@@ -188,7 +188,7 @@ async fn listening(
         // just been hot-updated by a pong.
         quiet_at = Instant::now() + config.read_deadline();
         ping_at = ping_at.min(Instant::now() + config.ping_interval);
-        if let Some(ended) = act(writer, step, delivery, cancel, quiet_at).await {
+        if let Some(ended) = act(writer, step, me, delivery, cancel, quiet_at).await {
             return ended;
         }
     }
@@ -199,6 +199,7 @@ async fn listening(
 async fn act(
     writer: &mut Writer,
     mut step: Step,
+    me: &str,
     delivery: &Delivery<'_>,
     cancel: &CancellationToken,
     quiet_at: Instant,
@@ -210,7 +211,7 @@ async fn act(
             "the ack could not be written: {error}"
         )));
     }
-    let event = with_resources(delivery, step).await?;
+    let event = with_resources(delivery, me, step).await?;
     // Handing an event on must never blind the socket. While this task is
     // parked on a full downstream channel, nothing polls the read deadline,
     // the ping timer or the cancellation — so a stalled session is
@@ -227,12 +228,13 @@ async fn act(
     }
 }
 
-/// The message with everything it only named: its pictures beside the words
-/// and its attachments on disk under them. A click is handed on as it came.
+/// The message with everything it only named: its pictures beside the words,
+/// its attachments on disk under them, the bundle it forwarded after those. A
+/// click is handed on as it came.
 ///
 /// The ack has gone out already, so a slow fetch costs delivery time, never a
 /// redelivery.
-async fn with_resources(delivery: &Delivery<'_>, mut step: Step) -> Option<Incoming> {
+async fn with_resources(delivery: &Delivery<'_>, me: &str, mut step: Step) -> Option<Incoming> {
     match step.deliver.take()? {
         Incoming::Message {
             conversation,
@@ -242,7 +244,7 @@ async fn with_resources(delivery: &Delivery<'_>, mut step: Step) -> Option<Incom
             parent,
             ..
         } => {
-            let (text, images) = filled(delivery, text, &step).await;
+            let (text, images) = filled(delivery, me, text, &step).await;
             Some(Incoming::Message {
                 conversation,
                 principal,
@@ -258,9 +260,19 @@ async fn with_resources(delivery: &Delivery<'_>, mut step: Step) -> Option<Incom
 
 /// The words with what was fetched appended, each part a blank line apart: a
 /// message that was only a file is the lines and nothing else.
-async fn filled(delivery: &Delivery<'_>, text: String, step: &Step) -> (String, Vec<Image>) {
+async fn filled(
+    delivery: &Delivery<'_>,
+    me: &str,
+    text: String,
+    step: &Step,
+) -> (String, Vec<Image>) {
     let fetched = files::fetch(delivery.api, delivery.files, &step.resources).await;
     let mut parts = vec![text, fetched.lines.join("\n")];
+    if let Some(id) = &step.forwarded
+        && let Some(bundle) = merged::lines(delivery.api, id, me).await
+    {
+        parts.push(bundle);
+    }
     parts.retain(|part| !part.is_empty());
     (parts.join("\n\n"), fetched.images)
 }
@@ -300,6 +312,8 @@ struct Step {
     deliver: Option<Incoming>,
     /// What `deliver` still has to fetch before it is handed on.
     resources: Vec<Resource>,
+    /// The merged bundle it still has to read, where it forwarded one.
+    forwarded: Option<String>,
 }
 
 /// The reassembly state of one connection, and the dedupe ring of the whole
@@ -360,6 +374,7 @@ impl<'a> Inbound<'a> {
             reply: Some(frame::ack(&whole, arrived.elapsed())),
             deliver: heard.incoming,
             resources: heard.resources,
+            forwarded: heard.forwarded,
         }
     }
 }

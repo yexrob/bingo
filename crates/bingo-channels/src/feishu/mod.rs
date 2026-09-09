@@ -19,6 +19,7 @@ pub mod content;
 pub mod event;
 pub mod files;
 pub mod frame;
+pub mod merged;
 pub mod posted;
 pub mod send;
 pub mod token;

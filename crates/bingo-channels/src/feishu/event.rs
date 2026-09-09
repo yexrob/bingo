@@ -24,6 +24,10 @@ use bingo_sdk::InteractionId;
 const MESSAGE: &str = "im.message.receive_v1";
 const CARD_ACTION: &str = "card.action.trigger";
 
+/// A bundle of messages somebody forwarded in one go. It arrives as a title
+/// and a promise; the messages themselves are a fetch (ADR-0051 §1).
+const MERGE_FORWARD: &str = "merge_forward";
+
 /// The key a button's value carries ours under, so a callback from somebody
 /// else's card is never mistaken for an answer.
 const OURS: &str = "bingo";
@@ -38,6 +42,9 @@ pub struct Heard {
     /// What the message carried besides words, still to be fetched: parsing
     /// does no I/O, so what leaves here is the key, not the bytes.
     pub resources: Vec<Resource>,
+    /// The message whose merged bundle is still to be read, where this was a
+    /// `merge_forward`.
+    pub forwarded: Option<String>,
 }
 
 /// `me` is this bot's own open id, read once at startup: there is no
@@ -72,10 +79,11 @@ fn message(event: &Value, me: &str) -> Option<Heard> {
         None => Conversation::direct(chat),
     };
     let id = message["message_id"].as_str().unwrap_or_default();
+    let message_type = message["message_type"].as_str()?;
     let mentions = &message["mentions"];
     let spoken = content::spoken(
         id,
-        message["message_type"].as_str()?,
+        message_type,
         message["content"].as_str().unwrap_or_default(),
         mentions,
         me,
@@ -95,6 +103,7 @@ fn message(event: &Value, me: &str) -> Option<Heard> {
         id: String::new(),
         incoming: Some(incoming),
         resources: spoken.resources,
+        forwarded: (message_type == MERGE_FORWARD && !id.is_empty()).then(|| id.to_string()),
     })
 }
 
@@ -341,6 +350,34 @@ mod tests {
             }],
             "the key is stamped with the message it will be fetched from"
         );
+    }
+
+    #[test]
+    fn a_merged_forward_names_the_message_whose_bundle_is_still_to_be_read() {
+        let mut event: Value = serde_json::from_slice(&text_message(
+            "p2p",
+            json!({ "title": "Tuesday's thread" }),
+            json!([]),
+        ))
+        .expect("json");
+        event["event"]["message"]["message_type"] = json!("merge_forward");
+        let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
+        let Some(Incoming::Message { text, .. }) = &heard.incoming else {
+            panic!("a message");
+        };
+        assert_eq!(text, "Tuesday's thread");
+        assert_eq!(heard.forwarded.as_deref(), Some("om_1"));
+    }
+
+    #[test]
+    fn an_ordinary_message_forwards_nothing() {
+        let heard = heard(
+            &text_message("p2p", json!({"text": "hello"}), json!([])),
+            ME,
+        )
+        .expect("an event");
+        assert_eq!(heard.forwarded, None);
+        assert!(heard.resources.is_empty());
     }
 
     #[test]
