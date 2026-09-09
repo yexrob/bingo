@@ -23,14 +23,20 @@ pub(super) enum Streamed {
 
 impl Turn<'_> {
     pub(super) async fn stream(&mut self, request: ModelRequest) -> Streamed {
-        let mut stream = match self
-            .model
-            .provider
-            .stream(request, self.cancel.child_token())
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => return Streamed::Failed(e, Vec::new()),
+        // Establishing the request is an await of its own — on a long context
+        // it is seconds of time to first byte — and the token the provider
+        // carries only reaches the stream that does not exist yet.
+        let established = self
+            .racing(
+                self.model
+                    .provider
+                    .stream(request, self.cancel.child_token()),
+            )
+            .await;
+        let mut stream = match established {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Streamed::Failed(e, Vec::new()),
+            None => return Streamed::Cancelled,
         };
         let mut acc = Accumulator::new(self.id.clone(), self.round);
         let mut cancelled = false;

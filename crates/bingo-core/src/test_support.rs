@@ -25,6 +25,9 @@ pub enum Script {
     /// The stream call itself explodes, so the turn loop panics where no
     /// `Result` can carry the news back.
     Panic,
+    /// The stream call never returns: a request whose first byte never
+    /// arrives, which is the longest await of a round.
+    Establishing,
 }
 
 pub struct ScriptedProvider {
@@ -40,6 +43,9 @@ pub struct ScriptedProvider {
     serves: Mutex<Result<Vec<ModelInfo>, String>>,
     /// Its credentials; `NotApplicable`, as the sdk's default is.
     auth: Mutex<AuthStatus>,
+    /// Whether an exact count ever comes back. A recount is an await of the
+    /// round like any other, so a test needs one that never does.
+    counts: Mutex<bool>,
 }
 
 impl ScriptedProvider {
@@ -70,7 +76,14 @@ impl ScriptedProvider {
             family,
             serves: Mutex::new(Ok(Vec::new())),
             auth: Mutex::new(AuthStatus::NotApplicable),
+            counts: Mutex::new(true),
         })
+    }
+
+    /// A provider whose exact count never comes back.
+    pub fn never_counts(self: Arc<Self>) -> Arc<Self> {
+        *self.counts.lock().unwrap() = false;
+        self
     }
 
     /// A provider nobody has signed in to.
@@ -148,7 +161,14 @@ impl Provider for ScriptedProvider {
             Some(Script::Hang(evs)) => Ok(Box::pin(
                 futures::stream::iter(evs.into_iter().map(Ok)).chain(futures::stream::pending()),
             )),
+            Some(Script::Establishing) => std::future::pending().await,
         }
+    }
+    async fn count_tokens(&self, request: &ModelRequest) -> Result<u64, ProviderError> {
+        if !*self.counts.lock().unwrap() {
+            std::future::pending::<()>().await;
+        }
+        Ok(request.messages.len() as u64)
     }
 }
 

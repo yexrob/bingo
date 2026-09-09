@@ -123,6 +123,60 @@ enum Assembled {
     Compacted,
 }
 
+/// One await of a round under the turn's cancel: `None` is a person having
+/// stopped the turn, and the work is dropped where it stands.
+///
+/// Biased for the executor's reason (`executor::run_one`): once a person has
+/// stopped the turn nothing is polled again, so what ends a round is always
+/// the drop. A cancel and a finishing await racing for the same round would be
+/// two endings for one keypress.
+async fn racing<T>(cancel: &CancellationToken, work: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        done = work => Some(done),
+    }
+}
+
+/// One item as a turn mints it: now, in this round, under this turn.
+fn mint(turn: &TurnId, round: u32, body: ItemBody, status: ItemStatus) -> Item {
+    let now = Timestamp::now();
+    Item {
+        id: ItemId::mint(),
+        turn: Some(turn.clone()),
+        round,
+        status,
+        started_at: now,
+        completed_at: status.is_terminal().then_some(now),
+        intent: None,
+        body,
+        meta: Default::default(),
+    }
+}
+
+/// A turn stopped before it had gathered enough to be one. The marker still
+/// reaches the transcript and the clients: what a person sees when they press
+/// esc does not depend on how far the turn had got.
+fn stopped_early(host: &dyn TurnHost, turn: &TurnId, mut items: Vec<Item>) -> TurnOutcome {
+    let item = mint(
+        turn,
+        0,
+        ItemBody::Interruption {
+            marker: INTERRUPTED_MARKER.into(),
+        },
+        ItemStatus::Completed,
+    );
+    host.emit(Event::ItemCompleted { item: item.clone() });
+    items.push(item);
+    TurnOutcome {
+        status: TurnStatus::Interrupted {
+            reason: InterruptReason::UserCancel,
+        },
+        usage: Usage::default(),
+        items,
+    }
+}
+
 /// The actor opens no turn on a session nothing answers (ADR-0011 §1); this
 /// is the guard, not a path.
 fn unanswered(items: Vec<Item>) -> TurnOutcome {
@@ -148,7 +202,9 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         provider: Some(model.provider.clone()),
         model: Some(model.id.clone()),
     };
-    let late = Late::gather(cfg).await;
+    let Some(late) = racing(&run.cancel, Late::gather(cfg)).await else {
+        return stopped_early(host, &run.turn, items);
+    };
     host.offered(late.tools.clone());
     for name in &late.shadowed {
         host.emit(Event::Notice {
@@ -176,13 +232,13 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         usage: Usage::default(),
         hook_cx,
     };
-    for hook in turn.hooks(HookPoint::Turn).await {
-        hook.on_turn(Phase::Start, &turn.id, &turn.items, &turn.hook_cx)
-            .await;
-    }
-    let status = match run.kind {
-        TurnKind::Respond => turn.respond().await,
-        TurnKind::Compact { instructions } => turn.compact_only(instructions).await,
+    let started = turn.start_hooks().await;
+    let status = match started {
+        Some(()) => match run.kind {
+            TurnKind::Respond => turn.respond().await,
+            TurnKind::Compact { instructions } => turn.compact_only(instructions).await,
+        },
+        None => turn.interrupted_status(),
     };
     TurnOutcome {
         status,
@@ -214,7 +270,9 @@ impl Turn<'_> {
                 ),
             };
         };
-        let (request, usage) = self.assemble_request().await;
+        let Some((request, usage)) = self.assemble_request().await else {
+            return self.interrupted_status();
+        };
         self.compact(
             compactor.as_ref(),
             CompactReason::Manual { instructions },
@@ -223,11 +281,14 @@ impl Turn<'_> {
         )
         .await;
         if self.cancel.is_cancelled() {
-            return TurnStatus::Interrupted {
-                reason: InterruptReason::UserCancel,
-            };
+            return self.interrupted_status();
         }
         TurnStatus::Completed
+    }
+
+    /// This turn's cancel across one await; see [`racing`].
+    async fn racing<T>(&self, work: impl Future<Output = T>) -> Option<T> {
+        racing(&self.cancel, work).await
     }
 
     /// The hooks that claim this point, asked of the one set the config holds.
@@ -235,19 +296,20 @@ impl Turn<'_> {
         self.cfg.hooks.at(point, None).await
     }
 
-    fn fresh(&self, body: ItemBody, status: ItemStatus) -> Item {
-        let now = Timestamp::now();
-        Item {
-            id: ItemId::mint(),
-            turn: Some(self.id.clone()),
-            round: self.round,
-            status,
-            started_at: now,
-            completed_at: status.is_terminal().then_some(now),
-            intent: None,
-            body,
-            meta: Default::default(),
+    /// The `Turn` hooks at the start. A hook that is still thinking when a
+    /// person presses esc does not hold the turn open, and neither does the
+    /// source that was still being asked for it.
+    async fn start_hooks(&self) -> Option<()> {
+        let hooks = self.racing(self.hooks(HookPoint::Turn)).await?;
+        for hook in hooks {
+            self.racing(hook.on_turn(Phase::Start, &self.id, &self.items, &self.hook_cx))
+                .await?;
         }
+        Some(())
+    }
+
+    fn fresh(&self, body: ItemBody, status: ItemStatus) -> Item {
+        mint(&self.id, self.round, body, status)
     }
 
     fn record(&mut self, body: ItemBody) -> ItemId {
@@ -276,11 +338,15 @@ impl Turn<'_> {
         });
     }
 
-    async fn contribute(
-        &mut self,
+    /// Let the contributors for one placement speak, raced: a contributor
+    /// still thinking when a person presses esc does not hold the round open,
+    /// and what the ones before it said is dropped with it — nothing half
+    /// gathered reaches the transcript.
+    async fn gathered(
+        &self,
         want: impl Fn(Placement) -> bool,
         usage: &ContextUsage,
-    ) -> Vec<SystemBlock> {
+    ) -> Option<contributors::Gathered> {
         let query = ContextQuery {
             session: &self.cfg.session,
             host: &self.cfg.host,
@@ -291,14 +357,23 @@ impl Turn<'_> {
             capabilities: &self.model.capabilities,
             cwd: &self.cfg.cwd,
         };
-        let gathered = contributors::gather(&self.late.contributors, want, query).await;
+        self.racing(contributors::gather(&self.late.contributors, want, query))
+            .await
+    }
+
+    async fn contribute(
+        &mut self,
+        want: impl Fn(Placement) -> bool,
+        usage: &ContextUsage,
+    ) -> Option<Vec<SystemBlock>> {
+        let gathered = self.gathered(want, usage).await?;
         for (id, e) in gathered.failed {
             self.warn("CONTRIBUTOR_FAILED", format!("{id}: {e}"));
         }
         for (label, parts) in gathered.user {
             self.user_piece(parts, label);
         }
-        gathered.system
+        Some(gathered.system)
     }
 
     /// A warning on the ephemeral stream: the person sees it, the journal does not.
@@ -335,14 +410,18 @@ impl Turn<'_> {
 
     /// An exact count when the endpoint offers one and the estimate has
     /// drifted far enough from the last truth to be worth a request.
-    async fn recount(&mut self, request: &ModelRequest) {
+    async fn recount(&mut self, request: &ModelRequest) -> Option<()> {
         if !self.model.capabilities.count_tokens || !self.ruler.recount_due() {
-            return;
+            return Some(());
         }
-        match self.model.provider.count_tokens(request).await {
+        let counted = self
+            .racing(self.model.provider.count_tokens(request))
+            .await?;
+        match counted {
             Ok(counted) => self.ruler.counted(counted),
             Err(e) => tracing::debug!(error = %e, "count_tokens unavailable; the estimate stands"),
         }
+        Some(())
     }
 
     /// The person is told once per turn when the window is nearly spent.
@@ -370,8 +449,9 @@ impl Turn<'_> {
             });
         }
         let (request, usage) = match self.assemble().await {
-            Assembled::Request { request, usage } => (request, usage),
-            Assembled::Compacted => return Step::Assembling,
+            Some(Assembled::Request { request, usage }) => (request, usage),
+            Some(Assembled::Compacted) => return Step::Assembling,
+            None => return self.interrupted(),
         };
         let finished = match self.stream(request.clone()).await {
             Streamed::Done(f) => f,
@@ -389,14 +469,14 @@ impl Turn<'_> {
 
     /// Let the contributors speak, then measure. A first round that is already
     /// over the compaction threshold compacts before it sends anything.
-    async fn assemble_request(&mut self) -> (ModelRequest, ContextUsage) {
+    async fn assemble_request(&mut self) -> Option<(ModelRequest, ContextUsage)> {
         let preliminary = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
         let extra_system = self
             .contribute(
                 |p| matches!(p, Placement::System { .. } | Placement::RoundStart),
                 &preliminary,
             )
-            .await;
+            .await?;
         let mut system = self.cfg.system.clone();
         system.extend(extra_system);
         let full = self.without_images(ContextView::fold_items(&self.items));
@@ -414,21 +494,21 @@ impl Turn<'_> {
             session: Some(self.cfg.session.id.clone()),
             provider_options: ProviderMetadata::new(),
         };
-        self.recount(&request).await;
+        self.recount(&request).await?;
         let usage = self.ruler.anchored(usage);
         self.warn_once(&usage);
-        (request, usage)
+        Some((request, usage))
     }
 
-    async fn assemble(&mut self) -> Assembled {
-        let (request, usage) = self.assemble_request().await;
+    async fn assemble(&mut self) -> Option<Assembled> {
+        let (request, usage) = self.assemble_request().await?;
         if usage.used >= self.ruler.lines.trigger
             && self.round == 0
             && self.try_compact(usage, &request).await
         {
-            return Assembled::Compacted;
+            return Some(Assembled::Compacted);
         }
-        Assembled::Request { request, usage }
+        Some(Assembled::Request { request, usage })
     }
 
     /// A threshold compaction, unless the breaker says the last three bought
@@ -515,8 +595,14 @@ impl Turn<'_> {
 
     /// A `Stop` hook may push the turn into another round instead of ending it.
     async fn stop_hooks(&mut self) -> Step {
-        for hook in self.hooks(HookPoint::Stop).await {
-            if let HookOutcome::Block { reason } = hook.on_stop(&self.hook_cx).await {
+        let Some(hooks) = self.racing(self.hooks(HookPoint::Stop)).await else {
+            return self.interrupted();
+        };
+        for hook in hooks {
+            let Some(outcome) = self.racing(hook.on_stop(&self.hook_cx)).await else {
+                return self.interrupted();
+            };
+            if let HookOutcome::Block { reason } = outcome {
                 self.user_piece(
                     vec![ContentPart::text(reason)],
                     format!("{HOOK_PREFIX}{}", hook.id()),
@@ -538,15 +624,18 @@ impl Turn<'_> {
         if stop_after {
             return Step::Closing(TurnStatus::Completed);
         }
-        self.barrier().await;
+        if self.barrier().await.is_none() {
+            return self.interrupted();
+        }
         self.round += 1;
         Step::Assembling
     }
 
     /// The barrier: steering queued during the round joins the transcript, then
     /// the barrier contributors see the round that just happened.
-    async fn barrier(&mut self) {
-        for (_intent, input) in self.host.absorb().await {
+    async fn barrier(&mut self) -> Option<()> {
+        let steering = self.racing(self.host.absorb()).await?;
+        for (_intent, input) in steering {
             if let Input::Text {
                 text,
                 images,
@@ -561,18 +650,34 @@ impl Turn<'_> {
             }
         }
         let usage = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
-        let _ = self
-            .contribute(|p| matches!(p, Placement::Barrier), &usage)
-            .await;
+        self.contribute(|p| matches!(p, Placement::Barrier), &usage)
+            .await?;
+        Some(())
     }
 
     fn interrupted(&mut self) -> Step {
+        Step::Closing(self.interrupted_status())
+    }
+
+    /// The marker in the transcript and the status that goes with it: one
+    /// keypress, one ending, wherever in the round it arrived.
+    fn interrupted_status(&mut self) -> TurnStatus {
         self.record(ItemBody::Interruption {
             marker: INTERRUPTED_MARKER.into(),
         });
-        Step::Closing(TurnStatus::Interrupted {
+        TurnStatus::Interrupted {
             reason: InterruptReason::UserCancel,
-        })
+        }
+    }
+
+    /// The `Compact` hooks at one phase, raced. A stopped turn keeps no
+    /// summary, so the strategy is never asked for one it would only discard.
+    async fn compact_hooks(&self, phase: Phase) -> Option<()> {
+        let hooks = self.racing(self.hooks(HookPoint::Compact)).await?;
+        for hook in hooks {
+            self.racing(hook.on_compact(phase, &self.hook_cx)).await?;
+        }
+        Some(())
     }
 
     /// Ask the strategy for a cut and take it only if it shrinks something;
@@ -585,8 +690,8 @@ impl Turn<'_> {
         request: &ModelRequest,
     ) -> bool {
         let started = std::time::Instant::now();
-        for hook in self.hooks(HookPoint::Compact).await {
-            hook.on_compact(Phase::Start, &self.hook_cx).await;
+        if self.compact_hooks(Phase::Start).await.is_none() {
+            return false;
         }
         let cx = CompactContext {
             items: &self.items,
@@ -599,9 +704,7 @@ impl Turn<'_> {
             keep_budget: self.ruler.lines.keep,
         };
         let outcome = compactor.compact(cx, reason).await;
-        for hook in self.hooks(HookPoint::Compact).await {
-            hook.on_compact(Phase::End, &self.hook_cx).await;
-        }
+        let _ = self.compact_hooks(Phase::End).await;
         match outcome {
             Ok(c) if c.after < c.before && !self.cancel.is_cancelled() => {
                 self.usage.add(c.usage);
@@ -769,7 +872,9 @@ impl Turn<'_> {
     /// Let the `AfterTool` hooks see each result; one of them may stop the turn.
     async fn after_tool_hooks(&self, outcomes: &[ToolOutcome]) -> bool {
         let mut stop_after = false;
-        let hooks = self.cfg.hooks.gather().await;
+        let Some(hooks) = self.racing(self.cfg.hooks.gather()).await else {
+            return stop_after;
+        };
         for o in outcomes {
             let Some(item) = self.items.iter().find(|i| i.id == o.item) else {
                 continue;
@@ -792,9 +897,13 @@ impl Turn<'_> {
                 .iter()
                 .filter(|h| hook_applies(&h.matcher(), HookPoint::AfterTool, Some(name)))
             {
-                if let HookOutcome::Block { .. } =
-                    hook.after_tool(&call, &o.output, &self.hook_cx).await
-                {
+                let Some(outcome) = self
+                    .racing(hook.after_tool(&call, &o.output, &self.hook_cx))
+                    .await
+                else {
+                    return stop_after;
+                };
+                if let HookOutcome::Block { .. } = outcome {
                     stop_after = true;
                 }
             }

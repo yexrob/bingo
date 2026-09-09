@@ -642,6 +642,7 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
 
 mod attribution;
 mod budget;
+mod racing;
 mod snapshots;
 
 #[tokio::test]

@@ -195,7 +195,20 @@ async fn failed_and_cancelled_summary_usage_is_billed_once_without_cutting() {
         .await;
         assert_eq!(out.usage.output_tokens, 17);
         assert_eq!(cfg.compaction.failures(), 1);
-        assert_eq!(out.items, original);
+        // Nothing was cut; a turn a person stopped leaves its marker and
+        // nothing else, as any other stopped turn does.
+        let (kept, marker) = out.items.split_at(original.len());
+        assert_eq!(kept, original.as_slice());
+        assert_eq!(
+            marker.len(),
+            usize::from(interrupted),
+            "only the stopped run records a marker"
+        );
+        assert!(
+            marker
+                .iter()
+                .all(|item| matches!(&item.body, ItemBody::Interruption { .. }))
+        );
         assert!(!host.kinds().contains(&"compacted".to_string()));
         assert!(provider.requests().is_empty());
         assert_eq!(
