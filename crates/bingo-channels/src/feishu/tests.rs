@@ -181,8 +181,9 @@ async fn a_streamed_answer_is_a_card_entity_sent_by_id_and_written_in_full() {
     );
     assert_eq!(
         bodies(&server, &format!("{CARDS}/ctp_1/settings")).await[0]["settings"],
-        json!({ "config": { "streaming_mode": false } }),
-        "the stream is closed, which is what re-opens the card to callbacks"
+        json!(r#"{"config":{"streaming_mode":false}}"#),
+        "a string, not an object: the stream is closed, which is what re-opens \
+         the card to callbacks"
     );
 }
 

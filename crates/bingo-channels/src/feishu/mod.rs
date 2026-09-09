@@ -305,8 +305,12 @@ impl Edit for Feishu {
         };
         self.write(&card_id, text).await?;
         let sequence = self.sequence(&card_id);
+        // `settings` is a JSON *string*, not an object: the endpoint answers
+        // an object with 9499 and the card never closes, which costs the
+        // whole answer a second time as a plain message.
+        // <https://open.feishu.cn/document/cardkit-v1/card/settings>
         let body = json!({
-            "settings": { "config": { "streaming_mode": false } },
+            "settings": json!({ "config": { "streaming_mode": false } }).to_string(),
             "sequence": sequence,
             "uuid": format!("{card_id}-{sequence}"),
         });
