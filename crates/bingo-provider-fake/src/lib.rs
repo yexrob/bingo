@@ -16,6 +16,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
@@ -101,6 +102,12 @@ pub enum Step {
     Error(ProviderError),
     /// Sleeps on the tokio timer, so tests can drive it with `tokio::time::pause`.
     Delay {
+        ms: u64,
+    },
+    /// Sleeps before the stream exists at all: the time to first byte a real
+    /// endpoint spends establishing the request. Wherever it stands among the
+    /// steps, it is waited out first, because that is when it happens.
+    DelayBeforeStream {
         ms: u64,
     },
 }
@@ -477,10 +484,25 @@ fn beats(response: &Response, index: usize, input_chars: usize) -> Vec<Beat> {
                 return out;
             }
             Step::Delay { ms } => out.push(Beat::Sleep(*ms)),
+            // Already waited out by `establishing`, before this stream began.
+            Step::DelayBeforeStream { .. } => {}
         }
     }
     out.push(finish_beat(response.finish, called, input_chars, emitted));
     out
+}
+
+/// How long this response spends before its stream exists.
+fn establishing(response: &Response) -> Duration {
+    let ms = response
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::DelayBeforeStream { ms } => Some(*ms),
+            _ => None,
+        })
+        .sum();
+    Duration::from_millis(ms)
 }
 
 /// One text block: start, the text in `CHUNK_CHARS`-wide deltas, end.
@@ -597,6 +619,10 @@ impl Provider for FakeProvider {
         let Some((index, response)) = self.conversation.claim(&text) else {
             return Err(nothing_left(self.conversation.free()));
         };
+        // Nothing here watches the token: a caller that stops waiting for the
+        // request drops this future, which is what a real endpoint's time to
+        // first byte does to it too.
+        tokio::time::sleep(establishing(response)).await;
         let beats = beats(response, index, input_chars).into_iter();
         Ok(Box::pin(futures::stream::unfold(
             (beats, cancel),
@@ -1166,6 +1192,31 @@ mod tests {
         let started = tokio::time::Instant::now();
         drain(&provider, "hi").await;
         assert!(started.elapsed() >= std::time::Duration::from_millis(5_000));
+    }
+
+    /// The wait a real endpoint spends on time to first byte: it is over
+    /// before `stream` answers at all, so a caller that stops waiting for the
+    /// request never reaches the stream.
+    #[tokio::test(start_paused = true)]
+    async fn a_delay_before_the_stream_waits_before_the_stream_exists() {
+        let provider = FakeProvider::new(Script {
+            responses: vec![Response {
+                steps: vec![
+                    Step::DelayBeforeStream { ms: 5_000 },
+                    Step::Text("late".into()),
+                ],
+                finish: None,
+                when: None,
+            }],
+
+            side: Vec::new(),
+        });
+        let started = tokio::time::Instant::now();
+        let stream = provider
+            .stream(request("hi"), CancellationToken::new())
+            .await;
+        assert!(stream.is_ok());
+        assert!(started.elapsed() >= Duration::from_millis(5_000));
     }
 
     #[tokio::test]

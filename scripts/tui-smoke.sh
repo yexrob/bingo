@@ -174,6 +174,16 @@ keys Escape
 await '[Request interrupted by user]'
 finish
 
+# The same keypress before a single byte has come back: the request is still
+# being established, which is where a long context spends its seconds.
+step 'esc interrupts a turn whose request has not answered yet'
+start '{"responses":[{"steps":[{"delayBeforeStream":{"ms":60000}},{"text":"too late"}]}]}'
+keys 'wait for the first byte' Enter
+await 'esc to interrupt'
+keys Escape
+await '[Request interrupted by user]'
+finish
+
 step 'a page up releases the tail, and the foot takes it back'
 start "$(long_reply)"
 keys 'say a lot' Enter
