@@ -378,6 +378,107 @@ async fn a_group_is_ignored_until_the_bot_is_mentioned() {
     );
 }
 
+/// The settings one policy test runs on. Everything else is the default,
+/// which is what ran before there was a policy at all.
+fn under(access: Value) -> Value {
+    json!({ "channels": { "loopback": { "access": access } } })
+}
+
+/// One group speaks and is refused, another speaks and is answered. The
+/// refused chat is a chat of its own, so a leak has nowhere to hide: every
+/// op the channel emits names the chat it went to.
+async fn only_one_group_is_heard(access: Value, refused: Value, heard: Value, chat: &str) {
+    let mut chat_under = Chat::open(&answering("Hello."), under(access)).await;
+    chat_under.peer.say(refused).await;
+    chat_under.peer.say(heard).await;
+    let ops = chat_under.peer.until(|op| is(op, "finish")).await;
+    assert!(
+        ops.iter().any(|op| op["chat"] == json!(chat)),
+        "the admitted group was answered: {ops:#?}"
+    );
+    assert!(
+        ops.iter()
+            .all(|op| op["chat"].is_null() || op["chat"] == json!(chat)),
+        "and nothing was said anywhere else: {ops:#?}"
+    );
+}
+
+fn in_group(chat: &str, principal: &str, text: &str) -> Value {
+    json!({
+        "kind": "message", "chat": chat, "group": true,
+        "principal": principal, "text": text,
+    })
+}
+
+/// A blocklisted principal opens no session and gets no reply — and is not
+/// told so either (ADR-0051 §4).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocklisted_principal_in_a_group_is_answered_with_nothing() {
+    only_one_group_is_heard(
+        json!({ "group": { "policy": "blocklist", "list": ["u_loud"], "mention": false } }),
+        // Mentioned, so the mention alone would have admitted it: what
+        // refuses it is the policy and nothing else.
+        in_group("oc_loud", "u_loud", "@bingo what do you think?"),
+        in_group("oc_quiet", "u_quiet", "what do you think?"),
+        "oc_quiet",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_admin_is_heard_in_a_group_that_admits_only_admins() {
+    only_one_group_is_heard(
+        json!({
+            "admins": ["u_admin"],
+            "group": { "policy": "admins", "mention": false },
+        }),
+        in_group("oc_no", "u_1", "@bingo what do you think?"),
+        in_group("oc_yes", "u_admin", "what do you think?"),
+        "oc_yes",
+    )
+    .await;
+}
+
+/// A chat's own rule replaces the one for groups whole, and a rule that wants
+/// no mention engages on a plain line — the amendment to ADR-0016 §4.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chats_own_rule_engages_without_the_mention_the_others_need() {
+    only_one_group_is_heard(
+        json!({ "rules": { "oc_open": { "mention": false } } }),
+        in_group("oc_shut", "u_1", "what do you think?"),
+        in_group("oc_open", "u_1", "what do you think?"),
+        "oc_open",
+    )
+    .await;
+}
+
+/// The sign brackets the turn the message started (ADR-0051 §5): up before
+/// the chat says anything back, down after the answer is finished.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_working_sign_brackets_the_turn_a_message_started() {
+    let mut chat = Chat::open(&answering("Two tests failed."), json!({})).await;
+    chat.peer
+        .say(json!({
+            "kind": "message", "chat": "oc_1", "principal": "u_1",
+            "text": "run the tests", "parent": "om_1",
+        }))
+        .await;
+    let ops = chat.peer.until(|op| is(op, "acknowledged")).await;
+    let at = |name: &str| ops.iter().position(|op| is(op, name));
+    let up = at("acknowledge").unwrap_or_else(|| panic!("the sign goes up: {ops:#?}"));
+    let said = at("reply").unwrap_or_else(|| panic!("the answer is posted: {ops:#?}"));
+    let done = at("finish").unwrap_or_else(|| panic!("and finished: {ops:#?}"));
+    let down = ops.len() - 1;
+    assert!(
+        up < said,
+        "the sign is up before a word is said back: {ops:#?}"
+    );
+    assert!(done < down, "and comes off after the answer: {ops:#?}");
+    assert_eq!(ops[up]["id"], json!("om_1"), "on the message that spoke");
+    assert_eq!(ops[down]["id"], json!("om_1"));
+    assert_eq!(ops[down]["outcome"], json!("done"));
+}
+
 /// The one thing a chat must never do quietly: two processes on one app take
 /// half of its events each and neither knows (ADR-0016 §5).
 #[test]
