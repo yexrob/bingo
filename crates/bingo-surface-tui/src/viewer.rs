@@ -77,13 +77,18 @@ pub fn open(
     }
 }
 
-/// The file the opener is handed for a picture: the path an answer wrote, or
-/// the one this surface wrote its bytes to.
+/// The file the opener is handed for a picture: the path an answer wrote,
+/// the file the picture itself says it is (ADR-0052 — a paste, an `@word`,
+/// a chat attachment) while that file is still there, or the one this
+/// surface writes its bytes to.
 pub fn word(source: &Source, image: Option<&Image>, at: Where<'_>) -> Result<String, Error> {
     if let Some(path) = path_named(source, at) {
         return Ok(path);
     }
     let image = image.ok_or(Error::Gone)?;
+    if let Some(path) = image.path.as_deref().filter(|path| path.is_file()) {
+        return Ok(path.to_string_lossy().into_owned());
+    }
     let path = written(source.id(), image, at.data_dir)?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -200,6 +205,29 @@ mod tests {
             matches!(super::word(&source, None, at), Err(Error::Gone)),
             "and an address whose picture is not in hand opens nothing"
         );
+    }
+
+    /// A picture that knows its file — a paste, an `@word`, a chat attachment
+    /// (ADR-0052) — is opened there, and nothing is written; one whose file
+    /// is gone is bytes again and goes the way bytes go.
+    #[test]
+    fn a_picture_that_knows_its_file_is_opened_there_while_it_is_there() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let at = Where {
+            cwd: dir.path(),
+            home: None,
+            data_dir: dir.path(),
+        };
+        let file = dir.path().join("pasted.png");
+        std::fs::write(&file, b"png").expect("a file");
+        let image = png(4, 3).at(&file);
+        let word = word(&journal(), Some(&image), at).expect("a file to open");
+        assert_eq!(word, file.to_string_lossy());
+        assert!(!dir.path().join(DIR).exists(), "and nothing was written");
+
+        std::fs::remove_file(&file).expect("gone");
+        let word = super::word(&journal(), Some(&image), at).expect("a file to open");
+        assert!(word.starts_with(&dir.path().join(DIR).to_string_lossy().into_owned()));
     }
 
     /// A picture that is only bytes is written out under the number it is

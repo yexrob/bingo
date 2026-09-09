@@ -796,10 +796,11 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now, delivery: Delivery) -> Vec<Effect>
         })],
         Some(Local::Resume(None)) => vec![Effect::ListSessions],
         Some(Local::Exit) => vec![Effect::Exit],
-        // The pasted pictures the line still names go beside it; the ones it
-        // mentions by path are read by the loop, which knows the directory.
+        // The pictures — the tokens the line still names and the `@word`s
+        // in it — are files, read by the loop, which knows the directory and
+        // what is held (`run::submit`).
         None => vec![Effect::Submit(Input::Text {
-            images: ui.pictures.carried(&text),
+            images: Vec::new(),
             text,
             origin: Origin::surface(SURFACE_ID),
             delivery,
@@ -975,26 +976,22 @@ mod tests {
         assert!(ui.composer.is_empty());
     }
 
-    /// The tokens still in the line at `⏎` say which held pictures go, in
-    /// the line's order; a deleted token's picture stays behind.
+    /// The line goes as typed, tokens and all, and carries no picture of its
+    /// own: every picture it names is a file the loop reads on its way out
+    /// (`run::submit`, ADR-0052), so `⏎` here is words alone.
     #[test]
-    fn a_pasted_picture_goes_beside_the_line_that_still_names_it() {
+    fn a_line_with_tokens_goes_as_typed_and_its_pictures_are_read_later() {
         let (mut ui, now) = scene();
         let tree = solo(&state());
-        let first = bingo_sdk::Image::from_bytes("image/png", b"one").unwrap();
-        let second = bingo_sdk::Image::from_bytes("image/png", b"two").unwrap();
-        let n = ui.pictures.hold("", first);
-        ui.composer
-            .insert(&format!("see {} ", crate::pictures::placeholder(n)));
-        let n = ui.pictures.hold(ui.composer.text(), second.clone());
-        ui.composer.insert(&crate::pictures::placeholder(n));
-        ui.composer.set("see [image 2]");
+        ui.pictures
+            .hold("", std::path::PathBuf::from("/pasted/one.png"));
+        ui.composer.set("see [image 1]");
         let effects = on_key(&mut ui, &tree, key(KeyCode::Enter), now);
         assert_eq!(
             effects,
             vec![Effect::Submit(Input::Text {
-                text: "see [image 2]".into(),
-                images: vec![second],
+                text: "see [image 1]".into(),
+                images: Vec::new(),
                 origin: Origin::surface(SURFACE_ID),
                 delivery: Delivery::Wake,
             })],
@@ -2807,8 +2804,7 @@ mod tests {
     fn a_click_on_a_strips_thumbnail_opens_it() {
         let state = state();
         let (mut ui, now) = scene();
-        let token = ui.pictures.hold("", bingo_pictures::testing::png(100, 100));
-        ui.composer.insert(&crate::pictures::placeholder(token));
+        let token = crate::test_support::drafted(&mut ui, bingo_pictures::testing::png(100, 100));
         crate::graphics::with(crate::graphics::drawing(), || {
             let screen = render(&state, &ui, now);
             let row = cells_row(&screen);

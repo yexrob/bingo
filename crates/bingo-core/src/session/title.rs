@@ -175,6 +175,7 @@ mod tests {
             asked(vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "AA".into(),
+                path: None,
             })]),
             asked(vec![ContentPart::text("fix the parser")]),
             asked(vec![ContentPart::text("and the lexer")]),

@@ -128,7 +128,8 @@ impl Tool for ReadTool {
 
         if let Some(media_type) = Image::media_type_of(&path) {
             let image = Image::from_bytes(media_type, &bytes)
-                .map_err(|e| ToolError::Failed(e.to_string()))?;
+                .map_err(|e| ToolError::Failed(e.to_string()))?
+                .at(&path);
             return Ok(ToolOutput {
                 parts: vec![ContentPart::Image(image)],
                 is_error: false,
@@ -297,7 +298,9 @@ mod tests {
             vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw==".into(),
-            })]
+                path: Some(dir.path().join("pixel.PNG")),
+            })],
+            "and the picture knows the file it is (ADR-0052)"
         );
     }
 

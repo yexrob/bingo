@@ -14,8 +14,10 @@
 //! (M61). [`sniffed`] and [`accepted`] answer with the one [`Image`] the
 //! journal keeps. [`load`] reads a [`Source`] — a path on this machine or a
 //! URL this machine fetches (ADR-0041 §3), kept on disk by [`cache`] — and
-//! hands the bytes to the first two. [`pixels`] answers with the samples
-//! themselves, for a caller that draws a picture rather than sends one.
+//! hands the bytes to the first two, and a path's picture knows its path.
+//! [`keep`] writes a picture a person handed over as the file it is from
+//! then on (ADR-0052). [`pixels`] answers with the samples themselves, for a
+//! caller that draws a picture rather than sends one.
 //!
 //! A PNG passes through untouched — its size is in its header, so nothing is
 //! decoded and nothing is re-encoded. Everything else is decoded once and
@@ -27,12 +29,14 @@ use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
 mod accepted;
 pub mod cache;
+pub mod file;
 mod load;
 mod pixels;
 mod source;
 
 pub use accepted::{accepted, sniffed};
 pub use cache::Cache;
+pub use file::keep;
 pub use load::load;
 pub use pixels::{Pixels, pixels};
 pub use source::{Source, names_a_picture};
@@ -273,6 +277,7 @@ mod tests {
         let image = Image {
             media_type: "image/png".into(),
             data: "!!!!not base64!!!!".into(),
+            path: None,
         };
         assert!(matches!(to_png(&image), Err(PictureError::NotBase64(_))));
     }

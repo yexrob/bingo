@@ -109,6 +109,7 @@ fn strip(state: &SessionState, ui: &Ui, width: u16) -> graphics::Band {
     strip::rows(
         &ui.pictures,
         ui.composer.text(),
+        &ui.linked,
         graphics::chosen(),
         &ui.decoded,
         u16::try_from(inner_width(state, usize::from(width))).unwrap_or(u16::MAX),
@@ -2234,10 +2235,7 @@ mod tests {
     /// line and the pictures held behind them.
     fn carrying(ui: &mut Ui, pictures: usize) {
         for _ in 0..pictures {
-            let token = ui
-                .pictures
-                .hold(ui.composer.text(), bingo_pictures::testing::png(100, 200));
-            ui.composer.insert(&crate::pictures::placeholder(token));
+            crate::test_support::drafted(ui, bingo_pictures::testing::png(100, 200));
         }
     }
 

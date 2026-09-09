@@ -141,6 +141,21 @@ enum Wake {
     Frame,
 }
 
+/// Where a paste lands, under the data directory: beside the pictures the
+/// viewer writes and the cache of fetched ones, in a directory of its own.
+const PASTED: &str = "pasted";
+
+/// A paste is a file before it is anything else (ADR-0052 §1): the
+/// clipboard's PNG, written under the data directory and named by its
+/// bytes, so the same picture pasted twice is one file. What comes back is
+/// the path the line will carry — the bytes are read again from it, the way
+/// an `@word` is, and held nowhere else.
+fn pasted(data_dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    let image = bingo_sdk::Image::from_bytes("image/png", bytes).map_err(|e| e.to_string())?;
+    let dir = data_dir.join(viewer::DIR).join(PASTED);
+    bingo_pictures::keep(&dir, &image).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
 struct Run {
     host: HostHandle,
     data_dir: std::path::PathBuf,
@@ -662,22 +677,22 @@ impl Run {
         }
     }
 
-    /// A picture on the clipboard becomes `[image N]` in the line and is held
-    /// under that token; a clipboard with none leaves the line alone.
+    /// A picture on the clipboard is written out as a file at once
+    /// (ADR-0052 §1), becomes `[image N]` in the line, and that file is held
+    /// under the token; a clipboard with none leaves the line alone.
     fn paste_image(&mut self) {
         let Some(bytes) = clipboard::image() else {
             return;
         };
-        match bingo_sdk::Image::from_bytes("image/png", &bytes) {
-            Ok(image) => {
-                let n = self.ui.pictures.hold(self.ui.composer.text(), image);
+        match pasted(&self.data_dir, &bytes) {
+            Ok(path) => {
+                let n = self.ui.pictures.hold(self.ui.composer.text(), path);
                 self.ui.composer.insert(&pictures::placeholder(n));
                 self.ui.edited();
             }
-            Err(error) => {
-                self.ui
-                    .notify(Level::Warn, format!("clipboard: {error}"), Instant::now())
-            }
+            Err(why) => self
+                .ui
+                .notify(Level::Warn, format!("clipboard: {why}"), Instant::now()),
         }
     }
 
@@ -1693,18 +1708,23 @@ mod tests {
     #[test]
     fn a_withdrawn_line_comes_back_to_the_composer_with_its_pictures() {
         let mut run = idle(Instant::now());
-        let image = Image::from_bytes("image/png", b"png").expect("a small picture");
+        let image = Image::from_bytes("image/png", b"png")
+            .expect("a small picture")
+            .at("/pasted/a.png");
         run.reply(
             Reply::Withdrawn(Box::new(Ok(Input::Text {
                 text: "look at [image 1]".into(),
-                images: vec![image.clone()],
+                images: vec![image],
                 origin: bingo_sdk::Origin::surface(SURFACE_ID),
                 delivery: bingo_sdk::Delivery::Hold,
             }))),
             &mut None,
         );
         assert_eq!(run.ui.composer.text(), "look at [image 1]");
-        assert_eq!(run.ui.pictures.carried(run.ui.composer.text()), vec![image]);
+        assert_eq!(
+            run.ui.pictures.carried(run.ui.composer.text()),
+            vec![std::path::PathBuf::from("/pasted/a.png")]
+        );
     }
 
     /// The race the actor settles: by the time the ask arrives the turn may
@@ -2137,19 +2157,23 @@ mod tests {
     ///
     /// And a paste waits for nothing (M61, the user's word after seeing it):
     /// the frame it lands on has the `[image 1]` in the line and the strip's
-    /// slot under the box, and fits no picture at all — the thumbnail arrives
-    /// on the frame after the run has fitted it off its own thread.
+    /// slot under the box, and reads and fits no picture at all. The paste
+    /// is a file (ADR-0052), read back off the loop's thread like an
+    /// answer's `![…](path)`, then fitted the same way — the thumbnail
+    /// arrives on the frame after both have landed.
     #[tokio::test]
     async fn a_carried_picture_is_sent_small_and_kept_when_its_token_goes() {
         use base64::Engine;
         let (mut run, mut waiting) = replying(state());
+        let dir = tempfile::tempdir().expect("a directory");
+        run.data_dir = dir.path().to_path_buf();
         let mut recorder = Recorder::default();
         let now = crate::test_support::scene().1;
         crate::graphics::with(crate::graphics::drawing(), || {
-            let token = run
-                .ui
-                .pictures
-                .hold("", bingo_pictures::testing::png(400, 300));
+            let path = pasted(&run.data_dir, &bingo_pictures::testing::png_bytes(400, 300))
+                .expect("written");
+            assert!(path.starts_with(dir.path().join(viewer::DIR).join(PASTED)));
+            let token = run.ui.pictures.hold("", path);
             run.ui.composer.insert(&pictures::placeholder(token));
             run.paint(&mut recorder, Wake::Frame, now).expect("a frame");
         });
@@ -2164,6 +2188,13 @@ mod tests {
             recorder.last()
         );
 
+        // The file read back, then the strip asks for a fit of it.
+        settle(&mut run, &mut waiting).await;
+        crate::graphics::with(crate::graphics::drawing(), || {
+            run.paint(&mut recorder, Wake::Frame, now)
+                .expect("the read landed");
+        });
+        assert!(recorder.places.is_empty(), "{:?}", places(&recorder));
         settle(&mut run, &mut waiting).await;
         crate::graphics::with(crate::graphics::drawing(), || {
             run.paint(&mut recorder, Wake::Frame, now).expect("another");

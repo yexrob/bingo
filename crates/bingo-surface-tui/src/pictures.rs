@@ -1,14 +1,22 @@
 //! The pictures a line carries, the way Claude Code and Codex spell them: a
-//! paste puts `[image N]` in the line and the bytes are held here under `N`.
+//! paste puts `[image N]` in the line and the file it was written to is held
+//! here under `N`.
 //!
 //! The line is the record. What is sent is derived from the tokens still in
 //! it at submit ([`Held::carried`]), so a token a person deletes takes its
 //! picture with it and nothing has to remember that it did. `@shot.png` is
 //! the other spelling — a word that names a file — and lives in
 //! `complete::attachments`; this module is only the pasted kind.
+//!
+//! What is held is a **path and nothing else** (ADR-0052 §1): a paste is a
+//! file before it is anything else, and from then on it is read the way an
+//! `@word` is read — at submit into the ask, and by the memo that draws it
+//! ([`crate::graphics::linked::Linked`]). No bytes live here that are on no
+//! disk.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use bingo_sdk::Image;
 
@@ -69,42 +77,54 @@ pub fn next_token(line: &str) -> u32 {
     tokens(line).into_iter().max().map_or(1, |n| n + 1)
 }
 
-/// The pasted pictures behind the composer, by token.
+/// The name the memo knows a draft's file by: the path's own spelling, which
+/// is also what an answer's `![…](path)` would say for the same file.
+pub fn dest(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// The pasted pictures behind the composer, by token: where each one's file
+/// is.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Held {
-    by_token: BTreeMap<u32, Image>,
+    by_token: BTreeMap<u32, PathBuf>,
 }
 
 impl Held {
-    /// Keep `image` for the token a paste into `line` mints, and say which.
-    pub fn hold(&mut self, line: &str, image: Image) -> u32 {
+    /// Keep `path` for the token a paste into `line` mints, and say which.
+    pub fn hold(&mut self, line: &str, path: PathBuf) -> u32 {
         let n = next_token(line);
-        self.by_token.insert(n, image);
+        self.by_token.insert(n, path);
         n
     }
 
     /// What the line still carries, in token order; a token typed by hand
     /// with nothing held under it is words.
-    pub fn carried(&self, line: &str) -> Vec<Image> {
+    pub fn carried(&self, line: &str) -> Vec<PathBuf> {
         self.shown(line)
             .into_iter()
-            .map(|(_, image)| image.clone())
+            .map(|(_, path)| path.to_path_buf())
             .collect()
     }
 
     /// The same, each under the token that names it: what the strip draws,
     /// which needs the token to know the picture by (M48 brick 3).
-    pub fn shown(&self, line: &str) -> Vec<(u32, &Image)> {
+    pub fn shown(&self, line: &str) -> Vec<(u32, &Path)> {
         tokens(line)
             .into_iter()
-            .filter_map(|n| Some((n, self.by_token.get(&n)?)))
+            .filter_map(|n| Some((n, self.by_token.get(&n)?.as_path())))
             .collect()
     }
 
-    /// The picture one token names, whatever the line says. What the send
-    /// reads a drawn thumbnail back out of.
-    pub fn under(&self, token: u32) -> Option<&Image> {
-        self.by_token.get(&token)
+    /// The names the memo reads the line's pictures under, so a frame that
+    /// draws the strip asks for them the way it asks for an answer's.
+    pub fn wanted(&self, line: &str) -> Vec<String> {
+        self.carried(line).iter().map(|path| dest(path)).collect()
+    }
+
+    /// The file one token names, whatever the line says.
+    pub fn under(&self, token: u32) -> Option<&Path> {
+        self.by_token.get(&token).map(PathBuf::as_path)
     }
 
     pub fn clear(&mut self) {
@@ -113,11 +133,16 @@ impl Held {
 
     /// A line taken back out of the queue: the pictures it went out with go
     /// back under the tokens it still names, in the order they were sent
-    /// ([`Held::carried`] is what put them in that order). A picture an
-    /// `@word` named is not held here and needs no place — the word is still
-    /// in the line, and it reads again when the line goes (M68).
+    /// ([`Held::carried`] is what put them in that order), each by the file
+    /// it was read from. A picture an `@word` named is not held here and
+    /// needs no place — the word is still in the line, and it reads again
+    /// when the line goes (M68).
     pub fn restore(&mut self, line: &str, images: Vec<Image>) {
-        self.by_token = tokens(line).into_iter().zip(images).collect();
+        self.by_token = tokens(line)
+            .into_iter()
+            .zip(images)
+            .filter_map(|(token, image)| Some((token, image.path?)))
+            .collect();
     }
 }
 
@@ -125,8 +150,14 @@ impl Held {
 mod tests {
     use super::*;
 
+    fn file(tag: &str) -> PathBuf {
+        PathBuf::from(format!("/pasted/{tag}.png"))
+    }
+
     fn image(tag: &str) -> Image {
-        Image::from_bytes("image/png", tag.as_bytes()).expect("a small picture")
+        Image::from_bytes("image/png", tag.as_bytes())
+            .expect("a small picture")
+            .at(file(tag))
     }
 
     #[test]
@@ -158,22 +189,23 @@ mod tests {
     #[test]
     fn a_paste_is_held_under_the_token_the_line_gets() {
         let mut held = Held::default();
-        let n = held.hold("look", image("a"));
+        let n = held.hold("look", file("a"));
         assert_eq!(n, 1);
         let line = format!("look {}", placeholder(n));
-        assert_eq!(held.carried(&line), vec![image("a")]);
+        assert_eq!(held.carried(&line), vec![file("a")]);
+        assert_eq!(held.wanted(&line), vec!["/pasted/a.png"]);
     }
 
     #[test]
     fn a_deleted_token_drops_its_picture_and_order_follows_the_line() {
         let mut held = Held::default();
-        held.hold("", image("a"));
-        held.hold("[image 1]", image("b"));
+        held.hold("", file("a"));
+        held.hold("[image 1]", file("b"));
         assert_eq!(
             held.carried("[image 2] [image 1]"),
-            vec![image("b"), image("a")]
+            vec![file("b"), file("a")]
         );
-        assert_eq!(held.carried("[image 2]"), vec![image("b")]);
+        assert_eq!(held.carried("[image 2]"), vec![file("b")]);
         assert!(held.carried("nothing").is_empty());
     }
 
@@ -185,23 +217,27 @@ mod tests {
     }
 
     /// A line withdrawn from the queue comes back whole: the tokens are still
-    /// in the words, and the pictures go back under them in the order they
-    /// were sent, so sending it again sends exactly what was queued (M68).
-    /// A picture an `@word` named rides past the tokens and needs no place.
+    /// in the words, and the pictures go back under them by the files they
+    /// were read from, so sending it again sends exactly what was queued
+    /// (M68). A picture an `@word` named rides past the tokens and needs no
+    /// place, and one that came from no file (a client's own bytes) holds
+    /// nothing — the token is words then.
     #[test]
     fn a_withdrawn_line_gets_its_pictures_back_under_the_tokens_it_names() {
-        let mut held = Held::default();
-        held.hold("", image("a"));
-        held.hold("[image 1]", image("b"));
         let line = "look [image 2] and [image 1] and @shot.png";
-        let sent = held.carried(line);
-        assert_eq!(sent, vec![image("b"), image("a")]);
-
+        let sent = vec![image("b"), image("a")];
         let mut back = Held::default();
         back.restore(line, [sent, vec![image("mentioned")]].concat());
-        assert_eq!(back.carried(line), vec![image("b"), image("a")]);
-        assert_eq!(back.under(1), Some(&image("a")));
+        assert_eq!(back.carried(line), vec![file("b"), file("a")]);
+        assert_eq!(back.under(1), Some(file("a").as_path()));
         assert_eq!(back.under(3), None, "and nothing is held for the word");
+
+        let mut none = Held::default();
+        none.restore(
+            "[image 1]",
+            vec![Image::from_bytes("image/png", b"x").expect("small")],
+        );
+        assert!(none.carried("[image 1]").is_empty());
     }
 
     /// The strip draws what the line carries and needs to know each one's
@@ -209,13 +245,13 @@ mod tests {
     #[test]
     fn what_is_shown_carries_its_token_and_is_read_back_by_it() {
         let mut held = Held::default();
-        held.hold("", image("a"));
-        held.hold("[image 1]", image("b"));
+        held.hold("", file("a"));
+        held.hold("[image 1]", file("b"));
         assert_eq!(
             held.shown("[image 2] and [image 1]"),
-            vec![(2, &image("b")), (1, &image("a"))]
+            vec![(2, file("b").as_path()), (1, file("a").as_path())]
         );
-        assert_eq!(held.under(1), Some(&image("a")));
+        assert_eq!(held.under(1), Some(file("a").as_path()));
         assert_eq!(held.under(9), None);
     }
 }

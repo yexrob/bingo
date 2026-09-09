@@ -217,6 +217,7 @@ mod tests {
             ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
+                path: None,
             }),
         ])]);
         insta::assert_json_snapshot!(encode(&request, Variant::Default));

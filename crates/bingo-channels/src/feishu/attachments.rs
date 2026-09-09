@@ -3,10 +3,11 @@
 //! Parsing hands over keys; this is where they become bytes. A picture
 //! becomes the one `Image` the journal keeps, its type read off the bytes
 //! because a chat carries whatever phones and screenshot keys produce and a
-//! BMP goes as PNG (ADR-0041 §2). Everything else lands on disk under the
-//! message that carried it and becomes a path in the words: the model reads
-//! it with the fs tool it already has, and no kernel type has to learn what a
-//! document is.
+//! BMP goes as PNG (ADR-0041 §2) — and it lands on disk under the message
+//! that carried it first, so the model can hand the file on (ADR-0052).
+//! Everything else lands there too and becomes a path in the words: the
+//! model reads it with the fs tool it already has, and no kernel type has to
+//! learn what a document is.
 //!
 //! Nothing here is fatal. A resource that will not fetch — no `im:resource`
 //! scope, bytes no decoder reads, a disk that refuses it — is dropped with a
@@ -14,7 +15,6 @@
 //! silenced by the file beside it.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use bingo_pictures::cache::{DAYS, fresh};
@@ -61,15 +61,12 @@ const FORBIDDEN: [char; 9] = ['/', '\\', '<', '>', ':', '"', '|', '?', '*'];
 /// Everything `resources` names, fetched into what the surface can use.
 pub async fn fetch(api: &Api, dir: &Path, resources: &[Resource]) -> Fetched {
     let mut fetched = Fetched::default();
-    if resources
-        .iter()
-        .any(|resource| resource.kind != Kind::Picture)
-    {
+    if !resources.is_empty() {
         swept(dir);
     }
     for resource in resources {
         match resource.kind {
-            Kind::Picture => match picture(api, resource).await {
+            Kind::Picture => match picture(api, dir, resource).await {
                 Ok(image) => fetched.images.push(image),
                 Err(why) => tracing::warn!(key = %resource.key, %why, "a picture was dropped"),
             },
@@ -89,9 +86,15 @@ pub fn resource_path(resource: &Resource, kind: &str) -> String {
     )
 }
 
-async fn picture(api: &Api, resource: &Resource) -> Result<Image, String> {
+/// A picture as the journal keeps it, written under the message that carried
+/// it and knowing where (ADR-0052): what is written is the journal's own
+/// type, so the file a model hands on is the picture it was shown.
+async fn picture(api: &Api, dir: &Path, resource: &Resource) -> Result<Image, String> {
     let binary = fetched(api, resource).await?;
-    bingo_pictures::sniffed(&binary.bytes).map_err(|e| e.to_string())
+    let image = bingo_pictures::sniffed(&binary.bytes).map_err(|e| e.to_string())?;
+    let path = bingo_pictures::keep(&dir.join(&resource.message), &image)
+        .map_err(|error| error.to_string())?;
+    Ok(image.at(path))
 }
 
 /// One attachment on disk, and the words that point at it.
@@ -190,27 +193,14 @@ fn cut(name: &str) -> String {
     format!("{}{tail}", &name[..end])
 }
 
-/// Through a temporary name and a rename, which is what makes two bingos
-/// sharing the directory safe: the file appears whole or not at all.
+/// Whole or not at all, which is what makes two bingos sharing the directory
+/// safe ([`bingo_pictures::file::written`]).
 fn written(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let temporary = dir.join(part());
-    std::fs::write(&temporary, bytes)?;
     let path = dir.join(name);
-    std::fs::rename(&temporary, &path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temporary);
-    })?;
+    bingo_pictures::file::written(&path, bytes)?;
     // A path in a transcript is a path on this machine (ADR-0051): an absolute
     // one, because the model's cwd is not this surface's business.
     Ok(std::path::absolute(&path).unwrap_or(path))
-}
-
-/// The name one write uses before its rename: this process, and a number no
-/// other write in it repeats.
-fn part() -> String {
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, Ordering::Relaxed);
-    format!(".{}.{n}.part", std::process::id())
 }
 
 /// A file past the cap is named and not kept: what a person needs to know is
@@ -607,11 +597,26 @@ mod tests {
             "the header said png for both; the bytes did not"
         );
         assert_eq!(
-            fetched.images[0],
-            Image::from_bytes("image/png", &png).expect("within the cap"),
+            fetched.images[0].data,
+            Image::from_bytes("image/png", &png)
+                .expect("within the cap")
+                .data,
             "a type the table takes is the bytes as they came"
         );
-        assert!(fetched.lines.is_empty(), "a picture is not a path");
+        let landed = fetched.images[0]
+            .path
+            .as_deref()
+            .expect("a picture is a file (ADR-0052)");
+        assert!(
+            landed.starts_with(dir.path().join("om_1")),
+            "{}",
+            landed.display()
+        );
+        assert_eq!(std::fs::read(landed).expect("the file"), png);
+        assert!(
+            fetched.lines.is_empty(),
+            "a picture is a file, not a line of its own"
+        );
     }
 
     /// A screenshot off a Windows phone, a scan, a sticker: a chat carries more

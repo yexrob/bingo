@@ -614,6 +614,7 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
         parts.push(ContentPart::Image(Image {
             media_type: "image/png".into(),
             data: "iVBORw0KGgo=".into(),
+            path: None,
         }));
     }
     let out = run_turn(

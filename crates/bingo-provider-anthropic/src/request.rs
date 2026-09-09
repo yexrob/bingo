@@ -179,7 +179,7 @@ fn merge_provider_options(body: &mut Map<String, Value>, extra: Option<&Map<Stri
 /// `None` for a message nothing survives the encoding of: an assistant turn of
 /// unsigned reasoning alone has no wire form, and empty content is a 400.
 fn message(message: &Message) -> Option<Value> {
-    let content: Vec<Value> = message.parts.iter().filter_map(part).collect();
+    let content: Vec<Value> = message.parts.iter().flat_map(blocks).collect();
     if content.is_empty() {
         return None;
     }
@@ -193,13 +193,38 @@ fn role(role: Role) -> &'static str {
     }
 }
 
+/// The blocks one part becomes: one, none, or — for a picture that knows
+/// where it is — the picture and then its path, said beside it rather than
+/// in the person's words (ADR-0052 §3).
+fn blocks(part: &ContentPart) -> Vec<Value> {
+    match part {
+        ContentPart::Image(image) => pictured(image),
+        other => self::part(other).into_iter().collect(),
+    }
+}
+
+fn pictured(image: &Image) -> Vec<Value> {
+    let mut blocks = vec![json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": image.media_type,
+            "data": image.data,
+        },
+    })];
+    blocks.extend(
+        image
+            .whereabouts()
+            .map(|words| json!({ "type": "text", "text": words })),
+    );
+    blocks
+}
+
 fn part(part: &ContentPart) -> Option<Value> {
     Some(match part {
         ContentPart::Text { text } => json!({ "type": "text", "text": text }),
-        ContentPart::Image(Image { media_type, data }) => json!({
-            "type": "image",
-            "source": { "type": "base64", "media_type": media_type, "data": data },
-        }),
+        // A picture is [`blocks`]'s: one block, or two when it knows its file.
+        ContentPart::Image(_) => return None,
         ContentPart::ToolUse { id, name, input } => json!({
             "type": "tool_use",
             "id": id,
@@ -219,7 +244,7 @@ fn part(part: &ContentPart) -> Option<Value> {
 }
 
 fn tool_result(id: &str, parts: &[ContentPart], is_error: bool) -> Value {
-    let content: Vec<Value> = parts.iter().filter_map(part).collect();
+    let content: Vec<Value> = parts.iter().flat_map(blocks).collect();
     // The API takes a string or a block array here; an empty array is a 400.
     let content = if content.is_empty() {
         json!("")
@@ -407,9 +432,30 @@ mod tests {
             ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
+                path: None,
             }),
         ])]);
         insta::assert_json_snapshot!(encode(&request, &caps(false)));
+    }
+
+    /// A pasted or attached picture is a file (ADR-0052): the model is told
+    /// where, in a text block right after the image block.
+    #[test]
+    fn a_picture_that_knows_its_path_is_followed_by_it() {
+        let image = Image::from_bytes("image/png", b"png")
+            .expect("small")
+            .at("/shots/a.png");
+        let request = request(vec![Message::user(vec![
+            ContentPart::text("see [image 1]"),
+            ContentPart::Image(image),
+        ])]);
+        let body = encode(&request, &caps(false));
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(
+            content[2],
+            json!({ "type": "text", "text": "[picture: /shots/a.png]" })
+        );
     }
 
     #[test]

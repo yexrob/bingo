@@ -1,6 +1,6 @@
 # ADR-0040 — A picture beside the words
 
-Status: accepted · 2026-09-03 · Plan: M45
+Status: accepted · 2026-09-03 · Plan: M45 · Amended by ADR-0052 (§1, §4: a handed-in picture is a file, and `Image` knows its path)
 
 ## Context
 

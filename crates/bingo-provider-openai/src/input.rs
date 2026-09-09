@@ -46,9 +46,7 @@ impl Input {
         for part in parts {
             match part {
                 ContentPart::Text { text } => content.push(input_text(text)),
-                ContentPart::Image(Image { media_type, data }) => {
-                    content.push(input_image(media_type, data));
-                }
+                ContentPart::Image(image) => content.extend(pictured(image)),
                 ContentPart::ToolResult {
                     tool_use_id,
                     parts,
@@ -162,11 +160,20 @@ fn text_of(parts: &[ContentPart]) -> String {
 fn images(parts: &[ContentPart]) -> Vec<Value> {
     parts
         .iter()
-        .filter_map(|part| match part {
-            ContentPart::Image(Image { media_type, data }) => Some(input_image(media_type, data)),
-            _ => None,
+        .flat_map(|part| match part {
+            ContentPart::Image(image) => pictured(image),
+            _ => Vec::new(),
         })
         .collect()
+}
+
+/// A picture, and then where it is when it is anywhere: the path is what a
+/// model hands to a tool, and it is said beside the picture rather than in
+/// the person's words (ADR-0052 §3).
+fn pictured(image: &Image) -> Vec<Value> {
+    let mut content = vec![input_image(&image.media_type, &image.data)];
+    content.extend(image.whereabouts().iter().map(|words| input_text(words)));
+    content
 }
 
 fn is_image(part: &ContentPart) -> bool {
@@ -231,6 +238,7 @@ mod tests {
             parts: vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
+                path: None,
             })],
             is_error: false,
         }])]);
@@ -242,6 +250,26 @@ mod tests {
                 "type": "input_image",
                 "image_url": "data:image/png;base64,iVBORw0KGgo=",
             })
+        );
+    }
+
+    /// A pasted or attached picture is a file (ADR-0052): the model is told
+    /// where, right after the picture, in words it can hand to a tool.
+    #[test]
+    fn a_picture_that_knows_its_path_is_followed_by_it() {
+        let image = Image::from_bytes("image/png", b"png")
+            .expect("small")
+            .at("/shots/a.png");
+        let items = items(&[Message::user(vec![
+            ContentPart::text("see [image 1]"),
+            ContentPart::Image(image),
+        ])]);
+        let content = &items[0]["content"];
+        assert_eq!(content[0]["text"], "see [image 1]");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(
+            content[2],
+            json!({ "type": "input_text", "text": "[picture: /shots/a.png]" })
         );
     }
 

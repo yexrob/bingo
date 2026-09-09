@@ -137,6 +137,7 @@ fn part(block: &ContentBlock) -> ContentPart {
         ContentBlock::Image(image) => ContentPart::Image(Image {
             media_type: image.mime_type.clone(),
             data: image.data.clone(),
+            path: None,
         }),
         other => ContentPart::text(
             serde_json::to_string(other)
@@ -252,7 +253,8 @@ mod tests {
             output.parts[1],
             ContentPart::Image(Image {
                 media_type: "image/png".into(),
-                data: "QUJD".into()
+                data: "QUJD".into(),
+                path: None,
             })
         );
         let ContentPart::Text { text } = &output.parts[2] else {

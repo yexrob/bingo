@@ -356,7 +356,9 @@ fn joined_text(parts: &[ContentPart]) -> String {
 fn block(part: &ContentPart) -> Option<Value> {
     match part {
         ContentPart::Text { text } => Some(text_block(text)),
-        ContentPart::Image(Image { media_type, data }) => Some(json!({
+        ContentPart::Image(Image {
+            media_type, data, ..
+        }) => Some(json!({
             "type": "image",
             "source": { "type": "base64", "media_type": media_type, "data": data },
         })),
@@ -855,6 +857,7 @@ mod tests {
                 ContentPart::Image(Image {
                     media_type: "image/png".into(),
                     data: "iVBORw0KGgo=".into(),
+                    path: None,
                 }),
             ],
             is_error: false,

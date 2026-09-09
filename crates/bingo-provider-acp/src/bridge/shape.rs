@@ -60,9 +60,9 @@ fn block(part: &ContentPart) -> ContentBlock {
     match part {
         ContentPart::Text { text } => ContentBlock::text(text.clone()),
         ContentPart::Reasoning { text, .. } => ContentBlock::text(text.clone()),
-        ContentPart::Image(Image { media_type, data }) => {
-            ContentBlock::image(data.clone(), media_type)
-        }
+        ContentPart::Image(Image {
+            media_type, data, ..
+        }) => ContentBlock::image(data.clone(), media_type),
         other => ContentBlock::text(
             serde_json::to_string(other).unwrap_or_else(|_| "[unreadable content]".to_string()),
         ),
@@ -213,6 +213,7 @@ mod tests {
             parts: vec![ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "AAAA".into(),
+                path: None,
             })],
             is_error: false,
             display: None,
