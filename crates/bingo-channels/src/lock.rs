@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ChannelError;
 
-const DIRECTORY: &str = "channels";
+/// Everything this surface keeps on disk lives under it.
+pub(crate) const DIRECTORY: &str = "channels";
 
 /// A credential this process holds for as long as the value lives.
 #[derive(Debug)]

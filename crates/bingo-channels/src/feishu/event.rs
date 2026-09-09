@@ -6,11 +6,15 @@
 //! the bot was addressed comes from the platform's `mentions`, never from the
 //! text, because text is what a person writes and a mention is what a person
 //! meant.
+//!
+//! This is the envelope only: which chat, which thread, who spoke, whether
+//! they spoke to us. What was said is [`super::content`]'s.
 
 use std::collections::{HashSet, VecDeque};
 
 use serde_json::{Value, json};
 
+use super::content::{self, Resource};
 use super::posted::Handle;
 use crate::adapter::Incoming;
 use crate::conversation::Conversation;
@@ -27,20 +31,13 @@ const OURS: &str = "bingo";
 /// One event, and what this surface makes of it. A well-formed event with
 /// nothing to do still carries its id: it has been seen, and a redelivery of
 /// it should be seen no more than once.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Heard {
     pub id: String,
     pub incoming: Option<Incoming>,
-    /// The pictures the message carried, still to be fetched: parsing does
-    /// no I/O, so what leaves here is the key, not the bytes.
-    pub pictures: Vec<Picture>,
-}
-
-/// One picture in a message, by the address Feishu serves it under.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Picture {
-    pub message: String,
-    pub key: String,
+    /// What the message carried besides words, still to be fetched: parsing
+    /// does no I/O, so what leaves here is the key, not the bytes.
+    pub resources: Vec<Resource>,
 }
 
 /// `me` is this bot's own open id, read once at startup: there is no
@@ -48,19 +45,23 @@ pub struct Picture {
 pub fn heard(payload: &[u8], me: &str) -> Option<Heard> {
     let event: Value = serde_json::from_slice(payload).ok()?;
     let id = event["header"]["event_id"].as_str()?.to_string();
-    let (incoming, pictures) = match event["header"]["event_type"].as_str()? {
-        MESSAGE => message(&event["event"], me).unzip(),
-        CARD_ACTION => (click(&event["event"]), None),
-        _ => (None, None),
+    let heard = match event["header"]["event_type"].as_str()? {
+        MESSAGE => message(&event["event"], me),
+        CARD_ACTION => click(&event["event"]).map(|incoming| Heard {
+            incoming: Some(incoming),
+            ..Heard::default()
+        }),
+        _ => None,
     };
+    // The id is the envelope's, and the envelope is read here: whatever came
+    // back of the event itself, it is stamped in one place.
     Some(Heard {
         id,
-        incoming,
-        pictures: pictures.unwrap_or_default(),
+        ..heard.unwrap_or_default()
     })
 }
 
-fn message(event: &Value, me: &str) -> Option<(Incoming, Vec<Picture>)> {
+fn message(event: &Value, me: &str) -> Option<Heard> {
     let message = &event["message"];
     let chat = message["chat_id"].as_str()?;
     // Only `p2p` and `group` exist; a topic thread is a group with a thread id.
@@ -70,92 +71,37 @@ fn message(event: &Value, me: &str) -> Option<(Incoming, Vec<Picture>)> {
         None if group => Conversation::group(chat),
         None => Conversation::direct(chat),
     };
-    let mentions = &message["mentions"];
-    let (text, keys) = spoken(message, mentions, me)?;
     let id = message["message_id"].as_str().unwrap_or_default();
-    let pictures = keys
-        .into_iter()
-        .map(|key| Picture {
-            message: id.to_string(),
-            key,
-        })
-        .collect();
+    let mentions = &message["mentions"];
+    let spoken = content::spoken(
+        id,
+        message["message_type"].as_str()?,
+        message["content"].as_str().unwrap_or_default(),
+        mentions,
+        me,
+    );
     let incoming = Incoming::Message {
         addressed: !group || mentions_me(mentions, me),
-        text,
+        text: spoken.text,
         images: Vec::new(),
         principal: event["sender"]["sender_id"]["open_id"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        parent: message["message_id"]
-            .as_str()
-            .map(|id| Handle::Message(id.to_string()).posted()),
+        parent: (!id.is_empty()).then(|| Handle::Message(id.to_string()).posted()),
         conversation,
     };
-    Some((incoming, pictures))
+    Some(Heard {
+        id: String::new(),
+        incoming: Some(incoming),
+        resources: spoken.resources,
+    })
 }
 
 fn mentions_me(mentions: &Value, me: &str) -> bool {
     mentions
         .as_array()
         .is_some_and(|mentions| mentions.iter().any(|m| m["id"]["open_id"] == me))
-}
-
-/// The words, with the `@_user_N` placeholders resolved — ours removed, the
-/// rest replaced by the name a person would have read on the screen — and
-/// the keys of the pictures beside them, in the order they were placed.
-fn spoken(message: &Value, mentions: &Value, me: &str) -> Option<(String, Vec<String>)> {
-    let content: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-    let (text, keys) = match message["message_type"].as_str()? {
-        "text" => (content["text"].as_str()?.to_string(), Vec::new()),
-        "post" => post(&content),
-        "image" => (
-            String::new(),
-            vec![content["image_key"].as_str()?.to_string()],
-        ),
-        // Files, audio and stickers are not this surface's (M13 non-goals).
-        _ => return None,
-    };
-    Some((resolve(&text, mentions, me).trim().to_string(), keys))
-}
-
-/// A rich-text message flattened: its text runs, one line per paragraph,
-/// and its `img` runs as the keys they name.
-fn post(content: &Value) -> (String, Vec<String>) {
-    let runs: Vec<&Value> = content["content"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .map(|paragraph| paragraph.as_array().map(Vec::as_slice).unwrap_or(&[]))
-        .flat_map(|paragraph| paragraph.iter().chain(std::iter::once(&Value::Null)))
-        .collect();
-    let mut text = String::new();
-    let mut keys = Vec::new();
-    for run in runs {
-        match run["tag"].as_str() {
-            Some("img") => keys.extend(run["image_key"].as_str().map(str::to_owned)),
-            _ if run.is_null() => text.push('\n'),
-            _ => text.push_str(run["text"].as_str().unwrap_or_default()),
-        }
-    }
-    (text, keys)
-}
-
-fn resolve(text: &str, mentions: &Value, me: &str) -> String {
-    let mut text = text.to_string();
-    for mention in mentions.as_array().map(Vec::as_slice).unwrap_or(&[]) {
-        let Some(key) = mention["key"].as_str() else {
-            continue;
-        };
-        let replacement = match mention["id"]["open_id"] == me {
-            true => String::new(),
-            false => format!("@{}", mention["name"].as_str().unwrap_or("someone")),
-        };
-        text = text.replace(key, &replacement);
-    }
-    text
 }
 
 fn click(event: &Value) -> Option<Incoming> {
@@ -236,6 +182,7 @@ impl Seen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feishu::content::Kind;
 
     const ME: &str = "ou_bot";
 
@@ -347,37 +294,27 @@ mod tests {
         assert!(conversation.group);
     }
 
+    /// The M13 non-goal closed (ADR-0051 §1): a voice note used to be dropped
+    /// where it stood, and the person who left it was answered with silence.
     #[test]
-    fn a_rich_text_message_arrives_as_its_lines() {
-        let mut event: Value =
-            serde_json::from_slice(&text_message("p2p", json!({}), json!([]))).expect("json");
-        event["event"]["message"]["message_type"] = json!("post");
-        event["event"]["message"]["content"] = json!(
-            json!({
-                "title": "",
-                "content": [
-                    [{ "tag": "text", "text": "first" }],
-                    [{ "tag": "text", "text": "sec" }, { "tag": "text", "text": "ond" }],
-                ],
-            })
-            .to_string()
-        );
-        let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
-        let Some(Incoming::Message { text, .. }) = heard.incoming else {
-            panic!("a message");
-        };
-        assert_eq!(text, "first\nsecond");
-    }
-
-    #[test]
-    fn a_file_is_seen_and_left_alone() {
-        let mut event: Value =
-            serde_json::from_slice(&text_message("p2p", json!({}), json!([]))).expect("json");
+    fn a_voice_note_is_a_message_with_one_resource_to_fetch() {
+        let mut event: Value = serde_json::from_slice(&text_message(
+            "p2p",
+            json!({ "file_key": "file_1", "duration": 4200 }),
+            json!([]),
+        ))
+        .expect("json");
         event["event"]["message"]["message_type"] = json!("audio");
         let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
-        assert_eq!(heard.id, "evt_1", "it is still acked and still deduped");
-        assert_eq!(heard.incoming, None);
-        assert!(heard.pictures.is_empty());
+        assert!(heard.incoming.is_some(), "it is heard, not shrugged at");
+        assert_eq!(
+            heard.resources,
+            vec![Resource {
+                message: "om_1".into(),
+                key: "file_1".into(),
+                kind: Kind::Audio,
+            }]
+        );
     }
 
     #[test]
@@ -390,39 +327,20 @@ mod tests {
         .expect("json");
         event["event"]["message"]["message_type"] = json!("image");
         let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
-        let Some(Incoming::Message { text, images, .. }) = heard.incoming else {
+        let Some(Incoming::Message { text, images, .. }) = &heard.incoming else {
             panic!("a message");
         };
         assert_eq!(text, "");
         assert!(images.is_empty(), "nothing is fetched while parsing");
         assert_eq!(
-            heard.pictures,
-            vec![Picture {
+            heard.resources,
+            vec![Resource {
                 message: "om_1".into(),
                 key: "img_1".into(),
-            }]
+                kind: Kind::Picture,
+            }],
+            "the key is stamped with the message it will be fetched from"
         );
-    }
-
-    #[test]
-    fn a_post_keeps_its_words_and_its_pictures_in_order() {
-        let mut event: Value = serde_json::from_slice(&text_message(
-            "p2p",
-            json!({"title": "", "content": [
-                [{"tag": "text", "text": "before"}, {"tag": "img", "image_key": "img_a"}],
-                [{"tag": "img", "image_key": "img_b"}, {"tag": "text", "text": "after"}]
-            ]}),
-            json!([]),
-        ))
-        .expect("json");
-        event["event"]["message"]["message_type"] = json!("post");
-        let heard = heard(event.to_string().as_bytes(), ME).expect("an event");
-        let Some(Incoming::Message { text, .. }) = heard.incoming else {
-            panic!("a message");
-        };
-        assert_eq!(text, "before\nafter");
-        let keys: Vec<&str> = heard.pictures.iter().map(|p| p.key.as_str()).collect();
-        assert_eq!(keys, ["img_a", "img_b"]);
     }
 
     #[test]

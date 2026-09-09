@@ -24,6 +24,12 @@ ADR-0016 records.
    - `im:message:send_as_bot` — sending.
    - `cardkit:card:write` — the streaming card.
    - `im:message.reactions:write_only` — the sign that says it is working.
+   - `im:resource` — the pictures and files a message carried (ADR-0051 §2).
+     Without it every attachment is dropped with a warning and only the words
+     arrive.
+   - `im:message` — the messages inside a forwarded bundle. This one is
+     *sensitive* on some tenants; without it a `merge_forward` arrives as its
+     title alone, which is a degrade and not a failure.
 
    The `im:message.p2p_msg:readonly` / `im:message.group_msg` pair are
    *sensitive* permissions needing tenant review; they read every message in
@@ -105,6 +111,16 @@ Tick each line, and paste what you saw.
       gets a `Typing` reaction while the bot works and loses it when the
       answer is done; a failed turn leaves a ❌ in its place (stop the
       provider, or point it at a bad key, to make one fail).
+- [ ] **What a chat carries.** In the direct chat, send the bot each of: a
+      file (make it `notes.md` — a text file under 100 KiB comes back in the
+      message as well as on disk), a voice note, a sticker, and a bundle
+      forwarded out of another chat. Every one of them is answered rather
+      than ignored. The file's path is under
+      `~/.bingo/data/channels/feishu/files/<message id>/` and it is there; the
+      voice note and any video get a path and nothing more — this surface
+      transcribes nothing. The forwarded bundle's messages are listed under a
+      `--- forwarded ---` line; if it arrives as its title alone, `im:message`
+      was not granted, and that is what the warning in the log will say.
 - [ ] **A dropped connection.** Turn the wifi off for a minute and back on.
       Within about two minutes the bot answers again; nothing is said twice.
 - [ ] **Rate limits.** Ask two long questions in one chat back to back. Both

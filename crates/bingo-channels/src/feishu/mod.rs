@@ -17,8 +17,8 @@ pub mod card;
 pub mod chunks;
 pub mod content;
 pub mod event;
+pub mod files;
 pub mod frame;
-pub mod pictures;
 pub mod posted;
 pub mod send;
 pub mod token;
@@ -26,6 +26,7 @@ pub mod upload;
 pub mod ws;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -70,11 +71,14 @@ pub struct Config {
     pub app_secret: String,
     /// Where the API lives. Overridable so a test can be Feishu.
     pub base: String,
+    /// Where an attachment a message carried lands (ADR-0051 §2).
+    pub files: PathBuf,
 }
 
 pub struct Feishu {
     api: Api,
     app_secret: String,
+    files: PathBuf,
     limits: Limits,
     queue: Queue,
     /// This bot's own open id, once `run` has asked for it.
@@ -100,6 +104,7 @@ impl Feishu {
         Self {
             api: Api::new(config.base, &config.app_id, &config.app_secret),
             app_secret: config.app_secret,
+            files: config.files,
             limits: Limits {
                 max_text: (MAX_TEXT, Encoding::Utf8Bytes),
                 dialect: Dialect::Markdown,
@@ -337,7 +342,15 @@ impl ChannelAdapter for Feishu {
         }
         let me = self.whoami().await?;
         *locked(&self.me) = me.clone();
-        ws::listen(&self.api, &self.app_secret, &me, &inbox, &cancel).await
+        ws::listen(
+            &self.api,
+            &self.app_secret,
+            &me,
+            &self.files,
+            &inbox,
+            &cancel,
+        )
+        .await
     }
 
     async fn send(
