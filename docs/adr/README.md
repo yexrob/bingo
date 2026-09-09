@@ -34,3 +34,4 @@ first record; 0036 §2 answered it before it was named).
 - [0048 — Stable request prefixes](0048-stable-request-prefixes.md)
 - [0049 — Memory has one writer](0049-memory-has-one-writer.md)
 - [0050 — An MCP server that needs signing in](0050-mcp-servers-that-need-signing-in.md)
+- [0051 — The chat carries more than words](0051-the-chat-carries-more-than-words.md)
