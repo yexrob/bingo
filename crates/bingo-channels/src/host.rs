@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use bingo_sdk::{
@@ -16,6 +16,7 @@ use bingo_sdk::{
 };
 use tokio::sync::mpsc;
 
+use crate::access::Access;
 use crate::adapter::{Arrival, ChannelAdapter, Inbox, Incoming};
 use crate::conversation::Conversation;
 use crate::gate::Gate;
@@ -29,9 +30,16 @@ const ARRIVALS: usize = 64;
 /// What one conversation's runner is reached by.
 type Chat = mpsc::Sender<Incoming>;
 
+/// The policy an adapter the settings said nothing about runs under: open,
+/// with a group engaging on a mention — what ran before there was a policy.
+static ANYONE: LazyLock<Access> = LazyLock::new(Access::default);
+
 pub struct ChannelsSurface {
     adapters: Vec<Arc<dyn ChannelAdapter>>,
     gate: Gate,
+    /// One policy per adapter id (ADR-0051 §4). An adapter with none runs
+    /// [`Access::default`], which is what ran before there was a policy.
+    access: BTreeMap<String, Access>,
 }
 
 impl std::fmt::Debug for ChannelsSurface {
@@ -46,8 +54,16 @@ impl std::fmt::Debug for ChannelsSurface {
 }
 
 impl ChannelsSurface {
-    pub fn new(adapters: Vec<Arc<dyn ChannelAdapter>>, gate: Gate) -> Self {
-        Self { adapters, gate }
+    pub fn new(
+        adapters: Vec<Arc<dyn ChannelAdapter>>,
+        gate: Gate,
+        access: BTreeMap<String, Access>,
+    ) -> Self {
+        Self {
+            adapters,
+            gate,
+            access,
+        }
     }
 
     /// One claim per credential, held for the run (ADR-0016 §5).
@@ -72,7 +88,7 @@ impl ChannelsSurface {
             let Some(adapter) = self.adapter(&arrival.adapter).cloned() else {
                 continue;
             };
-            let Some(conversation) = engaged(&arrival.event) else {
+            let Some(conversation) = self.engaged(&arrival.adapter, &arrival.event) else {
                 continue;
             };
             let key = format!("{}/{}", adapter.id(), conversation.path());
@@ -113,6 +129,45 @@ impl ChannelsSurface {
         tokio::spawn(runner.run());
         Ok((key, chat))
     }
+
+    /// Whether an arrival is this surface's business at all. Who may speak is
+    /// the adapter's policy now, and the mention a group used to need is one
+    /// rule of it (ADR-0051 §4). The adapter — which knows its own mention
+    /// syntax — stamped `addressed`; the policy reads it.
+    fn engaged<'a>(&self, adapter: &str, event: &'a Incoming) -> Option<&'a Conversation> {
+        match event {
+            Incoming::Message {
+                conversation,
+                principal,
+                addressed,
+                ..
+            } => self.admits(adapter, conversation, principal, *addressed),
+            // A click came off a button this surface put there.
+            Incoming::Click { conversation, .. } => Some(conversation),
+        }
+    }
+
+    /// The policy's answer. A refusal is a line in the log and nothing else:
+    /// a chat that was not admitted is not told it was not admitted.
+    fn admits<'a>(
+        &self,
+        adapter: &str,
+        to: &'a Conversation,
+        principal: &str,
+        addressed: bool,
+    ) -> Option<&'a Conversation> {
+        let access = self.access.get(adapter).unwrap_or(&ANYONE);
+        match access.admits(to, principal, addressed) {
+            Ok(()) => Some(to),
+            Err(refused) => {
+                tracing::debug!(
+                    %refused, %adapter, chat = %to.chat, %principal,
+                    "the chat was not admitted"
+                );
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -150,20 +205,6 @@ impl Surface for ChannelsSurface {
         cancel.cancel();
         outcome?;
         Ok(Exit { code: 0 })
-    }
-}
-
-/// Whether an arrival is this surface's business at all. A group engages only
-/// when the bot is spoken to (ADR-0016 §4), and the adapter — which knows its
-/// own id and its own mention syntax — is what decided that.
-fn engaged(event: &Incoming) -> Option<&Conversation> {
-    match event {
-        Incoming::Message {
-            conversation,
-            addressed,
-            ..
-        } => addressed.then_some(conversation),
-        Incoming::Click { conversation, .. } => Some(conversation),
     }
 }
 

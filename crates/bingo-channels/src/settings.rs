@@ -6,6 +6,7 @@
 //! app is called is settings, what it signs with is the environment — or,
 //! for a gateway that inherits no shell, the credential store (ADR-0020 §8).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bingo_sdk::Env;
@@ -13,6 +14,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::access::Access;
 use crate::adapter::ChannelAdapter;
 use crate::feishu::{self, Feishu};
 use crate::gate::Gate;
@@ -67,6 +69,10 @@ pub struct LoopbackChannel {
     pub max_text: usize,
     #[serde(default = "three")]
     pub max_actions: usize,
+    /// Who may speak to this bot here (ADR-0051 §4). Absent, it is open and
+    /// a group engages on a mention, which is what ran before.
+    #[serde(default)]
+    pub access: Access,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -81,6 +87,9 @@ pub struct FeishuChannel {
     /// long connection there is unverified (ADR-0016 consequences).
     #[serde(default)]
     pub base: Option<String>,
+    /// Who may speak to this bot here (ADR-0051 §4).
+    #[serde(default)]
+    pub access: Access,
 }
 
 /// The environment variables a Feishu app is signed with.
@@ -165,6 +174,23 @@ impl Channels {
             adapters.push(Arc::new(Feishu::new(settings.config(env))));
         }
         adapters
+    }
+
+    /// Each adapter's policy, by the id the arrivals carry. An adapter with
+    /// no entry runs the default, which is what ran before there was a policy.
+    pub fn access(&self) -> BTreeMap<String, Access> {
+        [
+            self.loopback
+                .as_ref()
+                .map(|settings| (Loopback::ID, settings.access.clone())),
+            self.feishu
+                .as_ref()
+                .map(|settings| (Feishu::ID, settings.access.clone())),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(id, access)| (id.to_string(), access))
+        .collect()
     }
 
     pub fn gate(&self) -> Gate {
@@ -273,6 +299,30 @@ mod tests {
         assert!(adapters[0].edit().is_none());
         assert!(adapters[0].buttons().is_none());
         assert!(adapters[0].typing().is_some());
+    }
+
+    #[test]
+    fn a_policy_is_read_per_adapter_and_an_unnamed_channel_has_none() {
+        let access = parse(json!({
+            "channels": { "loopback": { "access": { "group": { "policy": "off" } } } }
+        }))
+        .channels
+        .access();
+        assert_eq!(access["loopback"].group.policy, crate::access::Policy::Off);
+        assert_eq!(
+            access["loopback"].direct,
+            crate::access::Rule::default(),
+            "what a policy does not say keeps the default"
+        );
+        assert!(!access.contains_key("feishu"));
+    }
+
+    #[test]
+    fn an_adapter_that_says_nothing_about_access_runs_todays_rule() {
+        let access = parse(json!({ "channels": { "loopback": {} } }))
+            .channels
+            .access();
+        assert_eq!(access["loopback"], Access::default());
     }
 
     #[test]

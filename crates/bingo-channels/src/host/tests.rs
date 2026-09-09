@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -14,6 +15,7 @@ use bingo_sdk::{
 use tokio::sync::mpsc;
 
 use super::*;
+use crate::access::{Access, Policy, Rule};
 use crate::adapter::{Incoming, Mode};
 use crate::conversation::Posted;
 use crate::fixtures;
@@ -289,6 +291,10 @@ impl Chat {
     }
 
     fn with(config: loopback::Config) -> Self {
+        Self::under(config, Access::default())
+    }
+
+    fn under(config: loopback::Config, access: Access) -> Self {
         let home = tempfile::tempdir().expect("a temporary home");
         let loopback = Arc::new(Loopback::new(config));
         let surface = ChannelsSurface::new(
@@ -298,6 +304,7 @@ impl Chat {
                 min_chars: 1_000,
                 interval: Duration::from_millis(10),
             },
+            BTreeMap::from([(Loopback::ID.to_string(), access)]),
         );
         let host = Arc::new(TestHost::default());
         let handle = HostHandle(Arc::clone(&host) as Arc<dyn HostApi>);
@@ -474,6 +481,38 @@ async fn a_group_that_did_not_address_the_bot_opens_nothing() {
         chat.host.keys(),
         ["loopback/oc_2"],
         "silence in a group is not a session"
+    );
+}
+
+/// The policy answers where the mention alone used to (ADR-0051 §4). A
+/// refusal is silent: nothing is opened, and nothing is said back — a person
+/// who may not speak here is not told so in the chat.
+#[tokio::test]
+async fn a_principal_the_policy_refuses_opens_nothing_and_hears_nothing() {
+    let chat = Chat::under(
+        loopback::Config::default(),
+        Access {
+            group: Rule {
+                policy: Policy::Blocklist,
+                list: BTreeSet::from(["ou_person".to_string()]),
+                mention: false,
+            },
+            ..Access::default()
+        },
+    );
+    chat.say(said(Conversation::group("oc_1"), "run the tests", false))
+        .await;
+    chat.say(hello("oc_2")).await;
+    chat.session("loopback/oc_2").await;
+    assert_eq!(
+        chat.host.keys(),
+        ["loopback/oc_2"],
+        "the blocklisted group opened no session"
+    );
+    assert!(
+        chat.loopback.records().is_empty(),
+        "and was answered with nothing: {:?}",
+        chat.loopback.records()
     );
 }
 
@@ -762,6 +801,7 @@ async fn a_second_surface_on_one_credential_refuses_loudly() {
         ChannelsSurface::new(
             vec![Arc::new(Loopback::new(loopback::Config::default())) as Arc<dyn ChannelAdapter>],
             Gate::default(),
+            BTreeMap::new(),
         )
     };
     // What the first process left behind while it runs.

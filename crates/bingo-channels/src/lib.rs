@@ -5,6 +5,7 @@
 //! each other:
 //!
 //! - [`limits`] — what a platform will carry, with the unit its length is in.
+//! - [`access`] — who may speak to this bot, and where.
 //! - [`adapter`] — the [`ChannelAdapter`] contract: capabilities as accessors.
 //! - [`question`] — one [`Question`], two rungs: buttons, or a numbered list.
 //! - [`deliver`] — frames to [`Op`]s, coalesced by the dual gate.
@@ -17,6 +18,7 @@
 //! stream like every other surface, folding frames with `SessionState::apply`
 //! and deriving what to say from the fold.
 
+pub mod access;
 pub mod adapter;
 pub mod conversation;
 pub mod deliver;
@@ -40,6 +42,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{ConfigClaim, Merge, Plugin, PluginError, PluginManifest, Registrar, Surface};
 
+pub use access::{Access, Policy, Refused, Rule};
 pub use adapter::{Arrival, Buttons, ChannelAdapter, Edit, Inbox, Incoming, Mode, Threads, Typing};
 pub use conversation::{Conversation, Posted};
 pub use deliver::{Deliverer, Op};
@@ -83,7 +86,11 @@ impl Plugin for ChannelsPlugin {
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let settings: Settings = registrar.config()?;
         let adapters = settings.channels.adapters(registrar.env());
-        let surface = ChannelsSurface::new(adapters, settings.channels.gate());
+        let surface = ChannelsSurface::new(
+            adapters,
+            settings.channels.gate(),
+            settings.channels.access(),
+        );
         registrar.surface(Arc::new(surface) as Arc<dyn Surface>);
         Ok(())
     }
