@@ -86,15 +86,15 @@ boundaries; nothing reaches the kernel.
 
 ## Exit criteria
 
-- [ ] every ADR-0051 §1 shape has a fixture; no message type answers `None`
-- [ ] file / audio / video in, path in the text, ≤100 KiB text inlined; a
+- [x] every ADR-0051 §1 shape has a fixture; no message type answers `None`
+- [x] file / audio / video in, path in the text, ≤100 KiB text inlined; a
       hostile name cannot leave the message's directory
-- [ ] `SendFile` black-boxed on loopback; Feishu routes fixture-pinned;
+- [x] `SendFile` black-boxed on loopback; Feishu routes fixture-pinned;
       multipart body byte-pinned
-- [ ] access table test; three black-box cases on loopback; default = today
-- [ ] acknowledge bracket black-boxed on loopback; Feishu reactions wiremock
-- [ ] `scripts/budget.sh` unchanged; `cargo deny check` green
-- [ ] every gate green; Windows check for `bingo-channels`
+- [x] access table test; three black-box cases on loopback; default = today
+- [x] acknowledge bracket black-boxed on loopback; Feishu reactions wiremock
+- [x] `scripts/budget.sh` unchanged; `cargo deny check` green
+- [x] every gate green; [ ] Windows check for `bingo-channels` (CI: `aws-lc-sys` will not cross-build on this Mac)
 - [ ] live Feishu smoke per the runbook (user)
 
 ## Non-goals
@@ -114,3 +114,45 @@ boundaries; nothing reaches the kernel.
   subject answers it. Worth a line in the runbook.
 - Three workers touch `adapter.rs`, `runner.rs`, `settings.rs`; the merge is
   the reviewer's, in the order A, B, C, with each rebased on the last.
+
+## Verified (2026-09-09, dev `21f72c01`)
+
+```
+cargo fmt --all -- --check                                        → clean
+cargo check --workspace --all-targets --locked                    → Finished
+cargo clippy --workspace --all-targets --locked -- -D warnings    → Finished
+cargo test --workspace --locked --no-fail-fast
+  -- --skip a_proxy_with_a_token_this_run_never_minted_gets_nothing
+                                                                  → 4443 passed, 0 failed
+cargo test … a_proxy_with_a_token_this_run_never_minted_gets_nothing (alone)
+                                                                  → 1 passed
+scripts/check_discipline.sh                                       → discipline ok
+scripts/budget.sh    → dependencies 335 (max 335); budget ok — no new crate
+cargo deny check     → advisories ok, bans ok, licenses ok, sources ok
+```
+
+`cargo test -p bingo-channels` is 208 tests (was 124 at M13);
+`cargo test -p bingo --test channels` is 13 through the real binary.
+
+Three worker slices, merged in the order B, C, A (each rebased on the
+last): B — `access.rs`, `Acknowledge`, `Op::Ended`, Feishu reactions, and
+two fixes found in the user's gateway log on the way (the question card
+sent a schema-1 `action` container that card JSON 2.0 refuses, so every
+permission had fallen back to numbered text since the 2026-08-31 smoke;
+the CardKit settings patch sent an object where the endpoint takes a
+string, so no stream ever closed and every answer was posted twice);
+C — `Files`/`SendFile`/`Directory`, the hand-written multipart brick;
+A — `content.rs`, `attachments.rs`, `merged.rs`, `Picture` → `Resource`.
+
+Not done here, and deliberately:
+
+- **The Windows cross-check.** `cargo check --target x86_64-pc-windows-msvc`
+  dies in `aws-lc-sys`'s C build on this Mac before any workspace crate,
+  on `dev` as much as on the branches. CI's `windows` job is the check.
+- **The live Feishu smoke.** Every Feishu wire fact is wiremock-pinned;
+  the runbook's new lines (attachments, the working sign, `SendFile`, the
+  card buttons and the closed stream) are the user's to tick.
+- **The sweep's directory branch** in `attachments.rs` has no test: a
+  directory's mtime cannot be set back without a dependency.
+- **Windows reserved device names** (`CON.txt`) are not rewritten: such
+  an attachment fails to write and is dropped with a warning.
