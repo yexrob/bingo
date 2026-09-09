@@ -143,18 +143,24 @@ async fn over_http(
 /// A `401` here is the same fact as a `401` on the handshake: the token this
 /// dial carried is not one this server accepts.
 async fn list_tools(service: Service, asker: Arc<Asker>) -> Result<Connection, Refused> {
-    let tools = service.list_all_tools().await.map_err(|e| {
+    let mut tools = service.list_all_tools().await.map_err(|e| {
         let why = format!("listing tools: {e}");
         match crate::auth::call_wants_authorization(&e) {
             true => Refused::Unauthorized(why),
             false => Refused::Failed(why),
         }
     })?;
+    order_tools(&mut tools);
     Ok(Connection {
         service: Arc::new(service),
         tools,
         asker,
     })
+}
+
+fn order_tools(tools: &mut [rmcp::model::Tool]) {
+    // Equal names keep their server-given precedence for first-wins consumers.
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
 }
 
 async fn spawn_child(
@@ -256,6 +262,35 @@ fn open_log(data_dir: &Path, server_name: &str) -> std::io::Result<std::fs::File
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalogue_order_preserves_duplicate_definitions_and_precedence() {
+        let tools: Vec<_> = (0..64)
+            .map(|index| {
+                let name = ["zebra", "alpha", "middle"][index % 3];
+                rmcp::model::Tool::new(
+                    name,
+                    format!("Definition {index}"),
+                    Arc::new(serde_json::Map::from_iter([
+                        ("type".into(), serde_json::json!("object")),
+                        ("title".into(), serde_json::json!(format!("Schema {index}"))),
+                    ])),
+                )
+            })
+            .collect();
+        let expected: Vec<_> = ["alpha", "middle", "zebra"]
+            .into_iter()
+            .flat_map(|name| tools.iter().filter(move |tool| tool.name == name).cloned())
+            .collect();
+        let mut ordered = tools;
+        order_tools(&mut ordered);
+        assert_eq!(
+            ordered, expected,
+            "equal names retain every definition in first-wins order"
+        );
+        order_tools(&mut ordered);
+        assert_eq!(ordered, expected, "normalization is idempotent");
+    }
 
     #[test]
     fn a_server_logs_its_stderr_under_the_data_directory() {

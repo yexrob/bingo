@@ -357,13 +357,13 @@ async fn a_connected_server_s_tools_carry_its_name_and_its_schema() {
     assert_eq!(
         names,
         [
+            "mcp__test__ask",
+            "mcp__test__boom",
             "mcp__test__echo",
             "mcp__test__noisy",
-            "mcp__test__boom",
-            "mcp__test__whereami",
-            "mcp__test__ask"
+            "mcp__test__whereami"
         ],
-        "in the order the server listed them"
+        "in name order, independent of the server's list order"
     );
 }
 

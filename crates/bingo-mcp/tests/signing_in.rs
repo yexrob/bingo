@@ -35,6 +35,7 @@ struct Endpoint {
     /// Every `Authorization` it was offered, in order.
     offered: Mutex<Vec<String>>,
     calls: AtomicUsize,
+    catalogue: Mutex<Vec<Value>>,
 }
 
 /// The endpoint as wiremock holds it: a handle, because the test keeps one
@@ -48,6 +49,11 @@ impl Endpoint {
             accepts: Mutex::new(format!("Bearer {accepts}")),
             offered: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
+            catalogue: Mutex::new(vec![json!({
+                "name": "echo",
+                "description": "Say it back.\nThe second line is not a summary.",
+                "inputSchema": { "type": "object" },
+            })]),
         })
     }
 
@@ -89,13 +95,13 @@ impl Respond for Scripted {
             .set_body_json(json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": result(&message),
+                "result": result(&message, endpoint),
             }))
     }
 }
 
 /// What each method this test needs answers with.
-fn result(message: &Value) -> Value {
+fn result(message: &Value, endpoint: &Endpoint) -> Value {
     match message.get("method").and_then(Value::as_str) {
         Some("initialize") => json!({
             "protocolVersion": message["params"]["protocolVersion"],
@@ -103,11 +109,10 @@ fn result(message: &Value) -> Value {
             "serverInfo": { "name": "scripted", "version": "0.1.0" },
         }),
         Some("tools/list") => json!({
-            "tools": [{
-                "name": "echo",
-                "description": "Say it back.\nThe second line is not a summary.",
-                "inputSchema": { "type": "object" },
-            }],
+            "tools": *endpoint.catalogue.lock().unwrap(),
+        }),
+        Some("tools/call") => json!({
+            "content": [{ "type": "text", "text": message["params"]["name"] }],
         }),
         _ => json!({ "content": [{ "type": "text", "text": "said" }] }),
     }
@@ -241,6 +246,8 @@ async fn a_server_that_wants_a_bearer_nobody_has_needs_authentication() {
         manager.tools().await.is_empty(),
         "a server nobody signed in to offers nothing"
     );
+    assert!(tools(&manager).await.is_empty());
+    assert_eq!(manager.tools_of("remote").await, None);
 }
 
 #[tokio::test]
@@ -371,7 +378,106 @@ async fn a_connected_server_lists_what_it_offers() {
     assert_eq!(manager.tools_of("nothing").await, None);
 }
 
+#[tokio::test]
+async fn catalogue_order_survives_reconnect_and_tools_remain_callable() {
+    let (server, endpoint) = endpoint("at_1", "at_2").await;
+    let (manager, data) = manager(&server);
+    signed_in(&data, &server.uri(), "at_1");
+    *endpoint.catalogue.lock().unwrap() = ["zebra", "alpha", "middle"]
+        .map(|name| {
+            json!({
+                "name": name,
+                "description": format!("Call {name}."),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { name: { "type": "string" } },
+                    "required": [name],
+                },
+            })
+        })
+        .to_vec();
+    assert!(tools(&manager).await.is_empty(), "not connected yet");
+    manager.dial_enabled().await;
+    assert_eq!(state(&manager).await, Status::Connected { tools: 3 });
+    let before = callable_specs(&manager).await;
+
+    endpoint.catalogue.lock().unwrap().rotate_left(1);
+    assert!(manager.reconnect("remote").await);
+    settles(&manager, |status| !matches!(status, Status::Connecting)).await;
+    assert_eq!(state(&manager).await, Status::Connected { tools: 3 });
+    let after = callable_specs(&manager).await;
+    assert_eq!(
+        before, after,
+        "the full ordered SDK definitions are unchanged"
+    );
+    assert_eq!(
+        before
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "mcp__remote__alpha",
+            "mcp__remote__middle",
+            "mcp__remote__zebra"
+        ]
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                serde_json::from_slice::<Value>(&request.body)
+                    .is_ok_and(|message| message["method"] == "tools/list")
+            })
+            .count(),
+        2,
+        "reconnect fetched the reordered catalogue instead of retaining it"
+    );
+    manager.shutdown().await;
+    assert!(
+        tools(&manager).await.is_empty(),
+        "disconnected tools are not retained"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_reconnect_drops_the_previously_connected_catalogue() {
+    let (server, _endpoint) = endpoint("at_1", "at_2").await;
+    let (manager, data) = manager(&server);
+    signed_in(&data, &server.uri(), "at_1");
+    manager.dial_enabled().await;
+    assert_eq!(tools(&manager).await.len(), 1);
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    assert!(manager.reconnect("remote").await);
+    settles(&manager, |status| !matches!(status, Status::Connecting)).await;
+    assert!(matches!(state(&manager).await, Status::Failed { .. }));
+    assert!(tools(&manager).await.is_empty());
+    assert_eq!(manager.tools_of("remote").await, None);
+}
+
 // ------------------------------------------------------------------- support
+
+async fn callable_specs(manager: &Arc<Manager>) -> Vec<bingo_sdk::ToolSpec> {
+    let mut specs = Vec::new();
+    for tool in tools(manager).await {
+        let spec = tool.spec();
+        let name = spec.name.strip_prefix("mcp__remote__").unwrap();
+        let output = tool
+            .call(json!({ name: "value" }), &tool_context())
+            .await
+            .unwrap();
+        assert!(!output.is_error);
+        assert_eq!(output.parts, vec![bingo_sdk::ContentPart::text(name)]);
+        specs.push(spec);
+    }
+    specs
+}
 
 async fn tools(manager: &Arc<Manager>) -> Vec<Arc<dyn Tool>> {
     McpSource::new(Arc::clone(manager)).tools().await
