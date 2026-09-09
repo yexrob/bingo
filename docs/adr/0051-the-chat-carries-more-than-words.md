@@ -44,9 +44,9 @@ Nothing here reaches `bingo-sdk` or `bingo-core`.
    than 14 days (`bingo_pictures::cache::DAYS`) are swept on each write. A
    fetch that fails drops the attachment with a warning; the words still go.
 3. **Files go out through a tool, never a tag.** `files() -> Option<&dyn
-   Files>` is a fourth mechanism on `ChannelAdapter`: `send(to, parent,
+   Files>` is a fourth mechanism on `ChannelAdapter`: `post(to, parent,
    Outgoing { name, bytes, caption })`. The channels plugin contributes one
-   `ToolSource` whose `send_file` tool exists only while the surface runs
+   `ToolSource` whose `SendFile` tool exists only while the surface runs
    (ADR-0009 §1: answering with nothing is never wrong), and resolves the
    calling session to its conversation through the surface's own directory
    of runners; a session that is not a chat is refused in words. Feishu

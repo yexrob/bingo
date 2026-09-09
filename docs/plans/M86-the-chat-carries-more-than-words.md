@@ -76,7 +76,7 @@ boundaries; nothing reaches the kernel.
     `files()`, each in words. The plugin's `ToolSource` answers it only
     while the surface runs (a flag the surface sets in `run`). Black-box
     through the real binary on loopback: the model (fake provider) calls
-    `send_file`, the loopback peer records `file` with the bytes.
+    `SendFile`, the loopback peer records `file` with the bytes.
 
 ## Files
 
@@ -89,7 +89,7 @@ boundaries; nothing reaches the kernel.
 - [ ] every ADR-0051 §1 shape has a fixture; no message type answers `None`
 - [ ] file / audio / video in, path in the text, ≤100 KiB text inlined; a
       hostile name cannot leave the message's directory
-- [ ] `send_file` black-boxed on loopback; Feishu routes fixture-pinned;
+- [ ] `SendFile` black-boxed on loopback; Feishu routes fixture-pinned;
       multipart body byte-pinned
 - [ ] access table test; three black-box cases on loopback; default = today
 - [ ] acknowledge bracket black-boxed on loopback; Feishu reactions wiremock
@@ -110,7 +110,7 @@ boundaries; nothing reaches the kernel.
 
 - The merged-forward endpoint needs `im:message`, a sensitive scope on some
   tenants: a `merge_forward` without it degrades to its title, with a warning.
-- `send_file` in default mode asks once per call; a rule on the path
+- `SendFile` in default mode asks once per call; a rule on the path
   subject answers it. Worth a line in the runbook.
 - Three workers touch `adapter.rs`, `runner.rs`, `settings.rs`; the merge is
   the reviewer's, in the order A, B, C, with each rebased on the last.
