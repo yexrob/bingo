@@ -142,6 +142,29 @@ impl Api {
         Ok(bytes.to_vec())
     }
 
+    /// A form, already built. The body is the caller's (`super::upload`):
+    /// what a multipart body looks like is a wire format with its own
+    /// fixtures, and reqwest's `multipart` feature is not enabled for it.
+    pub async fn post_multipart(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<Value, ApiError> {
+        let bearer = self
+            .tokens
+            .bearer(&self.http, &self.base, std::time::Instant::now())
+            .await?;
+        request(
+            self.http
+                .post(format!("{}{path}", self.base))
+                .bearer_auth(bearer)
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(body),
+        )
+        .await
+    }
+
     async fn send(
         &self,
         method: reqwest::Method,

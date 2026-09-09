@@ -21,6 +21,7 @@ pub mod pictures;
 pub mod posted;
 pub mod send;
 pub mod token;
+pub mod upload;
 pub mod ws;
 
 use std::collections::HashMap;
@@ -31,7 +32,8 @@ use bingo_sdk::CancellationToken;
 use serde_json::{Value, json};
 
 use crate::adapter::{
-    Acknowledge, Buttons, ChannelAdapter, Edit, Inbox, Mark, Mode, Outcome, Threads,
+    Acknowledge, Buttons, ChannelAdapter, Edit, Files, Inbox, Mark, Mode, Outcome, Outgoing,
+    Threads,
 };
 use crate::conversation::{Conversation, Posted};
 use crate::error::ChannelError;
@@ -40,11 +42,14 @@ use crate::question::Question;
 use api::{Api, ApiError};
 use posted::Handle;
 use send::Queue;
+use upload::{Endpoint, Route};
 
 /// Who this bot is, asked once at startup: there is no `is_mentioned` flag on
 /// an event, only a list of mentions to look ourselves up in.
 const WHOAMI: &str = "/open-apis/bot/v3/info";
 const MESSAGES: &str = "/open-apis/im/v1/messages";
+const IMAGES: &str = "/open-apis/im/v1/images";
+const FILES: &str = "/open-apis/im/v1/files";
 const REACTIONS: &str = "reactions";
 const CARDS: &str = "/open-apis/cardkit/v1/cards";
 
@@ -213,6 +218,57 @@ impl Feishu {
         self.spend(self.api.put(&path, body).await)
     }
 
+    /// Post under the message that started this where there is one, and as a
+    /// message of its own where there is not — what a reply already does.
+    async fn deliver(
+        &self,
+        to: &Conversation,
+        parent: Option<&Posted>,
+        kind: &str,
+        content: Value,
+    ) -> Result<Handle, ChannelError> {
+        match parent {
+            Some(parent) => self.post_reply(to, parent, kind, content).await,
+            None => self.post(to, kind, content).await,
+        }
+    }
+
+    /// The bytes up, and the content of the message that will carry them back.
+    async fn uploaded(&self, route: &Route, file: &Outgoing) -> Result<Value, ChannelError> {
+        match route.endpoint {
+            Endpoint::Image => {
+                let key = self
+                    .upload(IMAGES, &[("image_type", route.file_type)], "image", file)
+                    .await?;
+                Ok(json!({ "image_key": key }))
+            }
+            Endpoint::File => {
+                let fields = [("file_type", route.file_type), ("file_name", &*file.name)];
+                let key = self.upload(FILES, &fields, "file", file).await?;
+                Ok(json!({ "file_key": key }))
+            }
+        }
+    }
+
+    /// One multipart upload, and the single key its answer is worth. Both
+    /// endpoints answer `data.<field>_key` and nothing else is read.
+    async fn upload(
+        &self,
+        path: &str,
+        fields: &[(&str, &str)],
+        field: &str,
+        file: &Outgoing,
+    ) -> Result<String, ChannelError> {
+        let (content_type, body) =
+            upload::multipart(&boundary(), fields, (field, &file.name, &file.bytes));
+        let answer = self.api.post_multipart(path, &content_type, body).await?;
+        let key = format!("{field}_key");
+        answer["data"][&key]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| ChannelError::Platform(format!("feishu kept no {key}")))
+    }
+
     /// One emoji on one message.
     async fn react(&self, message_id: &str, emoji: &str) -> Result<Value, ChannelError> {
         let body = json!({ "reaction_type": { "emoji_type": emoji } });
@@ -231,6 +287,16 @@ impl Feishu {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// A boundary the body it delimits cannot contain: the nanosecond it was
+/// minted, which no file being uploaded has a copy of.
+fn boundary() -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("----bingo{nonce:x}")
 }
 
 fn message_id(answer: &Value) -> Result<String, ChannelError> {
@@ -301,6 +367,10 @@ impl ChannelAdapter for Feishu {
     }
 
     fn threads(&self) -> Option<&dyn Threads> {
+        Some(self)
+    }
+
+    fn files(&self) -> Option<&dyn Files> {
         Some(self)
     }
 
@@ -393,6 +463,32 @@ impl Threads for Feishu {
                     .await?
             }
         };
+        Ok(handle.posted())
+    }
+}
+
+#[async_trait]
+impl Files for Feishu {
+    /// The bytes go up first and come back as a key; the message that carries
+    /// the key is a message like any other, so it queues per chat with the
+    /// rest and hangs under whatever a reply would (ADR-0051 §3).
+    ///
+    /// A caption is its own text message after the file, not a `post` around
+    /// it: a picture inside a rich post is not a picture a person can open
+    /// full-screen, and the words are worth more than the layout.
+    async fn send(
+        &self,
+        to: &Conversation,
+        parent: Option<&Posted>,
+        file: Outgoing,
+    ) -> Result<Posted, ChannelError> {
+        let route = upload::route(&file.name, &file.bytes);
+        let content = self.uploaded(&route, &file).await?;
+        let handle = self.deliver(to, parent, route.msg_type, content).await?;
+        if let Some(caption) = &file.caption {
+            self.deliver(to, parent, "text", json!({ "text": caption }))
+                .await?;
+        }
         Ok(handle.posted())
     }
 }
