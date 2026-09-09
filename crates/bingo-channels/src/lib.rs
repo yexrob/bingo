@@ -12,6 +12,7 @@
 //! - [`runner`] — one conversation on one session, both directions.
 //! - [`host`] — the surface: arrivals in, runners out.
 //! - [`directory`] — which chat a session sits in, for whoever asks later.
+//! - [`tool`] — `SendFile`, the one way a file goes out (ADR-0051 §3).
 //! - [`loopback`] — the adapter that is the contract fixture.
 //! - [`feishu`] — the first real platform, wire bricks and all.
 //!
@@ -35,6 +36,7 @@ pub mod question;
 pub mod runner;
 pub mod secret;
 pub mod settings;
+pub mod tool;
 
 #[cfg(test)]
 mod fixtures;
@@ -42,7 +44,10 @@ mod fixtures;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bingo_sdk::{ConfigClaim, Merge, Plugin, PluginError, PluginManifest, Registrar, Surface};
+use bingo_sdk::{
+    ConfigClaim, Contribution, Merge, Plugin, PluginError, PluginManifest, Registrar, Surface,
+    ToolSource,
+};
 
 pub use access::{Access, Policy, Refused, Rule};
 pub use adapter::{
@@ -61,12 +66,13 @@ pub use loopback::Loopback;
 pub use question::{Choice, Question};
 pub use runner::SURFACE_ID;
 pub use settings::{SETTING, Settings, from_flags, wanted};
+pub use tool::{SEND_FILE, SendFile, SendFileSource};
 
 static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.surface.channels",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["surface:channels"],
+    provides: &["surface:channels", "tool:SendFile"],
     requires: &[],
     config: Some(ConfigClaim {
         // Two layers each naming an adapter both apply: a project may add a
@@ -76,9 +82,10 @@ static MANIFEST: PluginManifest = PluginManifest {
     }),
 };
 
-/// Registers the channel surface with whatever adapters the settings name.
-/// With none named the surface still registers and refuses when run, so
-/// `bingo channels` says what is missing rather than doing nothing.
+/// Registers the channel surface with whatever adapters the settings name,
+/// and the tool that posts a file into one of its chats. With none named the
+/// surface still registers and refuses when run, so `bingo channels` says
+/// what is missing rather than doing nothing.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ChannelsPlugin;
 
@@ -96,7 +103,14 @@ impl Plugin for ChannelsPlugin {
             settings.channels.gate(),
             settings.channels.access(),
         );
+        // The same directory on both sides: the surface fills it as its
+        // conversations open, and the tool reads it to find the chat a
+        // session is in (ADR-0051 §3).
+        let directory = surface.directory();
         registrar.surface(Arc::new(surface) as Arc<dyn Surface>);
+        registrar.add(Contribution::Tools(
+            Arc::new(SendFileSource::new(directory)) as Arc<dyn ToolSource>,
+        ));
         Ok(())
     }
 }
@@ -106,13 +120,39 @@ mod plugin_tests {
     use super::*;
     use bingo_sdk::{Env, SurfaceKind};
 
-    fn registered(config: serde_json::Value) -> Arc<dyn Surface> {
+    fn contributions(config: serde_json::Value) -> Vec<bingo_sdk::Contribution> {
         let mut registrar = Registrar::new(MANIFEST.id, config, Env::rooted("/tmp"));
         ChannelsPlugin.register(&mut registrar).expect("register");
-        match registrar.into_contributions().pop() {
-            Some(bingo_sdk::Contribution::Surface(surface)) => surface,
-            other => panic!("expected a surface, got {other:?}"),
-        }
+        registrar.into_contributions()
+    }
+
+    fn registered(config: serde_json::Value) -> Arc<dyn Surface> {
+        contributions(config)
+            .into_iter()
+            .find_map(|contribution| match contribution {
+                bingo_sdk::Contribution::Surface(surface) => Some(surface),
+                _ => None,
+            })
+            .expect("a surface")
+    }
+
+    /// The tool is contributed by a source, not statically: it exists only
+    /// while the surface runs (ADR-0009 §1, ADR-0051 §3).
+    #[tokio::test]
+    async fn the_plugin_contributes_the_file_tool_through_a_source() {
+        let source = contributions(serde_json::json!({ "channels": { "loopback": {} } }))
+            .into_iter()
+            .find_map(|contribution| match contribution {
+                bingo_sdk::Contribution::Tools(source) => Some(source),
+                _ => None,
+            })
+            .expect("a tool source");
+        assert_eq!(source.id(), SURFACE_ID);
+        assert!(
+            source.tools().await.is_empty(),
+            "nothing is running, so there is no chat to send into"
+        );
+        assert!(MANIFEST.provides.contains(&"tool:SendFile"));
     }
 
     #[test]
@@ -124,7 +164,7 @@ mod plugin_tests {
             SurfaceKind::Concurrent,
             "a chat owns no terminal; it runs beside whatever does"
         );
-        assert_eq!(MANIFEST.provides, &["surface:channels"]);
+        assert_eq!(MANIFEST.provides, &["surface:channels", "tool:SendFile"]);
     }
 
     #[tokio::test]
