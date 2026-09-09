@@ -246,9 +246,9 @@ async fn a_question_is_its_own_card_and_settling_it_edits_that_message() {
     )
     .expect("the card");
     assert_eq!(
-        sent["body"]["elements"][1]["actions"][0]["behaviors"][0]["type"],
+        sent["body"]["elements"][1]["columns"][0]["elements"][0]["behaviors"][0]["type"],
         json!("callback"),
-        "a button is a callback: {sent}"
+        "a button is a callback, in a column of its own: {sent}"
     );
 
     buttons
@@ -263,7 +263,7 @@ async fn a_question_is_its_own_card_and_settling_it_edits_that_message() {
     .expect("the card");
     let elements = settled["body"]["elements"].as_array().expect("elements");
     assert!(
-        elements.iter().all(|e| e["tag"] != json!("action")),
+        elements.iter().all(|e| e["tag"] != json!("column_set")),
         "no live button outlives its question: {settled}"
     );
     assert!(
