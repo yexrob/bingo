@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use base64::Engine;
 use bingo_sdk::{CancellationToken, InteractionId};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -18,8 +19,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
 use crate::adapter::{
-    Acknowledge, Buttons, ChannelAdapter, Edit, Inbox, Incoming, Mark, Mode, Outcome, Threads,
-    Typing,
+    Acknowledge, Buttons, ChannelAdapter, Edit, Files, Inbox, Incoming, Mark, Mode, Outcome,
+    Outgoing, Threads, Typing,
 };
 use crate::conversation::{Conversation, Posted};
 use crate::error::ChannelError;
@@ -35,6 +36,7 @@ pub struct Config {
     pub buttons: bool,
     pub typing: bool,
     pub threads: bool,
+    pub files: bool,
     pub acknowledge: bool,
     /// What a group message must contain for the bot to be addressed.
     pub mention: String,
@@ -55,6 +57,7 @@ impl Default for Config {
             buttons: true,
             typing: true,
             threads: true,
+            files: true,
             acknowledge: true,
             mention: "@bingo".into(),
             peer: None,
@@ -97,6 +100,17 @@ pub enum Record {
         id: Posted,
         text: String,
         mode: Mode,
+    },
+    File {
+        to: Conversation,
+        parent: Option<Posted>,
+        id: Posted,
+        name: String,
+        /// The bytes as they were handed over. A fixture keeps what it was
+        /// given: a length beside them would be a second way to say how big
+        /// the file was, and the wire speaks the bytes themselves.
+        bytes: Vec<u8>,
+        caption: Option<String>,
     },
     Acknowledge {
         at: Posted,
@@ -321,6 +335,19 @@ fn spoken(record: &Record) -> Value {
             "op": "reply", "chat": to.chat, "parent": parent.as_str(), "id": id.as_str(),
             "text": text, "mode": mode_name(*mode),
         }),
+        Record::File {
+            to,
+            parent,
+            id,
+            name,
+            bytes,
+            caption,
+        } => json!({
+            "op": "file", "chat": to.chat, "thread": to.thread,
+            "parent": parent.as_ref().map(Posted::as_str), "id": id.as_str(),
+            "name": name, "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "caption": caption,
+        }),
     }
 }
 
@@ -386,6 +413,10 @@ impl ChannelAdapter for Loopback {
 
     fn threads(&self) -> Option<&dyn Threads> {
         self.config.threads.then_some(self as &dyn Threads)
+    }
+
+    fn files(&self) -> Option<&dyn Files> {
+        self.config.files.then_some(self as &dyn Files)
     }
 
     fn acknowledge(&self) -> Option<&dyn Acknowledge> {
@@ -495,6 +526,28 @@ impl Threads for Loopback {
     }
 }
 
+#[async_trait]
+impl Files for Loopback {
+    async fn send(
+        &self,
+        to: &Conversation,
+        parent: Option<&Posted>,
+        file: Outgoing,
+    ) -> Result<Posted, ChannelError> {
+        self.refused("file")?;
+        let id = self.mint();
+        self.record(Record::File {
+            to: to.clone(),
+            parent: parent.cloned(),
+            id: id.clone(),
+            name: file.name,
+            bytes: file.bytes,
+            caption: file.caption,
+        });
+        Ok(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +563,7 @@ mod tests {
             buttons: false,
             typing: false,
             threads: false,
+            files: false,
             acknowledge: false,
             ..Config::default()
         });
@@ -517,6 +571,7 @@ mod tests {
         assert!(bare.buttons().is_none());
         assert!(bare.typing().is_none());
         assert!(bare.threads().is_none());
+        assert!(bare.files().is_none());
         assert!(bare.acknowledge().is_none());
         let full = without(Config::default());
         assert!(full.edit().is_some());
@@ -527,7 +582,9 @@ mod tests {
     async fn every_call_is_recorded_in_order_with_the_ids_it_minted() {
         let loopback = without(Config::default());
         let chat = Conversation::direct("oc_1");
-        let first = loopback.send(&chat, "", Mode::Stream).await.unwrap();
+        let first = ChannelAdapter::send(&loopback, &chat, "", Mode::Stream)
+            .await
+            .unwrap();
         loopback
             .edit()
             .unwrap()
@@ -692,6 +749,14 @@ mod tests {
                     id: Posted::new("m3"),
                     text: "under it".into(),
                     mode: Mode::Once,
+                }),
+                spoken(&Record::File {
+                    to: Conversation::direct("oc_1"),
+                    parent: Some(Posted::new("m1")),
+                    id: Posted::new("m4"),
+                    name: "notes.txt".into(),
+                    bytes: b"by the chat\n".to_vec(),
+                    caption: Some("the notes".into()),
                 }),
                 spoken(&Record::Acknowledge {
                     at: Posted::new("om_1"),

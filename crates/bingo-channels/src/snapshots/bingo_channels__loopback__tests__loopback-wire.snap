@@ -1,6 +1,6 @@
 ---
 source: crates/bingo-channels/src/loopback.rs
-expression: "[spoken(&Record::Send\n{\n    to: Conversation::group(\"oc_1\").in_thread(\"omt_2\"), id: Posted::new(\"m1\"),\n    text: \"hi\".into(), mode: Mode::Stream,\n}),\nspoken(&Record::Replace { at: Posted::new(\"m1\"), text: \"hi there\".into(), }),\nspoken(&Record::Finish { at: Posted::new(\"m1\"), text: \"hi there!\".into(), }),\nspoken(&Record::Ask\n{ to: Conversation::direct(\"oc_1\"), id: Posted::new(\"m2\"), question, }),\nspoken(&Record::Settle\n{ at: Posted::new(\"m2\"), outcome: \"approved in the TUI\".into(), }),\nspoken(&Record::Typing { to: Conversation::direct(\"oc_1\"), }),\nspoken(&Record::Reply\n{\n    to: Conversation::direct(\"oc_1\"), parent: Posted::new(\"m1\"), id:\n    Posted::new(\"m3\"), text: \"under it\".into(), mode: Mode::Once,\n}), spoken(&Record::Acknowledge { at: Posted::new(\"om_1\"), }),\nspoken(&Record::Acknowledged\n{ at: Posted::new(\"om_1\"), outcome: Outcome::Failed, }),]"
+expression: "[spoken(&Record::Send\n{\n    to: Conversation::group(\"oc_1\").in_thread(\"omt_2\"), id: Posted::new(\"m1\"),\n    text: \"hi\".into(), mode: Mode::Stream,\n}),\nspoken(&Record::Replace { at: Posted::new(\"m1\"), text: \"hi there\".into(), }),\nspoken(&Record::Finish { at: Posted::new(\"m1\"), text: \"hi there!\".into(), }),\nspoken(&Record::Ask\n{ to: Conversation::direct(\"oc_1\"), id: Posted::new(\"m2\"), question, }),\nspoken(&Record::Settle\n{ at: Posted::new(\"m2\"), outcome: \"approved in the TUI\".into(), }),\nspoken(&Record::Typing { to: Conversation::direct(\"oc_1\"), }),\nspoken(&Record::Reply\n{\n    to: Conversation::direct(\"oc_1\"), parent: Posted::new(\"m1\"), id:\n    Posted::new(\"m3\"), text: \"under it\".into(), mode: Mode::Once,\n}),\nspoken(&Record::File\n{\n    to: Conversation::direct(\"oc_1\"), parent: Some(Posted::new(\"m1\")), id:\n    Posted::new(\"m4\"), name: \"notes.txt\".into(), bytes:\n    b\"by the chat\\n\".to_vec(), caption: Some(\"the notes\".into()),\n}), spoken(&Record::Acknowledge { at: Posted::new(\"om_1\"), }),\nspoken(&Record::Acknowledged\n{ at: Posted::new(\"om_1\"), outcome: Outcome::Failed, }),]"
 ---
 [
   {
@@ -50,6 +50,16 @@ expression: "[spoken(&Record::Send\n{\n    to: Conversation::group(\"oc_1\").in_
     "id": "m3",
     "text": "under it",
     "mode": "once"
+  },
+  {
+    "op": "file",
+    "chat": "oc_1",
+    "thread": null,
+    "parent": "m1",
+    "id": "m4",
+    "name": "notes.txt",
+    "bytes": "YnkgdGhlIGNoYXQK",
+    "caption": "the notes"
   },
   {
     "op": "acknowledge",

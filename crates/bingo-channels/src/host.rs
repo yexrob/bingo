@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use crate::access::Access;
 use crate::adapter::{Arrival, ChannelAdapter, Inbox, Incoming};
 use crate::conversation::Conversation;
+use crate::directory::Directory;
 use crate::gate::Gate;
 use crate::lock::Claim;
 use crate::runner::{Runner, SURFACE_ID};
@@ -40,6 +41,9 @@ pub struct ChannelsSurface {
     /// One policy per adapter id (ADR-0051 §4). An adapter with none runs
     /// [`Access::default`], which is what ran before there was a policy.
     access: BTreeMap<String, Access>,
+    /// Which chat each of this surface's sessions sits in, for whoever has
+    /// only a session id: the tool that posts a file (ADR-0051 §3).
+    directory: Directory,
 }
 
 impl std::fmt::Debug for ChannelsSurface {
@@ -63,7 +67,14 @@ impl ChannelsSurface {
             adapters,
             gate,
             access,
+            directory: Directory::default(),
         }
+    }
+
+    /// Where this surface's conversations can be found, for whoever else has
+    /// only a session id: the tool that posts a file into one (ADR-0051 §3).
+    pub fn directory(&self) -> Directory {
+        self.directory.clone()
     }
 
     /// One claim per credential, held for the run (ADR-0016 §5).
@@ -124,7 +135,16 @@ impl ChannelsSurface {
         cwd: PathBuf,
     ) -> Result<(String, Chat), KernelError> {
         let (chat, inbound) = mpsc::channel(ARRIVALS);
-        let runner = Runner::open(host, adapter, conversation, cwd, self.gate, inbound).await?;
+        let runner = Runner::open(
+            host,
+            adapter,
+            conversation,
+            cwd,
+            self.gate,
+            self.directory.clone(),
+            inbound,
+        )
+        .await?;
         let key = runner.key().to_string();
         tokio::spawn(runner.run());
         Ok((key, chat))
@@ -188,6 +208,9 @@ impl Surface for ChannelsSurface {
                  or pass --channels",
             ));
         }
+        // The tool that posts a file exists only while this runs (ADR-0051
+        // §3); the guard says so for exactly as long as `run` is on the stack.
+        let _serving = self.directory.serving();
         let _claims = self.claim(&opts.env.data_dir)?;
         let (post, arrivals) = mpsc::channel(ARRIVALS);
         let cancel = CancellationToken::new();

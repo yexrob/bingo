@@ -122,6 +122,10 @@ pub trait ChannelAdapter: Send + Sync {
         None
     }
 
+    fn files(&self) -> Option<&dyn Files> {
+        None
+    }
+
     fn acknowledge(&self) -> Option<&dyn Acknowledge> {
         None
     }
@@ -168,6 +172,33 @@ pub trait Threads: Send + Sync {
         parent: &Posted,
         text: &str,
         mode: Mode,
+    ) -> Result<Posted, ChannelError>;
+}
+
+/// A file on its way out of this machine and into a chat.
+///
+/// The bytes travel, not the path: what a chat can reach is nothing this
+/// machine's filesystem says, so the tool that reads the file is what decides
+/// it may be read, and the adapter only sends what it is handed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outgoing {
+    /// What the file is called in the chat. A basename, never a path.
+    pub name: String,
+    pub bytes: Vec<u8>,
+    /// A line said beside the file, where there is one to say.
+    pub caption: Option<String>,
+}
+
+/// Putting a file in the chat (ADR-0051 §3). A platform that has no way to
+/// carry one hands over nothing, and the tool says so in words rather than
+/// failing halfway through an upload.
+#[async_trait]
+pub trait Files: Send + Sync {
+    async fn send(
+        &self,
+        to: &Conversation,
+        parent: Option<&Posted>,
+        file: Outgoing,
     ) -> Result<Posted, ChannelError>;
 }
 

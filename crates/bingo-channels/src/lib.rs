@@ -11,6 +11,7 @@
 //! - [`deliver`] — frames to [`Op`]s, coalesced by the dual gate.
 //! - [`runner`] — one conversation on one session, both directions.
 //! - [`host`] — the surface: arrivals in, runners out.
+//! - [`directory`] — which chat a session sits in, for whoever asks later.
 //! - [`loopback`] — the adapter that is the contract fixture.
 //! - [`feishu`] — the first real platform, wire bricks and all.
 //!
@@ -22,6 +23,7 @@ pub mod access;
 pub mod adapter;
 pub mod conversation;
 pub mod deliver;
+pub mod directory;
 pub mod error;
 pub mod feishu;
 pub mod gate;
@@ -43,9 +45,12 @@ use async_trait::async_trait;
 use bingo_sdk::{ConfigClaim, Merge, Plugin, PluginError, PluginManifest, Registrar, Surface};
 
 pub use access::{Access, Policy, Refused, Rule};
-pub use adapter::{Arrival, Buttons, ChannelAdapter, Edit, Inbox, Incoming, Mode, Threads, Typing};
+pub use adapter::{
+    Arrival, Buttons, ChannelAdapter, Edit, Files, Inbox, Incoming, Mode, Outgoing, Threads, Typing,
+};
 pub use conversation::{Conversation, Posted};
 pub use deliver::{Deliverer, Op};
+pub use directory::{Directory, Seat};
 pub use error::ChannelError;
 pub use feishu::Feishu;
 pub use gate::Gate;

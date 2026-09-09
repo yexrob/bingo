@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use crate::adapter::{ChannelAdapter, Incoming, Mark, Mode, Outcome};
 use crate::conversation::{Conversation, Posted};
 use crate::deliver::{Deliverer, Op};
+use crate::directory::{Directory, Seat};
 use crate::error::ChannelError;
 use crate::gate::Gate;
 use crate::question::{Question, Settled};
@@ -47,8 +48,11 @@ pub struct Runner {
     deliverer: Deliverer,
     /// The message the answer is streaming into, while there is one.
     streaming: Option<Posted>,
-    /// The message a reply would hang under, from whoever spoke last.
-    parent: Option<Posted>,
+    /// Where this conversation is, for whoever else needs to reach it — the
+    /// tool that posts a file into it (ADR-0051 §3). The message a reply hangs
+    /// under lives in the seat, so this runner and that tool cannot disagree
+    /// about which message that is.
+    directory: Directory,
     /// The message being worked on and the sign that says so, while a turn
     /// this chat started is running (ADR-0051 §5).
     working: Option<(Posted, Mark)>,
@@ -65,6 +69,7 @@ impl Runner {
         conversation: Conversation,
         cwd: std::path::PathBuf,
         gate: Gate,
+        directory: Directory,
         inbound: mpsc::Receiver<Incoming>,
     ) -> Result<Self, KernelError> {
         let key = format!("{}/{}", adapter.id(), conversation.path());
@@ -76,6 +81,14 @@ impl Runner {
             handle,
         } = attachment;
         let deliverer = Deliverer::new(adapter.limits().clone(), gate, key.clone());
+        directory.sit(
+            session.clone(),
+            Seat {
+                adapter: Arc::clone(&adapter),
+                conversation: conversation.clone(),
+                parent: None,
+            },
+        );
         Ok(Self {
             adapter,
             conversation,
@@ -85,7 +98,7 @@ impl Runner {
             handle,
             deliverer,
             streaming: None,
-            parent: None,
+            directory,
             working: None,
             asked: BTreeMap::new(),
             key,
@@ -98,8 +111,13 @@ impl Runner {
     }
 
     /// Frames out, replies in, until the session's stream ends or the chat
-    /// goes away.
+    /// goes away — and then this conversation is nobody's to reach.
     pub async fn run(mut self) {
+        self.pump().await;
+        self.directory.leave(&self.root);
+    }
+
+    async fn pump(&mut self) {
         loop {
             let due = self.deliverer.due();
             tokio::select! {
@@ -191,7 +209,7 @@ impl Runner {
         if self.working.is_some() {
             return;
         }
-        let Some(at) = self.parent.clone() else {
+        let Some(at) = self.directory.parent(&self.root) else {
             return;
         };
         let adapter = Arc::clone(&self.adapter);
@@ -373,7 +391,7 @@ impl Runner {
         post(
             Arc::clone(&self.adapter),
             self.conversation.clone(),
-            self.parent.clone(),
+            self.directory.parent(&self.root),
             text.to_string(),
             mode,
         )
@@ -388,7 +406,7 @@ impl Runner {
                 parent,
                 ..
             } => {
-                self.parent = parent;
+                self.directory.under(&self.root, parent);
                 self.said(&principal, text, images).await;
             }
             Incoming::Click {

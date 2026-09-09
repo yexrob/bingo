@@ -61,6 +61,9 @@ pub struct LoopbackChannel {
     pub typing: bool,
     #[serde(default = "yes")]
     pub threads: bool,
+    /// Whether this chat will carry a file out.
+    #[serde(default = "yes")]
+    pub files: bool,
     /// Whether a message gets a sign while it is being worked on.
     #[serde(default = "yes")]
     pub acknowledge: bool,
@@ -217,6 +220,7 @@ impl LoopbackChannel {
             buttons: self.buttons,
             typing: self.typing,
             threads: self.threads,
+            files: self.files,
             acknowledge: self.acknowledge,
             mention: self.mention.clone(),
             peer: self.peer.clone(),
@@ -303,6 +307,7 @@ mod tests {
         assert!(adapters[0].edit().is_none());
         assert!(adapters[0].buttons().is_none());
         assert!(adapters[0].typing().is_some());
+        assert!(adapters[0].files().is_some());
     }
 
     #[test]
