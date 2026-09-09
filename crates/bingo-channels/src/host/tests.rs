@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::access::{Access, Policy, Rule};
-use crate::adapter::{Incoming, Mode};
+use crate::adapter::{Incoming, Mode, Outcome};
 use crate::conversation::Posted;
 use crate::fixtures;
 use crate::lock::Claim;
@@ -372,6 +372,45 @@ fn hello(chat: &str) -> Incoming {
     said(Conversation::direct(chat), "run the tests", true)
 }
 
+/// The same, arriving under a handle — what a platform that threads gives the
+/// surface, and the only thing a sign can be put on.
+fn spoke(chat: &str, at: &str) -> Incoming {
+    match hello(chat) {
+        Incoming::Message {
+            conversation,
+            principal,
+            text,
+            images,
+            addressed,
+            ..
+        } => Incoming::Message {
+            conversation,
+            principal,
+            text,
+            images,
+            addressed,
+            parent: Some(Posted::new(at)),
+        },
+        click => click,
+    }
+}
+
+/// A turn that starts, goes wrong, and ends.
+async fn fails(session: &TestSession) {
+    session.publish(Event::TurnStarted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        inputs: Vec::new(),
+        origin: bingo_sdk::TurnOrigin::Submit,
+    });
+    session.publish(Event::TurnCompleted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        status: TurnStatus::Failed {
+            error: KernelError::new(ErrorCode::ProviderUnavailable, "no provider"),
+        },
+        usage: Usage::default(),
+    });
+}
+
 /// A turn that says one thing and ends.
 async fn answers(session: &TestSession, text: &str) {
     session.publish(Event::TurnStarted {
@@ -557,6 +596,74 @@ async fn without_an_edit_the_answer_arrives_whole_and_once() {
             text: "Two tests failed.".into(),
             mode: Mode::Once,
         }]
+    );
+}
+
+/// The sign brackets the turn a message started (ADR-0051 §5): up before the
+/// chat says anything back, down when that turn has ended.
+#[tokio::test]
+async fn a_sign_goes_up_on_the_message_that_spoke_and_comes_off_at_the_end() {
+    let chat = Chat::open();
+    chat.say(spoke("oc_1", "om_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    assert_eq!(
+        chat.records(1).await[0],
+        Record::Acknowledge {
+            at: Posted::new("om_1"),
+        },
+        "before a word is said back"
+    );
+    answers(&session, "Two tests failed.").await;
+    let records = chat.records(5).await;
+    assert_eq!(
+        records.last(),
+        Some(&Record::Acknowledged {
+            at: Posted::new("om_1"),
+            outcome: Outcome::Done,
+        }),
+        "{records:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_that_failed_takes_the_sign_off_as_a_failure() {
+    let chat = Chat::open();
+    chat.say(spoke("oc_1", "om_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    fails(&session).await;
+    let records = chat.records(3).await;
+    assert_eq!(
+        records.last(),
+        Some(&Record::Acknowledged {
+            at: Posted::new("om_1"),
+            outcome: Outcome::Failed,
+        }),
+        "{records:?}"
+    );
+}
+
+/// A sign is an affordance, not the answer. A platform that refused to put
+/// one up has not refused the turn.
+#[tokio::test]
+async fn a_sign_that_would_not_go_up_costs_no_part_of_the_answer() {
+    let chat = Chat::open();
+    chat.loopback.refuse_once("acknowledge");
+    chat.say(spoke("oc_1", "om_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    answers(&session, "Two tests failed.").await;
+    let records = chat.records(3).await;
+    assert!(
+        !records.iter().any(|record| matches!(
+            record,
+            Record::Acknowledge { .. } | Record::Acknowledged { .. }
+        )),
+        "no sign was ever up, so none comes off: {records:?}"
+    );
+    assert!(
+        records.iter().any(
+            |record| matches!(record, Record::Finish { text, .. } if text == "Two tests failed.")
+        ),
+        "the answer arrived anyway: {records:?}"
     );
 }
 

@@ -17,7 +17,7 @@ use bingo_sdk::{
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::adapter::{ChannelAdapter, Incoming, Mode};
+use crate::adapter::{ChannelAdapter, Incoming, Mark, Mode, Outcome};
 use crate::conversation::{Conversation, Posted};
 use crate::deliver::{Deliverer, Op};
 use crate::error::ChannelError;
@@ -49,6 +49,9 @@ pub struct Runner {
     streaming: Option<Posted>,
     /// The message a reply would hang under, from whoever spoke last.
     parent: Option<Posted>,
+    /// The message being worked on and the sign that says so, while a turn
+    /// this chat started is running (ADR-0051 §5).
+    working: Option<(Posted, Mark)>,
     asked: BTreeMap<InteractionId, Asked>,
     inbound: mpsc::Receiver<Incoming>,
 }
@@ -83,6 +86,7 @@ impl Runner {
             deliverer,
             streaming: None,
             parent: None,
+            working: None,
             asked: BTreeMap::new(),
             key,
             inbound,
@@ -170,6 +174,55 @@ impl Runner {
             Op::Finalize { text, question } => self.finalize(&text, question).await,
             Op::Status { text } => self.post(&text).await.map(drop),
             Op::Resolved { question, outcome } => self.settle(&question, &outcome).await,
+            Op::Ended { failed } => {
+                self.ended(failed).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// Say that the message just submitted is being worked on, where the
+    /// platform has a way to say it.
+    ///
+    /// One sign at a time: a second message arriving mid-turn would strand
+    /// the first sign with nothing left holding its mark, and the sign
+    /// already up says exactly what the second one would.
+    async fn acknowledge(&mut self) {
+        if self.working.is_some() {
+            return;
+        }
+        let Some(at) = self.parent.clone() else {
+            return;
+        };
+        let adapter = Arc::clone(&self.adapter);
+        let Some(sign) = adapter.acknowledge() else {
+            return;
+        };
+        match sign.begin(&at).await {
+            Ok(mark) => self.working = Some((at, mark)),
+            Err(error) => {
+                tracing::warn!(%error, key = %self.key, "the chat could not say it was working");
+            }
+        }
+    }
+
+    /// The sign comes off however the turn went. A platform that will not
+    /// take it off has not failed the turn and has not lost the answer, so it
+    /// costs a warning and nothing else.
+    async fn ended(&mut self, failed: bool) {
+        let Some((at, mark)) = self.working.take() else {
+            return;
+        };
+        let adapter = Arc::clone(&self.adapter);
+        let Some(sign) = adapter.acknowledge() else {
+            return;
+        };
+        let outcome = match failed {
+            true => Outcome::Failed,
+            false => Outcome::Done,
+        };
+        if let Err(error) = sign.end(&at, mark, outcome).await {
+            tracing::warn!(%error, key = %self.key, "the chat kept the sign it was working");
         }
     }
 
@@ -349,19 +402,22 @@ impl Runner {
     async fn said(&mut self, principal: &str, text: String, images: Vec<Image>) {
         match self.answering(&text) {
             Some((id, answer)) => self.settles(id, answer).await,
-            None => self.handle.submit(
-                IntentId::mint(),
-                Input::Text {
-                    text,
-                    images,
-                    origin: Origin {
-                        surface: SURFACE_ID.into(),
-                        principal: Some(principal.to_string()),
-                        conversation: Some(self.key.clone()),
+            None => {
+                self.handle.submit(
+                    IntentId::mint(),
+                    Input::Text {
+                        text,
+                        images,
+                        origin: Origin {
+                            surface: SURFACE_ID.into(),
+                            principal: Some(principal.to_string()),
+                            conversation: Some(self.key.clone()),
+                        },
+                        delivery: Delivery::Wake,
                     },
-                    delivery: Delivery::Wake,
-                },
-            ),
+                );
+                self.acknowledge().await;
+            }
         }
     }
 

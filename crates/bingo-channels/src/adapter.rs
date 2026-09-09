@@ -121,6 +121,10 @@ pub trait ChannelAdapter: Send + Sync {
     fn threads(&self) -> Option<&dyn Threads> {
         None
     }
+
+    fn acknowledge(&self) -> Option<&dyn Acknowledge> {
+        None
+    }
 }
 
 /// Replacing what a message says. The text is always the whole of it: a
@@ -165,4 +169,32 @@ pub trait Threads: Send + Sync {
         text: &str,
         mode: Mode,
     ) -> Result<Posted, ChannelError>;
+}
+
+/// Saying that a message is being worked on, and taking the sign off again
+/// when the turn it started has ended (ADR-0051 §5).
+///
+/// What the sign *is* belongs to the platform — a reaction on Feishu, a badge
+/// elsewhere, nothing at all where there is none. The runner brackets a turn
+/// with whatever it is handed and never waits on it: a sign that would not go
+/// up has not cost anybody an answer.
+#[async_trait]
+pub trait Acknowledge: Send + Sync {
+    /// Put the sign on the message that spoke.
+    async fn begin(&self, at: &Posted) -> Result<Mark, ChannelError>;
+
+    /// Take it off, saying how the turn went.
+    async fn end(&self, at: &Posted, mark: Mark, outcome: Outcome) -> Result<(), ChannelError>;
+}
+
+/// Whatever the platform needs to undo a sign it put up — a reaction id, or
+/// nothing at all for a platform that needs none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mark(pub String);
+
+/// How the turn a sign was put up for ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Done,
+    Failed,
 }

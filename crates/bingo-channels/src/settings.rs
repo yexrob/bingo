@@ -61,6 +61,9 @@ pub struct LoopbackChannel {
     pub typing: bool,
     #[serde(default = "yes")]
     pub threads: bool,
+    /// Whether a message gets a sign while it is being worked on.
+    #[serde(default = "yes")]
+    pub acknowledge: bool,
     /// What a group message must contain for the bot to be addressed.
     #[serde(default = "mention")]
     pub mention: String,
@@ -214,6 +217,7 @@ impl LoopbackChannel {
             buttons: self.buttons,
             typing: self.typing,
             threads: self.threads,
+            acknowledge: self.acknowledge,
             mention: self.mention.clone(),
             peer: self.peer.clone(),
         }
