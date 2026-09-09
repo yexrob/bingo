@@ -528,7 +528,7 @@ impl Threads for Loopback {
 
 #[async_trait]
 impl Files for Loopback {
-    async fn send(
+    async fn post(
         &self,
         to: &Conversation,
         parent: Option<&Posted>,
@@ -582,9 +582,7 @@ mod tests {
     async fn every_call_is_recorded_in_order_with_the_ids_it_minted() {
         let loopback = without(Config::default());
         let chat = Conversation::direct("oc_1");
-        let first = ChannelAdapter::send(&loopback, &chat, "", Mode::Stream)
-            .await
-            .unwrap();
+        let first = loopback.send(&chat, "", Mode::Stream).await.unwrap();
         loopback
             .edit()
             .unwrap()

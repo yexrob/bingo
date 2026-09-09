@@ -143,7 +143,7 @@ impl Tool for SendFile {
         let name = basename(&path);
         let sent = format!("sent {name} ({} bytes) to the chat", bytes.len());
         files
-            .send(
+            .post(
                 &seat.conversation,
                 seat.parent.as_ref(),
                 Outgoing {

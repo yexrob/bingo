@@ -476,7 +476,7 @@ impl Files for Feishu {
     /// A caption is its own text message after the file, not a `post` around
     /// it: a picture inside a rich post is not a picture a person can open
     /// full-screen, and the words are worth more than the layout.
-    async fn send(
+    async fn post(
         &self,
         to: &Conversation,
         parent: Option<&Posted>,

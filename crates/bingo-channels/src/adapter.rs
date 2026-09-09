@@ -194,7 +194,7 @@ pub struct Outgoing {
 /// failing halfway through an upload.
 #[async_trait]
 pub trait Files: Send + Sync {
-    async fn send(
+    async fn post(
         &self,
         to: &Conversation,
         parent: Option<&Posted>,

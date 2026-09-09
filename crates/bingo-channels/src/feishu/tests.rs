@@ -76,7 +76,7 @@ async fn sent(name: &str, bytes: Vec<u8>, caption: Option<&str>) -> Sent {
     let posted = feishu
         .files()
         .expect("a way to send files")
-        .send(
+        .post(
             &Conversation::direct("oc_1"),
             None,
             Outgoing {
@@ -165,14 +165,14 @@ async fn a_plain_message_goes_to_the_chat_as_text() {
         .expect(1)
         .mount(&server)
         .await;
-    let posted = ChannelAdapter::send(
-        &feishu,
-        &Conversation::direct("oc_1"),
-        "two tests failed",
-        Mode::Once,
-    )
-    .await
-    .expect("a message");
+    let posted = feishu
+        .send(
+            &Conversation::direct("oc_1"),
+            "two tests failed",
+            Mode::Once,
+        )
+        .await
+        .expect("a message");
     assert_eq!(Handle::of(&posted), Some(Handle::Message("om_1".into())));
     assert_eq!(
         bodies(&server, MESSAGES).await[0],
@@ -201,9 +201,7 @@ async fn a_streamed_answer_is_a_card_entity_sent_by_id_and_written_in_full() {
     .await;
 
     let to = Conversation::direct("oc_1");
-    let posted = ChannelAdapter::send(&feishu, &to, "", Mode::Stream)
-        .await
-        .expect("a card");
+    let posted = feishu.send(&to, "", Mode::Stream).await.expect("a card");
     assert_eq!(Handle::of(&posted), Some(Handle::Card("ctp_1".into())));
     assert_eq!(
         bodies(&server, MESSAGES).await[0]["content"],
@@ -268,7 +266,8 @@ async fn a_rate_limited_frame_is_dropped_and_the_stream_carries_on() {
         .mount(&server)
         .await;
 
-    let posted = ChannelAdapter::send(&feishu, &Conversation::direct("oc_1"), "", Mode::Stream)
+    let posted = feishu
+        .send(&Conversation::direct("oc_1"), "", Mode::Stream)
         .await
         .expect("a card");
     let edit = feishu.edit().expect("an editor");
@@ -574,7 +573,7 @@ async fn a_file_hangs_under_the_message_a_reply_would() {
     let posted = feishu
         .files()
         .expect("a way to send files")
-        .send(
+        .post(
             &Conversation::group("oc_1"),
             Some(&Handle::Message("om_parent".into()).posted()),
             Outgoing {
@@ -599,7 +598,7 @@ async fn an_upload_that_keeps_no_key_is_a_refusal() {
     let error = feishu
         .files()
         .expect("a way to send files")
-        .send(
+        .post(
             &Conversation::direct("oc_1"),
             None,
             Outgoing {
