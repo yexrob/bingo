@@ -15,6 +15,7 @@ pub mod api;
 pub mod bootstrap;
 pub mod card;
 pub mod chunks;
+pub mod content;
 pub mod event;
 pub mod frame;
 pub mod pictures;
