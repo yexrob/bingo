@@ -14,6 +14,7 @@ mod support;
 use std::process::Stdio;
 use std::time::Duration;
 
+use base64::Engine;
 use bingo_sdk::{
     Activation, Answer, ClientIdentity, HostApi, IntentId, OpenOptions, Origin, SessionSelector,
 };
@@ -90,7 +91,9 @@ fn is(op: &Value, name: &str) -> bool {
 struct Chat {
     peer: Peer,
     _child: Child,
-    _home: tempfile::TempDir,
+    /// The session's working directory as well as its home: what a path the
+    /// model names is resolved against.
+    home: tempfile::TempDir,
 }
 
 impl Chat {
@@ -116,8 +119,12 @@ impl Chat {
         Chat {
             peer: Peer::accept(&listener).await,
             _child: child,
-            _home: home,
+            home,
         }
+    }
+
+    fn wrote(&self, name: &str, body: &str) {
+        std::fs::write(self.home.path().join(name), body).unwrap();
     }
 }
 
@@ -139,6 +146,25 @@ const WRITES_A_FILE: &str = r#"{"responses":[
     {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"made.txt","content":"by the chat\n"}}}]},
     {"steps":[{"text":"Written."}]}
 ]}"#;
+
+/// A turn that posts a file the test wrote, and then says it is done.
+const SENDS_A_FILE: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SendFile","input":{"path":"notes.txt","caption":"the notes"}}}]},
+    {"steps":[{"text":"Sent."}]}
+]}"#;
+
+/// The same, for a path nothing wrote. The second response waits for the
+/// refusal's own words, so it is only ever spent on a turn that was told them.
+const SENDS_A_MISSING_FILE: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SendFile","input":{"path":"absent.txt"}}}]},
+    {"when":{"contains":"no such file"},"steps":[{"text":"There is no such file."}]}
+]}"#;
+
+/// Settings whose gate is already answered for one tool: this scenario is
+/// about the file, and a rule is how a person stops being asked (M86 risks).
+fn allowing(tool: &str) -> Value {
+    json!({ "permissions": { "allow": [tool] } })
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_opens_a_session_and_the_answer_streams_into_one_edited_message() {
@@ -524,5 +550,48 @@ fn a_second_process_on_one_credential_refuses_loudly() {
     assert!(
         stderr.contains("another bingo already runs"),
         "a second process refuses loudly: {stderr}"
+    );
+}
+
+/// A file leaves this machine because the model asked for it by name, never
+/// because a tag was parsed out of its prose (ADR-0051 §3).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_posts_a_file_into_the_chat_it_is_talking_in() {
+    let mut chat = Chat::open(SENDS_A_FILE, allowing("SendFile")).await;
+    chat.wrote("notes.txt", "by the chat\n");
+    chat.peer.chats("oc_1", "send me the notes").await;
+    let ops = chat.peer.until(|op| is(op, "file")).await;
+    let sent = ops.last().expect("the file");
+    assert_eq!(sent["chat"], json!("oc_1"));
+    assert_eq!(sent["name"], json!("notes.txt"), "the name, not the path");
+    assert_eq!(sent["caption"], json!("the notes"));
+    assert_eq!(
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(sent["bytes"].as_str().expect("the bytes"))
+                .expect("base64")
+        )
+        .expect("the file is text"),
+        "by the chat\n",
+        "the bytes off this machine's disk, not the path to them"
+    );
+    // And the turn went on, with the tool's receipt behind it.
+    chat.peer.until(|op| op["text"] == json!("Sent.")).await;
+}
+
+/// A refusal is words the model can act on, in the transcript it reads back:
+/// the second response is addressed to them, so a turn that never saw them
+/// never finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_that_is_not_there_is_refused_in_words_the_model_reads() {
+    let mut chat = Chat::open(SENDS_A_MISSING_FILE, allowing("SendFile")).await;
+    chat.peer.chats("oc_1", "send me the notes").await;
+    let ops = chat
+        .peer
+        .until(|op| op["text"] == json!("There is no such file."))
+        .await;
+    assert!(
+        !ops.iter().any(|op| is(op, "file")),
+        "nothing was posted: {ops:#?}"
     );
 }
