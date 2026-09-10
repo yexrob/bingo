@@ -490,8 +490,8 @@ mod tests {
     }
 
     /// A table never wraps: it folds to the width it is laid out in (design
-    /// §7). In the transcript that width is the prose measure; in the sheet it
-    /// is the whole frame, which is what opening one is for.
+    /// §7). In the transcript that width is the measure a person set; in the
+    /// sheet it is the whole frame, which is what opening one is for.
     #[test]
     fn a_table_too_wide_for_the_measure_has_more_room_in_the_sheet() {
         let cell = "x".repeat(60);
@@ -503,7 +503,8 @@ mod tests {
                 .max()
                 .unwrap_or(0)
         };
-        let in_transcript = crate::markdown::render(&table, crate::wrap::measure(160) - 2);
+        let in_transcript =
+            crate::markdown::render(&table, crate::wrap::measure(160, Some(100)) - 2);
         assert_eq!(widest(&in_transcript), 98, "cut to the measure, with an …");
         assert_eq!(widest(&sheet_of(&item, 160)), 122, "and whole in the sheet");
     }

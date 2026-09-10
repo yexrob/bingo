@@ -120,6 +120,10 @@ pub struct Rows<'a> {
     /// (M63). Terminal-side, like the fold and the scroll: it is a fact about
     /// this machine, not about the conversation.
     pub update: Option<&'a str>,
+    /// The widest a line of prose may be drawn, where a person set one
+    /// (`tui.measure`, [`crate::settings`]; design §7). Nothing at all is the
+    /// region's own width, so the transcript fills the terminal it is in.
+    pub measure: Option<usize>,
     /// Which second of the opening this frame is (M70, M72): the piece plays
     /// *inside* the welcome box and lands on it, so the box is derived from the
     /// second rather than drawn twice. Nothing at all once it is over.
@@ -152,6 +156,7 @@ impl<'a> Rows<'a> {
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
             update: None,
+            measure: None,
             opening: None,
         }
     }
@@ -164,6 +169,11 @@ impl<'a> Rows<'a> {
     /// Which second of the opening this frame is, while it plays.
     pub fn opening(self, opening: Option<f32>) -> Self {
         Self { opening, ..self }
+    }
+
+    /// The measure a person set for prose, as this run was told it.
+    pub fn measuring(self, measure: Option<usize>) -> Self {
+        Self { measure, ..self }
     }
 }
 
@@ -216,14 +226,15 @@ impl Landing {
 }
 
 impl Rows<'_> {
-    /// Prose is read, not scanned: it stops at the measure (design §7).
-    fn measure(&self) -> usize {
-        wrap::measure(self.width)
+    /// The cells this block is laid out in: the region's own width, or the
+    /// narrower line a person asked for (design §7).
+    fn measured(&self) -> usize {
+        wrap::measure(self.width, self.measure)
     }
 
     /// The cells a result has, once the `⎿` gutter has taken its own.
     fn result_width(&self) -> usize {
-        self.measure().saturating_sub(connector().width()).max(1)
+        self.measured().saturating_sub(connector().width()).max(1)
     }
 
     /// A path as a person reads it, from this session's own directory.
@@ -519,7 +530,7 @@ fn marked(
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
     let mark = Span::styled(format!("{glyph} "), style);
-    under(mark, body, speaks_indent(), rows.measure())
+    under(mark, body, speaks_indent(), rows.measured())
 }
 
 /// What came back.
@@ -530,7 +541,7 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
         Span::styled(mark, theme::dim()),
         body,
         indent,
-        rows.measure(),
+        rows.measured(),
     )
 }
 
@@ -543,7 +554,7 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 /// of placeholder cells is not text, and cooling it would spend the colour the
 /// picture's own number is carried in.
 fn assistant(text: &str, status: ItemStatus, fold: Fold, rows: &Rows<'_>, cue: Cue) -> Block {
-    let written = markdown::rendered(text, rows.measure().saturating_sub(speaks_indent()));
+    let written = markdown::rendered(text, rows.measured().saturating_sub(speaks_indent()));
     let lit = match arriving(status, rows, cue) {
         Some(age) => comet(written.lines, age),
         None => written.lines,
@@ -2042,30 +2053,41 @@ mod tests {
         );
     }
 
+    /// The widest row a state draws at `width`, past the welcome box.
+    fn widest_row(state: &SessionState, width: usize, measure: Option<usize>) -> usize {
+        let welcomed = crate::welcome::lines(state, width, None).len();
+        let mut blocks = crate::blocks::Blocks::default();
+        let folds = Folds::new();
+        let pictures = Decoded::default();
+        let linked = Linked::default();
+        let rows =
+            Rows::of(state, width, &folds, &[], &pictures, &linked, scene().1).measuring(measure);
+        let height = blocks.sync(state, &Agents::new(), &rows, Vec::new());
+        blocks
+            .window(0, height)
+            .iter()
+            .skip(welcomed)
+            .map(|line| line.to_string().trim_end().width())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Prose fills the terminal, and the measure is the person's (design §7,
+    /// M89): the cap is what they set, not what this crate believes.
     #[test]
-    fn the_measure_stops_prose_at_a_hundred_columns() {
+    fn prose_fills_the_width_until_a_person_asks_for_less() {
         let state = folded(vec![frame(
             1,
             Event::ItemCompleted {
                 item: assistant("itm_1", &"word ".repeat(60), ItemStatus::Completed),
             },
         )]);
-        let welcomed = crate::welcome::lines(&state, 160, None).len();
-        let mut blocks = crate::blocks::Blocks::default();
-        let folds = Folds::new();
-        let pictures = Decoded::default();
-        let linked = Linked::default();
-        let rows = Rows::of(&state, 160, &folds, &[], &pictures, &linked, scene().1);
-        let height = blocks.sync(&state, &Agents::new(), &rows, Vec::new());
-        let widest = blocks
-            .window(0, height)
-            .iter()
-            .skip(welcomed)
-            .map(|line| line.to_string().trim_end().width())
-            .max()
-            .unwrap_or(0);
-        assert!(widest <= wrap::MEASURE, "{widest} cells");
-        assert!(widest > 80, "and it uses the measure it has: {widest}");
+        let filled = widest_row(&state, 160, None);
+        assert!(filled > 100, "the region is the measure: {filled} cells");
+        assert!(filled <= 160, "and never wider than it: {filled} cells");
+        let capped = widest_row(&state, 160, Some(100));
+        assert!(capped <= 100, "{capped} cells");
+        assert!(capped > 80, "and it uses the measure it has: {capped}");
     }
 
     #[test]

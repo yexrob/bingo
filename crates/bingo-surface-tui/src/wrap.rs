@@ -5,13 +5,12 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-/// Prose is read, not scanned: however wide the terminal is, a line of it
-/// stops here (design §7).
-pub const MEASURE: usize = 100;
-
-/// The width prose is wrapped to inside a region `width` columns wide.
-pub fn measure(width: usize) -> usize {
-    width.min(MEASURE)
+/// The width prose is wrapped to inside a region `width` columns wide: the
+/// whole of it, or the narrower line a person asked for (`tui.measure`,
+/// [`crate::settings`]; design §7). The number is theirs — this crate names
+/// none of its own.
+pub fn measure(width: usize, cap: Option<usize>) -> usize {
+    cap.map_or(width, |cap| width.min(cap))
 }
 
 /// Wrap one styled line to `width` columns, keeping each span's style. An empty
@@ -150,6 +149,15 @@ mod tests {
 
     fn text(lines: &[Line<'static>]) -> Vec<String> {
         lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// The transcript fills what it is given until a person says otherwise
+    /// (design §7, M89).
+    #[test]
+    fn a_measure_is_the_region_until_a_person_asks_for_less() {
+        assert_eq!(measure(200, None), 200);
+        assert_eq!(measure(200, Some(100)), 100);
+        assert_eq!(measure(80, Some(100)), 80, "and never more than the region");
     }
 
     #[test]

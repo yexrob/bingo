@@ -99,7 +99,7 @@ fn above_the_words(block: &mut Block, item: &Item, images: &[&Image], rows: &Row
         &thumbnails,
         cell,
         rows.pictures,
-        room(rows.measure().saturating_sub(indent)),
+        room(rows.measured().saturating_sub(indent)),
     );
     block.lines.splice(0..0, at_column(band.lines, indent));
     block.pictures.extend(band.pictures);
@@ -144,7 +144,7 @@ fn named(block: &mut Block, image: &markdown::Linked, fold: Fold, rows: &Rows<'_
     // The chip's own column, so the picture stands where the words it belongs
     // to stand rather than at the block's edge (M56).
     let room = room(
-        rows.measure()
+        rows.measured()
             .saturating_sub(speaks_indent() + image.indent),
     );
     let Some((picture, cells)) = drawn(source, read_in, room, height(fold), rows) else {

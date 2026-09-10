@@ -255,7 +255,7 @@ fn user(parts: &[ContentPart], origin: &Origin, rows: &Rows<'_>) -> Vec<Line<'st
     }
     let mark = mark(origin);
     let indent = mark.content.width();
-    barred(under(mark, body, indent, rows.measure()), rows.width)
+    barred(under(mark, body, indent, rows.measured()), rows.width)
 }
 
 /// Every row of a block on the raised bar. A shell line the person ran is on

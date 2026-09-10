@@ -474,6 +474,11 @@ pub struct Ui {
     pub linked: Linked,
     /// A newer release than this build, as the start-up check found it (M63).
     pub update: Option<String>,
+    /// The widest a line of prose is drawn, where a person set a measure
+    /// (`tui.measure`, [`crate::settings`]; design §7). Terminal-side like the
+    /// fold and the scroll, and read once at the start: it is a fact about
+    /// this machine, not about the conversation.
+    pub measure: Option<usize>,
     /// The opening, while it is playing (M70, redrawn by M72; design §11). It
     /// is drawn in the welcome box's place and it lands on that box, so the
     /// moment it has run out it is taken away and the box the transcript has
@@ -523,6 +528,7 @@ impl Ui {
             decoded: Decoded::default(),
             linked: Linked::default(),
             update: None,
+            measure: None,
             intro: None,
             files: RefCell::default(),
         }

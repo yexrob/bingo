@@ -61,6 +61,15 @@ pub fn measure(settings: &Value) -> Option<usize> {
         .and_then(|measure| usize::try_from(measure).ok())
 }
 
+/// The measure the bin gave this run, out of its own arguments — beside
+/// `updateCheck`, and read once at the start as that is. A harness that builds
+/// its own options says nothing and draws the width it has.
+pub(crate) fn given(args: &Value) -> Option<usize> {
+    args.get("measure")
+        .and_then(Value::as_u64)
+        .and_then(|measure| usize::try_from(measure).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +116,14 @@ mod tests {
             serde_json::from_value::<Settings>(json!({ "update": { "chek": false } })).is_err(),
             "the update half is read as strictly through this type as its own"
         );
+    }
+
+    #[test]
+    fn what_the_bin_handed_over_is_what_the_run_draws_at() {
+        assert_eq!(given(&json!({ "measure": 100 })), Some(100));
+        assert_eq!(given(&json!({ "measure": null })), None);
+        assert_eq!(given(&json!({})), None, "a harness fills its terminal");
+        assert_eq!(given(&Value::Null), None);
     }
 
     /// One claim, one schema: it describes both keys the manifest names, or a

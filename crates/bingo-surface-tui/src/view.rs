@@ -462,7 +462,8 @@ fn render_transcript(
             now,
         )
         .saying(ui.update.as_deref())
-        .opening(ui.intro.as_ref().map(|intro| intro.seconds(now))),
+        .opening(ui.intro.as_ref().map(|intro| intro.seconds(now)))
+        .measuring(ui.measure),
         live,
     );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
@@ -2364,6 +2365,43 @@ mod tests {
             assert_eq!(prompt, 1, "{rows:?}");
             assert_eq!(placeholder_rows(&screen), usize::from(graphics::band::ROWS));
         });
+    }
+
+    /// The widest drawn row carrying the answer's own words. The welcome box
+    /// and the input box are the width of the transcript whatever prose does,
+    /// so they are not what is being measured here.
+    fn widest_prose(screen: &ratatui::backend::TestBackend) -> usize {
+        let width = usize::from(screen.buffer().area().width);
+        screen
+            .buffer()
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .filter(|row| row.contains("word"))
+            .map(|row| row.trim_end().width())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// A wide terminal is filled with prose, and `tui.measure` is the one
+    /// thing that narrows it (design §7, M89). Drawn rather than counted: the
+    /// measure travels from the run's own arguments through [`Ui`] to the
+    /// rows, and this is the whole of that seam.
+    #[test]
+    fn a_wide_terminal_is_filled_unless_a_person_set_a_measure() {
+        let state = folded(vec![item_frame(
+            1,
+            assistant("itm_1", &"word ".repeat(80), ItemStatus::Completed),
+        )]);
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        let filled = widest_prose(&drawn(200, 40, &tree, &ui, now));
+        assert!(filled > 150, "prose fills the terminal: {filled} cells");
+        assert!(filled <= 200, "and never overruns it: {filled} cells");
+        ui.measure = Some(100);
+        let capped = widest_prose(&drawn(200, 40, &tree, &ui, now));
+        assert!(capped <= 100, "a person who set one has it: {capped} cells");
+        assert!(capped > 80, "and it is the measure, not a guess: {capped}");
     }
 
     /// The frame yields the strip before it yields the row a person is

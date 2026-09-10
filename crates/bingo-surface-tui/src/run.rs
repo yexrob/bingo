@@ -312,6 +312,7 @@ async fn attach(
         sluggish: false,
         exit: None,
     };
+    run.ui.measure = crate::settings::given(&opts.args);
     run.fetch_catalogs();
     run.ask_for_updates(&opts.args);
     notices::raise(&mut run.ui, Instant::now());
