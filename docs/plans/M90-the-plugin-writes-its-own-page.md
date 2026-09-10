@@ -71,19 +71,19 @@ Slice B — the pages the guide never had, one per plugin (after A merges):
 
 ## Exit criteria
 
-- [ ] `Pages::key("bingo.rooms") == "bingo.rooms.pages"`; a plugin's page
+- [x] `Pages::key("bingo.rooms") == "bingo.rooms.pages"`; a plugin's page
       reaches the skills plugin through the catalog and the typed service
       on the fake host, and a disk skill named `guide-<name>` overrides it
-- [ ] `guide` is under 80 lines and ends with the generated page list; the
+- [x] `guide` is under 80 lines and ends with the generated page list; the
       `# Skills` listing shows one line per page; `Skill guide-permissions`
       returns the permissions page
-- [ ] every page has an owner test naming its commands, tools and keys; the
+- [x] every page has an owner test naming its commands, tools and keys; the
       skills plugin's shape test holds for every page found
-- [ ] the old guide's permissions, hooks, MCP and skills text is on its
+- [x] the old guide's permissions, hooks, MCP and skills text is on its
       owner's page, corrected against the crate, and gone from `guide`
-- [ ] slice B: every plugin in brick 6 has a page; a `bingo --print` run's
+- [x] slice B: every plugin in brick 6 has a page; a `bingo --print` run's
       system prompt lists them (black-box)
-- [ ] every gate green; Windows check for `bingo-sdk`, `bingo-skills`
+- [x] every gate green; Windows check for `bingo-sdk`, `bingo-skills`
 
 ## Non-goals
 
@@ -103,3 +103,34 @@ Slice B — the pages the guide never had, one per plugin (after A merges):
 - `Library::skills` gaining a host parameter touches three callers and the
   test fixtures; a `OnceLock` gathers once, so a plugin enabled later is
   not seen until restart — acceptable, plugins do not change at run time.
+
+## Verified (2026-09-10, dev, `0a3f5f1b`…`86dc1875`)
+
+Three `opus-xhigh` worktrees — slice A (sdk type, gathering, the map, the
+permissions/hooks/mcp/skills pages), B1 (agents, rooms, tasks, schedule,
+experience, rewind) and B2 (memory, channels, tui, acp) — each gated before
+its ff merge; B2 re-gated on dev after the rebase, with the pages black-box
+un-ignored and listing all fourteen pages:
+
+```
+cargo fmt --all -- --check                                      ok
+cargo check --workspace --all-targets --locked                  ok
+cargo clippy --workspace --all-targets --locked -- -D warnings  ok
+cargo test --workspace --locked --no-fail-fast                  ok (89 targets)
+scripts/check_discipline.sh                                     discipline ok
+scripts/budget.sh                                               budget ok (335)
+scripts/tui-smoke.sh                                            tui-smoke ok
+```
+
+Windows check ran for `bingo-sdk` and `bingo-skills` in slice A; B1 and B2
+add markdown, registration lines and tests only.
+
+Decided on the way, against the plan's letter: pages are gathered in
+`Plugin::start` (a `CommandSource` holds no host); `guide-acp` registers
+whether or not an adapter row exists, because the page is how a person
+learns to write the row. Records the pages found lagging the code, left for
+their owners: ADR-0045 (`/rewind` queues, is not refused), ADR-0019 (`Wake`
+is not registered under `schedule.wakes: false`), design `tui.md` §7 (the
+`esc` stack has four rungs, not five), ADR-0035 §§5–6 (permission questions
+reach the person; the bridge exists), ADR-0016 §4 (`mention: false`).
+`guide-acp` says "no compaction": M91 changes that sentence.
