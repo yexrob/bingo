@@ -31,6 +31,7 @@ use crate::error::AcpError;
 use crate::events::Mapper;
 use crate::knobs::Wanted;
 use crate::session::{Link, Sessions};
+use crate::windows::Windows;
 
 type Yielded = Result<ModelEvent, ProviderError>;
 
@@ -41,6 +42,9 @@ pub struct AcpProvider {
     /// What the last handshake said about images. Fails closed: an adapter
     /// nobody has shaken hands with yet is assumed to take none.
     images: AtomicBool,
+    /// The window each of this adapter's models last named for itself
+    /// (ADR-0055 §4), for the `endpoint()` of the next session on it.
+    windows: Arc<Windows>,
 }
 
 impl AcpProvider {
@@ -50,6 +54,7 @@ impl AcpProvider {
             adapter,
             sessions,
             images: AtomicBool::new(false),
+            windows: Arc::new(Windows::default()),
         }
     }
 
@@ -75,6 +80,7 @@ impl AcpProvider {
         let (history, asked) = split(request.messages);
         Ok(Asking {
             sessions: self.sessions.clone(),
+            windows: self.windows.clone(),
             name: self.name.clone(),
             adapter: self.adapter.clone(),
             session,
@@ -98,6 +104,8 @@ impl AcpProvider {
 /// more on a new child.
 struct Asking {
     sessions: Arc<Sessions>,
+    /// Where the window this turn hears goes, for the sessions after it.
+    windows: Arc<Windows>,
     name: String,
     adapter: Adapter,
     session: SessionId,
@@ -178,12 +186,16 @@ impl Provider for AcpProvider {
         config::FAMILY
     }
 
-    fn endpoint(&self, _model: &str) -> EndpointCapabilities {
+    /// The agent holds this conversation, counts it and cuts it: the kernel's
+    /// ruler shapes nothing here (ADR-0055 §1), and the window is whatever
+    /// this model last said it was.
+    fn endpoint(&self, model: &str) -> EndpointCapabilities {
         EndpointCapabilities {
             images: self.images.load(Ordering::Relaxed),
             count_tokens: false,
             caching: false,
-            ..EndpointCapabilities::default()
+            holds_context: true,
+            context_window: self.windows.of(model),
         }
     }
 
@@ -341,18 +353,40 @@ async fn round(link: Arc<Link>, asking: Asking, cancel: CancellationToken, mut o
     }
 }
 
-/// One `session/prompt`, held open: updates folded as they arrive, an
-/// interrupt sent as `session/cancel`, and the finish written when the prompt
-/// answers.
+/// One `session/prompt`, and what the conversation keeps of it: the agent's
+/// last word on the context it holds, which outlives the turn that heard it,
+/// and the window it named, which outlives the session.
 async fn attempt(
     link: &Arc<Link>,
     asking: &Asking,
     cancel: &CancellationToken,
     out: &mut Telling,
 ) -> Attempt {
+    // The conversation's last reading, not the turn's: what the agent holds
+    // fell or grew since somebody last looked, and either way this turn is
+    // the one that sees it (ADR-0055 §4).
+    let mut mapper = Mapper::holding(link.held().await);
+    let attempt = fold(link, asking, cancel, out, &mut mapper).await;
+    // A turn the agent said nothing about leaves what it last said standing.
+    if let Some(reading) = mapper.held() {
+        link.hold(reading).await;
+        asking.windows.heard(&asking.model, reading.window);
+    }
+    attempt
+}
+
+/// One `session/prompt`, held open: updates folded as they arrive, an
+/// interrupt sent as `session/cancel`, and the finish written when the prompt
+/// answers.
+async fn fold(
+    link: &Arc<Link>,
+    asking: &Asking,
+    cancel: &CancellationToken,
+    out: &mut Telling,
+    mapper: &mut Mapper,
+) -> Attempt {
     let mut updates = link.listen().await;
     let prompt = asking.prompt(link).await;
-    let mut mapper = Mapper::default();
     let waiting = link.connection.call(prompt);
     tokio::pin!(waiting);
     let mut told = false;
@@ -382,7 +416,7 @@ async fn attempt(
             return Attempt::Done;
         }
     }
-    settle(answered, &mut mapper, cancel, out)
+    settle(answered, mapper, cancel, out)
 }
 
 /// What the prompt answered with, and what it leaves the turn. A dead pipe
@@ -523,13 +557,33 @@ mod tests {
     }
 
     /// Fails closed until a handshake says otherwise, and never claims what
-    /// ACP has no way to do.
+    /// ACP has no way to do — except the one thing it always is: the agent
+    /// holds this conversation, whoever the agent turns out to be.
     #[test]
-    fn an_adapter_nobody_has_met_yet_promises_nothing() {
+    fn an_adapter_nobody_has_met_yet_promises_nothing_but_holding_its_own() {
         let capabilities = provider().endpoint("agent");
         assert!(!capabilities.images);
         assert!(!capabilities.count_tokens);
         assert!(!capabilities.caching);
+        assert!(capabilities.holds_context);
+        assert_eq!(
+            capabilities.context_window, None,
+            "and names no window before a turn has heard one"
+        );
+    }
+
+    /// ADR-0055 §4: the window is the agent's own number, and the session
+    /// after the one that heard it starts measured against it.
+    #[test]
+    fn a_window_the_agent_named_is_what_the_next_session_is_told() {
+        let provider = provider();
+        provider.windows.heard("agent", 1_000_000);
+        assert_eq!(provider.endpoint("agent").context_window, Some(1_000_000));
+        assert_eq!(
+            provider.endpoint("another").context_window,
+            None,
+            "a window belongs to the model that named it"
+        );
     }
 
     /// Only the new user turn crosses; everything before it is the agent's

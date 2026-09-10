@@ -375,6 +375,61 @@ pub fn update_usage() -> Value {
     })
 }
 
+/// The same notification as `codex-acp` sends it: the two numbers and
+/// nothing else, no banner around it and no money in it.
+pub fn update_usage_bare() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "update": {
+            "sessionUpdate": "usage_update",
+            "used": 400000,
+            "size": 1000000
+        }
+    })
+}
+
+/// What `claude-agent-acp` sends the moment its own compaction is over: the
+/// same window, and a `used` that has fallen to what it kept. Nothing else in
+/// the protocol says a compaction happened at all (ADR-0055 §4).
+pub fn update_usage_after_compaction() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "update": {
+            "sessionUpdate": "usage_update",
+            "used": 120000,
+            "size": 1000000
+        }
+    })
+}
+
+/// The adapter's three banners around a compaction, sent as the model's own
+/// words because the protocol has nowhere else to put them. The spelling is
+/// `claude-agent-acp` 0.73's, exactly.
+pub fn update_compacting_banner() -> Value {
+    banner("Compacting...")
+}
+
+pub fn update_compacted_banner() -> Value {
+    banner("\n\nCompacting completed.")
+}
+
+/// The one a person needs to read: the agent tried to make room and could
+/// not, and the reason rides in the same chunk.
+pub fn update_compaction_failed_banner() -> Value {
+    banner("\n\nCompacting failed: the summary model refused")
+}
+
+fn banner(text: &str) -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": text },
+            "messageId": "msg_1"
+        }
+    })
+}
+
 /// Three updates ADR-0035 §6 leaves unmapped. They are recorded anyway: a
 /// fixture is how "we ignore this" stays a decision rather than a crash.
 pub fn update_plan() -> Value {

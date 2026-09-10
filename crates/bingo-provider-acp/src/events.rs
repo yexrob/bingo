@@ -41,6 +41,30 @@ pub const EXTERNAL: &str = "external";
 /// as one answer rather than one block per token.
 const UNKEYED: &str = "message";
 
+/// `claude-agent-acp`'s own status around a compaction, sent as the model's
+/// words because the protocol has no other way to say it. The agent did not
+/// say them, and a transcript that keeps them reads as if it had — the cut
+/// itself is a row of its own (ADR-0055 §4). `Compacting failed…` is not one
+/// of them: that one is what a person needs to read.
+const BANNERS: [&str; 2] = ["Compacting...", "\n\nCompacting completed."];
+
+/// What an agent last said about the context it holds: its own count, and the
+/// window it counted against (ADR-0055 §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reading {
+    pub used: u64,
+    pub window: u64,
+}
+
+impl From<&UsageUpdate> for Reading {
+    fn from(usage: &UsageUpdate) -> Self {
+        Self {
+            used: usage.used,
+            window: usage.size,
+        }
+    }
+}
+
 /// The running state of one turn's stream. A tool call arrives as a first
 /// notification and any number of partial updates, each naming only what
 /// changed, so what is open has to be remembered to be closed.
@@ -49,7 +73,10 @@ pub struct Mapper {
     text: Option<String>,
     thought: Option<String>,
     calls: BTreeMap<String, Call>,
-    context: Option<UsageUpdate>,
+    /// What the agent last said it holds — from this turn, or from the turn
+    /// before it, so a fall across a turn boundary is still the cut it was
+    /// (ADR-0055 §4).
+    held: Option<Reading>,
 }
 
 /// One tool call as it stands. Fields are replaced only by an update that
@@ -68,6 +95,21 @@ struct Call {
 }
 
 impl Mapper {
+    /// A turn of a conversation somebody has already read: what the agent
+    /// last said it holds, so the first reading of this turn is measured
+    /// against it (ADR-0055 §4).
+    pub fn holding(held: Option<Reading>) -> Self {
+        Self {
+            held,
+            ..Self::default()
+        }
+    }
+
+    /// What the agent said it holds, for the turn after this one.
+    pub fn held(&self) -> Option<Reading> {
+        self.held
+    }
+
     /// One update, in bingo's vocabulary. An update this build has no meaning
     /// for — a plan, a mode, a slash-command list (ADR-0035 §6) — is no
     /// events, deliberately.
@@ -77,12 +119,30 @@ impl Mapper {
             SessionUpdate::AgentThoughtChunk(chunk) => self.think(chunk),
             SessionUpdate::ToolCall(call) => self.open_call(call),
             SessionUpdate::ToolCallUpdate(update) => self.advance_call(update),
-            SessionUpdate::UsageUpdate(usage) => {
-                self.context = Some(usage);
-                Vec::new()
-            }
+            SessionUpdate::UsageUpdate(usage) => self.read(&usage),
             _ => Vec::new(),
         }
+    }
+
+    /// Every reading is the context as the agent counts it (ADR-0055 §2); one
+    /// that fell below the last is the cut the agent made to get there, which
+    /// no other frame says at all.
+    fn read(&mut self, usage: &UsageUpdate) -> Vec<ModelEvent> {
+        let reading = Reading::from(usage);
+        let cut = self
+            .held
+            .filter(|last| reading.used < last.used)
+            .map(|last| ModelEvent::Compacted {
+                before: last.used,
+                after: reading.used,
+            });
+        self.held = Some(reading);
+        cut.into_iter()
+            .chain([ModelEvent::Context {
+                used: reading.used,
+                window: reading.window,
+            }])
+            .collect()
     }
 
     /// Close whatever the last update left open. A turn ends once, and every
@@ -112,7 +172,7 @@ impl Mapper {
             };
         }
         Usage {
-            input_tokens: self.context.as_ref().map(|c| c.used).unwrap_or_default(),
+            input_tokens: self.held.map(|held| held.used).unwrap_or_default(),
             ..Usage::default()
         }
     }
@@ -136,6 +196,10 @@ impl Mapper {
     }
 
     fn say(&mut self, chunk: ContentChunk) -> Vec<ModelEvent> {
+        let said = plain(&chunk.content);
+        if BANNERS.contains(&said.as_str()) {
+            return Vec::new();
+        }
         let id = key(&chunk, UNKEYED);
         let mut events = Vec::new();
         if self.text.as_deref() != Some(id.as_str()) {
@@ -144,10 +208,7 @@ impl Mapper {
             }
             events.push(ModelEvent::TextStart { id: id.clone() });
         }
-        events.push(ModelEvent::TextDelta {
-            id,
-            delta: plain(&chunk.content),
-        });
+        events.push(ModelEvent::TextDelta { id, delta: said });
         events
     }
 

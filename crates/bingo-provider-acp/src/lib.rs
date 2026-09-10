@@ -59,6 +59,7 @@ pub mod servers;
 pub mod session;
 pub mod shared;
 pub mod transcript;
+pub mod windows;
 pub mod wire;
 
 /// No provider is promised: which ones exist is the person's configuration to
