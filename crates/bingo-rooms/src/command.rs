@@ -13,7 +13,8 @@ use crate::room::{self, CLOSED, Room};
 use crate::seat::Opening;
 use crate::{door, mentions, name, owed, seat};
 
-const HEADERS: [&str; 4] = ["room", "purpose", "members", "owed"];
+/// The columns a person reads a listing in; the page names each of them.
+pub(crate) const HEADERS: [&str; 4] = ["room", "purpose", "members", "owed"];
 
 /// What a session with no rooms in it is told, which is also where a person
 /// meets the holder's seat (ADR-0028), the ear it can wear (ADR-0029) and the

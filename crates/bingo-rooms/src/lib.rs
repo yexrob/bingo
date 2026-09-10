@@ -44,6 +44,7 @@ mod cursor;
 mod deadline;
 mod door;
 mod ear;
+pub mod guide;
 mod hook;
 mod listen;
 mod mentions;
@@ -96,6 +97,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "tool:CloseRoom",
         "tool:Listen",
         "context:rooms",
+        "service:bingo.rooms.pages",
     ],
     requires: &[],
     // Who sits in which room is a project's file, not a person's settings.
@@ -137,6 +139,7 @@ impl Plugin for RoomsPlugin {
         registrar.add(Contribution::Context(
             Arc::new(Reader) as Arc<dyn ContextContributor>
         ));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -163,6 +166,7 @@ mod plugin_tests {
                 "tool:CloseRoom",
                 "tool:Listen",
                 "context:rooms",
+                &format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)),
             ]
         );
         assert!(MANIFEST.requires.is_empty());
@@ -186,5 +190,12 @@ mod plugin_tests {
         assert!(matches!(&contributions[5], Contribution::Tool(t) if t.spec().name == "CloseRoom"));
         assert!(matches!(&contributions[6], Contribution::Tool(t) if t.spec().name == "Listen"));
         assert!(matches!(&contributions[7], Contribution::Context(c) if c.id() == "rooms"));
+        match &contributions[8] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 }
