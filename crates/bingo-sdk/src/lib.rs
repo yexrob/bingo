@@ -14,6 +14,7 @@ pub mod hook;
 pub mod host;
 pub mod ids;
 pub mod model;
+pub mod page;
 pub mod plugin;
 pub mod policy;
 pub mod provider;
@@ -39,6 +40,7 @@ pub use hook::{Hook, HookContext, HookMatcher, HookOutcome, HookPoint, Phase};
 pub use host::*;
 pub use ids::*;
 pub use model::*;
+pub use page::{Page, Pages};
 pub use plugin::{
     CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, HookSource, Merge,
     Plugin, PluginError, PluginManifest, ProviderSource, Registrar, ToolSource,
