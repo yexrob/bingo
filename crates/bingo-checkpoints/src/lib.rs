@@ -17,6 +17,7 @@
 //! not claim to undo them (ADR-0045 §2).
 
 pub mod command;
+pub mod guide;
 pub mod hook;
 pub mod restore;
 pub mod store;
@@ -38,7 +39,11 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.checkpoints",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["hook:checkpoints", "command:rewind"],
+    provides: &[
+        "hook:checkpoints",
+        "command:rewind",
+        "service:bingo.checkpoints.pages",
+    ],
     requires: &[],
     // Where the snapshots live follows the data directory; how many a turn
     // keeps follows what the turn edited. There is nothing to configure.
@@ -68,6 +73,7 @@ impl Plugin for CheckpointsPlugin {
         registrar.add(Contribution::Command(
             Arc::new(RewindCommand::new(store.clone())) as Arc<dyn Command>,
         ));
+        registrar.add(guide::contribution(registrar));
         self.store
             .set(store)
             .map_err(|_| PluginError::Failed("the checkpoints plugin registered twice".into()))
@@ -118,17 +124,32 @@ mod plugin_tests {
     #[test]
     fn the_manifest_says_what_it_provides_and_claims_no_settings() {
         assert_eq!(MANIFEST.id, "bingo.checkpoints");
+        assert_eq!(
+            MANIFEST.provides,
+            [
+                "hook:checkpoints",
+                "command:rewind",
+                &format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)),
+            ]
+        );
         assert!(MANIFEST.requires.is_empty());
         assert!(MANIFEST.config.is_none());
     }
 
     #[test]
-    fn registering_contributes_a_hook_and_a_command_and_creates_nothing() {
+    fn registering_contributes_a_hook_a_command_and_a_page_and_creates_nothing() {
         let home = tempfile::tempdir().expect("a temp home");
         let contributions = registered(home.path());
         assert_eq!(contributions.len(), MANIFEST.provides.len());
         assert!(matches!(contributions[0], Contribution::Hook(_)));
         assert!(matches!(contributions[1], Contribution::Command(_)));
+        match &contributions[2] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
         assert!(
             !home.path().join(".bingo/data/checkpoints").exists(),
             "registering creates no directory"
