@@ -65,14 +65,13 @@ pub const BINDINGS: &[Binding] = &[
         description: "scroll the transcript",
     },
     Binding {
-        keys: "v",
-        description: "select from the focused block · ↑↓←→ extend · y or ctrl+c copy",
-    },
-    Binding {
-        // The other half of the same selection (M92): the run is cells of the
-        // whole transcript, so both gestures reach what has scrolled away.
-        keys: "drag",
-        description: "select · release copies · past the edge scrolls",
+        // One gesture on one row (M92): the sheet does not scroll and this
+        // table already fills eighty by twenty-four, so a row added is a row
+        // pushed off. The key and the drag draw the same run — cells of the
+        // whole transcript, reaching what has scrolled away — and the page
+        // says what holding it past an edge does.
+        keys: "v · drag",
+        description: "select · ↑↓←→ or a drag extend · y, ctrl+c or release copy",
     },
     Binding {
         keys: "ctrl+g",

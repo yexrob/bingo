@@ -33,15 +33,15 @@ where you are, the window used against the whole, and the model.
 - `ctrl+a/e` — start and end of the line (`home` and `end` too). `alt+b/f` —
   one word. `ctrl+w/u/k` — delete a word, to the line start, to the line end.
 - `pgup/pgdn` — scroll the transcript.
-- `v` — select from the focused block, or from the first line on the screen.
-  `↑↓←→` take the far end of the run and the view follows it, so it reaches
-  what has scrolled away; `y` or `ctrl+c` copies through OSC 52 and lets it
-  go, `esc` lets it go and copies nothing. What is copied is what was drawn:
-  the cells as you saw them, trailing spaces trimmed. More than 100 KiB is
-  refused out loud rather than half-copied.
-- `drag` — the same run with the mouse, and releasing the button copies it.
-  Held past the top or the foot of the transcript it scrolls, a line at a
-  time, until you come back inside or let go.
+- `v · drag` — select: from the focused block or the first line on the screen
+  with the key, from wherever the press landed with the mouse. `↑↓←→` or the
+  drag itself take the far end of the run and the view follows it, so a run
+  reaches what has scrolled away; held past the top or the foot of the
+  transcript, a drag scrolls it a line at a time until you come back inside or
+  let go. `y`, `ctrl+c` or letting the button up copies through OSC 52 and
+  lets the run go; `esc` lets it go and copies nothing. What is copied is what
+  was drawn: the cells as you saw them, trailing spaces trimmed. More than
+  100 KiB is refused out loud rather than half-copied.
 - `ctrl+t` — show and hide the task list. `ctrl+p` — the plugin-state sheet:
   what the plugins wrote about the session on screen, and where a panel is
   pinned into the rail (`⏎` pins a row, `⏎` again takes it back).
