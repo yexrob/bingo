@@ -18,6 +18,7 @@ pub mod command;
 pub mod config;
 pub mod dial;
 pub mod elicitation;
+pub mod guide;
 pub mod manager;
 pub mod rows;
 pub mod source;
@@ -40,11 +41,16 @@ pub use rows::{Rows, SERVERS};
 pub use source::McpSource;
 pub use tool::{McpTool, tool_name};
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.mcp",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tools:mcp", "command:mcp", "service:mcp.servers"],
+    provides: &[
+        "tools:mcp",
+        "command:mcp",
+        "service:mcp.servers",
+        "service:bingo.mcp.pages",
+    ],
     requires: &[],
     config: Some(ConfigClaim {
         keys: &[
@@ -87,6 +93,7 @@ impl Plugin for McpPlugin {
             Arc::new(McpCommand::new(Arc::clone(&manager))) as Arc<dyn Command>,
         ));
         registrar.add(service(Arc::clone(&manager)));
+        registrar.add(guide::contribution(registrar));
         self.manager
             .set(manager)
             .map_err(|_| PluginError::Failed("the mcp plugin registered twice".into()))
@@ -184,7 +191,12 @@ pub(crate) mod tests {
         assert_eq!(MANIFEST.id, "bingo.mcp");
         assert_eq!(
             MANIFEST.provides,
-            ["tools:mcp", "command:mcp", "service:mcp.servers"]
+            [
+                "tools:mcp",
+                "command:mcp",
+                "service:mcp.servers",
+                "service:bingo.mcp.pages",
+            ]
         );
         assert!(MANIFEST.requires.is_empty());
         let claim = MANIFEST.config.expect("a config claim");
@@ -201,7 +213,7 @@ pub(crate) mod tests {
             .register(&mut registrar)
             .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 3);
+        assert_eq!(contributions.len(), MANIFEST.provides.len());
         match &contributions[0] {
             Contribution::Tools(source) => assert_eq!(source.id(), "mcp"),
             other => panic!("expected a tool source, got {other:?}"),
@@ -219,6 +231,13 @@ pub(crate) mod tests {
                 );
             }
             other => panic!("expected the rows service, got {other:?}"),
+        }
+        match &contributions[3] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
         }
     }
 

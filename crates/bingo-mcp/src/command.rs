@@ -247,7 +247,7 @@ pub enum Verb {
 }
 
 impl Verb {
-    const ALL: [Verb; 6] = [
+    pub(crate) const ALL: [Verb; 6] = [
         Verb::Login,
         Verb::Logout,
         Verb::Tools,
@@ -256,7 +256,7 @@ impl Verb {
         Verb::Disable,
     ];
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Verb::Login => "login",
             Verb::Logout => "logout",
