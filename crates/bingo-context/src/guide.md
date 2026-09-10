@@ -39,10 +39,10 @@ They read the patch first and want the reasoning under it, not beside it.
   repository does not record, `reference` a URL, a ticket, a dashboard.
 - `[[slug]]` links another memory.
 
-Each directory keeps `MEMORY.md`, its index: one line per file, `- [Title](
-name.md) — the description`. **The prompt carries the two indexes and never a
-body** — at most 60 lines of each, the newest kept and the cut said out loud.
-Read the file itself for the whole fact.
+Each directory keeps `MEMORY.md`, its index. One line per file, a markdown
+link to it and the description after an em dash. **The prompt carries the two
+indexes and never a body** — at most 60 lines of each, the newest kept and the
+cut said out loud. Read the file itself for the whole fact.
 
 ## Who writes one
 
@@ -69,7 +69,7 @@ contradict is fixed or deleted rather than followed.
 ## Instruction files
 
 `AGENTS.md`, or `CLAUDE.md` where a directory has none — one file per
-directory, never both. The person's own `<config>/AGENTS.md` speaks first, then
+directory, never both. The person's own `~/.bingo/AGENTS.md` speaks first, then
 one file per directory from the project root down to the working one, the
 nearest last. A file that is empty or will not read is a file that is not
 there: an unreadable `AGENTS.md` never costs a turn.
@@ -96,7 +96,7 @@ exactly. What the older turns held and the summary does not is gone.
 those instructions. A compaction is not the end of the transcript: the newest
 turns stay verbatim beside the summary, so the overlap is deliberate.
 
-Where no summary can be bought — an overflow the model cannot answer inside,
-or three failed attempts in a row — the cut still happens and the transcript
-carries `[earlier conversation dropped]` in its place. An honest gap makes
-room; a model reading one knows not to answer about what came before it.
+Where an overflow leaves no room to ask for a summary, or three compactions in
+a row have already failed, the cut still happens and the transcript carries
+`[earlier conversation dropped]` in its place. An honest gap makes room, and a
+model reading one knows not to answer about what came before it.
