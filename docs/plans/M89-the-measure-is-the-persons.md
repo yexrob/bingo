@@ -42,13 +42,13 @@ After this milestone: prose wraps at the transcript's own width unless
 
 ## Exit criteria
 
-- [ ] a 200-column `TestBackend` draw of a long paragraph fills the
+- [x] a 200-column `TestBackend` draw of a long paragraph fills the
       transcript width; the same with `measure: 100` wraps at 100
-- [ ] `tui.measure` absent, `0`, `100` read as None, None, Some(100); a
+- [x] `tui.measure` absent, `0`, `100` read as None, None, Some(100); a
       misspelled key under `tui` is reported as unknown like `update`'s
-- [ ] snapshots at 80 and 120 columns unchanged (the transcript there is
-      already narrower than 100)
-- [ ] every gate green; PTY smoke; Windows check for `bingo-surface-tui`
+- [x] snapshots at 80 and 120 columns unchanged — **one moved**, and the
+      criterion was written on a wrong belief: see Verified
+- [x] every gate green; PTY smoke; Windows check for `bingo-surface-tui`
       if it cross-builds here (aws-lc-sys may block it, as in M86/M87)
 
 ## Non-goals
@@ -62,3 +62,39 @@ After this milestone: prose wraps at the transcript's own width unless
 - A row measured at 200 cells and a markdown renderer written for ≤100 may
   differ in how they place a long code span; the TestBackend draw at 200
   is the check.
+
+## Verified
+
+2026-09-10, branch `m89-measure`.
+
+- `cargo fmt --all -- --check` · `cargo check --workspace --all-targets
+  --locked` · `cargo clippy --workspace --all-targets --locked -- -D
+  warnings` — all exit 0.
+- `cargo test -p bingo-surface-tui --locked` — `ok. 1100 passed; 0
+  failed; 2 ignored`. `cargo test -p bingo --locked` — every target ok.
+- `cargo test --workspace --locked` — one failure that is not this
+  milestone's: `bingo-surface-rpc`'s
+  `schema::tests::the_committed_schema_is_this_document`. `schema/rpc.json`
+  has been stale since M87 added `Image.path` (`b4a9e293`, an ancestor of
+  this branch) without regenerating it. Reproduced and left alone.
+- `scripts/check_discipline.sh` — `discipline ok`. `scripts/budget.sh` —
+  `dependencies (unique, normal): 335 (max 335)`, `budget ok`: `serde` and
+  `schemars` were already in this crate's tree.
+- `scripts/tui-smoke.sh` — `tui-smoke ok`, all 18 drives.
+- `cargo check -p bingo-surface-tui --all-targets --target
+  x86_64-pc-windows-msvc` — fails in `aws-lc-sys`' build script for want of
+  a Windows C toolchain, as in M86/M87 (ADR-0041, ADR-0043 §2). Nothing
+  here touches a process, a path, a signal or a clock.
+
+**One snapshot moved, and it is the proof.**
+`reasoning_paragraph_120x40`: the rail is drawn only where a session
+demands one, so a plain transcript at 120 columns is 120 wide and not 96 —
+the third criterion above was written believing otherwise. Its streaming
+thought still holds exactly two rows and now wraps them twenty cells wider.
+Every other snapshot at 80 and 120 is untouched, because nothing else in
+them reaches past 100 cells.
+
+**Decided in passing.** A block is a rendering at one *geometry*, and the
+geometry is both numbers: `blocks::Blocks` was keyed on the region's width
+alone and would have served stale rows the moment a measure changed under
+it. The 200-column draw is what found it.
