@@ -4,13 +4,19 @@
 //! person's, its membership is an `Event::Extension` in its own journal, a
 //! post is a `User` item in it, and the fan-out is `deliver`.
 //!
-//! One command, one tool and one hook:
+//! One command, four verbs and one hook:
 //!
 //! - `/room` lists the rooms under this session; `/room design reviewer scout`
-//!   opens `#design` under it, or resets who is in the one that stands.
+//!   opens `#design` under it, or resets who is in the one that stands, and
+//!   `/room close design` ends one. A person's door keeps the reset lever: a
+//!   person outranks the protocol (ADR-0025 §4).
 //! - `OpenRoom` is that same door with an agent on the other side of it
 //!   (ADR-0021): the room hangs under the caller, or — with `shared` — under
-//!   the caller's parent, which is the whole of who will hear it.
+//!   the caller's parent, which is the whole of who will hear it. It is opened
+//!   for one purpose and a name that stands is refused (ADR-0053 §1–2).
+//! - `Seat`, `Unseat` and `CloseRoom` move the roster of a room that stands and
+//!   end it. Each is a post the room reads, and only the session a room hangs
+//!   under and whoever opened it may call one (ADR-0053 §3–5).
 //! - The hook seats the rooms `.bingo/team.json` declares when a person's own
 //!   session opens, and watches every journal: a room announces itself, an
 //!   extension says who is in it, and a user item in one is a post to fan out.
@@ -36,6 +42,7 @@ mod chase;
 mod command;
 mod cursor;
 mod deadline;
+mod door;
 mod ear;
 mod hook;
 mod listen;
@@ -65,9 +72,9 @@ pub use hook::RoomsHook;
 pub use listen::ListenTool;
 pub use reader::Reader;
 pub use room::Room;
-pub use seat::seat;
+pub use seat::{Opening, seat};
 pub use team::{Entry, TeamError};
-pub use tool::OpenRoomTool;
+pub use tool::{CloseRoomTool, OpenRoomTool, SeatTool, UnseatTool};
 
 /// This plugin's id: the owner of a room's key, and the plugin a room's
 /// membership is published under.
@@ -84,6 +91,9 @@ static MANIFEST: PluginManifest = PluginManifest {
         "command:room",
         "hook:rooms",
         "tool:OpenRoom",
+        "tool:Seat",
+        "tool:Unseat",
+        "tool:CloseRoom",
         "tool:Listen",
         "context:rooms",
     ],
@@ -120,6 +130,9 @@ impl Plugin for RoomsPlugin {
             Arc::new(RoomsHook::default()) as Arc<dyn Hook>
         ));
         registrar.add(Contribution::Tool(Arc::new(OpenRoomTool) as Arc<dyn Tool>));
+        registrar.add(Contribution::Tool(Arc::new(SeatTool) as Arc<dyn Tool>));
+        registrar.add(Contribution::Tool(Arc::new(UnseatTool) as Arc<dyn Tool>));
+        registrar.add(Contribution::Tool(Arc::new(CloseRoomTool) as Arc<dyn Tool>));
         registrar.add(Contribution::Tool(Arc::new(ListenTool) as Arc<dyn Tool>));
         registrar.add(Contribution::Context(
             Arc::new(Reader) as Arc<dyn ContextContributor>
@@ -145,6 +158,9 @@ mod plugin_tests {
                 "command:room",
                 "hook:rooms",
                 "tool:OpenRoom",
+                "tool:Seat",
+                "tool:Unseat",
+                "tool:CloseRoom",
                 "tool:Listen",
                 "context:rooms",
             ]
@@ -165,7 +181,10 @@ mod plugin_tests {
         assert!(matches!(&contributions[0], Contribution::Command(c) if c.spec().name == "room"));
         assert!(matches!(&contributions[1], Contribution::Hook(h) if h.id() == "rooms"));
         assert!(matches!(&contributions[2], Contribution::Tool(t) if t.spec().name == "OpenRoom"));
-        assert!(matches!(&contributions[3], Contribution::Tool(t) if t.spec().name == "Listen"));
-        assert!(matches!(&contributions[4], Contribution::Context(c) if c.id() == "rooms"));
+        assert!(matches!(&contributions[3], Contribution::Tool(t) if t.spec().name == "Seat"));
+        assert!(matches!(&contributions[4], Contribution::Tool(t) if t.spec().name == "Unseat"));
+        assert!(matches!(&contributions[5], Contribution::Tool(t) if t.spec().name == "CloseRoom"));
+        assert!(matches!(&contributions[6], Contribution::Tool(t) if t.spec().name == "Listen"));
+        assert!(matches!(&contributions[7], Contribution::Context(c) if c.id() == "rooms"));
     }
 }

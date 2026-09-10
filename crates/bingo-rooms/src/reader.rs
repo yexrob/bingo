@@ -22,7 +22,7 @@
 use async_trait::async_trait;
 use bingo_sdk::{
     CONTRIBUTOR_PREFIX, ContentPart, ContextContributor, ContextError, ContextPiece, ContextQuery,
-    Item, ItemBody, Placement, SessionFilter, SessionId, SessionState, SessionSummary,
+    Item, ItemBody, Placement, SessionId, SessionState, SessionSummary,
 };
 
 use crate::cursor::{self, Unread};
@@ -52,7 +52,10 @@ another. `Listen` retunes your own seat and nobody else's.
 Being called on is owed an answer: post it back to the room with \
 `SendMessage(to: \"#<room>\")` so whoever is next can carry it on, and say \
 `@<name>` when it falls to someone in particular. When what a post names is not \
-yours, end your turn without posting rather than answering for someone else.";
+yours, end your turn without posting rather than answering for someone else.
+
+A room is opened for one purpose, said at the head of its reading; when the \
+work moves on, open another room rather than reseating this one.";
 
 /// What a member reads of its rooms, at the head of its own turn.
 #[derive(Debug, Default, Clone, Copy)]
@@ -100,11 +103,12 @@ fn spoken_here(item: &Item) -> bool {
 }
 
 /// One room this session sits in, as its own journal has it: which session it
-/// is, what it is called, the name it seats this session under, and the
-/// snapshot both answers were read from.
+/// is, what it is called and what for, the name it seats this session under,
+/// and the snapshot every one of those answers was read from.
 struct Seated {
     id: SessionId,
     title: String,
+    purpose: Option<String>,
     member: String,
     state: SessionState,
 }
@@ -118,16 +122,16 @@ async fn read(query: &ContextQuery<'_>, seat: &Seated) -> Option<ContextPiece> {
     if let Err(error) = cursor::advance(query.host, &seat.id, &seat.member, head).await {
         tracing::debug!(room = %seat.title, %error, "a seat's cursor did not move");
     }
-    let text = said(&seat.title, &unread.posts)?;
+    let text = said(&seat.title, seat.purpose.as_deref(), &unread.posts)?;
     Some(ContextPiece::User {
         parts: vec![ContentPart::text(text)],
         label: seat.title.clone(),
     })
 }
 
-/// The posts as the member reads them: the room and the reading above them,
-/// then one line per post under the name that wrote it.
-fn said(title: &str, posts: &[Post]) -> Option<String> {
+/// The posts as the member reads them: the room, what it is for and the
+/// reading above them, then one line per post under the name that wrote it.
+fn said(title: &str, purpose: Option<&str>, posts: &[Post]) -> Option<String> {
     if posts.is_empty() {
         return None;
     }
@@ -135,10 +139,17 @@ fn said(title: &str, posts: &[Post]) -> Option<String> {
         .iter()
         .map(|post| format!("{}: {}", post.author, post.text.trim()))
         .collect();
-    Some(format!(
-        "[{title}, since you last read]\n{}",
-        lines.join("\n")
-    ))
+    Some(format!("{}\n{}", header(title, purpose), lines.join("\n")))
+}
+
+/// The line above a reading. A room carries its one purpose here, where every
+/// member reads it every time (ADR-0053 §1); a room opened without one reads as
+/// it always did.
+fn header(title: &str, purpose: Option<&str>) -> String {
+    match purpose {
+        Some(purpose) => format!("[{title} — {purpose}, since you last read]"),
+        None => format!("[{title}, since you last read]"),
+    }
 }
 
 /// The rooms this session sits in, each with the name it is seated under. A
@@ -154,16 +165,28 @@ async fn seated_in(query: &ContextQuery<'_>) -> Vec<Seated> {
         };
         let room = room.seated(&state);
         let called = seated_as(query.session, &room);
-        if let Some(member) = room.members.iter().find(|m| name::same(m, &called)) {
-            seated.push(Seated {
-                id,
-                title: room.title.clone(),
-                member: member.clone(),
-                state,
-            });
+        let Some(member) = room.members.iter().find(|m| name::same(m, &called)) else {
+            continue;
+        };
+        if spent(&room, &state, member) {
+            continue;
         }
+        seated.push(Seated {
+            id,
+            title: room.title.clone(),
+            purpose: room.purpose.clone(),
+            member: member.clone(),
+            state,
+        });
     }
     seated
+}
+
+/// Whether a room has nothing left for this seat, ever: it has closed and the
+/// seat has read it to its end (ADR-0053 §4). Such a room is not a seat at all
+/// any more — it costs no reading and no protocol.
+fn spent(room: &Room, state: &SessionState, member: &str) -> bool {
+    room.closed && Unread::of(state, member).is_empty()
 }
 
 /// The name a room's roster would call this session: `parent` for the session
@@ -187,18 +210,7 @@ async fn rooms_around(query: &ContextQuery<'_>) -> Vec<(SessionId, Room)> {
 }
 
 async fn under(query: &ContextQuery<'_>, parent: &SessionId) -> Vec<(SessionId, Room)> {
-    let children = query
-        .host
-        .sessions(SessionFilter {
-            parent: Some(parent.clone()),
-            ..SessionFilter::default()
-        })
-        .await
-        .unwrap_or_default();
-    children
-        .into_iter()
-        .filter_map(|child| Room::of(&child).map(|room| (child.id, room)))
-        .collect()
+    room::under(query.host, parent).await.unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -272,6 +284,14 @@ mod tests {
 
     /// A root with a scout under it, and a room seating them both.
     async fn tree(members: &[&str]) -> (Fleet, SessionId, SessionId, SessionId) {
+        opened_for(None, members).await
+    }
+
+    /// The same, with the purpose the room was opened for.
+    async fn opened_for(
+        purpose: Option<&str>,
+        members: &[&str],
+    ) -> (Fleet, SessionId, SessionId, SessionId) {
         let fleet = Fleet::default();
         let root = fleet.root();
         let scout = fleet.child(&root, "scout");
@@ -279,16 +299,27 @@ mod tests {
             .iter()
             .map(|word| Seat::read(word).expect("a roster word"))
             .collect();
-        let room = seat::seat(
+        let room = seated(&fleet, &root, purpose, &seats).await;
+        (fleet, root, scout, room)
+    }
+
+    /// `#design` under this session, opened or reseated as a person's door
+    /// does it.
+    async fn seated(
+        fleet: &Fleet,
+        parent: &SessionId,
+        purpose: Option<&str>,
+        seats: &[Seat],
+    ) -> SessionId {
+        seat::seat(
             &fleet.handle(),
-            &root,
+            parent,
             Path::new("/work/project"),
-            "design",
-            &seats,
+            seat::Opening::person("design", purpose),
+            seats,
         )
         .await
-        .expect("a room this crate can open");
-        (fleet, root, scout, room)
+        .expect("a room this crate can open")
     }
 
     /// What one session's turn would be handed at its head, for a seat the
@@ -415,15 +446,13 @@ mod tests {
         let room = fleet.room(&root, "design");
         fleet.post(&room, "said before you joined", Some("reviewer"), ts());
 
-        seat::seat(
-            &fleet.handle(),
+        seated(
+            &fleet,
             &root,
-            Path::new("/work/project"),
-            "design",
+            None,
             &[Seat::read("scout").expect("a roster word")],
         )
-        .await
-        .expect("a room this crate can open");
+        .await;
 
         assert_eq!(
             cursor_of(&fleet, &room, "scout"),
@@ -448,15 +477,13 @@ mod tests {
         fleet.post(&room, "the build is green", Some("reviewer"), ts());
         assert_eq!(cursor_of(&fleet, &room, "scout"), None, "nothing read yet");
 
-        seat::seat(
-            &fleet.handle(),
+        seated(
+            &fleet,
             &root,
-            Path::new("/work/project"),
-            "design",
+            None,
             &[Seat::read("scout").expect("a roster word")],
         )
-        .await
-        .expect("a room this crate can reseat");
+        .await;
 
         assert_eq!(cursor_of(&fleet, &room, "scout"), None);
         assert_eq!(
@@ -496,9 +523,60 @@ mod tests {
     /// The piece is a fold of posts, so a room with nothing to say makes none.
     #[test]
     fn a_reading_of_no_posts_is_no_piece_at_all() {
-        assert_eq!(said("#design", &[]), None);
+        assert_eq!(said("#design", None, &[]), None);
         let state = SessionState::new(crate::tests::summary("ses_x", None, None));
         assert_eq!(cursor::of_state(&state, "scout"), None);
+    }
+
+    /// ADR-0053 §1: the purpose is at the head of every reading, so a member
+    /// meets what the room is for before it meets what the room said.
+    #[tokio::test]
+    async fn a_reading_carries_the_purpose_the_room_was_opened_for() {
+        let (fleet, _, scout, room) =
+            opened_for(Some("settle the storage layout"), &["scout"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            [
+                "[#design — settle the storage layout, since you last read]\nreviewer: the build is green"
+            ]
+        );
+
+        let (fleet, _, scout, room) = tree(&["scout"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            ["[#design, since you last read]\nreviewer: the build is green"],
+            "a room opened without one reads as it always did"
+        );
+    }
+
+    /// ADR-0053 §4: a closed room is read to its end and then never — and once
+    /// there is nothing left in it, it is not a seat this session has at all.
+    #[tokio::test]
+    async fn a_closed_room_is_read_to_its_end_and_then_never_again() {
+        let (fleet, _, scout, room) = tree(&["scout"]).await;
+        fleet.post(&room, "it shipped", Some("reviewer"), ts());
+        seat::close(
+            &fleet.handle(),
+            &room,
+            &Room::of(&fleet.summary(&room)).expect("a room"),
+            "parent",
+            None,
+        )
+        .await
+        .expect("a room this crate can close");
+
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            ["[#design, since you last read]\nreviewer: it shipped"],
+            "what was said before it closed is still read"
+        );
+        assert!(read_by(&fleet, &scout).await.is_empty(), "and then never");
+        assert!(
+            first_read_by(&fleet, &scout).await.is_empty(),
+            "a room with nothing left in it is no longer a seat to be told about"
+        );
     }
 
     #[test]
@@ -566,6 +644,8 @@ mod tests {
             "post it back to the room",
             "SendMessage(to: \"#<room>\")",
             "end your turn without posting",
+            "opened for one purpose",
+            "open another room rather than reseating this one",
         ] {
             assert!(PROTOCOL.contains(rule), "{rule} is unsaid: {PROTOCOL}");
         }

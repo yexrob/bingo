@@ -40,8 +40,8 @@ impl Roster {
     }
 
     /// One of this plugin's frames in a room's journal: the whole of its
-    /// membership, or one seat's own ear. Nothing else it publishes is a
-    /// room's business.
+    /// membership, one seat's own ear, what it was opened for, or that it has
+    /// ended. Nothing else it publishes is a room's business.
     pub fn extended(&self, session: &SessionId, kind: &str, payload: &Value) {
         let mut rooms = self.rooms();
         let Some(room) = rooms.get_mut(session) else {
@@ -53,6 +53,10 @@ impl Roster {
                 room.members = room::members_from(payload);
                 room.ears.declare(payload);
             }
+            None if kind == room::OPENED => {
+                room.purpose = room::Opened::of_payload(payload).and_then(|opened| opened.purpose)
+            }
+            None if kind == room::CLOSED => room.closed = room::is_closed(Some(payload)),
             None => {}
         }
     }
@@ -120,6 +124,45 @@ mod tests {
             Ear::Live,
             "as the roster seated it"
         );
+    }
+
+    /// The other two frames a room's own journal carries (ADR-0053 §1, §4),
+    /// folded by the same arm: what it is for, and that it has ended.
+    #[test]
+    fn a_room_folds_what_it_was_opened_for_and_that_it_has_closed() {
+        let parent = SessionId::from_raw("ses_root");
+        let announced = room_summary("ses_design", &parent, "design");
+        let roster = Roster::default();
+        roster.register(&announced);
+
+        let room = roster.get(&announced.id).expect("the room");
+        assert_eq!(room.purpose, None, "an announce says nothing of either");
+        assert!(!room.closed);
+
+        roster.extended(
+            &announced.id,
+            room::OPENED,
+            &room::Opened {
+                purpose: Some("settle the storage layout".into()),
+                by: "parent".into(),
+            }
+            .payload(),
+        );
+        let room = roster.get(&announced.id).expect("the room");
+        assert_eq!(room.purpose.as_deref(), Some("settle the storage layout"));
+        assert!(!room.closed, "a room that was opened still stands");
+
+        roster.extended(
+            &announced.id,
+            room::CLOSED,
+            &room::Closed {
+                at: jiff::Timestamp::UNIX_EPOCH,
+                by: "parent".into(),
+                why: None,
+            }
+            .payload(),
+        );
+        assert!(roster.get(&announced.id).expect("the room").closed);
     }
 
     #[test]

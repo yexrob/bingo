@@ -30,13 +30,17 @@ const SECTION: &str = "section";
 /// This plugin's key in that file.
 const ROOMS: &str = "rooms";
 
-/// One room a project declares: who is in it, and which of them hear it
-/// otherwise than a bare name does (ADR-0029 §2, ADR-0034 §6). A name in
-/// `members` alone is a patient seat at 300 seconds; a `listeners` entry of
-/// `{"name": "scout", "patience_s": 0}` is one every post wakes as it lands.
+/// One room a project declares: what it is for, who is in it, and which of
+/// them hear it otherwise than a bare name does (ADR-0029 §2, ADR-0034 §6). A
+/// name in `members` alone is a patient seat at 300 seconds; a `listeners`
+/// entry of `{"name": "scout", "patience_s": 0}` is one every post wakes as it
+/// lands. A file that says no purpose declares a room without one, as a
+/// person's `/room` opens one (ADR-0053 §1).
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
+    #[serde(default)]
+    pub purpose: Option<String>,
     #[serde(default)]
     pub members: Vec<String>,
     #[serde(default)]
@@ -114,6 +118,7 @@ mod tests {
                 .expect("a roster"),
             [Entry {
                 name: "design".into(),
+                purpose: None,
                 members: ["reviewer", "scout"].map(str::to_string).to_vec(),
                 listeners: Vec::new(),
             }]

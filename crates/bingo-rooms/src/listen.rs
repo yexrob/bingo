@@ -10,15 +10,15 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Driver, ErrorCode, HostHandle, KernelError, SessionFilter, SessionId, SessionSummary, Subject,
-    Tool, ToolContext, ToolError, ToolOutput, ToolSpec, input_schema,
+    ErrorCode, HostHandle, KernelError, SessionId, SessionSummary, Subject, Tool, ToolContext,
+    ToolError, ToolOutput, ToolSpec, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::ear::Ear;
-use crate::{PLUGIN, ear, name, room};
+use crate::{PLUGIN, door, ear, name, room};
 
 pub const LISTEN: &str = "Listen";
 
@@ -68,8 +68,11 @@ impl Tool for ListenTool {
         let args: ListenArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         let ear = Ear::asked(args.patience_s).map_err(refused)?;
-        let caller = own(&cx.host, &cx.session).await.map_err(refused)?;
-        let (id, title) = reachable(&cx.host, &caller, &args.room).await?;
+        let caller = door::own(&cx.host, &cx.session).await.map_err(refused)?;
+        let (id, room) = door::resolve(&cx.host, &caller, &args.room)
+            .await
+            .map_err(refused)?;
+        let title = room.title;
         let seat = seated(&cx.host, &id, &caller, &title).await?;
 
         cx.host
@@ -89,42 +92,6 @@ fn card(args: &ListenArgs, ear: Ear) -> String {
             format!("{title} with a patient ear ({}s)", patience.as_secs())
         }
     }
-}
-
-/// The room the caller means: one under it, else one beside it. A room reaches
-/// the tree it hangs in, so those are the only two a caller can be seated in.
-async fn reachable(
-    host: &HostHandle,
-    caller: &SessionSummary,
-    asked: &str,
-) -> Result<(SessionId, String), ToolError> {
-    let name = name::check(asked.trim().trim_start_matches('#')).map_err(refused)?;
-    let title = name::title(name);
-    let mut trees = vec![caller.id.clone()];
-    trees.extend(caller.parent.as_ref().map(|link| link.session.clone()));
-    for tree in trees {
-        if let Some(id) = room_under(host, &tree, &title).await {
-            return Ok((id, title));
-        }
-    }
-    Err(ToolError::InvalidInput(format!(
-        "there is no {title} you can reach: a room is opened by `OpenRoom` or `/room`, and \
-         reaches the session it hangs under and that session's other children"
-    )))
-}
-
-async fn room_under(host: &HostHandle, tree: &SessionId, title: &str) -> Option<SessionId> {
-    let children = host
-        .sessions(SessionFilter {
-            parent: Some(tree.clone()),
-            ..SessionFilter::default()
-        })
-        .await
-        .ok()?;
-    children
-        .into_iter()
-        .find(|child| child.driver == Driver::Log && child.title.as_deref() == Some(title))
-        .map(|child| child.id)
 }
 
 /// The caller's own seat on that roster, spelled as the roster spells it. A
@@ -149,16 +116,6 @@ async fn seated(
                  whoever opened it to seat you"
             ))
         })
-}
-
-/// The caller's own summary. There is no filter for one id, so this is the
-/// list the host has, read once.
-async fn own(host: &HostHandle, session: &SessionId) -> Result<SessionSummary, KernelError> {
-    host.sessions(SessionFilter::default())
-        .await?
-        .into_iter()
-        .find(|summary| &summary.id == session)
-        .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, "no such session"))
 }
 
 /// A refusal in the terms the model can act on: an input it can correct, or a
@@ -189,7 +146,7 @@ mod tests {
             &fleet.handle(),
             &root,
             Path::new("/work/project"),
-            "design",
+            seat::Opening::person("design", None),
             &[Seat::live("scout")],
         )
         .await
@@ -300,7 +257,7 @@ mod tests {
             &fleet.handle(),
             &scout,
             Path::new("/work/project"),
-            "standup",
+            seat::Opening::person("standup", None),
             &[Seat::live("scout")],
         )
         .await

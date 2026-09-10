@@ -1,26 +1,30 @@
-//! `/room`: the rooms under this session, and the one word that opens another.
+//! `/room`: the rooms under this session, the one word that opens another, and
+//! the one that ends one.
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, HostHandle, KernelError,
-    SessionFilter, SessionId, View,
+    ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, ErrorCode, HostHandle,
+    KernelError, SessionId, View,
 };
 use jiff::Timestamp;
 
 use crate::ear::Seat;
-use crate::room::{self, Room};
-use crate::{mentions, name, owed, seat};
+use crate::room::{self, CLOSED, Room};
+use crate::seat::Opening;
+use crate::{door, mentions, name, owed, seat};
 
-const HEADERS: [&str; 3] = ["room", "members", "owed"];
+const HEADERS: [&str; 4] = ["room", "purpose", "members", "owed"];
 
 /// What a session with no rooms in it is told, which is also where a person
-/// meets the holder's seat (ADR-0028) and the ear it can wear (ADR-0029).
-const NONE: &str = "no rooms here; `/room <name> [member…]` opens one — name \
-`parent` among the members to read the room yourself, and to owe an answer to a \
-post that says `@parent`. A member reads the room at the head of its next turn: \
-a bare `name` is woken when a post says `@name`, and once when the room has \
-stood unread for 300s. Write `name:120` to say how long it may stand instead, \
-or `name:0` for a seat every post wakes as it lands";
+/// meets the holder's seat (ADR-0028), the ear it can wear (ADR-0029) and the
+/// word that ends a room (ADR-0053 §4).
+const NONE: &str = "no rooms here; `/room <name> [member…]` opens one and \
+`/room close <name>` ends one — name `parent` among the members to read the room \
+yourself, and to owe an answer to a post that says `@parent`. A member reads the \
+room at the head of its next turn: a bare `name` is woken when a post says \
+`@name`, and once when the room has stood unread for 300s. Write `name:120` to \
+say how long it may stand instead, or `name:0` for a seat every post wakes as it \
+lands";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RoomCommand;
@@ -33,7 +37,7 @@ impl Command for RoomCommand {
             aliases: Vec::new(),
             hint: "the rooms under this session, or open one".into(),
             args: ArgSpec::Free {
-                hint: "[<name> [member…]]".into(),
+                hint: "[<name> [member…] | close <name>]".into(),
             },
             // Opening a room touches nothing a running turn is using.
             instant: true,
@@ -43,20 +47,45 @@ impl Command for RoomCommand {
 
     async fn run(&self, args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
         let mut words = args.split_whitespace();
-        let Some(name) = words.next() else {
+        let Some(word) = words.next() else {
             return list(cx).await;
         };
+        if name::same(word, name::CLOSE) {
+            return ended(cx, words.next()).await;
+        }
         let seats: Vec<Seat> = words.map(Seat::read).collect::<Result<_, _>>()?;
-        seat::seat(&cx.host, &cx.session, &cx.cwd, name, &seats).await?;
+        let opening = Opening::person(word, None);
+        seat::seat(&cx.host, &cx.session, &cx.cwd, opening, &seats).await?;
         Ok(CommandOutcome::Applied {
-            message: Some(seat::receipt(&name::title(name), &seats)),
+            message: Some(seat::receipt(&name::title(word), &seats)),
         })
     }
 }
 
+/// `/room close <name>`: the person's spelling of `CloseRoom` (ADR-0053 §4).
+/// A person closes a room of their own; the rooms further down the tree are
+/// closed by whoever holds or opened them.
+async fn ended(cx: &CommandContext, name: Option<&str>) -> Result<CommandOutcome, KernelError> {
+    let Some(name) = name else {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            format!("`/room {} <name>` needs the room to close", name::CLOSE),
+        ));
+    };
+    let title = name::title(name::check(name)?);
+    let rooms = room::under(&cx.host, &cx.session).await?;
+    let Some((id, room)) = rooms.iter().find(|(_, room)| room.title == title).cloned() else {
+        return Err(door::unreachable(&title, &rooms));
+    };
+    seat::close(&cx.host, &id, &room, name::PARENT, None).await?;
+    Ok(CommandOutcome::Applied {
+        message: Some(format!("{title}: {CLOSED}")),
+    })
+}
+
 /// Every room under this session, and who is in each.
 async fn list(cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
-    let rooms = under(&cx.host, &cx.session).await?;
+    let rooms = room::under(&cx.host, &cx.session).await?;
     if rooms.is_empty() {
         return Ok(CommandOutcome::View {
             view: View::Text { text: NONE.into() },
@@ -65,18 +94,7 @@ async fn list(cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
     let now = Timestamp::now();
     let mut rows = Vec::with_capacity(rooms.len());
     for (id, room) in rooms {
-        let read = room::read(&cx.host, &id).await;
-        let seats = read.as_ref().map(room::roster_of).unwrap_or_default();
-        let open = read.as_ref().map(mentions::of_state).unwrap_or_default();
-        rows.push(vec![
-            room.title,
-            seats
-                .iter()
-                .map(Seat::said)
-                .collect::<Vec<String>>()
-                .join(", "),
-            owed::column(&open, now),
-        ]);
+        rows.push(row(&cx.host, &id, &room, now).await);
     }
     Ok(CommandOutcome::View {
         view: View::Table {
@@ -86,21 +104,33 @@ async fn list(cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
     })
 }
 
-/// The rooms a session holds, as the host lists its children.
-async fn under(
-    host: &HostHandle,
-    session: &SessionId,
-) -> Result<Vec<(SessionId, Room)>, KernelError> {
-    let children = host
-        .sessions(SessionFilter {
-            parent: Some(session.clone()),
-            ..SessionFilter::default()
-        })
-        .await?;
-    Ok(children
-        .into_iter()
-        .filter_map(|child| Room::of(&child).map(|room| (child.id, room)))
-        .collect())
+/// One room's line: what it is for, who is in it, and what it owes — all four
+/// read off the one snapshot, so no column can disagree with another. A room
+/// that has ended seats nobody any more and owes nothing (ADR-0053 §4), so the
+/// column that would name its members says that instead.
+async fn row(host: &HostHandle, id: &SessionId, room: &Room, now: Timestamp) -> Vec<String> {
+    let read = room::read(host, id).await;
+    let purpose = read.as_ref().and_then(room::purpose_of).unwrap_or_default();
+    if read.as_ref().is_some_and(room::closed_of) {
+        return vec![
+            room.title.clone(),
+            purpose,
+            CLOSED.to_string(),
+            String::new(),
+        ];
+    }
+    let seats = read.as_ref().map(room::roster_of).unwrap_or_default();
+    let open = read.as_ref().map(mentions::of_state).unwrap_or_default();
+    vec![
+        room.title.clone(),
+        purpose,
+        seats
+            .iter()
+            .map(Seat::said)
+            .collect::<Vec<String>>()
+            .join(", "),
+        owed::column(&open, now),
+    ]
 }
 
 #[cfg(test)]
@@ -159,7 +189,7 @@ mod tests {
         assert_eq!(headers, HEADERS);
         assert_eq!(
             rows,
-            [["#design", "reviewer", ""], ["#standup", "", ""]],
+            [["#design", "", "reviewer", ""], ["#standup", "", "", ""]],
             "a room nobody has asked anything in owes nothing"
         );
     }
@@ -180,7 +210,7 @@ mod tests {
         else {
             panic!("a roster is a table");
         };
-        assert_eq!(rows[0][2], "scout 2m");
+        assert_eq!(rows[0][3], "scout 2m");
     }
 
     #[tokio::test]
@@ -230,7 +260,7 @@ mod tests {
         else {
             panic!("a roster is a table");
         };
-        assert_eq!(rows[0][1], "scout, parent:120");
+        assert_eq!(rows[0][2], "scout, parent:120");
     }
 
     #[tokio::test]
@@ -253,11 +283,100 @@ mod tests {
     /// what the number beside a name does (ADR-0029 §2, ADR-0034 §6).
     #[test]
     fn the_listing_says_what_seating_the_holder_gets_you() {
+        assert!(NONE.contains("`/room close <name>` ends one"), "{NONE}");
         assert!(NONE.contains("`parent` among the members"), "{NONE}");
         assert!(NONE.contains("`@parent`"), "{NONE}");
         assert!(NONE.contains("stood unread for 300s"), "{NONE}");
         assert!(NONE.contains("`name:120`"), "{NONE}");
         assert!(NONE.contains("`name:0`"), "{NONE}");
+    }
+
+    /// ADR-0053 §1: a room a person opens may have a purpose, and the listing
+    /// is where they read it back.
+    #[tokio::test]
+    async fn the_listing_says_what_each_room_is_for() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        fleet.child(&root, "scout");
+        seat::seat(
+            &fleet.handle(),
+            &root,
+            std::path::Path::new("/work/project"),
+            Opening::person("design", Some("settle the storage layout")),
+            &[Seat::live("scout")],
+        )
+        .await
+        .expect("a room this crate can open");
+
+        let CommandOutcome::View {
+            view: View::Table { rows, .. },
+        } = typed(&fleet, &root, "").await
+        else {
+            panic!("a roster is a table");
+        };
+        assert_eq!(
+            rows,
+            [["#design", "settle the storage layout", "scout:0", ""]]
+        );
+    }
+
+    /// ADR-0053 §4: `/room close <name>` is the person's spelling of the verb.
+    /// The room ends, the listing says so, and nothing is reopened under it.
+    #[tokio::test]
+    async fn closing_a_room_ends_it_and_the_listing_says_so() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        typed(&fleet, &root, "design scout").await;
+        assert_eq!(
+            typed(&fleet, &root, "close design").await,
+            CommandOutcome::Applied {
+                message: Some("#design: closed".into())
+            }
+        );
+
+        let room = fleet.titled("#design").expect("the room");
+        assert!(crate::room::closed_of(&fleet.state(&room)));
+        let CommandOutcome::View {
+            view: View::Table { rows, .. },
+        } = typed(&fleet, &root, "").await
+        else {
+            panic!("a roster is a table");
+        };
+        assert_eq!(
+            rows,
+            [["#design", "", "closed", ""]],
+            "a closed room seats nobody and owes nothing"
+        );
+
+        let error = RoomCommand
+            .run("design scout", &command_context(&root, &fleet))
+            .await
+            .expect_err("a closed name is not reopened");
+        assert!(error.message.contains("#design is closed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn closing_needs_a_name_and_a_room_that_is_there() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        typed(&fleet, &root, "design").await;
+
+        let bare = RoomCommand
+            .run("close", &command_context(&root, &fleet))
+            .await
+            .expect_err("close what?");
+        assert_eq!(bare.code, bingo_sdk::ErrorCode::InvalidInput);
+        assert!(bare.message.contains("`/room close <name>`"), "{bare}");
+
+        let missing = RoomCommand
+            .run("close standup", &command_context(&root, &fleet))
+            .await
+            .expect_err("no such room");
+        assert!(
+            missing.message.contains("no #standup you can reach"),
+            "{missing}"
+        );
+        assert!(missing.message.contains("#design"), "{missing}");
     }
 
     #[tokio::test]

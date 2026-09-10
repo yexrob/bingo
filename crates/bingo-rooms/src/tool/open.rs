@@ -1,29 +1,38 @@
 //! `OpenRoom`: the door `/room` is, with an agent on the other side of it
-//! (ADR-0021). A room is opened through the same `seat::seat` a person's
-//! `/room` calls — same name rules, same reset of a room that already stands,
-//! same membership frame — and the only question this tool adds is which
-//! session it hangs under, which is the question of who will hear it.
+//! (ADR-0021). A room is opened through `seat::open` — same name rules, same
+//! membership frame — and this tool adds two questions: which session it hangs
+//! under, which is the question of who will hear it, and what it is for, which
+//! is the question of what belongs in it (ADR-0053 §1).
+//!
+//! A name that already stands is refused here, and the refusal names the verb
+//! that does what was meant: a room is opened once, for one purpose, and a new
+//! phase of the work is a new room.
 
 use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ErrorCode, HostHandle, KernelError, SessionFilter, SessionId, SessionSummary, Subject, Tone,
-    Tool, ToolContext, ToolError, ToolOutput, ToolSpec, TreeNode, View, input_schema,
+    KernelError, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::{refused, seated};
 use crate::ear::{self, Listener, Seat};
 use crate::placement::{self, Placement};
-use crate::{name, seat};
+use crate::seat::Opening;
+use crate::{door, name, seat};
 
 pub const OPEN_ROOM: &str = "OpenRoom";
 
 const DESCRIPTION: &str = "\
 Open a room — a conversation whose every member reads what is posted into it — \
-and say who is in it. Post into it afterwards with `SendMessage` to `#name`. \
+for one purpose, and say who is in it. The purpose is what the room is for: \
+every member reads it at the head of every reading, and when the work moves on \
+you open another room rather than reseating this one. A name that already \
+stands is refused — `Seat` and `Unseat` change who is in a room that stands, \
+`CloseRoom` ends it. Post into it with `SendMessage` to `#name`. \
 By default the room hangs under you, so the agents you started are the ones \
 who read it; with `shared: true` it hangs under the agent that started you \
 instead, so your peers read it. Members are names, not sessions: a name \
@@ -33,14 +42,16 @@ stood unread for 300 seconds. \
 Name it in `listeners` with `patience_s` to say how long it may stand instead, \
 or `patience_s: 0` for a seat every post wakes as it lands. Name `parent` among \
 the members to read the room yourself, and to owe an answer to a post that says \
-`@parent`. Opening a room that already stands replaces who is in it rather than \
-opening a second one.";
+`@parent`.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenRoomArgs {
     /// What to call it: one word, no slashes. Members are told a post came
     /// from `#name`.
     pub name: String,
+    /// The one thing the room is for, in a sentence. Every member reads it
+    /// above everything the room says; work of another kind is another room.
+    pub purpose: String,
     /// Who is in it, by name — the names `SpawnAgent` gave back, or the roles
     /// of the team. Nobody, by default.
     pub members: Option<Vec<String>>,
@@ -84,19 +95,6 @@ fn card(name: &str, placement: Placement, seats: &[Seat]) -> String {
     )
 }
 
-/// The room the call left, as a person reads it (ADR-0013, the block lane):
-/// the room, and the seats it now has under it.
-fn seated(title: &str, seats: &[Seat]) -> View {
-    View::Tree {
-        nodes: vec![TreeNode {
-            label: title.to_string(),
-            badge: None,
-            tone: Tone::Neutral,
-            children: ear::nodes(seats),
-        }],
-    }
-}
-
 /// Opening a room in a tree: the session it hangs under is the audience, so
 /// this tool's traits are the fail-closed defaults and its card says where.
 #[derive(Debug, Default, Clone, Copy)]
@@ -124,37 +122,23 @@ impl Tool for OpenRoomTool {
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let args: OpenRoomArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let name = name::check(&args.name).map_err(refused)?;
         let seats = args.seats().map_err(refused)?;
-        let caller = own(&cx.host, &cx.session).await.map_err(refused)?;
+        let caller = door::own(&cx.host, &cx.session).await.map_err(refused)?;
         let parent = placement::under(&caller, args.placement()).map_err(refused)?;
-        seat::seat(&cx.host, &parent, &cx.cwd, name, &seats)
+        let by = name::signed_by(&caller);
+        let opening = Opening {
+            name: &args.name,
+            purpose: Some(&args.purpose),
+            by: &by,
+        };
+        seat::open(&cx.host, &parent, &cx.cwd, opening, &seats)
             .await
             .map_err(refused)?;
-        let title = name::title(name);
+        let title = name::title(args.name.trim());
         let mut out = ToolOutput::text(seat::receipt(&title, &seats));
         out.display = Some(seated(&title, &seats));
         Ok(out)
     }
-}
-
-/// A refusal in the terms the model can act on: an input it can correct, or a
-/// host that failed under it.
-fn refused(error: KernelError) -> ToolError {
-    match error.code {
-        ErrorCode::InvalidInput => ToolError::InvalidInput(error.message),
-        _ => ToolError::Failed(error.message),
-    }
-}
-
-/// The caller's own summary, for the parent it hangs under. There is no filter
-/// for one id, so this is the list the host has, read once.
-async fn own(host: &HostHandle, session: &SessionId) -> Result<SessionSummary, KernelError> {
-    host.sessions(SessionFilter::default())
-        .await?
-        .into_iter()
-        .find(|summary| &summary.id == session)
-        .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, "no such session"))
 }
 
 #[cfg(test)]
@@ -163,7 +147,10 @@ mod tests {
     use crate::post;
     use crate::room::Room;
     use crate::tests::{Fleet, tool_context};
-    use bingo_sdk::{Command as _, CommandOutcome, Driver, ParentLink, ToolTraits, View};
+    use bingo_sdk::{
+        Command as _, CommandOutcome, Driver, ParentLink, SessionId, Tone, ToolTraits, TreeNode,
+        View,
+    };
     use serde_json::json;
 
     /// A root, the agent it started, and that agent's own worker: three
@@ -176,12 +163,23 @@ mod tests {
         (fleet, root, reviewer, helper)
     }
 
+    /// A call, with the purpose every room is opened for filled in where the
+    /// test is not about the purpose itself.
     async fn opened(
         fleet: &Fleet,
         caller: &SessionId,
         input: Value,
     ) -> Result<ToolOutput, ToolError> {
-        OpenRoomTool.call(input, &tool_context(caller, fleet)).await
+        OpenRoomTool
+            .call(for_something(input), &tool_context(caller, fleet))
+            .await
+    }
+
+    fn for_something(mut input: Value) -> Value {
+        if input.get("purpose").is_none() {
+            input["purpose"] = json!("settle the storage layout");
+        }
+        input
     }
 
     fn node(label: &str, badge: Option<&str>, children: Vec<TreeNode>) -> TreeNode {
@@ -230,6 +228,48 @@ mod tests {
         let delivered = fleet.delivered();
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert_eq!(delivered[0].0, helper, "the worker the caller started");
+    }
+
+    /// ADR-0053 §1: the room's journal says what it is for, and the name that
+    /// opened it — the caller's own, which is what the roster verbs check.
+    #[tokio::test]
+    async fn a_room_says_what_it_was_opened_for_and_who_opened_it() {
+        let (fleet, _, reviewer, _) = tree();
+        opened(
+            &fleet,
+            &reviewer,
+            json!({"name": "design", "purpose": "settle the storage layout"}),
+        )
+        .await
+        .expect("a room");
+
+        let (id, room) = room_of(&fleet, "#design");
+        let state = fleet.state(&id);
+        assert_eq!(
+            room.seated(&state).purpose.as_deref(),
+            Some("settle the storage layout")
+        );
+        assert_eq!(
+            crate::room::Opened::of_state(&state).map(|opened| opened.by),
+            Some("reviewer".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_that_says_no_purpose_is_refused_with_the_schema() {
+        let (fleet, _, reviewer, _) = tree();
+        let error = OpenRoomTool
+            .call(
+                json!({"name": "design", "members": ["helper"]}),
+                &tool_context(&reviewer, &fleet),
+            )
+            .await
+            .expect_err("a room is opened for one purpose");
+        assert!(
+            matches!(error, ToolError::InvalidInput(_)),
+            "the input it can correct: {error:?}"
+        );
+        assert!(fleet.created().is_empty(), "nothing was opened");
     }
 
     #[tokio::test]
@@ -288,7 +328,11 @@ mod tests {
         else {
             panic!("a roster is a table");
         };
-        assert_eq!(rows, [["#design", "helper", ""]], "a new room owes nothing");
+        assert_eq!(
+            rows,
+            [["#design", "settle the storage layout", "helper", ""]],
+            "a new room owes nothing"
+        );
     }
 
     #[tokio::test]
@@ -305,10 +349,11 @@ mod tests {
         assert!(fleet.created().is_empty(), "nothing was opened");
     }
 
-    /// The same room twice is one room whose membership is replaced — `/room`'s
-    /// own rule, reached through the tool (ADR-0021 §3).
+    /// ADR-0053 §2: the name of a room that stands is not reopened here. The
+    /// refusal carries what the room is for, who is in it, and the verb that
+    /// does what the caller meant.
     #[tokio::test]
-    async fn a_standing_room_is_reset_not_opened_twice() {
+    async fn a_standing_name_is_refused_and_the_room_is_left_alone() {
         let (fleet, _, reviewer, _) = tree();
         opened(
             &fleet,
@@ -317,23 +362,40 @@ mod tests {
         )
         .await
         .expect("a room");
-        opened(
+        let error = opened(
             &fleet,
             &reviewer,
             json!({ "name": "design", "members": ["scout"] }),
         )
         .await
-        .expect("the same room");
+        .expect_err("the same name again");
 
+        let ToolError::InvalidInput(message) = error else {
+            panic!("the wrong kind of refusal: {error:?}");
+        };
+        for said in [
+            "#design already stands",
+            "settle the storage layout",
+            "helper, scout",
+            "`Seat`",
+            "`Unseat`",
+            "`CloseRoom`",
+        ] {
+            assert!(message.contains(said), "{said} is unsaid: {message}");
+        }
         assert_eq!(fleet.created().len(), 1, "the second call opened nothing");
         let id = fleet.titled("#design").expect("the one room");
-        assert_eq!(fleet.members(&id), ["scout"], "the membership is replaced");
+        assert_eq!(
+            fleet.members(&id),
+            ["helper", "scout"],
+            "and reseated nobody"
+        );
     }
 
     #[tokio::test]
     async fn a_name_that_is_not_one_is_refused_by_the_same_rule_room_uses() {
         let (fleet, _, reviewer, _) = tree();
-        for bad in ["two words", "de/sign", "  "] {
+        for bad in ["two words", "de/sign", "  ", "close"] {
             let error = opened(&fleet, &reviewer, json!({ "name": bad }))
                 .await
                 .expect_err("a room name is one word, no slashes");
@@ -445,21 +507,23 @@ mod tests {
     /// "always" answer installs, so it is asserted whole.
     #[test]
     fn the_card_names_the_room_the_members_and_where_it_will_hang() {
-        let shared = json!({ "name": "design", "members": ["reviewer", "scout"], "shared": true });
+        let shared = for_something(
+            json!({ "name": "design", "members": ["reviewer", "scout"], "shared": true }),
+        );
         assert_eq!(
             OpenRoomTool.subjects(&shared, Path::new("/work")),
             [Subject::Name {
                 name: "#design under the caller's parent with reviewer, scout".into()
             }]
         );
-        let own = json!({ "name": "design", "members": ["helper"] });
+        let own = for_something(json!({ "name": "design", "members": ["helper"] }));
         assert_eq!(
             OpenRoomTool.subjects(&own, Path::new("/work")),
             [Subject::Name {
                 name: "#design under the caller with helper".into()
             }]
         );
-        let empty = json!({ "name": "design" });
+        let empty = for_something(json!({ "name": "design" }));
         assert_eq!(
             OpenRoomTool.subjects(&empty, Path::new("/work")),
             [Subject::Name {
@@ -475,6 +539,12 @@ mod tests {
             OpenRoomTool
                 .subjects(&json!({ "members": [] }), Path::new("/work"))
                 .is_empty()
+        );
+        assert!(
+            OpenRoomTool
+                .subjects(&json!({ "name": "design" }), Path::new("/work"))
+                .is_empty(),
+            "a call with no purpose is a call that will be refused"
         );
     }
 
@@ -533,8 +603,8 @@ mod tests {
         assert!(fleet.created().is_empty(), "nothing was opened");
     }
 
-    /// Where a model meets ADR-0028 and ADR-0034 §6: the pattern and the
-    /// default are in the tool\'s own words.
+    /// Where a model meets ADR-0028, ADR-0034 §6 and ADR-0053 §1–2: the
+    /// pattern, the default and the four verbs are in the tool's own words.
     #[test]
     fn the_description_says_what_naming_the_holder_gets_you() {
         assert!(
@@ -559,11 +629,29 @@ mod tests {
         );
     }
 
+    /// The rule ADR-0053 was written for, in the words the model reads before
+    /// it calls: one purpose, one room, and the verb for everything else.
     #[test]
-    fn the_spec_asks_for_a_name_and_leaves_the_rest_optional() {
+    fn the_description_says_a_room_is_opened_once_for_one_purpose() {
+        for said in [
+            "for one purpose",
+            "open another room rather than reseating this one",
+            "A name that already stands is refused",
+            "`Seat` and `Unseat`",
+            "`CloseRoom` ends it",
+        ] {
+            assert!(
+                DESCRIPTION.contains(said),
+                "{said} is unsaid: {DESCRIPTION}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_spec_asks_for_a_name_and_a_purpose_and_leaves_the_rest_optional() {
         let spec = OpenRoomTool.spec();
         assert_eq!(spec.name, OPEN_ROOM);
-        assert_eq!(spec.input_schema["required"], json!(["name"]));
+        assert_eq!(spec.input_schema["required"], json!(["name", "purpose"]));
         let properties = &spec.input_schema["properties"];
         assert!(properties["members"].is_object(), "{properties}");
         assert!(properties["listeners"].is_object(), "{properties}");

@@ -32,17 +32,32 @@ pub fn signed_by(seat: &bingo_sdk::SessionSummary) -> String {
     }
 }
 
+/// The word a person's door spends on ending a room (ADR-0053 §4). It is a
+/// name no room may take, because `/room close design` has to mean the end of
+/// `#design` rather than a room called `close` seating a member called
+/// `design`.
+pub const CLOSE: &str = "close";
+
 /// A name a room can be opened under.
 pub fn check(name: &str) -> Result<&str, KernelError> {
     let name = name.trim();
     let bad = name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace);
-    match bad {
-        true => Err(KernelError::new(
+    if bad {
+        return Err(KernelError::new(
             ErrorCode::InvalidInput,
             format!("{name:?} is not a room name: one word, no slashes"),
-        )),
-        false => Ok(name),
+        ));
     }
+    if same(name, CLOSE) {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            format!(
+                "{CLOSE:?} is the word that ends a room — `/room {CLOSE} <name>` — so no room \
+                 is called it; pick another name"
+            ),
+        ));
+    }
+    Ok(name)
 }
 
 /// The name as a title. A room reads as a channel, and `#design` is how a
@@ -63,6 +78,17 @@ mod tests {
         }
         let error = check("a/b").expect_err("a slash makes the key ambiguous");
         assert_eq!(error.code, ErrorCode::InvalidInput);
+    }
+
+    /// The one word a room may not be called, in any case (ADR-0053 §4).
+    #[test]
+    fn the_word_that_ends_a_room_is_not_a_room_name() {
+        for spelled in ["close", "Close", " close "] {
+            let error = check(spelled).expect_err("the word that ends a room");
+            assert_eq!(error.code, ErrorCode::InvalidInput);
+            assert!(error.message.contains("`/room close <name>`"), "{error}");
+        }
+        assert_eq!(check("closed"), Ok("closed"), "a name of its own");
     }
 
     #[test]
