@@ -1440,6 +1440,13 @@
         "data": {
           "type": "string",
           "description": "Base64 payload."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where the same bytes are on this machine, when they are anywhere: a\npicture read off a disk, or one a surface wrote before handing it on\n(ADR-0052). A location, not a second copy — absent from the wire and\nthe journal when there is none, so a picture without one is the\nbytes it always was."
         }
       },
       "required": [
