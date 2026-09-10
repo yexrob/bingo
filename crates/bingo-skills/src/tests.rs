@@ -2,16 +2,17 @@
 //! three contexts the sdk hands a command, a tool and a contributor.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogKind, ClientIdentity,
-    CloseReason, CommandContext, ContextQuery, ContextUsage, Delivery, Env, GatewayStream, HostApi,
-    HostHandle, Input, IntentId, InteractionKind, Item, ItemBody, ItemId, KernelError,
-    ModelCapabilities, OpenOptions, Prompter, SessionFilter, SessionId, SessionSelector,
-    SessionSummary, ToolContext, ToolHost, TurnId, Usage,
+    Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogEntry, CatalogKind,
+    ClientIdentity, CloseReason, CommandContext, ContextQuery, ContextUsage, Delivery, Env,
+    GatewayStream, HostApi, HostHandle, Input, IntentId, InteractionKind, Item, ItemBody, ItemId,
+    KernelError, ModelCapabilities, OpenOptions, Page, Pages, Prompter, SessionFilter, SessionId,
+    SessionSelector, SessionSummary, ToolContext, ToolHost, TurnId, Usage,
 };
 use jiff::Timestamp;
 
@@ -69,12 +70,43 @@ impl Tree {
     }
 }
 
+/// Two pages under one plugin's key, for a test that only needs a plugin to
+/// have written something.
+pub(crate) static PAGES: Pages = Pages(&[
+    Page {
+        name: "first",
+        description: "The first page.",
+        body: "# First\n",
+    },
+    Page {
+        name: "second",
+        description: "The second page.",
+        body: "# Second\n",
+    },
+]);
+
+/// A host that is nothing but its loaded plugins and what each of them wrote
+/// about itself: the two doors a page travels through (ADR-0054 §1).
+pub(crate) fn host_with_pages(written: &[(&str, Pages)]) -> HostHandle {
+    HostHandle(Arc::new(PluginHost {
+        plugins: written.iter().map(|(id, _)| (*id).to_string()).collect(),
+        pages: written
+            .iter()
+            .map(|(id, pages)| (Pages::key(id), Arc::new(*pages)))
+            .collect(),
+    }))
+}
+
 /// A command context reads its session, its directory and a host; a skill
-/// command asks the host nothing, so every answer here would be a bug.
-struct UnusedHost;
+/// command asks the host for the pages and nothing else, so every other answer
+/// here would be a bug.
+struct PluginHost {
+    plugins: Vec<String>,
+    pages: HashMap<String, Arc<Pages>>,
+}
 
 #[async_trait]
-impl HostApi for UnusedHost {
+impl HostApi for PluginHost {
     async fn sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
         unreachable!("a skill reads no session list")
     }
@@ -126,16 +158,30 @@ impl HostApi for UnusedHost {
         unreachable!("this double signals nothing")
     }
 
-    async fn catalog(&self, _kind: CatalogKind) -> Result<Catalog, KernelError> {
-        unreachable!("a skill reads no catalog")
+    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+        assert_eq!(kind, CatalogKind::Plugins, "a skill reads no other catalog");
+        Ok(Catalog {
+            kind,
+            entries: self
+                .plugins
+                .iter()
+                .map(|id| CatalogEntry {
+                    id: id.clone(),
+                    label: id.clone(),
+                    meta: serde_json::Value::Null,
+                })
+                .collect(),
+        })
     }
 
     fn gateway_events(&self) -> GatewayStream {
         unreachable!("a skill watches no gateway")
     }
 
-    fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        None
+    fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.pages
+            .get(key)
+            .map(|pages| Arc::clone(pages) as Arc<dyn Any + Send + Sync>)
     }
 }
 
@@ -143,7 +189,7 @@ pub(crate) fn command_context() -> CommandContext {
     CommandContext {
         session: SessionId::from_raw("ses_test"),
         cwd: PathBuf::from("/work/project"),
-        host: HostHandle(Arc::new(UnusedHost)),
+        host: host_with_pages(&[]),
     }
 }
 
@@ -179,7 +225,7 @@ pub(crate) fn tool_context(cwd: &Path) -> ToolContext {
         cwd: cwd.to_path_buf(),
         cancel: CancellationToken::new(),
         env: Arc::new(Env::rooted("/nowhere")),
-        host: bingo_sdk::testing::NoHost::handle(),
+        host: host_with_pages(&[]),
         call: Arc::new(NullHost),
     }
 }
@@ -231,7 +277,7 @@ pub(crate) fn asked(cwd: &Path) -> Asked {
             caching: false,
         },
         cwd: cwd.to_path_buf(),
-        host: bingo_sdk::testing::NoHost::handle(),
+        host: host_with_pages(&[]),
     }
 }
 

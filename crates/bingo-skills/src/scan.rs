@@ -20,16 +20,17 @@ pub struct Scan {
     pub watched: Vec<PathBuf>,
 }
 
-/// Every layer in order, then the bundled skills. The first skill of a name
-/// wins: the person's own overrides the project's, a nearer directory
-/// overrides a farther one, and any of them overrides a bundled skill.
-pub fn layers(dirs: &[PathBuf]) -> Scan {
+/// Every layer in order, then the bundled skills, then the pages the plugins
+/// wrote. The first skill of a name wins: the person's own overrides the
+/// project's, a nearer directory overrides a farther one, and any of them
+/// overrides a bundled skill or a page.
+pub fn layers(dirs: &[PathBuf], pages: &[Skill]) -> Scan {
     let mut scan = Scan::default();
     for dir in dirs {
         scan.read(dir);
     }
     scan.dedupe();
-    scan.append_bundled();
+    scan.append_bundled(pages);
     scan
 }
 
@@ -70,10 +71,18 @@ impl Scan {
         self.skills.retain(|skill| seen.insert(skill.name.clone()));
     }
 
-    /// What the binary ships, for every name no directory claimed.
-    fn append_bundled(&mut self) {
+    /// What the binary ships — its own skills, then the pages — for every name
+    /// no directory claimed. The map is written here because it ends in the
+    /// list of pages found (ADR-0054 §3).
+    fn append_bundled(&mut self, pages: &[Skill]) {
+        self.extend_unclaimed(bundled::skills(pages));
+        self.extend_unclaimed(pages.to_vec());
+    }
+
+    /// Every one of these whose name nothing above has taken.
+    fn extend_unclaimed(&mut self, skills: Vec<Skill>) {
         let taken: HashSet<&str> = self.skills.iter().map(|s| s.name.as_str()).collect();
-        let spare: Vec<Skill> = bundled::skills()
+        let spare: Vec<Skill> = skills
             .into_iter()
             .filter(|skill| !taken.contains(skill.name.as_str()))
             .collect();
@@ -88,7 +97,7 @@ mod tests {
 
     #[test]
     fn an_empty_machine_still_has_the_bundled_guide() {
-        let scan = layers(&[]);
+        let scan = layers(&[], &[]);
         assert_eq!(names(&scan), ["guide"]);
     }
 
@@ -98,7 +107,7 @@ mod tests {
         let layer = tree.dir("layer");
         tree.skill(&layer, "zebra", "---\ndescription: z\n---\nz\n");
         tree.skill(&layer, "alpha", "---\ndescription: a\n---\na\n");
-        let scan = layers(&[layer]);
+        let scan = layers(&[layer], &[]);
         assert_eq!(names(&scan), ["alpha", "zebra", "guide"]);
     }
 
@@ -109,7 +118,7 @@ mod tests {
         let far = tree.dir("far");
         tree.skill(&near, "deploy", "---\ndescription: the near one\n---\nn\n");
         tree.skill(&far, "deploy", "---\ndescription: the far one\n---\nf\n");
-        let scan = layers(&[near, far]);
+        let scan = layers(&[near, far], &[]);
         assert_eq!(names(&scan), ["deploy", "guide"]);
         assert_eq!(scan.skills[0].description, "the near one");
     }
@@ -119,7 +128,7 @@ mod tests {
         let tree = Tree::new();
         let layer = tree.dir("layer");
         tree.skill(&layer, "guide", "---\ndescription: mine\n---\nmine\n");
-        let scan = layers(&[layer]);
+        let scan = layers(&[layer], &[]);
         assert_eq!(names(&scan), ["guide"]);
         assert_eq!(scan.skills[0].description, "mine");
     }
@@ -130,7 +139,7 @@ mod tests {
         let layer = tree.dir("layer");
         tree.dir("layer/empty");
         tree.skill(&layer, "real", "body\n");
-        let scan = layers(&[layer]);
+        let scan = layers(&[layer], &[]);
         assert_eq!(names(&scan), ["real", "guide"]);
     }
 
@@ -138,7 +147,7 @@ mod tests {
     fn a_layer_that_is_not_there_is_read_as_nothing_and_still_watched() {
         let tree = Tree::new();
         let absent = tree.root().join("nowhere");
-        let scan = layers(std::slice::from_ref(&absent));
+        let scan = layers(std::slice::from_ref(&absent), &[]);
         assert_eq!(names(&scan), ["guide"]);
         assert!(
             scan.watched.contains(&absent),
@@ -160,7 +169,7 @@ mod tests {
         std::os::unix::fs::symlink(tree.root().join("gone"), layer.join("dangling"))
             .expect("a dangling symlink");
 
-        assert_eq!(names(&layers(&[layer])), ["linked", "guide"]);
+        assert_eq!(names(&layers(&[layer], &[])), ["linked", "guide"]);
     }
 
     #[test]
@@ -168,10 +177,35 @@ mod tests {
         let tree = Tree::new();
         let layer = tree.dir("layer");
         let skill = tree.skill(&layer, "one", "body\n");
-        let scan = layers(std::slice::from_ref(&layer));
+        let scan = layers(std::slice::from_ref(&layer), &[]);
         assert!(scan.watched.contains(&layer));
         assert!(scan.watched.contains(&skill));
         assert!(scan.watched.contains(&skill.join(SKILL_FILE)));
+    }
+
+    #[test]
+    fn a_page_a_plugin_wrote_is_a_skill_below_the_bundled_ones() {
+        let scan = layers(&[], &pages());
+        assert_eq!(names(&scan), ["guide", "guide-first", "guide-second"]);
+        assert_eq!(scan.skills[1].body, "# First\n");
+    }
+
+    #[test]
+    fn a_disk_skill_overrides_the_page_of_that_name() {
+        let tree = Tree::new();
+        let layer = tree.dir("layer");
+        tree.skill(&layer, "guide-first", "---\ndescription: mine\n---\nmine\n");
+        let scan = layers(&[layer], &pages());
+        assert_eq!(names(&scan), ["guide-first", "guide", "guide-second"]);
+        assert_eq!(scan.skills[0].description, "mine");
+    }
+
+    /// Two pages, as the library gathered them.
+    fn pages() -> Vec<Skill> {
+        vec![
+            Skill::page("guide-first", "The first page.", "# First\n"),
+            Skill::page("guide-second", "The second page.", "# Second\n"),
+        ]
     }
 
     fn names(scan: &Scan) -> Vec<&str> {

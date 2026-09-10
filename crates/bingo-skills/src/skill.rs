@@ -44,6 +44,22 @@ impl Skill {
             body: body.to_string(),
         }
     }
+
+    /// A page a plugin wrote about itself (ADR-0054 §2). There is no
+    /// frontmatter to read and no directory to be relative to, so neither is
+    /// invented: the name, the line and the body are all a page has.
+    pub fn page(name: &str, description: &str, body: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            argument_hint: None,
+            argument_names: Vec::new(),
+            allowed_tools: Vec::new(),
+            model: None,
+            dir: PathBuf::new(),
+            body: body.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +90,17 @@ mod tests {
         let skill = Skill::parse("empty", PathBuf::new(), "---\nname: empty\n---\n");
         assert_eq!(skill.description, "");
         assert_eq!(skill.body, "");
+    }
+
+    #[test]
+    fn a_page_carries_its_three_strings_and_invents_nothing() {
+        let page = Skill::page("guide-mcp", "What MCP is here.", "# MCP\n");
+        assert_eq!(page.name, "guide-mcp");
+        assert_eq!(page.description, "What MCP is here.");
+        assert_eq!(page.body, "# MCP\n");
+        assert!(page.dir.as_os_str().is_empty(), "a page is in the binary");
+        assert!(page.argument_hint.is_none());
+        assert!(page.argument_names.is_empty());
     }
 
     #[test]

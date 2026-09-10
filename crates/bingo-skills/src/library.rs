@@ -8,13 +8,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
-use bingo_sdk::Env;
+use bingo_sdk::{Env, HostHandle};
 
 use crate::skill::Skill;
-use crate::{layers, scan};
+use crate::{layers, pages, scan};
 
 /// What a path looked like when it was read. The length is there because a
 /// clock can be too coarse to notice a rewrite within its own tick.
@@ -31,6 +31,10 @@ struct Cached {
 pub struct Library {
     env: Env,
     cache: Mutex<HashMap<PathBuf, Cached>>,
+    /// The pages the loaded plugins wrote (ADR-0054 §2). Gathered once: the
+    /// set of plugins is fixed when the host has registered them, and a page
+    /// is a static string in the binary.
+    pages: OnceLock<Vec<Skill>>,
 }
 
 impl std::fmt::Debug for Cached {
@@ -46,7 +50,15 @@ impl Library {
         Self {
             env,
             cache: Mutex::new(HashMap::new()),
+            pages: OnceLock::new(),
         }
+    }
+
+    /// Read what every loaded plugin wrote about itself (ADR-0054 §2). Done
+    /// once, when the plugin starts: every plugin has registered by then, and
+    /// none arrives later — a page is a static string in this binary.
+    pub async fn read_pages(&self, host: &HostHandle) {
+        let _ = self.pages.set(pages::gather(host).await);
     }
 
     /// The skills a session working in `cwd` can run, most important first.
@@ -55,10 +67,16 @@ impl Library {
         if let Some(cached) = cache.get(cwd).filter(|cached| cached.is_current()) {
             return Arc::clone(&cached.skills);
         }
-        let fresh = Cached::of(scan::layers(&layers::dirs(&self.env, cwd)));
+        let fresh = Cached::of(scan::layers(&layers::dirs(&self.env, cwd), self.pages()));
         let skills = Arc::clone(&fresh.skills);
         cache.insert(cwd.to_path_buf(), fresh);
         skills
+    }
+
+    /// The pages read at start; none, in a process that never started this
+    /// plugin — a page is what the model may read, never what a turn needs.
+    fn pages(&self) -> &[Skill] {
+        self.pages.get().map_or(&[], Vec::as_slice)
     }
 }
 
@@ -188,6 +206,30 @@ mod tests {
 
         assert_eq!(names(&library.skills(&one)), ["here", "guide"]);
         assert_eq!(names(&library.skills(&two)), ["there", "guide"]);
+    }
+
+    #[tokio::test]
+    async fn the_pages_read_at_start_are_listed_below_the_bundled_guide() {
+        let tree = Tree::new();
+        let library = library(&tree);
+        library
+            .read_pages(&crate::tests::host_with_pages(&[(
+                "bingo.mcp",
+                crate::tests::PAGES,
+            )]))
+            .await;
+
+        assert_eq!(
+            names(&library.skills(&tree.cwd())),
+            ["guide", "guide-first", "guide-second"]
+        );
+    }
+
+    #[test]
+    fn a_library_nobody_started_still_answers_with_what_is_on_disk() {
+        let tree = Tree::new();
+        tree.user_skill("one", "body\n");
+        assert_eq!(names(&library(&tree).skills(&tree.cwd())), ["one", "guide"]);
     }
 
     fn names(skills: &[Skill]) -> Vec<&str> {

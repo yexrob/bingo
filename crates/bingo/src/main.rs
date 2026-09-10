@@ -701,7 +701,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(FsPlugin),
         Box::new(BashPlugin::default()),
         Box::new(WebPlugin),
-        Box::new(SkillsPlugin),
+        Box::new(SkillsPlugin::default()),
         Box::new(McpPlugin::default()),
         Box::new(PluginRpcPlugin::default()),
         Box::new(AgentsPlugin),
