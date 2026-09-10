@@ -50,14 +50,11 @@ fn seated(title: &str, seats: &[Seat]) -> View {
     block(title, None, seats)
 }
 
-/// A call that names nobody to seat or unseat is refused rather than run: an
-/// empty roster move reads exactly like one that worked.
-fn somebody(seats: Vec<Seat>, verb: &str) -> Result<Vec<Seat>, KernelError> {
-    match seats.is_empty() {
-        true => Err(KernelError::new(
-            ErrorCode::InvalidInput,
-            format!("name at least one member to {verb}"),
-        )),
-        false => Ok(seats),
-    }
+/// What a call that names nobody to seat or unseat is refused with: an empty
+/// roster move reads exactly like one that worked, so it is not run.
+fn nobody(verb: &str) -> KernelError {
+    KernelError::new(
+        ErrorCode::InvalidInput,
+        format!("name at least one member to {verb}"),
+    )
 }

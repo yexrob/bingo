@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{refused, seated, somebody};
+use super::{nobody, refused, seated};
 use crate::ear::{self, Listener, Seat};
 use crate::{door, name, seat};
 
@@ -45,13 +45,14 @@ impl SeatArgs {
     /// The seats it asks for, ears and all. A call that names nobody is
     /// refused: an empty roster move reads like one that worked.
     fn seats(&self) -> Result<Vec<Seat>, KernelError> {
-        somebody(
-            ear::seats(
-                &self.members.clone().unwrap_or_default(),
-                &self.listeners.clone().unwrap_or_default(),
-            )?,
-            "seat",
-        )
+        let seats = ear::seats(
+            &self.members.clone().unwrap_or_default(),
+            &self.listeners.clone().unwrap_or_default(),
+        )?;
+        match seats.is_empty() {
+            true => Err(nobody("seat")),
+            false => Ok(seats),
+        }
     }
 }
 

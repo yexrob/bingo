@@ -6,14 +6,13 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ErrorCode, KernelError, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec,
-    input_schema,
+    KernelError, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{refused, seated};
+use super::{nobody, refused, seated};
 use crate::{door, name, seat};
 
 pub const UNSEAT: &str = "Unseat";
@@ -39,10 +38,7 @@ impl UnseatArgs {
     /// roster move reads like one that worked.
     fn names(&self) -> Result<&[String], KernelError> {
         match self.members.is_empty() {
-            true => Err(KernelError::new(
-                ErrorCode::InvalidInput,
-                "name at least one member to unseat",
-            )),
+            true => Err(nobody("unseat")),
             false => Ok(&self.members),
         }
     }
