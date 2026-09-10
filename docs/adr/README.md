@@ -38,3 +38,4 @@ first record; 0036 §2 answered it before it was named).
 - [0052 — The picture is a file](0052-the-picture-is-a-file.md)
 - [0053 — A room has one purpose, and four verbs](0053-the-room-s-verbs.md)
 - [0054 — The plugin writes its own page](0054-the-plugin-writes-its-own-page.md)
+- [0055 — The context an agent holds is the agent's to measure](0055-the-context-an-agent-holds.md)
