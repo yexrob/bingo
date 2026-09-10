@@ -28,6 +28,7 @@ pub mod directory;
 pub mod error;
 pub mod feishu;
 pub mod gate;
+pub mod guide;
 pub mod host;
 pub mod limits;
 pub mod lock;
@@ -68,11 +69,15 @@ pub use runner::SURFACE_ID;
 pub use settings::{SETTING, Settings, from_flags, wanted};
 pub use tool::{SEND_FILE, SendFile, SendFileSource};
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.surface.channels",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["surface:channels", "tool:SendFile"],
+    provides: &[
+        "surface:channels",
+        "tool:SendFile",
+        "service:bingo.surface.channels.pages",
+    ],
     requires: &[],
     config: Some(ConfigClaim {
         // Two layers each naming an adapter both apply: a project may add a
@@ -111,6 +116,7 @@ impl Plugin for ChannelsPlugin {
         registrar.add(Contribution::Tools(
             Arc::new(SendFileSource::new(directory)) as Arc<dyn ToolSource>,
         ));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -164,7 +170,34 @@ mod plugin_tests {
             SurfaceKind::Concurrent,
             "a chat owns no terminal; it runs beside whatever does"
         );
-        assert_eq!(MANIFEST.provides, &["surface:channels", "tool:SendFile"]);
+        assert_eq!(
+            MANIFEST.provides,
+            &[
+                "surface:channels",
+                "tool:SendFile",
+                "service:bingo.surface.channels.pages",
+            ]
+        );
+        assert!(
+            MANIFEST
+                .provides
+                .contains(&format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)).as_str()),
+            "the page's key is spelled the one way (ADR-0054 §1)"
+        );
+    }
+
+    /// The page is registered whether or not a chat is: a person asking how
+    /// to configure one has not configured one yet.
+    #[test]
+    fn the_plugin_contributes_its_page_with_no_adapter_configured() {
+        let contributions = contributions(serde_json::json!({}));
+        match contributions.last().expect("a contribution") {
+            bingo_sdk::Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 
     #[tokio::test]
