@@ -118,7 +118,7 @@ fn root_of(out: &Output) -> SessionId {
 /// every response after it is the same word.
 const CONVENE: &str = r##"{"responses":[
     {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"reviewer","prompt":"convene the room","background":false}}}]},
-    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","members":["reviewer","scout"],"shared":true}}}]},
+    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","purpose":"convene the peers","members":["reviewer","scout"],"shared":true}}}]},
     {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"@scout stand-up in five"}}}]},
     {"steps":[{"text":"done"}]},
     {"steps":[{"text":"done"}]},
@@ -167,8 +167,9 @@ fn an_agent_opens_a_shared_room_and_its_peer_reads_the_post() {
     let read = readings(&scout);
     assert_eq!(
         read,
-        ["[#design, since you last read]\nreviewer: @scout stand-up in five"],
-        "the peer read the room once, under its own label and in the author\'s name"
+        ["[#design — convene the peers, since you last read]\nreviewer: @scout stand-up in five"],
+        "the peer read the room once, under its own label, what it is for, and \
+         in the author\'s name"
     );
     assert!(
         posts(&frames_at(&scout))
@@ -187,7 +188,7 @@ fn the_permission_card_names_the_room_its_members_and_where_it_will_hang() {
     let home = tempfile::tempdir().unwrap();
     let script = script(
         r#"{"responses":[
-            {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","members":["reviewer","scout"]}}}]},
+            {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","purpose":"convene the peers","members":["reviewer","scout"]}}}]},
             {"steps":[{"text":"it was not allowed"}]}
         ]}"#,
     );
@@ -220,7 +221,7 @@ fn a_root_asking_to_share_is_refused_in_words_and_opens_nothing() {
     let home = tempfile::tempdir().unwrap();
     let script = script(
         r#"{"responses":[
-            {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","shared":true}}}]},
+            {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","purpose":"convene the peers","shared":true}}}]},
             {"steps":[{"text":"no peers here"}]}
         ]}"#,
     );
@@ -242,6 +243,95 @@ fn a_root_asking_to_share_is_refused_in_words_and_opens_nothing() {
         session_dir(home.path(), &format!("rooms/{root}/design")).is_none(),
         "the refusal opened a room anyway"
     );
+}
+
+/// The session that opens `#design` twice under itself. The second call is the
+/// one M88 was written for: two of the members and a different subject, on a
+/// room that was already carrying another job.
+const TWICE: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","purpose":"settle the storage layout","members":["reviewer","scout"]}}}]},
+    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","purpose":"narrow the debate","members":["scout"]}}}]},
+    {"steps":[{"text":"it stands already"}]}
+]}"##;
+
+/// ADR-0053 §2 end to end: a standing name is not reopened. The second call is
+/// refused with what the room is for, who is in it and the verb that does what
+/// was meant — and the room it names is untouched: one session, one roster, the
+/// one it was opened with.
+#[test]
+fn an_agent_that_opens_a_standing_name_is_refused_and_the_room_is_untouched() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(TWICE);
+    let out = scripted_run(
+        home.path(),
+        &script,
+        &["--allowed-tools", "OpenRoom"],
+        "convene them",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let root = root_of(&out);
+
+    let refused = tool_result(&frames_of(&out), "OpenRoom");
+    assert!(refused.is_error, "the second call opened something");
+    let text = text_of(&refused);
+    for said in [
+        "#design already stands",
+        "settle the storage layout",
+        "reviewer, scout",
+        "`Seat`",
+        "`Unseat`",
+        "`CloseRoom`",
+    ] {
+        assert!(text.contains(said), "{said} is unsaid: {text}");
+    }
+
+    assert_eq!(room_dirs(home.path()).len(), 1, "one room of that name");
+    let room = journal(home.path(), &format!("rooms/{root}/design"));
+    assert_eq!(
+        rosters(&room),
+        [["reviewer", "scout"]],
+        "the roster it was opened with, and no second one"
+    );
+    assert_eq!(
+        purposes(&room),
+        ["settle the storage layout"],
+        "and the one purpose it was opened for"
+    );
+}
+
+/// The rosters a room's journal has taken, in order: `members` is published
+/// whole, so each of these is the whole of who was in it at that moment.
+fn rosters(frames: &[Frame]) -> Vec<Vec<String>> {
+    published(frames, "members")
+        .filter_map(|payload| {
+            Some(
+                payload["members"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_string))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// What the room says it was opened for (ADR-0053 §1).
+fn purposes(frames: &[Frame]) -> Vec<String> {
+    published(frames, "opened")
+        .filter_map(|payload| payload["purpose"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// This plugin's frames of one kind in a room's journal.
+fn published<'a>(frames: &'a [Frame], of: &'a str) -> impl Iterator<Item = serde_json::Value> + 'a {
+    frames.iter().filter_map(move |frame| match &frame.event {
+        Event::Extension {
+            plugin,
+            kind,
+            payload,
+        } if plugin == "bingo.rooms" && kind == of => Some(payload.clone()),
+        _ => None,
+    })
 }
 
 // ---- the holder on the roster (ADR-0028) -----------------------------------
@@ -312,13 +402,23 @@ fn root_dir(home: &Path) -> Option<PathBuf> {
 
 /// The room this project declares, whatever the root's id turned out to be.
 fn room_dir(home: &Path) -> Option<PathBuf> {
-    dirs(home).into_iter().find(|dir| {
-        summary_of(dir).is_some_and(|summary| {
-            summary["key"]
-                .as_str()
-                .is_some_and(|key| key.starts_with("rooms/"))
+    room_dirs(home).into_iter().next()
+}
+
+/// Every room session the run opened, however many that turned out to be.
+fn room_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut rooms: Vec<PathBuf> = dirs(home)
+        .into_iter()
+        .filter(|dir| {
+            summary_of(dir).is_some_and(|summary| {
+                summary["key"]
+                    .as_str()
+                    .is_some_and(|key| key.starts_with("rooms/"))
+            })
         })
-    })
+        .collect();
+    rooms.sort();
+    rooms
 }
 
 /// The turns a session ran, by how many started.
