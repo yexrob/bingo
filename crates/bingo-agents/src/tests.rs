@@ -15,7 +15,8 @@ use bingo_sdk::{
     HostHandle, Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody,
     ItemId, ItemStatus, KernelError, OpenOptions, ParentLink, Prompter, Seq, SessionChange,
     SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec,
-    SessionState, SessionSummary, ToolContext, ToolHost, TurnId, TurnOrigin, TurnStatus, Usage,
+    SessionState, SessionSummary, ToolContext, ToolHost, ToolOutput, TurnId, TurnOrigin,
+    TurnStatus, Usage,
 };
 use futures::StreamExt;
 use jiff::Timestamp;
@@ -220,6 +221,37 @@ impl Fleet {
     /// A post nobody signed came from the session the room hangs under.
     pub(crate) fn post(&self, room: &SessionId, text: &str, who: Option<&str>) {
         self.remember(room, [posted(text, who)]);
+    }
+
+    /// A call this session already made, with what it was handed back: what a
+    /// journal holds of a call whose result the model has read.
+    pub(crate) fn called(
+        &self,
+        session: &SessionId,
+        name: &str,
+        input: serde_json::Value,
+        output: ToolOutput,
+    ) {
+        self.remember(session, [called(name, input, output)]);
+    }
+
+    /// A register another plugin published in this session's journal, as
+    /// `extend` leaves one (`SessionState::extensions`).
+    pub(crate) fn extended(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: serde_json::Value,
+    ) {
+        self.remember(
+            session,
+            [Event::Extension {
+                plugin: plugin.into(),
+                kind: kind.into(),
+                payload,
+            }],
+        );
     }
 
     fn remember(&self, session: &SessionId, events: impl IntoIterator<Item = Event>) {
@@ -587,6 +619,29 @@ pub(crate) fn assistant(text: &str) -> Event {
             completed_at: Some(ts()),
             intent: None,
             body: ItemBody::Assistant { text: text.into() },
+            meta: Default::default(),
+        },
+    }
+}
+
+pub(crate) fn called(name: &str, input: serde_json::Value, output: ToolOutput) -> Event {
+    Event::ItemCompleted {
+        item: Item {
+            id: ItemId::mint(),
+            turn: Some(TurnId::from_raw(TURN)),
+            round: 0,
+            status: ItemStatus::Completed,
+            started_at: ts(),
+            completed_at: Some(ts()),
+            intent: None,
+            body: ItemBody::ToolCall {
+                call_id: "call_journaled".into(),
+                name: name.into(),
+                input,
+                output: Some(output),
+                progress: None,
+                duration_ms: None,
+            },
             meta: Default::default(),
         },
     }

@@ -35,6 +35,7 @@ mod message;
 mod models;
 mod names;
 mod note;
+mod rooms;
 mod serial;
 mod spawn;
 mod team;

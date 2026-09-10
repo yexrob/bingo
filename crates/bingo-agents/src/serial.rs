@@ -16,21 +16,10 @@
 //! before there was a session to read it, and no author can be behind on it.
 //! What landed afterwards and was not read is what bounces.
 
-use bingo_sdk::{
-    ContentPart, Item, ItemBody, ItemId, SessionState, SessionSummary, ToolContext, ToolOutput,
-};
+use bingo_sdk::{ContentPart, Item, ItemBody, ItemId, SessionState, ToolOutput};
 
-use crate::{names, watch};
-
-/// The plugin whose journal a cursor is read out of. This crate may not import
-/// that one (ADR-0001), so the three names here are the whole of the contract
-/// and the payload is read as data: a shape this does not recognise says the
-/// caller has read nothing rather than guessing.
-const ROOMS: &str = "bingo.rooms";
-/// The kind one seat's cursor is published under, before its name.
-const CURSOR: &str = "cursor:";
-/// The post that payload names: the last one the seat has read.
-const POST: &str = "post";
+use crate::message::MessageArgs;
+use crate::{message, names, rooms};
 
 /// One post, as a room's journal has it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,20 +38,59 @@ enum Verdict {
     Behind { seen: usize, missed: Vec<Post> },
 }
 
-/// The bounce a stale post gets, or nothing when it may land. A room this
-/// process cannot read judges nobody: the discipline is only ever what the
-/// journals say it is.
-pub async fn bounce(cx: &ToolContext, room: &SessionSummary, speaker: &str) -> Option<ToolOutput> {
-    let title = names::name_of(room).to_string();
-    let there = watch::follow(&cx.host, &room.id).await.ok()?;
-    let here = watch::follow(&cx.host, &cx.session).await.ok()?;
-    let awaited = awaited(&there.snapshot, &here.snapshot, speaker);
-    let read = read(&there.snapshot, &awaited, cursor(&there.snapshot, speaker));
-    let quoted = quoted(before(&here.snapshot, &cx.item), &title);
+/// The bounce a stale post gets, or nothing when it may land. Both journals
+/// are read once, by the caller, and folded here: the discipline is only ever
+/// what they say it is.
+pub fn bounce(
+    room: &SessionState,
+    caller: &SessionState,
+    cut: &ItemId,
+    title: &str,
+    speaker: &str,
+) -> Option<ToolOutput> {
+    let awaited = awaited(room, caller, speaker);
+    let read = read(room, &awaited, rooms::cursor(room, speaker));
+    let quoted = quoted(before(caller, cut), title);
     match verdict(awaited, read.max(quoted)) {
         Verdict::Land => None,
-        Verdict::Behind { seen, missed } => Some(ToolOutput::error(said(&title, seen, &missed))),
+        Verdict::Behind { seen, missed } => Some(ToolOutput::error(said(title, seen, &missed))),
     }
+}
+
+/// The text of the caller's own latest post that this room bounced. The
+/// bounced call is still in the journal with the input it was made on, so the
+/// draft is already written down and repeating it costs a word rather than a
+/// regeneration (ADR-0053 §6).
+pub fn draft(caller: &SessionState, cut: &ItemId, room: &str) -> Option<String> {
+    before(caller, cut)
+        .iter()
+        .rev()
+        .find_map(|item| bounced(item, room))
+}
+
+/// The text a bounced post carried, or nothing when this item is not one of
+/// them. A call that was itself an `again` wrote no text of its own — the
+/// draft it repeated is further back — so it is passed over rather than read
+/// as a post with nothing in it.
+fn bounced(item: &Item, room: &str) -> Option<String> {
+    let ItemBody::ToolCall {
+        name,
+        input,
+        output: Some(output),
+        ..
+    } = &item.body
+    else {
+        return None;
+    };
+    if name != message::SEND_MESSAGE {
+        return None;
+    }
+    head_of(room, &text_of(output))?;
+    let args: MessageArgs = serde_json::from_value(input.clone()).ok()?;
+    if names::addressed(&args.to) != room {
+        return None;
+    }
+    args.text
 }
 
 /// The posts of a room the caller was there to hear, each with where the room
@@ -101,17 +129,6 @@ fn read(room: &SessionState, awaited: &[(usize, Post)], cursor: Option<ItemId>) 
         return 0;
     };
     awaited.iter().filter(|(at, _)| *at <= head).count()
-}
-
-/// Where one member has read this room up to, as the rooms plugin publishes it
-/// in the room's own journal: a register per seat, keyed in one spelling of the
-/// name because a room compares names in any case.
-fn cursor(room: &SessionState, member: &str) -> Option<ItemId> {
-    let published = room
-        .extensions
-        .get(ROOMS)?
-        .get(&format!("{CURSOR}{}", member.to_lowercase()))?;
-    Some(ItemId::from_raw(published.get(POST)?.as_str()?))
 }
 
 /// The caller's journal as the model that made this call saw it. What a
@@ -185,7 +202,7 @@ fn said(room: &str, seen: usize, missed: &[Post]) -> String {
         .map(|post| format!("  {}: {}", post.author, post.text.trim()))
         .collect();
     format!(
-        "{}\n\n{}\n\nYou have them now. Post again if what you wrote still applies.",
+        "{}\n\n{}\n\nYou have them now. Post it again with `again: true` if it still applies, or write a new text.",
         ledger(room, seen, seen + missed.len()),
         quotes.join("\n")
     )
@@ -197,7 +214,7 @@ mod tests {
     use crate::tests::{Fleet, Recorder, summary, tool_context};
     use bingo_sdk::{ItemStatus, Origin, Tool, TurnId};
     use jiff::Timestamp;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     /// A ledger of posts, as `awaited` hands one back: in the order the room
     /// holds them, from the top of it.
@@ -253,15 +270,26 @@ mod tests {
         item
     }
 
-    fn result(text: &str) -> Item {
+    /// A `SendMessage` call and what it was handed back, as the caller's own
+    /// journal holds one.
+    fn call(input: Value, output: ToolOutput) -> Item {
         item(ItemBody::ToolCall {
             call_id: "c1".into(),
-            name: "SendMessage".into(),
-            input: json!({}),
-            output: Some(ToolOutput::error(text)),
+            name: message::SEND_MESSAGE.into(),
+            input,
+            output: Some(output),
             progress: None,
             duration_ms: None,
         })
+    }
+
+    fn result(text: &str) -> Item {
+        call(json!({}), ToolOutput::error(text))
+    }
+
+    /// A bounce for `#design`, as `said` writes one.
+    fn bounce(text: &str) -> ToolOutput {
+        ToolOutput::error(said("#design", 0, &[post("builder", text)]))
     }
 
     #[test]
@@ -348,28 +376,6 @@ mod tests {
         );
     }
 
-    /// The cursor as the rooms plugin publishes it, read back by hand: the
-    /// contract between the two crates, written down (ADR-0034 §2).
-    #[test]
-    fn a_cursor_is_a_post_id_under_the_rooms_plugin_s_own_kind() {
-        let mut room = journal("#design", 0, Vec::new());
-        assert_eq!(cursor(&room, "scout"), None);
-
-        room.extensions.insert(
-            ROOMS.into(),
-            [("cursor:scout".to_string(), json!({ "post": "itm_7" }))]
-                .into_iter()
-                .collect(),
-        );
-        assert_eq!(cursor(&room, "scout"), Some(ItemId::from_raw("itm_7")));
-        assert_eq!(
-            cursor(&room, "Scout"),
-            Some(ItemId::from_raw("itm_7")),
-            "a room compares names in any case"
-        );
-        assert_eq!(cursor(&room, "builder"), None, "one seat is not another");
-    }
-
     /// The cut: what a barrier absorbed after the model spoke was not what it
     /// wrote against, so a bounce quoted after it is not counted as read.
     #[test]
@@ -410,6 +416,57 @@ mod tests {
         let seen = quoted(before(&caller, &ItemId::from_raw("itm_call")), "#design");
         assert_eq!(seen, 1);
         assert_eq!(verdict(ledger(&missed), seen), Verdict::Land);
+    }
+
+    /// The draft `again` repeats is the bounced call's own input, and the
+    /// latest of them: a caller that wrote twice meant the second one
+    /// (ADR-0053 §6). A room is addressed as a name is written, `@` and all.
+    #[test]
+    fn the_latest_post_this_room_bounced_is_the_draft() {
+        let caller = journal(
+            "scout",
+            0,
+            vec![
+                call(json!({ "to": "#design", "text": "first" }), bounce("mind")),
+                call(json!({ "to": " @#design " }), bounce("and this")),
+                call(json!({ "to": "#design", "text": "second" }), bounce("this")),
+            ],
+        );
+        let cut = ItemId::from_raw("itm_call");
+        assert_eq!(
+            draft(&caller, &cut, "#design").as_deref(),
+            Some("second"),
+            "an `again` carries no text of its own and is passed over"
+        );
+
+        let empty = journal("scout", 0, Vec::new());
+        assert_eq!(draft(&empty, &cut, "#design"), None);
+    }
+
+    /// A draft belongs to the room that bounced it, and to the calls the model
+    /// had already seen the results of.
+    #[test]
+    fn another_room_s_bounce_and_a_call_after_the_cut_are_not_drafts() {
+        let elsewhere = ToolOutput::error(said("#standup", 0, &[post("builder", "mind")]));
+        let mine = call(json!({ "to": "#design", "text": "mine" }), bounce("mind"));
+        let cut = mine.id.clone();
+        let caller = journal(
+            "scout",
+            0,
+            vec![
+                call(json!({ "to": "#standup", "text": "theirs" }), elsewhere),
+                call(
+                    json!({ "to": "#design", "text": "landed" }),
+                    ToolOutput::text("Posted to #design."),
+                ),
+                mine,
+            ],
+        );
+        assert_eq!(
+            draft(&caller, &cut, "#design"),
+            None,
+            "another room's bounce, a landed post, and the call being made"
+        );
     }
 
     /// End to end through the tool, on a fleet whose room holds a post the

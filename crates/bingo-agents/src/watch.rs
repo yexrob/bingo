@@ -30,6 +30,13 @@ pub async fn follow(host: &HostHandle, child: &SessionId) -> Result<Attachment, 
     .await
 }
 
+/// Another session's journal as it stands, folded by the one reducer. The
+/// attachment is let go with the answer: what is read here is a fact of this
+/// moment, and nothing keeps it.
+pub async fn snapshot(host: &HostHandle, session: &SessionId) -> Option<SessionState> {
+    Some(follow(host, session).await.ok()?.snapshot)
+}
+
 /// What a child's turn came to: how it ended, and the assistant text it
 /// wrote on the way. A turn that failed or was cut short is not an answer,
 /// whatever it managed to say first.
