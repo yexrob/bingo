@@ -66,6 +66,8 @@ mod fold;
 mod form;
 mod frame;
 mod graphics;
+/// What this surface says about itself, as a page a model may read.
+pub mod guide;
 mod highlight;
 mod history;
 mod input;
@@ -192,11 +194,11 @@ fn entering(e: std::io::Error) -> KernelError {
     )
 }
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.surface.tui",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["surface:tui"],
+    provides: &["surface:tui", "service:bingo.surface.tui.pages"],
     requires: &[],
     // `update.check` (ADR-0043 §4) and `tui.measure` (design §7): the box is
     // where a newer release is said and the transcript is where prose is
@@ -224,7 +226,54 @@ impl Plugin for TuiPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.surface(Arc::new(TuiSurface) as Arc<dyn Surface>);
+        registrar.add(guide::contribution(registrar));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+    use bingo_sdk::{Contribution, Env, Pages};
+
+    #[test]
+    fn the_manifest_says_what_it_provides_and_the_two_keys_it_claims() {
+        assert_eq!(MANIFEST.id, "bingo.surface.tui");
+        assert_eq!(
+            MANIFEST.provides,
+            ["surface:tui", "service:bingo.surface.tui.pages"]
+        );
+        assert!(
+            MANIFEST
+                .provides
+                .contains(&format!("service:{}", Pages::key(MANIFEST.id)).as_str()),
+            "the page's key is spelled the one way (ADR-0054 §1)"
+        );
+        let claim = MANIFEST.config.expect("a config claim");
+        assert_eq!(claim.keys.len(), 2);
+    }
+
+    #[test]
+    fn the_plugin_registers_the_surface_and_its_page() {
+        let mut registrar = Registrar::new(
+            MANIFEST.id,
+            serde_json::json!({}),
+            Env::rooted(std::env::temp_dir().join("bingo-tui-test")),
+        );
+        TuiPlugin.register(&mut registrar).expect("register");
+        let contributions = registrar.into_contributions();
+        assert_eq!(contributions.len(), MANIFEST.provides.len());
+        match &contributions[0] {
+            Contribution::Surface(surface) => assert_eq!(surface.id(), SURFACE_ID),
+            other => panic!("expected the surface, got {other:?}"),
+        }
+        match &contributions[1] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 }
 
