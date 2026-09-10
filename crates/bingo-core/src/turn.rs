@@ -215,7 +215,11 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
     }
     let mut turn = Turn {
         cfg,
-        ruler: Ruler::new(model.capabilities.context_window, model.max_tokens),
+        ruler: Ruler::new(
+            model.capabilities.context_window,
+            model.max_tokens,
+            model.capabilities.holds_context,
+        ),
         model,
         host,
         id: run.turn,

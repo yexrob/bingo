@@ -37,6 +37,19 @@ impl Thresholds {
             keep: effective / 4,
         }
     }
+
+    /// The lines for a context the endpoint holds (ADR-0055 §1): the window
+    /// is the endpoint's own and nothing is drawn in it. There is no output
+    /// budget to reserve — the kernel sends no request whose size it decides
+    /// — nothing to warn at, nothing to cut at, and nothing to keep.
+    pub fn held(window: u64) -> Self {
+        Self {
+            effective: window,
+            warn: 0,
+            trigger: window,
+            keep: 0,
+        }
+    }
 }
 
 /// Where the estimate was last tied to the truth: what the server counted
@@ -101,6 +114,17 @@ mod tests {
         assert_eq!(lines.warn, 16_000);
         assert_eq!(lines.trigger, 36_000);
         assert_eq!(lines.keep, 10_000);
+    }
+
+    /// ADR-0055 §1: a held window has no lines in it, so nothing the kernel
+    /// draws can fire — and `trigger` says so by being the window itself.
+    #[test]
+    fn a_held_window_has_no_lines_in_it() {
+        let lines = Thresholds::held(1_000_000);
+        assert_eq!(lines.effective, 1_000_000);
+        assert_eq!(lines.trigger, 1_000_000);
+        assert_eq!(lines.warn, 0);
+        assert_eq!(lines.keep, 0);
     }
 
     #[test]
