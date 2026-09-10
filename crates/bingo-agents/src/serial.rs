@@ -15,6 +15,10 @@
 //! the caller's session existed is not counted: it was never anybody's to read
 //! before there was a session to read it, and no author can be behind on it.
 //! What landed afterwards and was not read is what bounces.
+//!
+//! A bounce keeps no copy of what it refused either: the words are in the
+//! bounced call's own input, where `draft` reads them back for the `again`
+//! that posts them a second time (ADR-0053 §6).
 
 use bingo_sdk::{ContentPart, Item, ItemBody, ItemId, SessionState, ToolOutput};
 

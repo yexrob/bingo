@@ -1,7 +1,10 @@
 //! What one session says to another. One tool, one delivery: `SendMessage`
 //! wakes an idle target and reaches a busy one mid-run (ADR-0024 §2). A post
-//! into a room goes through the same door and is checked against the room's
-//! head first (ADR-0025).
+//! into a room goes through the same door and is weighed there first: a closed
+//! room takes none (ADR-0053 §4), and one written behind the room's head is
+//! handed back with what it missed (ADR-0025) — the draft still in the call
+//! that made it, so `again: true` posts those words as they stand
+//! (ADR-0053 §6).
 
 use std::path::Path;
 
