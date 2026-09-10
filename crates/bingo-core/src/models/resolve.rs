@@ -40,6 +40,7 @@ pub fn resolve(
         reasoning: declared.reasoning.unwrap_or(facts.reasoning),
         count_tokens: endpoint.count_tokens,
         caching: endpoint.caching,
+        holds_context: endpoint.holds_context,
     }
 }
 
@@ -63,6 +64,7 @@ mod tests {
             images,
             count_tokens: true,
             caching: true,
+            ..EndpointCapabilities::default()
         }
     }
 

@@ -428,8 +428,9 @@ impl FinishReason {
 
 /// What an endpoint does with a request, as only the provider can know:
 /// whether image parts reach the model, whether tokens can be counted ahead,
-/// whether prefixes are cached. The model's own facts — window, output
-/// budget, reasoning, vision — are the kernel catalogue's (ADR-0004).
+/// whether prefixes are cached, whether the conversation is its own. The
+/// model's own facts — window, output budget, reasoning, vision — are the
+/// kernel catalogue's (ADR-0004).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointCapabilities {
@@ -439,6 +440,15 @@ pub struct EndpointCapabilities {
     pub count_tokens: bool,
     #[serde(default)]
     pub caching: bool,
+    /// The conversation lives on the endpoint's side, and so does the ruler
+    /// over it: the kernel sends the newest turn, measures nothing and cuts
+    /// nothing (ADR-0055 §1).
+    #[serde(default)]
+    pub holds_context: bool,
+    /// The window this endpoint last named for this model. A server's word on
+    /// itself outranks every guess at it (ADR-0055 §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// What a turn may assume about its model: the kernel's resolution of the
@@ -457,6 +467,10 @@ pub struct ModelCapabilities {
     pub count_tokens: bool,
     #[serde(default)]
     pub caching: bool,
+    /// The endpoint holds this conversation and measures it itself
+    /// (ADR-0055 §1): the kernel draws no line in a window it does not own.
+    #[serde(default)]
+    pub holds_context: bool,
 }
 
 /// Provider stream events. Never published; the accumulator folds them into items.
@@ -515,6 +529,19 @@ pub enum ModelEvent {
         id: String,
         name: String,
         input: String,
+    },
+    /// What the endpoint says it is holding for this session: its own count,
+    /// against its own window (ADR-0055 §2). Sent as often as it likes; the
+    /// last one of a round is what that round reports.
+    Context {
+        used: u64,
+        window: u64,
+    },
+    /// A cut the endpoint made in the context it holds (ADR-0055 §3). The
+    /// journal lost nothing by it: it is a row, not a rewrite.
+    Compacted {
+        before: u64,
+        after: u64,
     },
     Finish {
         usage: Usage,
@@ -779,6 +806,59 @@ mod tests {
         };
         let json = serde_json::to_string(&part).unwrap();
         assert!(!json.contains("providerMetadata"));
+    }
+
+    /// The two events an endpoint that holds its own context sends
+    /// (ADR-0055 §2, §3). The wire shape is the contract: a plugin provider
+    /// speaks them over the rpc, so the tag and the field names are pinned
+    /// here rather than left to the derive.
+    #[test]
+    fn a_reading_and_a_cut_are_tagged_and_round_trip() {
+        let reading = ModelEvent::Context {
+            used: 412_000,
+            window: 1_000_000,
+        };
+        let json = serde_json::to_value(&reading).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "context", "used": 412_000, "window": 1_000_000 })
+        );
+        assert_eq!(serde_json::from_value::<ModelEvent>(json).unwrap(), reading);
+
+        let cut = ModelEvent::Compacted {
+            before: 967_000,
+            after: 120_000,
+        };
+        let json = serde_json::to_value(&cut).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "compacted", "before": 967_000, "after": 120_000 })
+        );
+        assert_eq!(serde_json::from_value::<ModelEvent>(json).unwrap(), cut);
+    }
+
+    /// An endpoint that says nothing about either holds nothing and names no
+    /// window: every recorded capability set predating ADR-0055 reads that
+    /// way, which is what it always meant.
+    #[test]
+    fn an_endpoint_that_says_nothing_holds_nothing() {
+        let capabilities: EndpointCapabilities =
+            serde_json::from_value(serde_json::json!({ "images": true })).unwrap();
+        assert!(capabilities.images);
+        assert!(!capabilities.holds_context);
+        assert_eq!(capabilities.context_window, None);
+        let held = EndpointCapabilities {
+            holds_context: true,
+            context_window: Some(1_000_000),
+            ..EndpointCapabilities::default()
+        };
+        let json = serde_json::to_value(held).unwrap();
+        assert_eq!(json["holdsContext"], Value::Bool(true));
+        assert_eq!(json["contextWindow"], Value::from(1_000_000));
+        assert_eq!(
+            serde_json::from_value::<EndpointCapabilities>(json).unwrap(),
+            held
+        );
     }
 
     #[test]

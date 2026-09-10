@@ -288,7 +288,9 @@ pub struct ContextUsage {
     /// The input side of the model's window: what is left once the output
     /// budget is reserved (ADR-0006).
     pub window: u64,
-    /// `used` at which the older turns are summarised.
+    /// `used` at which the older turns are summarised, equal to `window`
+    /// where the kernel draws no line because the endpoint holds the context
+    /// and cuts it itself (ADR-0055 §2).
     pub trigger: u64,
 }
 

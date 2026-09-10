@@ -212,6 +212,7 @@ fn handshake(options: &Options) -> Value {
                 images: true,
                 count_tokens: false,
                 caching: false,
+                ..EndpointCapabilities::default()
             },
         }],
         hooks: hooks::hooks(),

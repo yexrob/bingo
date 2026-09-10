@@ -340,6 +340,7 @@ impl Provider for OpenAiProvider {
             images: self.images,
             count_tokens: false,
             caching: true,
+            ..EndpointCapabilities::default()
         }
     }
 
@@ -740,6 +741,7 @@ pub(crate) mod tests {
                 images: false,
                 count_tokens: false,
                 caching: true,
+                ..EndpointCapabilities::default()
             }
         );
     }

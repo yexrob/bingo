@@ -34,6 +34,10 @@ pub struct Finished {
     pub items: Vec<Item>,
     pub tool_calls: Vec<(ItemId, ToolCall)>,
     pub usage: Usage,
+    /// What the endpoint last said it holds this round — its own count and
+    /// its own window (ADR-0055 §2) — where the endpoint holds the context
+    /// at all. It beats every count the kernel made.
+    pub context: Option<(u64, u64)>,
     pub finish_reason: Option<FinishReason>,
     pub error: Option<ProviderError>,
     /// A text or reasoning block was still open when the stream stopped.
@@ -49,6 +53,7 @@ pub struct Accumulator {
     tool_inputs: HashMap<String, (String, String)>,
     tool_calls: Vec<(ItemId, ToolCall)>,
     usage: Usage,
+    context: Option<(u64, u64)>,
     finish_reason: Option<FinishReason>,
     error: Option<ProviderError>,
 }
@@ -63,6 +68,7 @@ impl Accumulator {
             tool_inputs: HashMap::new(),
             tool_calls: Vec::new(),
             usage: Usage::default(),
+            context: None,
             finish_reason: None,
             error: None,
         }
@@ -193,6 +199,25 @@ impl Accumulator {
         Emit::Started(item)
     }
 
+    /// A cut the endpoint made in the context it holds: the row every surface
+    /// already draws for a compaction, with nothing of the journal replaced
+    /// and no summary to read, because there is none to read (ADR-0055 §3).
+    fn compacted(&mut self, before: u64, after: u64) -> Emit {
+        let mut item = self.fresh(
+            ItemBody::Compaction {
+                summary: String::new(),
+                replaced: 0,
+                before,
+                after,
+                duration_ms: 0,
+            },
+            ItemStatus::Completed,
+        );
+        item.completed_at = Some(item.started_at);
+        self.items.push(item.clone());
+        Emit::Completed(item)
+    }
+
     pub fn push(&mut self, event: ModelEvent) -> Vec<Emit> {
         match event {
             ModelEvent::StreamStart { .. } | ModelEvent::ResponseMetadata { .. } => Vec::new(),
@@ -226,6 +251,11 @@ impl Accumulator {
             }
             ModelEvent::ToolInputEnd { .. } => Vec::new(),
             ModelEvent::ToolCall { id, name, input } => vec![self.start_call(id, name, input)],
+            ModelEvent::Context { used, window } => {
+                self.context = Some((used, window));
+                Vec::new()
+            }
+            ModelEvent::Compacted { before, after } => vec![self.compacted(before, after)],
             ModelEvent::Finish {
                 usage,
                 finish_reason,
@@ -264,6 +294,7 @@ impl Accumulator {
             items: self.items,
             tool_calls: self.tool_calls,
             usage: self.usage,
+            context: self.context,
             finish_reason: self.finish_reason,
             error: self.error,
             truncated,
@@ -428,6 +459,57 @@ mod tests {
                 text: "partial".into()
             }
         );
+    }
+
+    /// ADR-0055 §2: the endpoint's own count is carried to the round whole,
+    /// and the last one of the round is the one it reports.
+    #[test]
+    fn the_last_reading_of_a_round_is_the_rounds_reading() {
+        let mut a = acc();
+        assert!(
+            a.push(ModelEvent::Context {
+                used: 412_000,
+                window: 1_000_000,
+            })
+            .is_empty(),
+            "a reading is not an item"
+        );
+        a.push(ModelEvent::Context {
+            used: 431_000,
+            window: 1_000_000,
+        });
+        let (_, fin) = a.finish(false);
+        assert_eq!(fin.context, Some((431_000, 1_000_000)));
+        assert!(fin.items.is_empty());
+    }
+
+    /// ADR-0055 §3: a cut the endpoint made is the compaction row every
+    /// surface already draws, with nothing replaced and no summary.
+    #[test]
+    fn a_cut_the_endpoint_made_is_a_compaction_item_with_nothing_replaced() {
+        let mut a = acc();
+        let emits = a.push(ModelEvent::Compacted {
+            before: 967_000,
+            after: 120_000,
+        });
+        let [Emit::Completed(item)] = &emits[..] else {
+            panic!("{emits:?}")
+        };
+        assert_eq!(
+            item.body,
+            ItemBody::Compaction {
+                summary: String::new(),
+                replaced: 0,
+                before: 967_000,
+                after: 120_000,
+                duration_ms: 0,
+            }
+        );
+        assert_eq!(item.status, ItemStatus::Completed);
+        assert_eq!(item.completed_at, Some(item.started_at));
+        let (emits, fin) = a.finish(false);
+        assert!(emits.is_empty(), "it was over when it arrived");
+        assert_eq!(fin.items.len(), 1, "and it is one item of the round");
     }
 
     #[test]

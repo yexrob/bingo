@@ -597,6 +597,7 @@ impl Provider for FakeProvider {
             images: true,
             count_tokens: true,
             caching: false,
+            ..EndpointCapabilities::default()
         }
     }
 

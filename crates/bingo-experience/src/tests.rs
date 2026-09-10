@@ -82,6 +82,7 @@ impl Fixture {
                 reasoning: false,
                 count_tokens: false,
                 caching: false,
+                holds_context: false,
             },
             cwd: self.cwd(),
             host: NoHost::handle(),

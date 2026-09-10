@@ -960,7 +960,7 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
-          "description": "`used` at which the older turns are summarised."
+          "description": "`used` at which the older turns are summarised, equal to `window`\nwhere the kernel draws no line because the endpoint holds the context\nand cuts it itself (ADR-0055 §2)."
         }
       },
       "required": [
@@ -1111,9 +1111,23 @@
         "caching": {
           "type": "boolean",
           "default": false
+        },
+        "holdsContext": {
+          "type": "boolean",
+          "description": "The conversation lives on the endpoint's side, and so does the ruler\nover it: the kernel sends the newest turn, measures nothing and cuts\nnothing (ADR-0055 §1).",
+          "default": false
+        },
+        "contextWindow": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The window this endpoint last named for this model. A server's word on\nitself outranks every guess at it (ADR-0055 §2)."
         }
       },
-      "description": "What an endpoint does with a request, as only the provider can know:\nwhether image parts reach the model, whether tokens can be counted ahead,\nwhether prefixes are cached. The model's own facts — window, output\nbudget, reasoning, vision — are the kernel catalogue's (ADR-0004)."
+      "description": "What an endpoint does with a request, as only the provider can know:\nwhether image parts reach the model, whether tokens can be counted ahead,\nwhether prefixes are cached, whether the conversation is its own. The\nmodel's own facts — window, output budget, reasoning, vision — are the\nkernel catalogue's (ADR-0004)."
     },
     "Entry": {
       "type": "object",
@@ -3253,6 +3267,11 @@
         "caching": {
           "type": "boolean",
           "default": false
+        },
+        "holdsContext": {
+          "type": "boolean",
+          "description": "The endpoint holds this conversation and measures it itself\n(ADR-0055 §1): the kernel draws no line in a window it does not own.",
+          "default": false
         }
       },
       "required": [
@@ -3497,6 +3516,56 @@
             "input"
           ],
           "description": "The complete call. `input` is the raw JSON text; the loop parses it once."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "used": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "window": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "context"
+            }
+          },
+          "required": [
+            "type",
+            "used",
+            "window"
+          ],
+          "description": "What the endpoint says it is holding for this session: its own count,\nagainst its own window (ADR-0055 §2). Sent as often as it likes; the\nlast one of a round is what that round reports."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "before": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "after": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "compacted"
+            }
+          },
+          "required": [
+            "type",
+            "before",
+            "after"
+          ],
+          "description": "A cut the endpoint made in the context it holds (ADR-0055 §3). The\njournal lost nothing by it: it is a row, not a rewrite."
         },
         {
           "type": "object",
@@ -4005,7 +4074,8 @@
           "default": {
             "images": false,
             "countTokens": false,
-            "caching": false
+            "caching": false,
+            "holdsContext": false
           }
         }
       },

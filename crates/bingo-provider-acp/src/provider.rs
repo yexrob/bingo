@@ -183,6 +183,7 @@ impl Provider for AcpProvider {
             images: self.images.load(Ordering::Relaxed),
             count_tokens: false,
             caching: false,
+            ..EndpointCapabilities::default()
         }
     }
 

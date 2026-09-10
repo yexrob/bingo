@@ -548,7 +548,7 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
-          "description": "`used` at which the older turns are summarised."
+          "description": "`used` at which the older turns are summarised, equal to `window`\nwhere the kernel draws no line because the endpoint holds the context\nand cuts it itself (ADR-0055 §2)."
         }
       },
       "required": [

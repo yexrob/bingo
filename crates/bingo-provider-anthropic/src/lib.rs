@@ -172,6 +172,7 @@ impl Provider for AnthropicProvider {
             images: self.images,
             count_tokens: true,
             caching: true,
+            ..EndpointCapabilities::default()
         }
     }
 

@@ -286,6 +286,7 @@ mod tests {
             images: true,
             count_tokens: true,
             caching,
+            ..EndpointCapabilities::default()
         }
     }
 
