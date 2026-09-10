@@ -88,6 +88,33 @@ mod tests {
         );
     }
 
+    /// The skills plugin asks a page for its shape and nothing else: what a
+    /// page *says* is asserted by the plugin that owns it (ADR-0054 §4).
+    #[tokio::test]
+    async fn every_page_gathered_is_shaped_like_a_page() {
+        let host = host_with_pages(&[("bingo.mcp", PAGES), ("bingo.rooms", PAGES)]);
+        let gathered = gather(&host).await;
+        assert!(!gathered.is_empty(), "there is something to check");
+        for page in gathered {
+            let noun = page.name.strip_prefix(PREFIX).expect("guide-<name>");
+            assert!(
+                !noun.is_empty() && noun.chars().all(|c| c.is_ascii_lowercase()),
+                "a page is named after one noun, in one word: {}",
+                page.name
+            );
+            assert!(
+                !page.description.contains('\n') && page.description.chars().count() < 250,
+                "a description is one line in the prompt: {}",
+                page.description
+            );
+            assert!(
+                page.body.lines().count() < 200,
+                "{} is a page, not a manual",
+                page.name
+            );
+        }
+    }
+
     fn names(skills: &[Skill]) -> Vec<&str> {
         skills.iter().map(|s| s.name.as_str()).collect()
     }

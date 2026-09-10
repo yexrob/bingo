@@ -9,3 +9,5 @@ Procedures written down for this project and this machine. When one of these fit
 - deploy — Ship the build
 - review — Read a diff
 - guide — The map of bingo itself: what it is, running it, sessions, the commands the kernel and the surface own, the settings layers and keys, and where files live. Read it before any question about bingo; it ends with one line per plugin page.
+- guide-first — The first page.
+- guide-second — The second page.

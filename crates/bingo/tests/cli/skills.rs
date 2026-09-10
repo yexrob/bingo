@@ -79,3 +79,68 @@ fn an_unknown_slash_command_is_still_refused() {
         stderr(&out)
     );
 }
+
+/// What a completed call to `tool` handed back, as the model read it.
+fn tool_result(out: &Output, tool: &str) -> String {
+    frames_of(out)
+        .into_iter()
+        .filter_map(|f| match f.event {
+            Event::ItemCompleted { item } => match item.body {
+                bingo_sdk::ItemBody::ToolCall { name, output, .. } if name == tool => output,
+                _ => None,
+            },
+            _ => None,
+        })
+        .next_back()
+        .map(|output| {
+            output
+                .parts
+                .iter()
+                .filter_map(bingo_sdk::ContentPart::as_text)
+                .collect()
+        })
+        .unwrap_or_else(|| panic!("no {tool} call completed: {}", stdout(out)))
+}
+
+#[test]
+fn a_plugin_s_page_is_a_skill_the_model_can_read_by_name() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Skill","input":{"name":"guide-mcp"}}}]},
+            {"steps":[{"text":"read"}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--output-format", "json", "--cwd"])
+        .arg(home.path())
+        .arg("how do mcp servers work here?")
+        .envs(home_env(home.path())));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let page = tool_result(&out, "Skill");
+    assert!(
+        page.starts_with("# MCP"),
+        "the page the mcp plugin wrote is what came back: {page}"
+    );
+}
+
+#[test]
+fn the_prompt_lists_the_pages_the_loaded_plugins_wrote() {
+    let home = tempfile::tempdir().unwrap();
+    // The fake provider answers only a request that carries this text, and the
+    // system prompt is part of what it reads: no line, no answer, no run.
+    let script = script(
+        r#"{"responses":[
+            {"when":{"contains":"- guide-permissions —"},"steps":[{"text":"listed"}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--cwd"])
+        .arg(home.path())
+        .arg("hello")
+        .envs(home_env(home.path())));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "listed");
+}
