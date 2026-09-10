@@ -65,6 +65,16 @@ pub const BINDINGS: &[Binding] = &[
         description: "scroll the transcript",
     },
     Binding {
+        keys: "v",
+        description: "select from the focused block · ↑↓←→ extend · y or ctrl+c copy",
+    },
+    Binding {
+        // The other half of the same selection (M92): the run is cells of the
+        // whole transcript, so both gestures reach what has scrolled away.
+        keys: "drag",
+        description: "select · release copies · past the edge scrolls",
+    },
+    Binding {
         keys: "ctrl+g",
         description: "the same list · ↑↓ to walk it",
     },
