@@ -749,6 +749,8 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "reqwest",
+ "schemars 1.2.2",
+ "serde",
  "serde_json",
  "similar 3.2.0",
  "syntect",

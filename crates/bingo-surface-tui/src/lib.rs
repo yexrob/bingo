@@ -95,6 +95,9 @@ mod scroll;
 mod search;
 mod seats;
 mod select;
+/// What a person may set about this surface: the measure prose is drawn to,
+/// and the check the welcome box says the answer to.
+pub mod settings;
 /// The shells the session has running in the background (M75): a word under
 /// the row that started one, a count on the status line, and no card.
 mod shells;
@@ -195,13 +198,18 @@ static MANIFEST: PluginManifest = PluginManifest {
     sdk: "^0.1",
     provides: &["surface:tui"],
     requires: &[],
-    // `update.check` (ADR-0043 §4): the box is where a newer release is said,
-    // so this is the surface that claims the key. The bin reads the answer
-    // out of the layers, as it does for every key that decides something
-    // before a host exists, and hands it over with the rest of the args.
+    // `update.check` (ADR-0043 §4) and `tui.measure` (design §7): the box is
+    // where a newer release is said and the transcript is where prose is
+    // measured, so this is the surface that claims both keys. The bin reads
+    // the answers out of the layers, as it does for every key that decides
+    // something before a host exists, and hands them over with the rest of
+    // the args.
     config: Some(ConfigClaim {
-        keys: &[(bingo_update::SETTING, Merge::Replace)],
-        schema: bingo_update::schema,
+        keys: &[
+            (bingo_update::SETTING, Merge::Replace),
+            (settings::SETTING, Merge::Replace),
+        ],
+        schema: settings::schema,
     }),
 };
 
