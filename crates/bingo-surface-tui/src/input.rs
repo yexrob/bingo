@@ -518,12 +518,11 @@ fn picker(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
 /// A run owns the keyboard while it is being drawn: the arrows take its far
 /// end, `y` and `ctrl+c` copy it, anything else lets it go and is typed.
 fn selecting(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    let height = ui.transcript().0;
     match key.code {
-        KeyCode::Up => ui.select.walk(-1, 0, height),
-        KeyCode::Down => ui.select.walk(1, 0, height),
-        KeyCode::Left => ui.select.walk(0, -1, height),
-        KeyCode::Right => ui.select.walk(0, 1, height),
+        KeyCode::Up => walk_run(ui, -1, 0, now),
+        KeyCode::Down => walk_run(ui, 1, 0, now),
+        KeyCode::Left => walk_run(ui, 0, -1, now),
+        KeyCode::Right => walk_run(ui, 0, 1, now),
         KeyCode::Char('y') | KeyCode::Char('c') => return copy(ui),
         KeyCode::Esc => ui.select.clear(),
         _ => {
@@ -532,6 +531,19 @@ fn selecting(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         }
     }
     Vec::new()
+}
+
+/// Take the far end of the run where the key points, and bring the view after
+/// it. A run's cells are lines of the whole transcript rather than of the
+/// screenful it is parked on (§3), so the arrows reach what has scrolled away
+/// — and what a person is choosing has to stay in front of them.
+fn walk_run(ui: &mut Ui, lines: isize, columns: isize, now: Now) {
+    let (height, rows) = ui.transcript();
+    ui.select.walk(lines, columns, height);
+    let Some(head) = ui.select.run.map(|run| run.head) else {
+        return;
+    };
+    ui.scroll.reveal(head.line, height, rows, now.instant);
 }
 
 /// Take what is inside the run, and let it go: a selection is answered once.
@@ -2267,6 +2279,85 @@ mod tests {
             "a run of two lines, cut where the far end is: {text:?}"
         );
         assert!(ui.select.run.is_none(), "copying lets it go");
+    }
+
+    /// A page back, settled, so a run started at the top of the screen has
+    /// transcript on either side of it.
+    fn reading_back(state: &SessionState) -> (Ui, Now) {
+        let (mut ui, now) = scene();
+        render(state, &ui, now);
+        press(&mut ui, state, key(KeyCode::PageUp), now);
+        let now = settled_at(now);
+        render(state, &ui, now);
+        (ui, now)
+    }
+
+    /// The frame after an ease has run out: what the screen shows once the
+    /// transcript has arrived where a key sent it.
+    fn settled_at(now: Now) -> Now {
+        later(now, crate::scroll::EASE.as_millis() as i64)
+    }
+
+    /// The arrows reach the whole transcript, so the view goes with them: a
+    /// far end walked one line past the last row on the screen brings that
+    /// line onto it, and nothing else moves.
+    #[test]
+    fn walking_the_far_end_off_the_screen_brings_the_view_after_it() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let (_, rows) = ui.transcript();
+        let top = ui.painted.borrow().top;
+        press(&mut ui, &state, typed('v'), now);
+        assert_eq!(
+            ui.select.run.map(|run| run.head.line),
+            Some(top),
+            "a run starts at the first line on the screen"
+        );
+        for _ in 0..rows {
+            press(&mut ui, &state, key(KeyCode::Down), now);
+        }
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        let painted = ui.painted.borrow();
+        assert_eq!(painted.top, top + 1, "one line, and only one");
+        assert_eq!(
+            painted.row_of(top + rows),
+            u16::try_from(rows - 1).ok(),
+            "the far end is on the last row of the screen"
+        );
+    }
+
+    #[test]
+    fn walking_it_off_the_top_brings_the_view_back_up() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let top = ui.painted.borrow().top;
+        assert!(top > 0, "there is transcript above the screen");
+        press(&mut ui, &state, typed('v'), now);
+        press(&mut ui, &state, key(KeyCode::Up), now);
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        let painted = ui.painted.borrow();
+        assert_eq!(painted.top, top - 1);
+        assert_eq!(
+            painted.row_of(top - 1),
+            Some(0),
+            "the far end is on the first row of the screen"
+        );
+    }
+
+    /// Sideways is not a reason to move: a view that jumped on every `→`
+    /// would chase a column the screen already shows.
+    #[test]
+    fn walking_the_far_end_across_a_line_moves_nothing() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let top = ui.painted.borrow().top;
+        press(&mut ui, &state, typed('v'), now);
+        press(&mut ui, &state, key(KeyCode::Right), now);
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        assert_eq!(ui.painted.borrow().top, top);
     }
 
     #[test]
