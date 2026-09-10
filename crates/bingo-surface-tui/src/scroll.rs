@@ -67,8 +67,9 @@ impl Scroll {
     }
 
     /// The line the transcript is easing towards — where [`Scroll::top`] lands
-    /// once the ease is over.
-    fn target(&self, total: usize, rows: usize) -> usize {
+    /// once the ease is over. A gesture that adds to a move already running
+    /// counts from here rather than from where the ease has reached.
+    pub fn target(&self, total: usize, rows: usize) -> usize {
         let bottom = bottom(total, rows);
         match self {
             Scroll::Tail => bottom,
@@ -80,6 +81,24 @@ impl Scroll {
     pub fn home(&mut self, total: usize, rows: usize, now: Instant) {
         let here = self.top(total, rows, now);
         self.hold(here, 0, total, rows, now);
+    }
+
+    /// Bring a line into view with the smallest move that shows it: none at
+    /// all while it is on the screen, the line at the top when it is above
+    /// and at the bottom when it is below.
+    ///
+    /// What follows a hand moves this way and what answers a question moves
+    /// the other ([`Scroll::show`]): a selection's far end walks a line at a
+    /// time, and a view that jumped a third of a screen under each step would
+    /// read as the transcript running away from it.
+    pub fn reveal(&mut self, line: usize, total: usize, rows: usize, now: Instant) {
+        let top = self.target(total, rows);
+        let want = revealed(line, top, rows);
+        if want == top {
+            return;
+        }
+        let here = self.top(total, rows, now);
+        self.hold(here, want, total, rows, now);
     }
 
     /// Bring a line into view, a third of the way down, and hold it there.
@@ -104,6 +123,19 @@ impl Scroll {
                 since: now,
             }
         };
+    }
+}
+
+/// The first line a view of `rows` shows so that `line` is on it, moving as
+/// little from `top` as that takes.
+fn revealed(line: usize, top: usize, rows: usize) -> usize {
+    let Some(last) = rows.checked_sub(1) else {
+        return top;
+    };
+    match line {
+        _ if line < top => line,
+        _ if line > top + last => line - last,
+        _ => top,
     }
 }
 
@@ -244,6 +276,67 @@ mod tests {
             0,
             "a line near the head is the head"
         );
+    }
+
+    /// The tail shows lines 80..=99, so every line of that screenful is
+    /// already read and the transcript stays where it is — following, at
+    /// that.
+    #[test]
+    fn revealing_a_line_that_is_on_the_screen_moves_nothing() {
+        let now = Instant::now();
+        let mut scroll = Scroll::default();
+        for line in [80, 90, 99] {
+            scroll.reveal(line, TOTAL, ROWS, now);
+            assert_eq!(scroll, Scroll::Tail, "line {line} is on the last screen");
+        }
+    }
+
+    #[test]
+    fn revealing_a_line_above_the_top_puts_it_at_the_top() {
+        let now = Instant::now();
+        let mut scroll = Scroll::default();
+        scroll.reveal(60, TOTAL, ROWS, now);
+        assert_eq!(at(&scroll, now + EASE), 60);
+        scroll.reveal(79, TOTAL, ROWS, now + EASE);
+        assert_eq!(
+            at(&scroll, now + 2 * EASE),
+            60,
+            "the last line of that screenful is on it"
+        );
+    }
+
+    #[test]
+    fn revealing_a_line_below_the_bottom_puts_it_at_the_bottom() {
+        let now = Instant::now();
+        let mut scroll = Scroll::default();
+        scroll.home(TOTAL, ROWS, now);
+        scroll.reveal(20, TOTAL, ROWS, now + EASE);
+        assert_eq!(
+            at(&scroll, now + 2 * EASE),
+            1,
+            "one line, not a third of a screen"
+        );
+        scroll.reveal(99, TOTAL, ROWS, now + 2 * EASE);
+        assert_eq!(scroll, Scroll::Tail, "the last line is the tail again");
+    }
+
+    /// A run's far end walks a line at a time while the ease of the last step
+    /// is still running: each step counts from where the transcript is going,
+    /// as a burst of notches does.
+    #[test]
+    fn revealing_line_after_line_lands_every_one_of_them() {
+        let now = Instant::now();
+        let mut scroll = Scroll::default();
+        scroll.home(TOTAL, ROWS, now);
+        for (step, line) in (ROWS..ROWS + 5).enumerate() {
+            scroll.reveal(
+                line,
+                TOTAL,
+                ROWS,
+                now + Duration::from_millis(step as u64 * 2),
+            );
+        }
+        assert_eq!(at(&scroll, now + EASE * 2), 5, "five lines, one per step");
     }
 
     #[test]
