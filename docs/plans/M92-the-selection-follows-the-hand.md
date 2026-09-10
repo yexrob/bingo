@@ -60,25 +60,25 @@ clipboard, the 100 KiB cap refused out loud.
 
 ## Exit criteria
 
-- [ ] `Scroll::reveal`: a line above the top becomes the top, below the
+- [x] `Scroll::reveal`: a line above the top becomes the top, below the
       bottom becomes the bottom, on the screen moves nothing; `Tail` stays
       `Tail` when the line is on the last screen
-- [ ] `TestBackend`: `v` then `↓` past the last screen row advances
+- [x] `TestBackend`: `v` then `↓` past the last screen row advances
       `painted.top` by one and the run's head is on the last row; `↑` from
       the first row the mirror
-- [ ] `TestBackend`: press on a row, drag to a row above the region, the
+- [x] `TestBackend`: press on a row, drag to a row above the region, the
       view scrolls by the overshoot and the run reaches the new top line;
       a further drag inside stops the scrolling; holding past the edge
       scrolls one line per 50 ms under the scripted clock and stops at
       line 0
-- [ ] `TestBackend`: press, drag, release yields exactly one `Effect::Copy`
+- [x] `TestBackend`: press, drag, release yields exactly one `Effect::Copy`
       whose text includes a line that was off the screen at the press, and
       a `copied N lines` notice; press and release on one cell yields no
       copy and keeps the click's meaning (focus, fold cycle)
-- [ ] the wheel during a held run scrolls and keeps the run; `esc` still
+- [x] the wheel during a held run scrolls and keeps the run; `esc` still
       lets it go; a typed letter lets it go and is typed
-- [ ] `?` shows the two rows; `guide-tui`'s owner test passes with them
-- [ ] every gate green, `scripts/tui-smoke.sh`, 80×24 and 120×40 snapshots
+- [x] `?` shows the two rows; `guide-tui`'s owner test passes with them
+- [x] every gate green, `scripts/tui-smoke.sh`, 80×24 and 120×40 snapshots
       unchanged except the `?` panel's
 
 ## Non-goals
@@ -101,3 +101,33 @@ clipboard, the 100 KiB cap refused out loud.
   the run is copied as it stands, which is what the hand meant.
 - Mouse reporting inside tmux needs `set -g mouse on`; without it there is
   no drag and nothing here changes, as today.
+
+## Verified (2026-09-10, dev, `e18c8ef6`…`0ef3cc9b`)
+
+One `opus-xhigh` worktree cut from `c0fcc628`; dev did not move under it,
+and every gate was run again on the branch before the ff merge:
+
+```
+cargo fmt --all -- --check                                      ok
+cargo clippy --workspace --all-targets --locked -- -D warnings  ok
+cargo test --workspace --locked --no-fail-fast                  ok (tui 1131 passed, 2 ignored)
+scripts/check_discipline.sh                                     discipline ok
+scripts/budget.sh                                               budget ok (335)
+scripts/tui-smoke.sh                                            tui-smoke ok
+cargo check -p bingo-surface-tui --target x86_64-pc-windows-msvc   dies in aws-lc-sys' C build, as in M86–M89
+```
+
+Decided on the way, against the plan's letter: the transcript starts at
+screen row 0, so no terminal can report a row above it — the transcript's
+own first row is the top edge, pulling by nothing, and only a hand that
+stays there walks the view up; the two `?` rows became one (`v · drag`)
+because the sheet does not scroll and its table already fills 80×24, so
+each row added is an older row pushed off — one is still lost (`ctrl+o` at
+80×24, `/help` at 80×30). Five snapshots moved, all the `?` panel; every
+other 80×24 and 120×40 screen is byte-identical.
+
+Not verified: no hands-on drive. The drag past the edge, the pace and the
+release-copies gesture are proven by `TestBackend` and unit tests only; the
+smoke has no mouse scenario. A tmux drive with `set -g mouse on` before the
+next release is owed, as for every TUI-visible change. Known: the
+`copied N lines` notice can precede the 100 KiB refusal on a huge run.
