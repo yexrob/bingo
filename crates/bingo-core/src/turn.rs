@@ -506,7 +506,10 @@ impl Turn<'_> {
 
     async fn assemble(&mut self) -> Option<Assembled> {
         let (request, usage) = self.assemble_request().await?;
-        if usage.used >= self.ruler.lines.trigger
+        // A context the endpoint holds is the endpoint's to cut: the kernel
+        // has nothing to summarise and nothing to replace (ADR-0055 §1).
+        if !self.ruler.holds()
+            && usage.used >= self.ruler.lines.trigger
             && self.round == 0
             && self.try_compact(usage, &request).await
         {
@@ -553,20 +556,35 @@ impl Turn<'_> {
             .unwrap_or(messages)
     }
 
-    /// Bill the round to the turn. What the provider counted as input beats
-    /// the estimate the assembler made.
+    /// Bill the round to the turn, and say where the context stands after it.
     fn account(&mut self, finished: &Finished, usage: ContextUsage) {
         self.usage.add(finished.usage);
-        self.ruler.responded(finished.usage.input_total());
-        let context = ContextUsage {
-            used: finished.usage.input_total().max(usage.used),
-            ..usage
-        };
+        let context = self.measured(finished, usage);
         self.host.emit(Event::TurnUsage {
             turn: self.id.clone(),
             usage: finished.usage,
             context,
         });
+    }
+
+    /// What the round leaves in the context. Where the endpoint holds it, its
+    /// own reading is the whole answer (ADR-0055 §2) — and where it said
+    /// nothing this round, the last reading still stands, because the turn's
+    /// bill is every call of the turn summed and not a measure of anything a
+    /// window holds. Otherwise what the provider counted as input beats the
+    /// estimate the assembler made.
+    fn measured(&mut self, finished: &Finished, usage: ContextUsage) -> ContextUsage {
+        if self.ruler.holds() {
+            return match finished.context {
+                Some((used, window)) => self.ruler.reading(used, window),
+                None => usage,
+            };
+        }
+        self.ruler.responded(finished.usage.input_total());
+        ContextUsage {
+            used: finished.usage.input_total().max(usage.used),
+            ..usage
+        }
     }
 
     /// What the response means when it asks for no tool: `None` means it does,

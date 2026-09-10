@@ -106,6 +106,25 @@ async fn a_named_instance_reads_its_family_s_shelf_then_the_id_s_own() {
     );
 }
 
+/// ADR-0055 §2: an endpoint that keeps the conversation names the window it
+/// keeps it in, and that window is the session's — over the settings, over
+/// the learned clamp, over the snapshot.
+#[tokio::test]
+async fn an_endpoint_that_holds_the_context_names_the_window_the_session_uses() {
+    let (host, provider) = host_fronting("openai").await;
+    let guessed = host.resolve_model(provider.as_ref(), "gpt-5.5-pro");
+    assert!(!guessed.holds_context);
+
+    let provider = provider.clone().holding(1_000_000);
+    let held = host.resolve_model(provider.as_ref(), "gpt-5.5-pro");
+    assert!(held.holds_context);
+    assert_eq!(held.context_window, 1_000_000);
+    assert_eq!(
+        held.max_output, guessed.max_output,
+        "and nothing else about the model moved"
+    );
+}
+
 /// Before the endpoint has answered, a provider offers its family's shelf;
 /// after, it offers what the endpoint says it serves — and only that.
 #[tokio::test]

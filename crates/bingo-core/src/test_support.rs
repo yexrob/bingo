@@ -46,6 +46,10 @@ pub struct ScriptedProvider {
     /// Whether an exact count ever comes back. A recount is an await of the
     /// round like any other, so a test needs one that never does.
     counts: Mutex<bool>,
+    /// The window it holds the conversation in, where it holds one at all
+    /// (ADR-0055 §1). `None` is a provider that holds nothing, as every
+    /// provider but an agent's is.
+    holds: Mutex<Option<u64>>,
 }
 
 impl ScriptedProvider {
@@ -77,12 +81,20 @@ impl ScriptedProvider {
             serves: Mutex::new(Ok(Vec::new())),
             auth: Mutex::new(AuthStatus::NotApplicable),
             counts: Mutex::new(true),
+            holds: Mutex::new(None),
         })
     }
 
     /// A provider whose exact count never comes back.
     pub fn never_counts(self: Arc<Self>) -> Arc<Self> {
         *self.counts.lock().unwrap() = false;
+        self
+    }
+
+    /// A provider that keeps the conversation on its own side and measures it
+    /// itself (ADR-0055 §1), the way an ACP adapter does.
+    pub fn holding(self: Arc<Self>, window: u64) -> Arc<Self> {
+        *self.holds.lock().unwrap() = Some(window);
         self
     }
 
@@ -135,7 +147,12 @@ impl Provider for ScriptedProvider {
         self.auth.lock().unwrap().clone()
     }
     fn endpoint(&self, _: &str) -> EndpointCapabilities {
-        EndpointCapabilities::default()
+        let held = *self.holds.lock().unwrap();
+        EndpointCapabilities {
+            holds_context: held.is_some(),
+            context_window: held,
+            ..EndpointCapabilities::default()
+        }
     }
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         self.serves

@@ -133,6 +133,13 @@ impl Turn<'_> {
         request: &ModelRequest,
     ) -> Step {
         self.items.retain(|i| !dropped.contains(&i.id));
+        // The ladder is the kernel's own: it learns a window, cuts the fold
+        // and sends it again. None of that is answerable where the endpoint
+        // holds the context, so an overflow there fails the turn as any other
+        // provider error does (ADR-0055 §1).
+        if self.ruler.holds() {
+            return self.retried_or_failed(error, dropped).await;
+        }
         if let ProviderError::ContextOverflow { message } = &error {
             self.learn_window(message);
         }
@@ -156,6 +163,12 @@ impl Turn<'_> {
             }
             return Step::Assembling;
         }
+        self.retried_or_failed(error, dropped).await
+    }
+
+    /// What every error that is not an overflow comes to: a retryable one
+    /// waits and goes again, and anything else ends the turn.
+    async fn retried_or_failed(&mut self, error: ProviderError, dropped: Vec<ItemId>) -> Step {
         if error.retryable() && self.retries < self.cfg.budget.max_retries {
             self.retries += 1;
             let delay = backoff(self.retries, error.retry_after_ms());

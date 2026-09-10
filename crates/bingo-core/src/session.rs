@@ -429,6 +429,20 @@ impl Actor {
                 "a log session has nothing to compact",
             ));
         }
+        if let Some(model) = self
+            .config
+            .model
+            .as_ref()
+            .filter(|m| m.capabilities.holds_context)
+        {
+            return Err(KernelError::new(
+                ErrorCode::InvalidInput,
+                format!(
+                    "`{}` holds this context and compacts it itself; bingo does not",
+                    model.provider.id()
+                ),
+            ));
+        }
         if self.running.is_some() {
             return Err(KernelError::new(ErrorCode::NotReady, "a turn is running"));
         }

@@ -120,6 +120,10 @@ impl Folder {
                 output,
                 ..
             } => self.tool_call(round, call_id, name, input, output.as_ref()),
+            // A cut the endpoint made in a context of its own: the row says
+            // it happened, and there is no summary to hand anybody because
+            // the endpoint kept what it kept (ADR-0055 §3).
+            ItemBody::Compaction { summary, .. } if summary.is_empty() => {}
             ItemBody::Compaction { summary, .. } => {
                 self.note(format!("[Summary of the conversation so far]\n{summary}"))
             }
@@ -869,6 +873,33 @@ mod tests {
                     "results are in user messages only"
                 );
             }
+        }
+
+        /// ADR-0055 §3: a cut the endpoint made replaced nothing and wrote no
+        /// summary, so the conversation the model reads is the one it would
+        /// have read had the row never been journaled — wherever it fell.
+        #[test]
+        fn a_compaction_with_no_summary_says_nothing_to_the_model(
+            shapes in proptest::collection::vec(any_shape(), 0..16),
+            at in 0usize..17,
+        ) {
+            let without = items_of(&shapes);
+            let mut with = without.clone();
+            let at = at.min(with.len());
+            with.insert(at, item(
+                "held",
+                ItemBody::Compaction {
+                    summary: String::new(),
+                    replaced: 0,
+                    before: 400_000,
+                    after: 120_000,
+                    duration_ms: 0,
+                },
+            ));
+            proptest::prop_assert_eq!(
+                ContextView::fold_items(&with),
+                ContextView::fold_items(&without)
+            );
         }
 
         #[test]
