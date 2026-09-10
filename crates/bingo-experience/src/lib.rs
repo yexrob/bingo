@@ -22,6 +22,7 @@ mod contributor;
 mod diff;
 pub mod entry;
 mod frontmatter;
+pub mod guide;
 mod id;
 mod project;
 mod rank;
@@ -58,6 +59,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "command:experience",
         "context:experience:index",
         "context:experience:recall",
+        "service:bingo.experience.pages",
     ],
     requires: &[],
     // Where the library lives is not a setting — it follows the config
@@ -138,6 +140,7 @@ impl Plugin for ExperiencePlugin {
         registrar.add(Contribution::Context(
             Arc::new(RecallContributor::new(library)) as Arc<dyn ContextContributor>,
         ));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -159,6 +162,8 @@ mod plugin_tests {
     #[test]
     fn the_manifest_says_what_it_provides_and_claims_one_setting() {
         assert_eq!(MANIFEST.id, "bingo.experience");
+        let page = format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id));
+        assert_eq!(MANIFEST.provides.last().copied(), Some(page.as_str()));
         assert!(MANIFEST.requires.is_empty());
         assert_eq!(
             MANIFEST.config.map(|claim| claim.keys),
@@ -188,7 +193,8 @@ mod plugin_tests {
     }
 
     /// Nothing registered is nothing in the prompt: no tool description, no
-    /// index block, and no `/experience` for a person who turned it off.
+    /// index block, no page and no `/experience` for a person who turned it
+    /// off.
     #[test]
     fn a_project_that_turned_playbooks_off_is_offered_none() {
         let mut registrar = registrar(json!({"experience": {"enabled": false}}));
@@ -225,5 +231,12 @@ mod plugin_tests {
         assert!(matches!(contributions[4], Contribution::Command(_)));
         assert!(matches!(contributions[5], Contribution::Context(_)));
         assert!(matches!(contributions[6], Contribution::Context(_)));
+        match &contributions[7] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 }
