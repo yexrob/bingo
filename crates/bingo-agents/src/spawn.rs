@@ -198,7 +198,8 @@ pub(crate) async fn child_tools(
     Some(names)
 }
 
-const NOT_A_CHILDS: [&str; 2] = [SPAWN_AGENT, "AskUserQuestion"];
+/// The two a child is never offered; the page says so where a parent reads.
+pub(crate) const NOT_A_CHILDS: [&str; 2] = [SPAWN_AGENT, "AskUserQuestion"];
 
 /// Every tool name the host has now, or nothing when the catalogue cannot be
 /// read — in which case the child inherits the whole set, as a session does.

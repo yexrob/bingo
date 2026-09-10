@@ -27,6 +27,7 @@
 
 mod command;
 mod definition;
+pub mod guide;
 mod hook;
 mod layers;
 mod library;
@@ -76,6 +77,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "command:agents",
         "command:team",
         "service:agents.team",
+        "service:bingo.agents.pages",
     ],
     requires: &[],
     // Definitions are files, not settings, and the limits on a session tree
@@ -142,6 +144,7 @@ impl Plugin for AgentsPlugin {
             Arc::new(TeamCommand) as Arc<dyn Command>
         ));
         registrar.add(team_file());
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -174,6 +177,7 @@ mod plugin_tests {
                 "command:agents",
                 "command:team",
                 "service:agents.team",
+                &format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)),
             ]
         );
         assert!(MANIFEST.requires.is_empty());
@@ -226,10 +230,11 @@ mod plugin_tests {
                 _ => None,
             })
             .collect();
+        let page = bingo_sdk::Pages::key(MANIFEST.id);
         assert_eq!(
             services,
-            [("agents.team", false)],
-            "the team file, in process only (ADR-0031 §3)"
+            [("agents.team", false), (page.as_str(), false)],
+            "the team file and this plugin's page, in process only (ADR-0031 §3)"
         );
     }
 
