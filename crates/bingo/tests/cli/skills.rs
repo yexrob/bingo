@@ -144,3 +144,53 @@ fn the_prompt_lists_the_pages_the_loaded_plugins_wrote() {
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(stdout(&out).trim(), "listed");
 }
+
+/// The pages a default build carries, one line each. The `# Skills` listing
+/// and the map's own `## Pages` section are generated from the same gathering
+/// (ADR-0054 §§2–3), so a plugin that owns a noun and wrote nothing about it
+/// is missing from both, and this is where that shows.
+///
+/// One run per page: the fake provider answers only a request carrying the
+/// line, so a missing page is a run that fails by name rather than a list
+/// compared to a list.
+#[test]
+#[ignore = "until slice B1 lands"]
+fn the_prompt_lists_a_page_for_every_plugin_that_owns_a_noun() {
+    for page in [
+        "guide-agents",
+        "guide-channels",
+        "guide-hooks",
+        "guide-mcp",
+        "guide-memory",
+        "guide-permissions",
+        "guide-rooms",
+        "guide-skills",
+        "guide-tui",
+    ] {
+        let out = asked_for(page);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{page} is on no line of the prompt: {}",
+            stderr(&out)
+        );
+        assert_eq!(stdout(&out).trim(), "listed", "{page}");
+    }
+}
+
+/// One `--print` run whose only answer is addressed to the prompt line `page`
+/// would take.
+fn asked_for(page: &str) -> Output {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(&format!(
+        r#"{{"responses":[
+            {{"when":{{"contains":"- {page} —"}},"steps":[{{"text":"listed"}}]}}
+        ]}}"#
+    ));
+    run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--cwd"])
+        .arg(home.path())
+        .arg("hello")
+        .envs(home_env(home.path())))
+}
