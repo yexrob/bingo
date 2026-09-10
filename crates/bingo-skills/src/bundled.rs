@@ -45,7 +45,7 @@ mod tests {
         let guide = &skills[0];
         assert_eq!(guide.name, "guide");
         assert!(
-            guide.description.contains("Read it before answering"),
+            guide.description.contains("Read it before any question"),
             "the frontmatter parsed and the description tells the model when \
              to read the guide: {}",
             guide.description
@@ -65,6 +65,9 @@ mod tests {
     #[test]
     fn the_guide_describes_this_product() {
         let guide = &skills(&[])[0];
+        // What is the whole's and no plugin's (ADR-0054 §3). Permissions,
+        // hooks, skills and MCP are named on their owners' pages, and their
+        // owners' tests are where the words are asserted.
         for subject in [
             "--print",
             "serve --stdio",
@@ -72,10 +75,6 @@ mod tests {
             "/model",
             "/compact",
             "/permission",
-            "acceptEdits",
-            "hooks",
-            "skills",
-            "MCP",
             "~/.bingo",
         ] {
             assert!(
@@ -119,8 +118,8 @@ mod tests {
     #[test]
     fn the_guide_stays_short_enough_to_read() {
         assert!(
-            skills(&[])[0].body.lines().count() <= 200,
-            "the guide is a page, not a manual"
+            skills(&[])[0].body.lines().count() <= 80,
+            "the guide is a map, not a manual (ADR-0054 §3)"
         );
     }
 }
