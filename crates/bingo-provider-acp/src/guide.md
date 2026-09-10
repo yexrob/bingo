@@ -90,15 +90,21 @@ reaches it: the catalogue moving is `tools/list_changed`.
 
 ## What a bridge session cannot do
 
-- **No compaction, and no side questions.** A request carrying an explicit
-  purpose is refused: ACP delegates execution, so even a text-only summary
-  might run tools on the other side. `/compact` on an ACP session fails, and so
-  does any plugin's question asked beside the conversation.
-- **No system prompt, no caching, no token counting.** Usage is whatever the
-  adapter reports and honestly zero otherwise; the context window is the
-  agent's business, not this one's. ACP's plans, modes and slash commands are
-  unmapped, and `fs/*` and `terminal/*` are declared unsupported — the agent
-  reaches the disk as itself.
+- **The agent compacts its own context, and takes no side questions.** The
+  conversation lives on the agent's side, so the ruler over it is the agent's
+  too: bingo draws no line in that window, warns about nothing and cuts
+  nothing. When the agent makes room for itself the transcript shows a
+  `context compacted (… → … tokens)` row where it happened, and the count
+  carries on from there. `/compact` is refused in words — the adapter holds
+  this context and compacts it itself — rather than forwarded; a request
+  carrying an explicit purpose is refused too, because ACP delegates
+  execution and even a text-only summary might run tools on the other side,
+  and so is any plugin's question asked beside the conversation.
+- **No system prompt, no caching, no token counting.** Usage is the agent's
+  own count against the agent's own window, from the first `usage_update` it
+  sends — and honestly zero where an adapter reports none. ACP's plans, modes
+  and slash commands are unmapped, and `fs/*` and `terminal/*` are declared
+  unsupported — the agent reaches the disk as itself.
 - **Permission questions are the adapter's own.** One that asks anyway is put
   to whoever is at the session, in the agent's own words. Where nobody answers
   it fails closed with one of the reject options the agent itself offered, or

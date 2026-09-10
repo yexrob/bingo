@@ -15,7 +15,7 @@ pub static PAGES: Pages = Pages(&[Page {
     description: "Another coding agent driving as a model: the `acp.adapters` \
                   rows that spawn one, the `agent` model label and how /model \
                   and /think reach it, the tool bridge, and what a session on \
-                  one cannot do — compaction included.",
+                  one cannot do — `/compact` included.",
     body: include_str!("guide.md"),
 }]);
 
@@ -100,6 +100,14 @@ mod tests {
     #[test]
     fn the_page_names_the_label_that_never_crosses_the_wire() {
         assert!(quoted(AGENT), "the page never says the {AGENT} model");
+    }
+
+    /// The one command that answers differently at an ACP session than
+    /// anywhere else (ADR-0055 §1): a person who types it gets a refusal, so
+    /// the page owes it a sentence before they do.
+    #[test]
+    fn the_page_names_the_command_a_held_context_refuses() {
+        assert!(quoted("/compact"), "the page never says /compact");
     }
 
     /// The tools an agent is never handed are the tools it brought itself. A

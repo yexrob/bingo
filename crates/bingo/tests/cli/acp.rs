@@ -392,6 +392,12 @@ fn tool_call() -> Value {
     })
 }
 
+/// What the adapter says after every result message and again the moment its
+/// own compaction is over: what it is holding, and the window it holds it in.
+fn usage_update(used: u64, size: u64) -> Value {
+    json!({ "sessionUpdate": "usage_update", "used": used, "size": size })
+}
+
 fn one_turn(updates: Vec<Value>) -> Value {
     json!({ "updates": updates, "stopReason": "end_turn" })
 }
@@ -689,5 +695,124 @@ fn the_restore_ladder_climbs_resume_then_load_then_a_file() {
     assert!(
         !transcript.contains("a replayed"),
         "and holds nothing the journal never had: {transcript}"
+    );
+}
+
+/// ADR-0055: an ACP session is measured by the agent, in the agent's window,
+/// and the compaction the agent made for itself is a row of the transcript.
+/// The two banners it wraps that in are the adapter's status, not the model's
+/// words, and never reach the journal.
+#[test]
+fn the_agents_own_count_its_window_and_its_own_compaction_reach_every_surface() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::new(
+        agent,
+        json!({
+            "sessionId": "acp-6",
+            "capabilities": { "resume": true },
+            "turns": [{
+                "updates": [
+                    usage_update(400_000, 1_000_000),
+                    chunk("Compacting..."),
+                    usage_update(120_000, 1_000_000),
+                    chunk("\n\nCompacting completed."),
+                    chunk("Answered.")
+                ],
+                "stopReason": "end_turn",
+                "usage": { "totalTokens": 2_367_503, "inputTokens": 2_367_000, "outputTokens": 503 }
+            }]
+        }),
+    );
+    let out = adapter.turn("go");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let context: Vec<Value> = frames_of(&out)
+        .into_iter()
+        .filter_map(|frame| match frame.event {
+            Event::TurnUsage { context, .. } => Some(json!({
+                "used": context.used,
+                "window": context.window,
+                "trigger": context.trigger,
+            })),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        context,
+        [json!({ "used": 120_000, "window": 1_000_000, "trigger": 1_000_000 })],
+        "the agent's count, not the turn's bill of every call it made"
+    );
+    assert_eq!(
+        bodies(frames_of(&out))
+            .into_iter()
+            .filter_map(|body| match body {
+                ItemBody::Compaction {
+                    summary,
+                    replaced,
+                    before,
+                    after,
+                    ..
+                } => Some((summary, replaced, before, after)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [(String::new(), 0, 400_000, 120_000)]
+    );
+    assert_eq!(
+        said(frames_of(&out)),
+        ["Answered."],
+        "the banners were the adapter talking about itself"
+    );
+}
+
+/// The refusal a person gets for typing `/compact` at an agent that compacts
+/// itself: bingo does not summarise a conversation it does not hold, and says
+/// whose it is (ADR-0055 §1).
+#[test]
+fn compacting_an_acp_session_is_refused_in_the_adapters_name() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::new(
+        agent,
+        json!({
+            "sessionId": "acp-7",
+            "capabilities": { "resume": true },
+            "turns": [one_turn(vec![usage_update(400_000, 1_000_000), chunk("First.")])]
+        }),
+    );
+    let mut host = stream_json::Host::start(&mut adapter.driven("agent"));
+    host.prompt("one");
+    host.until_event("turnCompleted");
+    host.prompt("/compact");
+    let ack = host.until_event("intentAck");
+    let ended = host.finish();
+    assert_eq!(ack["event"]["outcome"]["kind"], "rejected", "{ack}");
+    assert_eq!(
+        ack["event"]["outcome"]["error"]["message"],
+        "`scripted` holds this context and compacts it itself; bingo does not"
+    );
+    // A refused line is a failed run, the way every other refusal is
+    // (`super::shell`): the words go to stderr and the code says it did not
+    // happen.
+    assert_eq!(ended.code, Some(1), "stderr: {}", ended.err);
+    assert!(
+        ended.err.contains("code=INVALID_INPUT")
+            && ended
+                .err
+                .contains("holds this context and compacts it itself"),
+        "{}",
+        ended.err
+    );
+    assert!(
+        !ended
+            .lines
+            .iter()
+            .any(|line| line["event"]["type"] == "compacted"),
+        "and nothing was cut: {:?}",
+        ended.types()
+    );
+    assert_eq!(
+        adapter.methods(),
+        ["initialize", "session/new", "session/prompt"],
+        "the refusal never reached the agent"
     );
 }
