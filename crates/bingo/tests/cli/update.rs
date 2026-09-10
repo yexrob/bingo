@@ -220,3 +220,30 @@ fn a_headless_run_that_turns_the_check_off_is_not_told_the_key_is_unknown() {
         "an unclaimed key is reported by source: {said}"
     );
 }
+
+/// The terminal surface claims a second key beside the check, `tui.measure`
+/// (M89, design §7), and it is read the same way and by the same reader. Every
+/// run composes the plugin, so a person who sets the measure and then runs
+/// `--print` — or the same settings file on a machine with no terminal — is
+/// never told the key is unknown.
+#[test]
+fn a_headless_run_that_sets_the_measure_is_not_told_the_key_is_unknown() {
+    let responses = script(r#"{"responses":[{"steps":[{"text":"ok"}]}]}"#);
+    let settings = script(r#"{"tui": {"measure": 100}, "notAKey": 1}"#);
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", responses.path())
+        .args(["--print", "--provider", "fake", "--settings"])
+        .arg(settings.path())
+        .arg("hello"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "ok\n");
+    let said = stderr(&out);
+    assert!(
+        !said.contains("`tui`"),
+        "the claim reaches a run with no transcript in it: {said}"
+    );
+    assert!(
+        said.contains("`notAKey`"),
+        "an unclaimed key is reported by source: {said}"
+    );
+}
