@@ -22,6 +22,11 @@ const UNKNOWN: ModelFacts = ModelFacts {
 /// `declared > learned clamp > catalogue > unknown`, field by field; the
 /// endpoint's facts are composed in, never overridden, because no setting can
 /// make a proxy forward an image it strips.
+///
+/// The window is the one field the endpoint outranks everybody at: a server
+/// that names its own window is stating a fact the other three guess at
+/// (ADR-0055 §2), so it reads `endpoint > declared > learned clamp >
+/// catalogue`.
 pub fn resolve(
     declared: Option<&Declared>,
     learned: Option<u64>,
@@ -30,8 +35,9 @@ pub fn resolve(
 ) -> ModelCapabilities {
     let facts = catalogue.unwrap_or(UNKNOWN);
     let declared = declared.cloned().unwrap_or_default();
-    let window = declared
+    let window = endpoint
         .context_window
+        .or(declared.context_window)
         .unwrap_or_else(|| learned.map_or(facts.context_window, |l| l.min(facts.context_window)));
     ModelCapabilities {
         context_window: window,
@@ -117,6 +123,34 @@ mod tests {
         assert_eq!(caps.max_output, 64_000, "an undeclared field falls through");
     }
 
+    /// ADR-0055 §2: the endpoint's own window is a fact, and the other three
+    /// owners are guesses at it. Whether it holds the context rides across
+    /// untouched — no setting grants it and none takes it away.
+    #[test]
+    fn the_window_an_endpoint_names_beats_the_declaration_and_the_catalogue() {
+        let declared = Declared {
+            context_window: Some(200_000),
+            ..Declared::default()
+        };
+        let held = EndpointCapabilities {
+            holds_context: true,
+            context_window: Some(1_000_000),
+            ..endpoint(true)
+        };
+        let caps = resolve(Some(&declared), Some(150_000), None, held);
+        assert_eq!(caps.context_window, 1_000_000);
+        assert!(caps.holds_context);
+        assert!(
+            !resolve(Some(&declared), None, None, endpoint(true)).holds_context,
+            "an endpoint that holds nothing says so"
+        );
+        assert_eq!(
+            resolve(Some(&declared), None, None, endpoint(true)).context_window,
+            200_000,
+            "and the declaration stands where the endpoint names nothing"
+        );
+    }
+
     #[test]
     fn images_need_both_the_model_and_the_endpoint() {
         assert!(!resolve(None, None, Some(facts()), endpoint(false)).images);
@@ -178,6 +212,29 @@ mod tests {
                 if let Some(r) = d.reasoning { prop_assert_eq!(caps.reasoning, r); }
                 if d.images == Some(false) { prop_assert!(!caps.images); }
             }
+        }
+
+        /// The one field an endpoint outranks the declaration at (ADR-0055
+        /// §2): a window a server named is not a guess, and nothing else
+        /// about the model moves because it named one.
+        #[test]
+        fn a_window_the_endpoint_names_is_the_window(
+            declared in any_declared(),
+            learned in proptest::option::of(8_000u64..2_000_000),
+            facts in any_facts(),
+            named in 8_000u64..2_000_000,
+        ) {
+            let endpoint = EndpointCapabilities {
+                context_window: Some(named),
+                holds_context: true,
+                ..endpoint(true)
+            };
+            let caps = resolve(declared.as_ref(), learned, facts, endpoint);
+            prop_assert_eq!(caps.context_window, named);
+            prop_assert!(caps.holds_context);
+            let guessed = resolve(declared.as_ref(), learned, facts, self::endpoint(true));
+            prop_assert_eq!(caps.max_output, guessed.max_output);
+            prop_assert_eq!(caps.reasoning, guessed.reasoning);
         }
 
         #[test]
