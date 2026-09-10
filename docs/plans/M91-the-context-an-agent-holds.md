@@ -82,22 +82,22 @@ completed.`, `\n\nCompacting failed<reason>`.
 
 ## Exit criteria
 
-- [ ] `resolve`: an endpoint window of 1 000 000 wins over a declared
+- [x] `resolve`: an endpoint window of 1 000 000 wins over a declared
       200 000; `holds_context` carried; the property test holds
-- [ ] a held ruler never triggers `try_compact` and never warns; `/compact`
+- [x] a held ruler never triggers `try_compact` and never warns; `/compact`
       on a held session is refused with the provider's name; a scripted
       `ContextOverflow` on a held session fails the turn without a ladder
-- [ ] `Context { used: 412000, window: 1000000 }` in a round makes that
+- [x] `Context { used: 412000, window: 1000000 }` in a round makes that
       round's `TurnUsage.context` read `412000 / 1000000 / 1000000`,
       whatever the bill said
-- [ ] `Compacted { before, after }` records one `Compaction` item with an
+- [x] `Compacted { before, after }` records one `Compaction` item with an
       empty summary and no `Event::Compacted`; the fold writes no note
-- [ ] provider-acp: the recorded compaction frames yield `Compacted` then
+- [x] provider-acp: the recorded compaction frames yield `Compacted` then
       `Context`, and neither banner reaches a `TextDelta`; the failure
       banner does; a second turn's `endpoint()` names the size
-- [ ] black-box stream-json shows the window and the item; `/compact`
+- [x] black-box stream-json shows the window and the item; `/compact`
       answers the refusal; the `guide-acp` owner test names `/compact`
-- [ ] every gate green; Windows check for `bingo-provider-acp`, `bingo-core`
+- [x] every gate green; Windows check for `bingo-provider-acp`, `bingo-core`
 
 ## Non-goals
 
@@ -121,3 +121,37 @@ completed.`, `\n\nCompacting failed<reason>`.
   no size yet and measures against the catalogue's unknown window until
   the first reading arrives mid-turn; the first `TurnUsage` is already
   right.
+
+## Verified (2026-09-10, dev, `c0489785`…`1b951461`)
+
+One `opus-xhigh` worktree cut from `5d819299`; dev did not move under it,
+so the worker's gates ran on the merge tree, and clippy, the touched
+crates and the CLI black-box were run once more before the ff merge:
+
+```
+cargo fmt --all -- --check                                      ok
+cargo check --workspace --all-targets --locked                  ok
+cargo clippy --workspace --all-targets --locked -- -D warnings  ok
+cargo test --workspace --locked --no-fail-fast                  ok (4648 passed, 2 ignored, no flake)
+cargo test -p bingo --locked --test cli                         ok (223)
+scripts/check_discipline.sh                                     discipline ok
+scripts/budget.sh                                               budget ok (335)
+scripts/tui-smoke.sh                                            tui-smoke ok
+cargo check -p bingo-provider-acp -p bingo-core --all-targets --target x86_64-pc-windows-msvc  ok
+BINGO_UPDATE_SCHEMA=1 cargo test -p bingo-surface-rpc / -p bingo-plugin-rpc   schemas regenerated, committed
+```
+
+Decided on the way, against the plan's letter: a refused `/compact` exits
+1 like every rejected command (`INVALID_INPUT`), not 0; the black-box reads
+`--output-format json`, the raw frames, since `stream-json` carries no
+`TurnUsage`; `context_window` is `skip_serializing_if` so a recorded
+`ProviderSpec` shape does not grow a `null`; a held round that hears no
+reading keeps the last reading rather than falling back to the bill; the
+session-long reading lives on the ACP `Link`, the per-model window in
+`provider-acp/src/windows.rs`; the kernel's new tests are
+`turn/tests/held.rs` because `turn/tests.rs` is at the file cap.
+
+Not verified: no live `claude-agent-acp` run — the banner spellings and
+the `usage_update` shape are pinned from the adapter's source into
+fixtures. A live drive of a `[1m]` session past 967 000 tokens is the
+one check left.
