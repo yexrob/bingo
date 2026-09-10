@@ -67,21 +67,21 @@ posts, each bounce a full regeneration. After this milestone (ADR-0053):
 
 ## Exit criteria
 
-- [ ] `OpenRoom` on a standing name is refused, names the room's purpose and
+- [x] `OpenRoom` on a standing name is refused, names the room's purpose and
       members, and opens nothing; the same for a closed name
-- [ ] `Seat` seats at the head and the room reads `<by> seated scout`;
+- [x] `Seat` seats at the head and the room reads `<by> seated scout`;
       `Unseat` publishes the roster without the name, the room reads it, the
       seat that left is nudged with who and why, its retuning is cleared
-- [ ] `CloseRoom`: a last post, then `closed`; a member reads it to the end
+- [x] `CloseRoom`: a last post, then `closed`; a member reads it to the end
       and then nothing; `SendMessage` to it is refused; `/room` says closed
-- [ ] a sibling of a shared room may post and may not `Seat`/`Unseat`/close
-- [ ] the reading header carries the purpose; `/room` lists it
-- [ ] `SendMessage { to, again: true }` posts the latest bounced draft for
+- [x] a sibling of a shared room may post and may not `Seat`/`Unseat`/close
+- [x] the reading header carries the purpose; `/room` lists it
+- [x] `SendMessage { to, again: true }` posts the latest bounced draft for
       that room and is judged by the same serial rule; `text` and `again`
       together, or `again` with no bounce to repeat, are refused as input
-- [ ] black-box: the convene script still runs; a standing name refused;
+- [x] black-box: the convene script still runs; a standing name refused;
       `again` lands after a bounce
-- [ ] every gate green; Windows check for `bingo-rooms`, `bingo-agents`
+- [x] every gate green; Windows check for `bingo-rooms`, `bingo-agents`
 
 ## Non-goals
 
@@ -104,3 +104,29 @@ posts, each bounce a full regeneration. After this milestone (ADR-0053):
   one it last decided to send.
 - A closed room's seats keep their cursors; a reseat of the same name is
   refused, so nothing reads them again. Accepted: the journal is history.
+
+## Verified (2026-09-10, dev, merged `f729acfb`…`cb962546` and `63e864b7`…`1973c4e0`)
+
+Two `opus-xhigh` worktrees (rooms, agents), each gated before its ff merge,
+then re-gated on dev after the rebase:
+
+```
+cargo fmt --all -- --check                                      ok
+cargo check --workspace --all-targets --locked                  ok
+cargo clippy --workspace --all-targets --locked -- -D warnings  ok
+cargo test -p bingo-rooms --locked                              ok (218)
+cargo test -p bingo-agents --locked                             ok (150)
+cargo test -p bingo --locked --test cli                         ok (216)
+cargo test --workspace --locked --no-fail-fast                  ok, one flake:
+    pty a_terminal_that_answers_the_graphics_probe_is_sent_the_picture
+    failed once under the workspace's parallel load, 16/16 alone
+scripts/check_discipline.sh                                     discipline ok
+scripts/budget.sh                                               budget ok (335)
+cargo check -p bingo-rooms -p bingo-agents --target x86_64-pc-windows-msvc  ok
+```
+
+Found on the way: `schema/rpc.json` had been stale since M87 (`Image.path`);
+regenerated on dev as `006749dc`. Left for a later tidy: `tests/cli/again.rs`
+copies six journal helpers from `tests/cli/rooms.rs` because the two files
+were owned by different workers. No hands-on drive of a live room yet: the
+verbs are proven by the fake fleet and the CLI black-box scripts.
