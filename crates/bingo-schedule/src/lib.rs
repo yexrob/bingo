@@ -26,6 +26,7 @@
 mod command;
 mod diff;
 pub mod entry;
+pub mod guide;
 mod id;
 pub mod lock;
 mod render;
@@ -67,6 +68,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "tool:Wake",
         "command:schedule",
         "command:wake",
+        "service:bingo.schedule.pages",
     ],
     requires: &[],
     // The store is a directory, not a setting: where it lives follows the
@@ -148,6 +150,7 @@ impl Plugin for SchedulePlugin {
         registrar.add(Contribution::Command(
             Arc::new(WakeCommand::new(schedules.clone())) as Arc<dyn Command>,
         ));
+        registrar.add(guide::contribution(registrar));
         self.schedules
             .set(schedules)
             .map_err(|_| PluginError::Failed("the schedules plugin registered twice".into()))
@@ -183,6 +186,8 @@ mod plugin_tests {
     #[test]
     fn the_manifest_says_what_it_provides_and_claims_no_settings() {
         assert_eq!(MANIFEST.id, "bingo.schedule");
+        let page = format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id));
+        assert_eq!(MANIFEST.provides.last().copied(), Some(page.as_str()));
         assert!(MANIFEST.requires.is_empty());
         assert_eq!(
             MANIFEST.config.map(|claim| claim.keys),
@@ -214,6 +219,13 @@ mod plugin_tests {
         );
         assert!(matches!(contributions[4], Contribution::Command(_)));
         assert!(matches!(contributions[5], Contribution::Command(_)));
+        match &contributions[6] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
         assert!(
             !home.path().join(".bingo/data/schedules").exists(),
             "registering creates no directory"
