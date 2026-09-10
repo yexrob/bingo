@@ -154,17 +154,21 @@ fn the_prompt_lists_the_pages_the_loaded_plugins_wrote() {
 /// line, so a missing page is a run that fails by name rather than a list
 /// compared to a list.
 #[test]
-#[ignore = "until slice B1 lands"]
 fn the_prompt_lists_a_page_for_every_plugin_that_owns_a_noun() {
     for page in [
+        "guide-acp",
         "guide-agents",
         "guide-channels",
+        "guide-experience",
         "guide-hooks",
         "guide-mcp",
         "guide-memory",
         "guide-permissions",
+        "guide-rewind",
         "guide-rooms",
+        "guide-schedule",
         "guide-skills",
+        "guide-tasks",
         "guide-tui",
     ] {
         let out = asked_for(page);
