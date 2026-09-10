@@ -547,7 +547,8 @@ fn walk_run(ui: &mut Ui, lines: isize, columns: isize, now: Now) {
 }
 
 /// Take what is inside the run, and let it go: a selection is answered once.
-fn copy(ui: &mut Ui) -> Vec<Effect> {
+/// One road, whether a key asked or a button was released ([`crate::pointer`]).
+pub fn copy(ui: &mut Ui) -> Vec<Effect> {
     let text = ui
         .select
         .run
@@ -2393,6 +2394,22 @@ mod tests {
         assert!(ui.select.run.is_none());
     }
 
+    /// A hand still out past the edge is let go with the run it was drawing:
+    /// nothing walks the view afterwards.
+    #[test]
+    fn esc_lets_go_of_a_hand_held_past_the_edge() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let foot = below_the_transcript(&ui, 1);
+        on_mouse(&mut ui, &tree, click(2, 4), now);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        assert!(ui.select.dragging.is_some());
+        press(&mut ui, &state, key(KeyCode::Esc), now);
+        assert!(ui.select.run.is_none(), "esc lets it go");
+        assert!(ui.select.dragging.is_none(), "and the hand with it");
+    }
+
     // ---- the mouse ------------------------------------------------------
 
     #[test]
@@ -2765,6 +2782,211 @@ mod tests {
                 "dragging {from}..{to} over {text:?}"
             );
         }
+    }
+
+    // ---- the selection follows the hand (M92) -----------------------------
+
+    /// The rows of the transcript region as the last frame cut them.
+    fn region(ui: &Ui) -> ratatui::layout::Rect {
+        ui.painted.borrow().regions.transcript
+    }
+
+    /// A screen row `past` rows below the last one the transcript was drawn
+    /// on: the activity row, the input box, the status line.
+    fn below_the_transcript(ui: &Ui, past: u16) -> u16 {
+        let region = region(ui);
+        region.y + region.height + past - 1
+    }
+
+    /// A drag past the foot takes the view with it, by as many lines as the
+    /// pointer is rows past the region, and the run reaches the line that is
+    /// now drawn there.
+    #[test]
+    fn a_drag_below_the_transcript_scrolls_by_the_overshoot() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let (_, rows) = ui.transcript();
+        let top = ui.painted.borrow().top;
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 3);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        assert_eq!(
+            ui.select.run.map(|run| run.head.line),
+            Some(top + 3 + rows - 1),
+            "the run reaches the line now drawn at the foot"
+        );
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        assert_eq!(
+            ui.painted.borrow().top,
+            top + 3,
+            "three rows past, three lines"
+        );
+        assert!(ui.select.dragging.is_some(), "the hand is still out there");
+    }
+
+    /// Back inside the region, the run reaches the cell under the pointer and
+    /// the view stops walking.
+    #[test]
+    fn a_drag_back_inside_the_transcript_stops_the_walk() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 2);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        assert!(ui.select.dragging.is_some());
+        on_mouse(&mut ui, &tree, dragged(6, 5), now);
+        assert!(ui.select.dragging.is_none(), "the hand came back");
+        let top = ui.painted.borrow().top;
+        ui.drag_step(later(now, 500));
+        assert_eq!(ui.painted.borrow().top, top, "and nothing walks without it");
+    }
+
+    /// A hand that stays out there takes a line every [`crate::select::
+    /// EDGE_PACE`], measured from the last one it took — the loop asks on
+    /// every frame, and the frames are shorter than the pace.
+    #[test]
+    fn a_hand_held_past_the_foot_takes_a_line_every_pace() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 1);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        let reached = |ui: &Ui| ui.select.run.map(|run| run.head.line);
+        let head = reached(&ui);
+        ui.drag_step(later(now, 49));
+        assert_eq!(reached(&ui), head, "not yet");
+        ui.drag_step(later(now, 50));
+        assert_eq!(reached(&ui), head.map(|line| line + 1), "a line");
+        ui.drag_step(later(now, 60));
+        assert_eq!(reached(&ui), head.map(|line| line + 1), "and one at a time");
+        ui.drag_step(later(now, 100));
+        assert_eq!(reached(&ui), head.map(|line| line + 2));
+    }
+
+    /// It stops at the transcript's own last line: a hand may go on holding,
+    /// and the frames another step would cost are not owed.
+    #[test]
+    fn a_walk_past_the_foot_stops_at_the_last_line() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let (height, _) = ui.transcript();
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 1);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        for step in 1..=height {
+            ui.drag_step(later(now, 50 * step as i64));
+        }
+        assert_eq!(ui.select.run.map(|run| run.head.line), Some(height - 1));
+        assert!(ui.select.dragging.is_none(), "there is nothing further");
+    }
+
+    /// The first row of the transcript is as far up as a terminal can report:
+    /// a hand resting there walks the view back up a line at a time, and stops
+    /// at the transcript's first line.
+    #[test]
+    fn a_hand_held_at_the_top_walks_the_view_back_up() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let top = ui.painted.borrow().top;
+        assert!(top > 0, "there is transcript above the screen");
+        let head_row = region(&ui).y;
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        on_mouse(&mut ui, &tree, dragged(4, head_row), now);
+        assert_eq!(
+            ui.select.run.map(|run| run.head.line),
+            Some(top),
+            "the run reaches the first line on the screen, and the view holds"
+        );
+        ui.drag_step(later(now, 50));
+        assert_eq!(ui.select.run.map(|run| run.head.line), Some(top - 1));
+        for step in 2..=top + 1 {
+            ui.drag_step(later(now, 50 * step as i64));
+        }
+        assert_eq!(ui.select.run.map(|run| run.head.line), Some(0));
+        assert!(ui.select.dragging.is_none(), "there is nothing further");
+    }
+
+    /// Releasing the button is the copy: what the hand drew goes to the
+    /// terminal's clipboard, the run is let go, and the notice says how much.
+    #[test]
+    fn releasing_a_drag_copies_what_it_reached_and_says_how_much() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let (_, rows) = ui.transcript();
+        let top = ui.painted.borrow().top;
+        // Three rows past the foot, so three lines the screen was not showing
+        // join the run; the first of them with anything on it is the proof.
+        let hidden = ui
+            .transcript_text()
+            .get(top + rows..top + rows + 3)
+            .unwrap_or_default()
+            .iter()
+            .map(|line| line.trim_end().to_string())
+            .find(|line| !line.is_empty())
+            .expect("a line below the screen at the press");
+        let head_row = region(&ui).y;
+        let foot = below_the_transcript(&ui, 3);
+        on_mouse(&mut ui, &tree, click(0, head_row), now);
+        on_mouse(&mut ui, &tree, dragged(40, foot), now);
+        let copied = on_mouse(&mut ui, &tree, released(40, foot), now);
+        let [Effect::Copy(text)] = copied.as_slice() else {
+            panic!("releasing copies: {copied:?}")
+        };
+        assert!(
+            text.contains(&hidden),
+            "the run reached what the screen had not: {hidden:?} in {text:?}"
+        );
+        assert!(ui.select.run.is_none(), "copying lets it go");
+        assert!(ui.select.dragging.is_none());
+        assert_eq!(
+            ui.notice().map(|notice| notice.text.clone()),
+            Some(format!("copied {} lines", rows + 3))
+        );
+    }
+
+    /// A press and a release on one cell is a click, and a click means what it
+    /// has always meant: the block takes the focus and its fold goes round.
+    #[test]
+    fn a_press_and_a_release_on_one_cell_is_still_a_click() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(4, 5), now);
+        let folded = ui.folds.len();
+        let copied = on_mouse(&mut ui, &tree, released(4, 5), now);
+        assert!(copied.is_empty(), "a click copies nothing: {copied:?}");
+        assert!(ui.notice().is_none(), "and says nothing");
+        assert!(ui.select.block.is_some(), "the block is still focused");
+        assert_eq!(
+            ui.folds.len(),
+            folded,
+            "and the fold the press cycled stands"
+        );
+    }
+
+    /// The wheel is a second hand: it moves the view under a run being drawn
+    /// and the run stays where the first hand put it.
+    #[test]
+    fn the_wheel_scrolls_under_a_run_and_keeps_it() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(2, 4), now);
+        on_mouse(&mut ui, &tree, dragged(6, 6), now);
+        let run = ui.select.run;
+        let top = ui.painted.borrow().top;
+        on_mouse(&mut ui, &tree, wheel(true, 6, 6), now);
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        assert_eq!(ui.painted.borrow().top, top - WHEEL as usize);
+        assert_eq!(ui.select.run, run, "the run is the hand's, not the wheel's");
     }
 
     #[test]

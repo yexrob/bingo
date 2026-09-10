@@ -32,7 +32,7 @@ use crate::rewind::Rewind;
 use crate::roster;
 use crate::scroll::Scroll;
 use crate::search::Search;
-use crate::select::Select;
+use crate::select::{self, Cell, Dragging, Edge, Select};
 use crate::tree::{self, Row, Tree};
 use crate::views::Marks;
 
@@ -719,6 +719,47 @@ impl Ui {
     /// The rows a page key moves by: the screenful a person is looking at.
     pub fn page(&self) -> usize {
         self.transcript().1.max(1)
+    }
+
+    /// A drag held past an edge of the transcript: scroll towards it, and take
+    /// the run's far end to the line now drawn at that edge.
+    ///
+    /// It remembers that the hand is still out there — unless what the edge
+    /// reached is the transcript's own first or last line, where a hand may go
+    /// on holding but there is nothing further to reach, and the frames
+    /// another step would cost are not owed.
+    ///
+    /// The far end is measured against where the scroll is *going*, never
+    /// against where its ease has reached: a drag sends events far faster than
+    /// the ease is long, and the run would fall behind the view it is moving.
+    pub fn drag_edge(&mut self, edge: Edge, column: usize, now: Now) {
+        let (height, rows) = self.transcript();
+        self.scroll.by(edge.lines(), height, rows, now.instant);
+        let line = edge.line(self.scroll.target(height, rows), rows, height);
+        self.select.extend(Cell { line, column });
+        self.select.dragging = edge.beyond(line, height).then_some(Dragging {
+            edge,
+            stepped: now.instant,
+        });
+    }
+
+    /// One line more of a drag the hand is still holding past an edge, once
+    /// [`select::EDGE_PACE`] has come round again. The loop asks every frame,
+    /// and a frame is owed for as long as this has something to do.
+    pub fn drag_step(&mut self, now: Now) {
+        let Some(held) = self.select.dragging else {
+            return;
+        };
+        if now.since(held.stepped) < select::EDGE_PACE {
+            return;
+        }
+        self.drag_edge(held.edge.step(), self.head_column(), now);
+    }
+
+    /// The column the run's far end is at: a drag walking past an edge keeps
+    /// the column the pointer left the region at.
+    fn head_column(&self) -> usize {
+        self.select.run.map_or(0, |run| run.head.column)
     }
 }
 

@@ -257,6 +257,7 @@ pub(crate) async fn drive(
         };
         let now = Now::real();
         run.ui.expire(now);
+        run.ui.drag_step(now);
         if let Some(exit) = run.exit.take() {
             return run.leave(screen, exit, now).await;
         }
@@ -404,6 +405,7 @@ impl Run {
             || self.ui.sending(screen).is_some()
             || self.ui.painted.borrow().blocks.moving()
             || self.ui.exit_armed(screen.instant)
+            || self.ui.select.dragging.is_some()
             || self
                 .session
                 .tree

@@ -29,6 +29,15 @@ pub fn dragged(column: u16, row: u16) -> MouseEvent {
     )
 }
 
+/// The button coming up, wherever the hand had got to by then.
+pub fn released(column: u16, row: u16) -> MouseEvent {
+    mouse(
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        column,
+        row,
+    )
+}
+
 pub fn wheel(up: bool, column: u16, row: u16) -> MouseEvent {
     let kind = match up {
         true => crossterm::event::MouseEventKind::ScrollUp,

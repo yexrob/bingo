@@ -7,6 +7,8 @@
 //! [`LIMIT`] is refused out loud rather than truncated, because half a
 //! selection on the clipboard is worse than none.
 
+use std::time::{Duration, Instant};
+
 use base64::Engine;
 use bingo_sdk::ItemId;
 use ratatui::layout::Rect;
@@ -18,6 +20,11 @@ use crate::theme;
 /// The most a terminal is asked to take in one sequence. tmux's own default
 /// is smaller still; past this the answer is a notice, not a truncation.
 pub const LIMIT: usize = 100 * 1024;
+
+/// How long a drag held past the transcript's edge waits between lines: slow
+/// enough to let go where a person meant to, quick enough to cross a
+/// screenful in a second. A constant to tune by hand, not a setting.
+pub const EDGE_PACE: Duration = Duration::from_millis(50);
 
 /// A cell of the rendered transcript.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -34,6 +41,25 @@ pub struct Run {
     pub head: Cell,
 }
 
+/// How far past the rows of the transcript a screen row is, and on which
+/// side. A pointer that has left the region is still pointing at the
+/// transcript: above it are the lines that have scrolled off the top, below
+/// it — over the composer, the status line, a rail card — the ones under its
+/// foot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    Above(usize),
+    Below(usize),
+}
+
+/// A drag the hand is still holding past an edge: which way it pulls, and
+/// when it last took a line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dragging {
+    pub edge: Edge,
+    pub stepped: Instant,
+}
+
 /// What the transcript is holding.
 #[derive(Clone, Debug, Default)]
 pub struct Select {
@@ -41,6 +67,9 @@ pub struct Select {
     pub block: Option<ItemId>,
     /// The run being taken out of it.
     pub run: Option<Run>,
+    /// The hand is past an edge of the transcript and the view is walking
+    /// towards it, a line every [`EDGE_PACE`].
+    pub dragging: Option<Dragging>,
 }
 
 impl Select {
@@ -49,6 +78,7 @@ impl Select {
             anchor: at,
             head: at,
         });
+        self.dragging = None;
     }
 
     pub fn extend(&mut self, to: Cell) {
@@ -74,6 +104,59 @@ impl Select {
 
     pub fn clear(&mut self) {
         self.run = None;
+        self.dragging = None;
+    }
+}
+
+impl Edge {
+    /// Which side of a region `rows` tall a row falls past, and by how many
+    /// rows; `None` while it is on it. The row is counted from the region's
+    /// first, and a pointer above it counts backwards.
+    pub fn of(row: i32, rows: usize) -> Option<Self> {
+        let last = i32::try_from(rows).ok()? - 1;
+        match row {
+            _ if row < 0 => usize::try_from(row.unsigned_abs()).ok().map(Edge::Above),
+            _ if row > last => usize::try_from(row - last).ok().map(Edge::Below),
+            _ => None,
+        }
+    }
+
+    /// The lines to scroll to bring what it points at into view: towards the
+    /// head of the transcript above, towards its foot below.
+    pub fn lines(self) -> isize {
+        match self {
+            Edge::Above(rows) => signed(rows),
+            Edge::Below(rows) => -signed(rows),
+        }
+    }
+
+    /// The line drawn at the boundary row of a view `rows` tall parked at
+    /// `top`, in a transcript `height` lines long: the first line on the
+    /// screen above, the last one below. The overshoot says how far to
+    /// scroll, and this says what the pointer has reached once it has.
+    pub fn line(self, top: usize, rows: usize, height: usize) -> usize {
+        match self {
+            Edge::Above(_) => top,
+            Edge::Below(_) => (top + rows).min(height).saturating_sub(1),
+        }
+    }
+
+    /// Whether there is any transcript left on this side of a line: a hand
+    /// held past the last line asks for nothing more, and the frames another
+    /// step would cost are not owed.
+    pub fn beyond(self, line: usize, height: usize) -> bool {
+        match self {
+            Edge::Above(_) => line > 0,
+            Edge::Below(_) => line + 1 < height,
+        }
+    }
+
+    /// The one-row step a drag held past it takes each pace.
+    pub fn step(self) -> Self {
+        match self {
+            Edge::Above(_) => Edge::Above(1),
+            Edge::Below(_) => Edge::Below(1),
+        }
     }
 }
 
@@ -84,6 +167,18 @@ impl Run {
             true => (self.anchor, self.head),
             false => (self.head, self.anchor),
         }
+    }
+
+    /// Whether it reaches nowhere: a press with no drag after it, which is a
+    /// click and means what a click has always meant.
+    pub fn empty(&self) -> bool {
+        self.anchor == self.head
+    }
+
+    /// How many lines of the transcript it spans — what a copy says it took.
+    pub fn lines(&self) -> usize {
+        let (from, to) = self.span();
+        to.line - from.line + 1
     }
 
     /// Whether a cell of the transcript is inside the run.
@@ -110,6 +205,11 @@ impl Run {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// A count of rows as a move: a screen has fewer rows than an `isize` holds.
+fn signed(rows: usize) -> isize {
+    isize::try_from(rows).unwrap_or(isize::MAX)
 }
 
 /// The cells `[from, to)` of a line, measured as the terminal measures them.
@@ -248,6 +348,66 @@ mod tests {
             select.run.map(|r| r.head),
             Some(Cell { line: 0, column: 0 })
         );
+    }
+
+    #[test]
+    fn a_run_that_reaches_nowhere_is_a_click() {
+        let mut select = Select::default();
+        select.start(Cell { line: 4, column: 2 });
+        assert!(select.run.is_some_and(|run| run.empty()));
+        assert_eq!(select.run.map(|run| run.lines()), Some(1));
+        select.extend(Cell { line: 6, column: 0 });
+        assert!(select.run.is_some_and(|run| !run.empty()));
+        assert_eq!(
+            select.run.map(|run| run.lines()),
+            Some(3),
+            "three lines, counted the way a person reads them"
+        );
+    }
+
+    #[test]
+    fn a_row_on_the_region_is_past_no_edge() {
+        assert_eq!(Edge::of(0, 10), None);
+        assert_eq!(Edge::of(9, 10), None);
+    }
+
+    #[test]
+    fn a_row_off_the_region_is_the_rows_it_is_past_it_by() {
+        assert_eq!(Edge::of(-1, 10), Some(Edge::Above(1)));
+        assert_eq!(Edge::of(-4, 10), Some(Edge::Above(4)));
+        assert_eq!(Edge::of(10, 10), Some(Edge::Below(1)));
+        assert_eq!(Edge::of(13, 10), Some(Edge::Below(4)));
+    }
+
+    /// The overshoot is how far to scroll, and the sign is which way.
+    #[test]
+    fn an_edge_scrolls_towards_what_it_points_at() {
+        assert_eq!(Edge::Above(4).lines(), 4);
+        assert_eq!(Edge::Below(4).lines(), -4);
+        assert_eq!(Edge::Above(4).step(), Edge::Above(1));
+        assert_eq!(Edge::Below(4).step(), Edge::Below(1));
+    }
+
+    /// Lines 30..=49 are on a twenty-row view parked at 30.
+    #[test]
+    fn the_line_at_an_edge_is_the_first_or_the_last_one_drawn() {
+        assert_eq!(Edge::Above(3).line(30, 20, 100), 30);
+        assert_eq!(Edge::Below(3).line(30, 20, 100), 49);
+    }
+
+    /// A transcript shorter than its region hangs from the composer: the last
+    /// line it drew is its own last, not the row that far down the pane.
+    #[test]
+    fn the_line_below_a_short_transcript_is_its_last() {
+        assert_eq!(Edge::Below(3).line(0, 20, 4), 3);
+    }
+
+    #[test]
+    fn an_edge_at_the_end_of_the_transcript_has_nowhere_further_to_go() {
+        assert!(Edge::Above(1).beyond(1, 100));
+        assert!(!Edge::Above(1).beyond(0, 100));
+        assert!(Edge::Below(1).beyond(98, 100));
+        assert!(!Edge::Below(1).beyond(99, 100));
     }
 
     #[test]
