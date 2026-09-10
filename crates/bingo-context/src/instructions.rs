@@ -11,7 +11,7 @@ use crate::{baseline, files, root};
 
 /// The file a directory speaks through, in order of preference: a project that
 /// has written for this agent is not also asked what it told another one.
-const NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+pub(crate) const NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
 /// Before everything else in the system prompt: instructions are the frame the
 /// rest of the prompt is read in.

@@ -10,6 +10,7 @@ mod baseline;
 mod compact;
 mod estimate;
 mod files;
+pub mod guide;
 mod instructions;
 mod memory;
 mod prompt;
@@ -39,7 +40,7 @@ pub use compact::SummaryCompactor;
 pub use instructions::InstructionsContributor;
 pub use memory::{MemoryCommand, MemoryContributor};
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.context",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
@@ -48,6 +49,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "context:instructions",
         "context:memory",
         "command:memory",
+        "service:bingo.context.pages",
     ],
     requires: &[],
     config: None,
@@ -81,6 +83,7 @@ impl Plugin for ContextPlugin {
         registrar.add(Contribution::Hook(Arc::new(baseline::BaselineHook::new(
             data_dir,
         ))));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -106,8 +109,15 @@ mod tests {
                 "compactor:summary",
                 "context:instructions",
                 "context:memory",
-                "command:memory"
+                "command:memory",
+                "service:bingo.context.pages",
             ]
+        );
+        assert!(
+            MANIFEST
+                .provides
+                .contains(&format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)).as_str()),
+            "the page's key is spelled the one way (ADR-0054 §1)"
         );
         assert!(MANIFEST.config.is_none(), "no switch turns memory off");
     }
@@ -116,7 +126,9 @@ mod tests {
     #[test]
     fn the_plugin_registers_a_compactor_two_contributors_the_command_and_one_hook() {
         let contributions = contributions(json!({}));
-        assert_eq!(contributions.len(), 5);
+        // The hook is nobody's promise: it is the baseline's own, and the
+        // manifest names the five things another plugin could ask for.
+        assert_eq!(contributions.len(), MANIFEST.provides.len() + 1);
         assert!(matches!(contributions[0], Contribution::Compactor(_)));
         assert!(matches!(contributions[1], Contribution::Context(_)));
         assert!(matches!(contributions[2], Contribution::Context(_)));
@@ -126,5 +138,12 @@ mod tests {
         };
         assert_eq!(hook.id(), "context:baselines");
         assert_eq!(hook.matcher().points, [bingo_sdk::HookPoint::Session]);
+        match &contributions[5] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 }
