@@ -43,6 +43,7 @@ pub mod error;
 pub mod events;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod guide;
 pub mod inbox;
 pub mod knobs;
 pub mod ladder;
@@ -60,14 +61,15 @@ pub mod shared;
 pub mod transcript;
 pub mod wire;
 
-/// Nothing static is provided: which providers exist is the person's
-/// configuration to say (ADR-0035 §1), and a build that ships a default row
-/// would be a build with an opinion about which agent you use.
-static MANIFEST: PluginManifest = PluginManifest {
+/// No provider is promised: which ones exist is the person's configuration to
+/// say (ADR-0035 §1), and a build that ships a default row would be a build
+/// with an opinion about which agent you use. The page is the one thing this
+/// plugin always has, configured or not (ADR-0054 §1).
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: session::PLUGIN,
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.4",
-    provides: &[],
+    provides: &["service:bingo.acp.pages"],
     requires: &[],
     config: Some(ConfigClaim {
         keys: &[("acp", Merge::ByName)],
@@ -102,6 +104,9 @@ impl Plugin for AcpPlugin {
     }
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
+        // The page first: what an agent is and how to configure one is worth
+        // reading before there is one to read about.
+        registrar.add(guide::contribution(registrar));
         let rows = config::adapters(registrar.config()?)?;
         if rows.is_empty() {
             return Ok(());
@@ -195,11 +200,14 @@ mod tests {
     }
 
     /// A person with no adapters gets no providers, no listener and no
-    /// children — the plugin is inert until it is configured.
+    /// children — the plugin is inert until it is configured, and says only
+    /// what it is.
     #[test]
-    fn nothing_is_registered_until_an_adapter_is_configured() {
-        assert!(registered(json!({})).is_empty());
-        assert!(registered(json!({ "acp": { "adapters": {} } })).is_empty());
+    fn nothing_but_the_page_is_registered_until_an_adapter_is_configured() {
+        for config in [json!({}), json!({ "acp": { "adapters": {} } })] {
+            let contributions = registered(config);
+            assert_eq!(contributions, ["Service(bingo.acp.pages)"]);
+        }
     }
 
     #[test]
@@ -239,7 +247,13 @@ mod tests {
     #[test]
     fn the_manifest_claims_one_key_and_promises_no_provider_of_its_own() {
         assert_eq!(MANIFEST.id, "bingo.acp");
-        assert!(MANIFEST.provides.is_empty());
+        assert_eq!(MANIFEST.provides, ["service:bingo.acp.pages"]);
+        assert!(
+            MANIFEST
+                .provides
+                .contains(&format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)).as_str()),
+            "the page's key is spelled the one way (ADR-0054 §1)"
+        );
         assert!(MANIFEST.requires.is_empty());
         let claim = MANIFEST.config.expect("a config claim");
         assert_eq!(claim.keys, [("acp", Merge::ByName)]);
