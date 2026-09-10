@@ -160,25 +160,25 @@ async fn post(
     room: &SessionSummary,
     said: Said,
     from: &str,
-) -> Result<String, ToolOutput> {
+) -> Result<String, Box<ToolOutput>> {
     let title = names::name_of(room);
     let Some((there, here)) = journals(cx, &room.id).await else {
         // A room this process cannot read judges nobody — and holds no draft
         // for it to repeat either.
         return said
             .written()
-            .ok_or_else(|| ToolOutput::error(nothing_to_repeat(title)));
+            .ok_or_else(|| Box::new(ToolOutput::error(nothing_to_repeat(title))));
     };
     if rooms::is_closed(&there) {
-        return Err(ToolOutput::error(closed(title)));
+        return Err(Box::new(ToolOutput::error(closed(title))));
     }
     let text = match said {
         Said::Text(text) => text,
         Said::Again => serial::draft(&here, &cx.item, title)
-            .ok_or_else(|| ToolOutput::error(nothing_to_repeat(title)))?,
+            .ok_or_else(|| Box::new(ToolOutput::error(nothing_to_repeat(title))))?,
     };
     match serial::bounce(&there, &here, &cx.item, title, from) {
-        Some(bounce) => Err(bounce),
+        Some(bounce) => Err(Box::new(bounce)),
         None => Ok(text),
     }
 }
@@ -229,7 +229,7 @@ impl Tool for MessageTool {
         let text = match (to.driver, said) {
             (Driver::Log, said) => match post(cx, &to, said, &from).await {
                 Ok(text) => text,
-                Err(handed_back) => return Ok(handed_back),
+                Err(handed_back) => return Ok(*handed_back),
             },
             (Driver::Model, Said::Text(text)) => text,
             (Driver::Model, Said::Again) => return Err(refused(NOT_A_ROOM)),
