@@ -7,17 +7,17 @@
 //! of answers the keys give (§7: a key means one direction, a click means
 //! both).
 
-use bingo_sdk::{SessionId, SessionState};
+use bingo_sdk::{Level, SessionId, SessionState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
 use crate::clock::Now;
 use crate::effect::Effect;
 use crate::fold;
-use crate::input::{item_of, scroll, walk_to};
+use crate::input::{self, item_of, scroll, walk_to};
 use crate::rail::CardId;
 use crate::roster;
-use crate::select::Cell;
+use crate::select::{Cell, Edge};
 use crate::tree::Tree;
 use crate::ui::{Open, Ui};
 
@@ -26,13 +26,18 @@ pub const WHEEL: isize = 3;
 
 /// One pure function from a mouse event to a list of effects, against the
 /// frame the last draw left behind: the wheel scrolls, a drag takes a run of
-/// cells, a click lands on a block, on a child's row, or on a card's option.
+/// cells and the release copies it, a click lands on a block, on a child's
+/// row, or on a card's option.
 pub fn on_mouse(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect> {
     match mouse.kind {
         MouseEventKind::ScrollUp => scroll(ui, WHEEL, now),
         MouseEventKind::ScrollDown => scroll(ui, -WHEEL, now),
         MouseEventKind::Down(MouseButton::Left) => return pressed(ui, tree, mouse, now),
-        MouseEventKind::Drag(MouseButton::Left) => drag(ui, mouse),
+        MouseEventKind::Drag(MouseButton::Left) => drag(ui, mouse, now),
+        MouseEventKind::Up(MouseButton::Left) => return released(ui, now),
+        // The pointer is moving with nothing held down, so no hand is out past
+        // the edge asking the view to walk any more.
+        MouseEventKind::Moved => ui.select.dragging = None,
         _ => {}
     }
     Vec::new()
@@ -95,11 +100,85 @@ fn cycle_fold(ui: &mut Ui, state: &SessionState, id: &bingo_sdk::ItemId) {
     ui.folds.insert(id.clone(), next);
 }
 
-/// A drag takes the far end of the run with it.
-fn drag(ui: &mut Ui, mouse: MouseEvent) {
+/// A drag takes the far end of the run with it. Past the transcript's own
+/// rows it takes the view too: the pointer is still pointing at the
+/// transcript, and what it points at is off the screen (§3).
+fn drag(ui: &mut Ui, mouse: MouseEvent, now: Now) {
+    match edge_under(ui, mouse) {
+        Some(edge) => drag_past(ui, edge, mouse, now),
+        None => drag_inside(ui, mouse),
+    }
+}
+
+/// On the region, the run reaches the cell under the pointer and the hand is
+/// no longer asking the view for anything.
+fn drag_inside(ui: &mut Ui, mouse: MouseEvent) {
+    ui.select.dragging = None;
     if let Some(cell) = transcript_cell(ui, mouse) {
         ui.select.extend(cell);
     }
+}
+
+/// Past it, only a run being drawn asks for anything: a drag that started
+/// somewhere else is somebody else's gesture.
+fn drag_past(ui: &mut Ui, edge: Edge, mouse: MouseEvent, now: Now) {
+    if ui.select.run.is_none() {
+        return;
+    }
+    ui.drag_edge(edge, column_under(ui, mouse), now);
+}
+
+/// The button comes up. A run that reaches somewhere is what the hand drew: it
+/// goes to the terminal's clipboard by the road the keys use and is let go,
+/// and a notice says how much, because a release is not obviously a copy. A
+/// run that reaches nowhere is a click, and keeps every meaning a click has.
+fn released(ui: &mut Ui, now: Now) -> Vec<Effect> {
+    ui.select.dragging = None;
+    let Some(lines) = ui
+        .select
+        .run
+        .filter(|run| !run.empty())
+        .map(|run| run.lines())
+    else {
+        return Vec::new();
+    };
+    let copied = input::copy(ui);
+    if !copied.is_empty() {
+        ui.notify(Level::Info, taken(lines), now.instant);
+    }
+    copied
+}
+
+/// What a copy says it took.
+fn taken(lines: usize) -> String {
+    match lines {
+        1 => "copied 1 line".to_string(),
+        many => format!("copied {many} lines"),
+    }
+}
+
+/// Which side of the transcript the pointer is pulling the view towards, if
+/// either. Only the rows count: a row of the composer, of the status line or
+/// of a rail card is a row below the transcript, whatever column it is in.
+///
+/// **The transcript's own first row is the top edge.** Nothing sits above it
+/// (`frame`), so a hand that has gone past the top of the window is reported
+/// on that row and on no other — there is no row above row 0 for a terminal
+/// to name. It pulls by nothing at all, so the view does not jump under a
+/// drag that merely reached the top; a hand that stays there is what walks it
+/// (`Ui::drag_step`).
+fn edge_under(ui: &Ui, mouse: MouseEvent) -> Option<Edge> {
+    let region = ui.painted.borrow().regions.transcript;
+    match i32::from(mouse.row) - i32::from(region.y) {
+        0 => Some(Edge::Above(0)),
+        row => Edge::of(row, usize::from(region.height)),
+    }
+}
+
+/// The column of the transcript the pointer is over, whatever row it is on.
+fn column_under(ui: &Ui, mouse: MouseEvent) -> usize {
+    let region = ui.painted.borrow().regions.transcript;
+    usize::from(mouse.column.saturating_sub(region.x))
 }
 
 /// The picture under the pointer, wherever this frame drew one — among the

@@ -77,8 +77,6 @@ impl Scope<'_> {
 }
 use serde_json::{Value, json};
 
-use crate::render::tool_failed;
-
 #[derive(Debug)]
 pub(crate) struct Encoder {
     /// The tool names the preamble advertises; only the host knows them.
@@ -199,7 +197,7 @@ impl Encoder {
                 scope,
                 call_id,
                 output.as_ref(),
-                tool_failed(item, output.as_ref()),
+                item.status.failed(output.as_ref()),
             )),
             ItemBody::Shell {
                 command,
@@ -358,7 +356,9 @@ fn joined_text(parts: &[ContentPart]) -> String {
 fn block(part: &ContentPart) -> Option<Value> {
     match part {
         ContentPart::Text { text } => Some(text_block(text)),
-        ContentPart::Image(Image { media_type, data }) => Some(json!({
+        ContentPart::Image(Image {
+            media_type, data, ..
+        }) => Some(json!({
             "type": "image",
             "source": { "type": "base64", "media_type": media_type, "data": data },
         })),
@@ -857,6 +857,7 @@ mod tests {
                 ContentPart::Image(Image {
                     media_type: "image/png".into(),
                     data: "iVBORw0KGgo=".into(),
+                    path: None,
                 }),
             ],
             is_error: false,

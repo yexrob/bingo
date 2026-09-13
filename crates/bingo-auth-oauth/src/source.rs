@@ -165,7 +165,7 @@ impl TokenSource {
             vec![AnswerSpec::Cancel],
         );
         let flow = async {
-            let code = redirect::receive(loopback, &state).await?;
+            let code = redirect::receive(loopback, &state).await?.code;
             let reply = exchange::authorization_code(
                 &self.http,
                 &self.issuer,

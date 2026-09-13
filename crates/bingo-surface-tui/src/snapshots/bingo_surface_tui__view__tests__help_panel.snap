@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/view.rs
-assertion_line: 1398
 expression: "draw_sized(100, 28, &state, &ui, now)"
 ---
 "enter        send the message · open the focused…  ctrl+g       the same list · ↑↓ to walk it       "
@@ -15,13 +14,13 @@ expression: "draw_sized(100, 28, &state, &ui, now)"
 "alt+b/f      move one word                         / · !        run a command · run a shell line    "
 "ctrl+w/u/k   delete word · to line start · to li…  click        a picture · open it                 "
 "pgup/pgdn    scroll the transcript                 ?            toggle this panel                   "
+"v · drag     select · ↑↓←→ or a drag extend · y,…                                                   "
 "                                                                                                    "
 "/help    shortcuts and commands                                                                     "
 "/clear   start a fresh session here                                                                 "
 "/resume  reopen a session                                                                           "
 "/exit    leave bingo                                                                                "
 "/quit    leave bingo                                                                                "
-"                                                                                                    "
 "                                                                                                    "
 "                                                                                                    "
 "                                                                                                    "

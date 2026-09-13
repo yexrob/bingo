@@ -37,7 +37,21 @@ pub enum Server {
     Http {
         url: String,
         headers: BTreeMap<String, String>,
+        /// What this server's authorization server calls bingo, when it
+        /// registers no clients of its own (ADR-0050 §1). Absent is the
+        /// ordinary case: bingo registers itself.
+        oauth: Option<OAuth>,
     },
+}
+
+/// The sign-in half of an HTTP server's entry. Only a client id: a public
+/// native client holds no secret, and a token never enters a settings file
+/// (ADR-0012 §2).
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OAuth {
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 /// A child's environment and an HTTP server's headers are where a person keeps
@@ -53,10 +67,15 @@ impl fmt::Debug for Server {
                 .field("args", args)
                 .field("env", &Names(env))
                 .finish_non_exhaustive(),
-            Server::Http { url, headers } => f
+            Server::Http {
+                url,
+                headers,
+                oauth,
+            } => f
                 .debug_struct("Http")
                 .field("url", url)
                 .field("headers", &Names(headers))
+                .field("oauth", oauth)
                 .finish_non_exhaustive(),
         }
     }
@@ -88,6 +107,8 @@ struct Entry {
     url: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    #[serde(default)]
+    oauth: Option<OAuth>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -112,8 +133,8 @@ impl Entry {
         let command = self
             .command
             .ok_or_else(|| E::custom("a stdio server needs a command"))?;
-        if self.url.is_some() || !self.headers.is_empty() {
-            return Err(E::custom("url and headers belong to an http server"));
+        if self.url.is_some() || !self.headers.is_empty() || self.oauth.is_some() {
+            return Err(E::custom("url, headers and oauth belong to an http server"));
         }
         Ok(Server::Stdio {
             command,
@@ -133,6 +154,7 @@ impl Entry {
         Ok(Server::Http {
             url,
             headers: self.headers,
+            oauth: self.oauth,
         })
     }
 }
@@ -165,11 +187,22 @@ pub fn row(server: &Server) -> Value {
             "env": env,
             "cwd": cwd,
         }),
-        Server::Http { url, headers } => json!({
-            "type": "http",
-            "url": url,
-            "headers": headers,
-        }),
+        Server::Http {
+            url,
+            headers,
+            oauth,
+        } => {
+            let mut row = json!({ "type": "http", "url": url, "headers": headers });
+            // Absent rather than null: a row is forwarded verbatim to a
+            // foreign agent (ADR-0036 §4), and a key nobody wrote is a key
+            // nobody should read.
+            if let Some(oauth) = oauth
+                && let Some(row) = row.as_object_mut()
+            {
+                row.insert("oauth".into(), json!({ "clientId": oauth.client_id }));
+            }
+            row
+        }
     }
 }
 
@@ -245,6 +278,7 @@ mod tests {
                     "Authorization".to_string(),
                     "Bearer s3cret".to_string()
                 )]),
+                oauth: None,
             }
         );
     }
@@ -284,6 +318,39 @@ mod tests {
         let error = server(json!({ "type": "http", "url": "http://localhost", "command": "npx" }))
             .expect_err("refused");
         assert!(error.to_string().contains("stdio server"), "{error}");
+
+        let error = server(json!({ "command": "npx", "oauth": { "clientId": "cl_1" } }))
+            .expect_err("refused");
+        assert!(error.to_string().contains("http server"), "{error}");
+    }
+
+    /// ADR-0050 §1: a person may name the client id their authorization
+    /// server gave them, for a server that registers nobody.
+    #[test]
+    fn an_http_entry_may_name_the_client_id_it_signs_in_as() {
+        let parsed = server(json!({
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "oauth": { "clientId": "cl_1" },
+        }))
+        .expect("a readable entry");
+        let Server::Http { oauth, .. } = &parsed else {
+            panic!("an http server");
+        };
+        assert_eq!(
+            oauth.as_ref().and_then(|oauth| oauth.client_id.as_deref()),
+            Some("cl_1")
+        );
+        assert_eq!(row(&parsed)["oauth"]["clientId"], json!("cl_1"));
+        assert_eq!(server(row(&parsed)).expect("the row reads back"), parsed);
+    }
+
+    /// A row is forwarded verbatim: a key nobody wrote is not invented here.
+    #[test]
+    fn a_server_that_names_no_client_id_forwards_no_oauth_key() {
+        let parsed = server(json!({ "type": "http", "url": "https://mcp.example.com/mcp" }))
+            .expect("a readable entry");
+        assert!(row(&parsed).get("oauth").is_none(), "{}", row(&parsed));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bingo_sdk::{CancellationToken, HostHandle, SessionId, View};
 use serde_json::Value;
@@ -263,13 +263,42 @@ impl Jobs {
         }
     }
 
-    /// The jobs one session has running, oldest first.
-    pub fn running_in(&self, session: &SessionId) -> Vec<Arc<Job>> {
+    /// Every job still going, oldest first.
+    pub fn running(&self) -> Vec<Arc<Job>> {
         self.locked()
             .values()
-            .filter(|job| &job.session == session && !job.state().ended())
+            .filter(|job| !job.state().ended())
             .cloned()
             .collect()
+    }
+
+    /// The jobs one session has running, oldest first.
+    pub fn running_in(&self, session: &SessionId) -> Vec<Arc<Job>> {
+        self.running()
+            .into_iter()
+            .filter(|job| &job.session == session)
+            .collect()
+    }
+
+    /// End every job still going, and wait for it. Each is asked the way
+    /// `KillShell` asks, and its own task does the signalling: `SIGTERM`, then
+    /// the signal it cannot answer once the grace is spent (ADR-0018 §2).
+    ///
+    /// Asking costs nothing, so every grace runs at once and `within` bounds
+    /// the whole set rather than each of them.
+    pub async fn end_all(&self, within: Duration) {
+        let running = self.running();
+        for job in &running {
+            job.ask_to_die();
+        }
+        let ended = async {
+            for job in &running {
+                job.wait().await;
+            }
+        };
+        if tokio::time::timeout(within, ended).await.is_err() {
+            tracing::warn!("a background job had not ended when the plugin stopped");
+        }
     }
 
     /// What a session's jobs look like on the rail (ADR-0013 §2): a table

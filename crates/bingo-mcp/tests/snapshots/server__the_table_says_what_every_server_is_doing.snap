@@ -6,23 +6,27 @@ expression: "json!({ \"headers\": headers, \"rows\": rows })"
   "headers": [
     "server",
     "status",
-    "tools"
+    "tools",
+    "auth"
   ],
   "rows": [
     [
       "off",
       "disabled",
-      ""
+      "",
+      "-"
     ],
     [
       "test",
       "connected",
-      "5"
+      "5",
+      "-"
     ],
     [
       "waiting",
       "connecting",
-      ""
+      "",
+      "-"
     ]
   ]
 }

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
+use bingo_sdk::service::Services;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogKind,
     ClientIdentity, CloseReason, CommandContext, ContentPart, Delivery, Driver, Env, ErrorCode,
@@ -17,10 +18,58 @@ use bingo_sdk::{
     SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec, SessionState,
     SessionSummary, ToolContext, ToolHost, TurnId, Usage,
 };
+use bingo_sdk::{ServiceError, ServiceHandle, WireService, testing::ServiceHost};
 use jiff::Timestamp;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{PLUGIN, room};
+
+/// A stand-in for a service another plugin owns (ADR-0031): it answers one
+/// thing however it is called, and records what it was asked. This crate's
+/// half of such a contract is the key it looks the service up by, the method
+/// it calls and the params it sends, and that is what a `Stub` sees.
+pub(crate) struct Stub {
+    asked: Mutex<Vec<(String, Value)>>,
+    answer: Result<Value, String>,
+}
+
+impl Stub {
+    /// A team file whose section is this, whichever one is asked for.
+    pub(crate) fn declaring(section: Value) -> Arc<Stub> {
+        Stub::answering(Ok(json!({ "section": section })))
+    }
+
+    /// A team file that could not be read.
+    pub(crate) fn refusing(why: &str) -> Arc<Stub> {
+        Stub::answering(Err(why.to_string()))
+    }
+
+    fn answering(answer: Result<Value, String>) -> Arc<Stub> {
+        Arc::new(Stub {
+            asked: Mutex::new(Vec::new()),
+            answer,
+        })
+    }
+
+    /// Every call that reached it: the method, and what it was sent.
+    pub(crate) fn asked(&self) -> Vec<(String, Value)> {
+        locked(&self.asked).clone()
+    }
+}
+
+#[async_trait]
+impl WireService for Stub {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, ServiceError> {
+        locked(&self.asked).push((method.to_string(), params));
+        self.answer.clone().map_err(ServiceError)
+    }
+}
+
+/// A host that answers for one service and nothing else.
+pub(crate) fn service_host(key: &str, stub: Arc<Stub>) -> HostHandle {
+    let wire = stub as Arc<dyn WireService>;
+    ServiceHost::holding(key, Arc::new(ServiceHandle::new(wire)))
+}
 
 /// Long ago: what a room's journal was stamped with before this process.
 pub(crate) fn ts() -> Timestamp {
@@ -40,6 +89,9 @@ struct Inner {
     /// The sessions this plugin asked for, and the messages it sent.
     created: Mutex<Vec<SessionSpec>>,
     delivered: Mutex<Vec<(SessionId, Input, Delivery)>>,
+    /// What another plugin registered, for the one lookup this plugin makes
+    /// of one (ADR-0031).
+    services: Services,
 }
 
 fn locked<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -53,6 +105,13 @@ pub(crate) struct Fleet(Arc<Inner>);
 impl Fleet {
     pub(crate) fn handle(&self) -> HostHandle {
         HostHandle(Arc::new(self.clone()))
+    }
+
+    /// A service this fleet answers for, as its owner would have registered
+    /// it: the typed handle over a wire face (ADR-0031 §4).
+    pub(crate) fn serving(self, key: &str, stub: Arc<Stub>) -> Fleet {
+        let _ = self.0.services.open(key, stub as Arc<dyn WireService>);
+        self
     }
 
     /// A session with no parent, as a surface opens one.
@@ -306,8 +365,8 @@ impl HostApi for Fleet {
         Box::pin(futures::stream::empty())
     }
 
-    fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        None
+    fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.0.services.value(key)
     }
 }
 

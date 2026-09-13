@@ -75,9 +75,12 @@ pub fn turns(state: &SessionState) -> Vec<Turn> {
 
 /// The line a person typed, when the item is one.
 fn asked(item: &bingo_sdk::Item) -> Option<String> {
-    let ItemBody::User { parts, .. } = &item.body else {
+    let ItemBody::User { parts, origin } = &item.body else {
         return None;
     };
+    if origin.is_context() {
+        return None;
+    }
     let text = parts
         .iter()
         .filter_map(ContentPart::as_text)

@@ -119,9 +119,9 @@ pub struct Glyphs {
     pub tick: &'static str,
     /// The permission mode on the status line.
     pub mode: &'static str,
-    /// A tree node with siblings under it, and the last one.
-    pub branch: &'static str,
-    pub corner: &'static str,
+    /// A tree node: `[0]` with siblings under it, `[1]` the last one. One
+    /// field because it is one fact in two states, as the todo box is.
+    pub tree: [&'static str; 2],
     /// What is left where something was folded away or cut short.
     pub ellipsis: &'static str,
     /// What opens an item of a list.
@@ -141,8 +141,7 @@ pub const UNICODE: Glyphs = Glyphs {
     task: ["◻", "◼", "✔"],
     tick: "✔",
     mode: "⏵⏵",
-    branch: "├",
-    corner: "└",
+    tree: ["├", "└"],
     ellipsis: "…",
     point: "•",
     border: border::ROUNDED,
@@ -169,8 +168,7 @@ pub const ASCII: Glyphs = Glyphs {
     task: ["-", "*", "x"],
     tick: "x",
     mode: ">>",
-    branch: "+",
-    corner: "+",
+    tree: ["+", "+"],
     ellipsis: "...",
     point: "-",
     border: border::Set {
@@ -1006,11 +1004,11 @@ pub fn rule() -> &'static str {
 
 /// A tree node that has siblings under it; [`corner`] is the last of them.
 pub fn branch() -> &'static str {
-    glyphs().branch
+    glyphs().tree[0]
 }
 
 pub fn corner() -> &'static str {
-    glyphs().corner
+    glyphs().tree[1]
 }
 
 /// What is left where something was folded away, cut short, or is still on
@@ -1245,7 +1243,7 @@ mod tests {
             (
                 "presence",
                 &[
-                    // The sparkle at rest, and a turn that is retrying.
+                    // A turn that is retrying.
                     "activity.rs",
                     // Which session asked, named after a card's own title —
                     // every card's head is written in one place (ADR-0010 §3).

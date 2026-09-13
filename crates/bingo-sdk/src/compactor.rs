@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::KernelError;
 use crate::event::{ContextUsage, Item};
 use crate::ids::ItemId;
-use crate::model::{ModelCapabilities, Usage};
+use crate::model::{ModelCapabilities, ModelRequest, Usage};
 use crate::provider::Provider;
 
 /// Consecutive discarded compactions at which the kernel's breaker trips
@@ -42,7 +42,9 @@ pub struct CompactContext<'a> {
     pub usage: ContextUsage,
     pub capabilities: &'a ModelCapabilities,
     pub provider: Arc<dyn Provider>,
-    pub model: &'a str,
+    /// The assembled parent request, including contributions and projections.
+    /// Summary input may overlap the retained tail; the cut still names items.
+    pub request: &'a ModelRequest,
     pub cancel: CancellationToken,
     /// Consecutive compactions the kernel discarded; at three the breaker is
     /// tripped and a strategy takes its rung that needs no model.
@@ -78,11 +80,50 @@ pub struct Compaction {
     pub usage: Usage,
 }
 
+/// A rejected summary still bills any usage observed before it failed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
+#[error("{error}")]
+#[serde(rename_all = "camelCase")]
+pub struct CompactError {
+    pub error: KernelError,
+    #[serde(default)]
+    pub usage: Usage,
+}
+
+impl From<KernelError> for CompactError {
+    fn from(error: KernelError) -> Self {
+        Self {
+            error,
+            usage: Usage::default(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait Compactor: Send + Sync {
     async fn compact(
         &self,
         cx: CompactContext<'_>,
         reason: CompactReason,
-    ) -> Result<Compaction, KernelError>;
+    ) -> Result<Compaction, CompactError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_summary_preserves_observed_usage_on_the_wire() {
+        let value = serde_json::json!({
+            "error": {"code": "CONTEXT_OVERFLOW", "message": "too long"},
+            "usage": {"inputTokens": 37, "outputTokens": 5}
+        });
+        let failed: CompactError = serde_json::from_value(value).expect("failure contract");
+        assert_eq!(failed.usage.input_tokens, 37);
+        assert_eq!(failed.usage.output_tokens, 5);
+        let roundtrip: CompactError =
+            serde_json::from_value(serde_json::to_value(&failed).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(failed, roundtrip);
+    }
 }

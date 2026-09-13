@@ -159,11 +159,26 @@ step 'a reply reaches the transcript'
 start '{"responses":[{"steps":[{"text":"Hello from the smoke test."}]}]}'
 keys 'say hello' Enter
 await 'Hello from the smoke test.'
+if pane | grep -Eq '# (Tasks|Experience|Memories)|Context injection|context:memory'; then
+  echo 'tui-smoke: internal context appeared in the conversation' >&2
+  pane >&2
+  exit 1
+fi
 finish
 
 step 'esc interrupts a turn that is still waiting'
 start '{"responses":[{"steps":[{"delay":{"ms":60000}},{"text":"too late"}]}]}'
 keys 'wait for it' Enter
+await 'esc to interrupt'
+keys Escape
+await '[Request interrupted by user]'
+finish
+
+# The same keypress before a single byte has come back: the request is still
+# being established, which is where a long context spends its seconds.
+step 'esc interrupts a turn whose request has not answered yet'
+start '{"responses":[{"steps":[{"delayBeforeStream":{"ms":60000}},{"text":"too late"}]}]}'
+keys 'wait for the first byte' Enter
 await 'esc to interrupt'
 keys Escape
 await '[Request interrupted by user]'

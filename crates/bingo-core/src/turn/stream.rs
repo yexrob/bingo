@@ -23,14 +23,20 @@ pub(super) enum Streamed {
 
 impl Turn<'_> {
     pub(super) async fn stream(&mut self, request: ModelRequest) -> Streamed {
-        let mut stream = match self
-            .model
-            .provider
-            .stream(request, self.cancel.child_token())
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => return Streamed::Failed(e, Vec::new()),
+        // Establishing the request is an await of its own — on a long context
+        // it is seconds of time to first byte — and the token the provider
+        // carries only reaches the stream that does not exist yet.
+        let established = self
+            .racing(
+                self.model
+                    .provider
+                    .stream(request, self.cancel.child_token()),
+            )
+            .await;
+        let mut stream = match established {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Streamed::Failed(e, Vec::new()),
+            None => return Streamed::Cancelled,
         };
         let mut acc = Accumulator::new(self.id.clone(), self.round);
         let mut cancelled = false;
@@ -124,8 +130,16 @@ impl Turn<'_> {
         error: ProviderError,
         dropped: Vec<ItemId>,
         usage: ContextUsage,
+        request: &ModelRequest,
     ) -> Step {
         self.items.retain(|i| !dropped.contains(&i.id));
+        // The ladder is the kernel's own: it learns a window, cuts the fold
+        // and sends it again. None of that is answerable where the endpoint
+        // holds the context, so an overflow there fails the turn as any other
+        // provider error does (ADR-0055 §1).
+        if self.ruler.holds() {
+            return self.retried_or_failed(error, dropped).await;
+        }
         if let ProviderError::ContextOverflow { message } = &error {
             self.learn_window(message);
         }
@@ -143,11 +157,18 @@ impl Turn<'_> {
                         message: error.to_string(),
                     },
                     usage,
+                    request,
                 )
                 .await;
             }
             return Step::Assembling;
         }
+        self.retried_or_failed(error, dropped).await
+    }
+
+    /// What every error that is not an overflow comes to: a retryable one
+    /// waits and goes again, and anything else ends the turn.
+    async fn retried_or_failed(&mut self, error: ProviderError, dropped: Vec<ItemId>) -> Step {
         if error.retryable() && self.retries < self.cfg.budget.max_retries {
             self.retries += 1;
             let delay = backoff(self.retries, error.retry_after_ms());

@@ -1,20 +1,11 @@
-//! The reminder in the system prompt: what is still to do, recomputed every
-//! request from the journal. Late among the system blocks — the kernel's own
-//! instructions frame the work, this is the state of it — and never cached,
-//! because a task the model just finished must not be listed as open on the
-//! next round.
+//! Open task state, recomputed from the journal and appended when it changes.
 
 use async_trait::async_trait;
-use bingo_sdk::{
-    ContextContributor, ContextError, ContextPiece, ContextQuery, Placement, SystemBlock,
-};
+use bingo_sdk::{ContextContributor, ContextError, ContextPiece, ContextQuery, Placement};
 
 use crate::{journal, render};
 
-/// After everything the kernel and the other plugins put in the prompt.
-const ORDER: i32 = 900;
-
-/// Lists the session's open tasks, or contributes nothing at all.
+/// Lists the session's open tasks, including an explicit cleared state.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TasksContributor;
 
@@ -25,15 +16,15 @@ impl ContextContributor for TasksContributor {
     }
 
     fn placement(&self) -> Placement {
-        Placement::System { order: ORDER }
+        Placement::RoundStart
     }
 
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
         let tasks = journal::read(query.host, &query.session.id)
             .await
             .map_err(|e| ContextError(e.message))?;
-        Ok(render::reminder(&tasks)
-            .map(|text| ContextPiece::System(SystemBlock { text, cache: false }))
+        let text = render::reminder(&tasks).unwrap_or_else(|| "# Tasks\nNo open tasks.".into());
+        Ok(ContextPiece::snapshot(self.id(), text, query.items)
             .into_iter()
             .collect())
     }
@@ -58,8 +49,15 @@ mod tests {
 
     fn text(pieces: &[ContextPiece]) -> String {
         match &pieces[0] {
-            ContextPiece::System(block) => block.text.clone(),
-            ContextPiece::User { .. } => panic!("a reminder is a system block"),
+            ContextPiece::System(_) => panic!("a reminder is an appended user snapshot"),
+            ContextPiece::User { parts, .. } => parts
+                .iter()
+                .filter_map(|part| match part {
+                    bingo_sdk::ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -87,24 +85,92 @@ mod tests {
             text(&pieces),
             "# Tasks\n- #1 [in_progress] write the plan\n- #2 [pending] ship it"
         );
-        let ContextPiece::System(block) = &pieces[0] else {
-            panic!("a reminder is a system block");
+        assert!(matches!(&pieces[0], ContextPiece::User { .. }));
+    }
+
+    fn recorded(pieces: &[ContextPiece]) -> bingo_sdk::Item {
+        let ContextPiece::User { parts, .. } = &pieces[0] else {
+            panic!("tasks are appended user snapshots");
         };
-        assert!(
-            !block.cache,
-            "a list that changes within the turn is not a cache prefix"
+        bingo_sdk::Item {
+            id: bingo_sdk::ItemId::mint(),
+            turn: None,
+            round: 0,
+            status: bingo_sdk::ItemStatus::Completed,
+            started_at: jiff::Timestamp::UNIX_EPOCH,
+            completed_at: None,
+            intent: None,
+            body: bingo_sdk::ItemBody::User {
+                parts: parts.clone(),
+                origin: bingo_sdk::Origin::surface("contributor:tasks"),
+            },
+            meta: Default::default(),
+        }
+    }
+
+    async fn visible(
+        journals: &Journals,
+        session: &SessionId,
+        items: &[bingo_sdk::Item],
+    ) -> Vec<ContextPiece> {
+        let asked = Asked::new(session, journals);
+        let mut query = asked.query();
+        query.items = items;
+        TasksContributor
+            .contribute(query)
+            .await
+            .expect("task context")
+    }
+
+    #[tokio::test]
+    async fn task_changes_append_and_completion_clears_the_previous_snapshot() {
+        let journals = Journals::new();
+        let session = journals.session();
+        let cx = tool_context(&session, &journals);
+        TaskCreateTool
+            .call(json!({"subject": "write the plan"}), &cx)
+            .await
+            .expect("a task");
+        let first = visible(&journals, &session, &[]).await;
+        let mut items = vec![recorded(&first)];
+        assert!(visible(&journals, &session, &items).await.is_empty());
+
+        TaskUpdateTool
+            .call(json!({"id": 1, "status": "in_progress"}), &cx)
+            .await
+            .expect("an update");
+        let changed = visible(&journals, &session, &items).await;
+        assert_eq!(text(&changed), "# Tasks\n- #1 [in_progress] write the plan");
+        items.push(recorded(&changed));
+        assert!(visible(&journals, &session, &items).await.is_empty());
+
+        TaskUpdateTool
+            .call(json!({"id": 1, "status": "completed"}), &cx)
+            .await
+            .expect("an update");
+        let cleared = visible(&journals, &session, &items).await;
+        assert_eq!(text(&cleared), "# Tasks\nNo open tasks.");
+        items.push(recorded(&cleared));
+        assert!(visible(&journals, &session, &items).await.is_empty());
+        // Removing the visible snapshot, as compaction can, restores current state.
+        assert_eq!(
+            text(&visible(&journals, &session, &[]).await),
+            text(&cleared)
         );
     }
 
     #[tokio::test]
-    async fn a_session_with_no_tasks_adds_nothing_to_the_prompt() {
+    async fn a_session_with_no_tasks_says_there_are_no_open_tasks() {
         let journals = Journals::new();
         let session = journals.session();
-        assert!(pieces(&journals, &session).await.is_empty());
+        assert_eq!(
+            text(&pieces(&journals, &session).await),
+            "# Tasks\nNo open tasks."
+        );
     }
 
     #[tokio::test]
-    async fn a_list_that_is_all_done_adds_nothing_either() {
+    async fn a_list_that_is_all_done_says_there_are_no_open_tasks() {
         let journals = Journals::new();
         let session = journals.session();
         let cx = tool_context(&session, &journals);
@@ -116,7 +182,10 @@ mod tests {
             .call(json!({"id": 1, "status": "completed"}), &cx)
             .await
             .expect("an update");
-        assert!(pieces(&journals, &session).await.is_empty());
+        assert_eq!(
+            text(&pieces(&journals, &session).await),
+            "# Tasks\nNo open tasks."
+        );
     }
 
     #[tokio::test]
@@ -127,11 +196,8 @@ mod tests {
     }
 
     #[test]
-    fn it_comes_after_the_kernel_s_own_blocks_and_is_never_cached() {
+    fn it_refreshes_at_the_start_of_each_round() {
         assert_eq!(TasksContributor.id(), "tasks");
-        assert_eq!(
-            TasksContributor.placement(),
-            Placement::System { order: 900 }
-        );
+        assert_eq!(TasksContributor.placement(), Placement::RoundStart);
     }
 }

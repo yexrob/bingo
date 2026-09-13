@@ -11,9 +11,10 @@
 //! open and is not. And the dialled URL is single-use: every reconnect
 //! re-runs the bootstrap.
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bingo_sdk::CancellationToken;
+use bingo_sdk::{CancellationToken, Image};
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::time::Instant;
@@ -22,9 +23,10 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use super::api::Api;
 use super::bootstrap::{ClientConfig, Refusal, handshake};
 use super::chunks::Chunks;
-use super::event::{Picture, Seen, heard};
+use super::content::Resource;
+use super::event::{Seen, heard};
 use super::frame::{self, Frame, Method, header, kind};
-use super::pictures;
+use super::{attachments, merged};
 use crate::adapter::{Inbox, Incoming};
 use crate::error::ChannelError;
 
@@ -46,9 +48,15 @@ pub async fn listen(
     api: &Api,
     app_secret: &str,
     me: &str,
+    attachments: &Path,
     inbox: &Inbox,
     cancel: &CancellationToken,
 ) -> Result<(), ChannelError> {
+    let delivery = Delivery {
+        api,
+        attachments,
+        inbox,
+    };
     let mut config = ClientConfig::default();
     let mut attempt = 0u32;
     // Outlives every connection, unlike the reassembly beside it: see `Inbound`.
@@ -57,7 +65,7 @@ pub async fn listen(
         if cancel.is_cancelled() {
             return Ok(());
         }
-        match once(api, app_secret, me, inbox, cancel, &mut config, &mut seen).await {
+        match once(&delivery, app_secret, me, cancel, &mut config, &mut seen).await {
             Ended::Cancelled => return Ok(()),
             Ended::Fatal(why) => return Err(ChannelError::Refused(why)),
             Ended::Dropped(why) => {
@@ -79,15 +87,14 @@ pub async fn listen(
 
 /// One bootstrap, one dial, one connection's worth of listening.
 async fn once(
-    api: &Api,
+    delivery: &Delivery<'_>,
     app_secret: &str,
     me: &str,
-    inbox: &Inbox,
     cancel: &CancellationToken,
     config: &mut ClientConfig,
     seen: &mut Seen,
 ) -> Ended {
-    let url = match api.endpoint(app_secret).await {
+    let url = match delivery.api.endpoint(app_secret).await {
         Ok((url, fresh)) => {
             *config = fresh;
             url
@@ -99,14 +106,15 @@ async fn once(
         Ok((socket, _)) => socket,
         Err(error) => return refused(error),
     };
-    let delivery = Delivery { api, inbox };
-    pump(socket, config, me, &delivery, cancel, seen).await
+    pump(socket, config, me, delivery, cancel, seen).await
 }
 
-/// Where an event goes once it is whole: the inbox, and the api that fetches
-/// what the event only names (ADR-0040).
+/// Where an event goes once it is whole: the inbox, the api that fetches what
+/// the event only names (ADR-0040), and the directory an attachment lands in
+/// (ADR-0051 §2).
 struct Delivery<'a> {
     api: &'a Api,
+    attachments: &'a Path,
     inbox: &'a Inbox,
 }
 
@@ -184,7 +192,7 @@ async fn listening(
         // just been hot-updated by a pong.
         quiet_at = Instant::now() + config.read_deadline();
         ping_at = ping_at.min(Instant::now() + config.ping_interval);
-        if let Some(ended) = act(writer, step, delivery, cancel, quiet_at).await {
+        if let Some(ended) = act(writer, step, me, delivery, cancel, quiet_at).await {
             return ended;
         }
     }
@@ -194,19 +202,20 @@ async fn listening(
 /// to the surface. `Some` is the connection ending.
 async fn act(
     writer: &mut Writer,
-    step: Step,
+    mut step: Step,
+    me: &str,
     delivery: &Delivery<'_>,
     cancel: &CancellationToken,
     quiet_at: Instant,
 ) -> Option<Ended> {
-    if let Some(reply) = step.reply
+    if let Some(reply) = step.reply.take()
         && let Err(error) = writer.send(binary(&reply)).await
     {
         return Some(Ended::Dropped(format!(
             "the ack could not be written: {error}"
         )));
     }
-    let event = with_pictures(delivery.api, step.deliver?, &step.pictures).await;
+    let event = with_resources(delivery, me, step).await?;
     // Handing an event on must never blind the socket. While this task is
     // parked on a full downstream channel, nothing polls the read deadline,
     // the ping timer or the cancellation — so a stalled session is
@@ -223,11 +232,14 @@ async fn act(
     }
 }
 
-/// The message with its pictures fetched; anything else is handed on as is.
-/// The ack has gone out already, so a slow fetch costs delivery time, never
-/// a redelivery.
-async fn with_pictures(api: &Api, event: Incoming, pictures: &[Picture]) -> Incoming {
-    match event {
+/// The message with everything it only named: its pictures beside the words,
+/// its attachments on disk under them, the bundle it forwarded after those. A
+/// click is handed on as it came.
+///
+/// The ack has gone out already, so a slow fetch costs delivery time, never a
+/// redelivery.
+async fn with_resources(delivery: &Delivery<'_>, me: &str, mut step: Step) -> Option<Incoming> {
+    match step.deliver.take()? {
         Incoming::Message {
             conversation,
             principal,
@@ -235,16 +247,38 @@ async fn with_pictures(api: &Api, event: Incoming, pictures: &[Picture]) -> Inco
             addressed,
             parent,
             ..
-        } if !pictures.is_empty() => Incoming::Message {
-            conversation,
-            principal,
-            text,
-            images: pictures::fetch(api, pictures).await,
-            addressed,
-            parent,
-        },
-        other => other,
+        } => {
+            let (text, images) = filled(delivery, me, text, &step).await;
+            Some(Incoming::Message {
+                conversation,
+                principal,
+                text,
+                images,
+                addressed,
+                parent,
+            })
+        }
+        click => Some(click),
     }
+}
+
+/// The words with what was fetched appended, each part a blank line apart: a
+/// message that was only a file is the lines and nothing else.
+async fn filled(
+    delivery: &Delivery<'_>,
+    me: &str,
+    text: String,
+    step: &Step,
+) -> (String, Vec<Image>) {
+    let fetched = attachments::fetch(delivery.api, delivery.attachments, &step.resources).await;
+    let mut parts = vec![text, fetched.lines.join("\n")];
+    if let Some(id) = &step.forwarded
+        && let Some(bundle) = merged::lines(delivery.api, id, me).await
+    {
+        parts.push(bundle);
+    }
+    parts.retain(|part| !part.is_empty());
+    (parts.join("\n\n"), fetched.images)
 }
 
 /// Say goodbye before letting the socket go.
@@ -281,7 +315,9 @@ struct Step {
     reply: Option<Frame>,
     deliver: Option<Incoming>,
     /// What `deliver` still has to fetch before it is handed on.
-    pictures: Vec<Picture>,
+    resources: Vec<Resource>,
+    /// The merged bundle it still has to read, where it forwarded one.
+    forwarded: Option<String>,
 }
 
 /// The reassembly state of one connection, and the dedupe ring of the whole
@@ -335,14 +371,14 @@ impl<'a> Inbound<'a> {
     /// Acked within three seconds, whatever else happens to it. The ack's
     /// payload doubles as the `{}` a card callback must be answered with.
     fn event(&mut self, whole: Frame, arrived: std::time::Instant) -> Step {
-        let (deliver, pictures) = heard(&whole.payload, self.me)
+        let heard = heard(&whole.payload, self.me)
             .filter(|heard| self.seen.first(&heard.id))
-            .map(|heard| (heard.incoming, heard.pictures))
             .unwrap_or_default();
         Step {
             reply: Some(frame::ack(&whole, arrived.elapsed())),
-            deliver,
-            pictures,
+            deliver: heard.incoming,
+            resources: heard.resources,
+            forwarded: heard.forwarded,
         }
     }
 }

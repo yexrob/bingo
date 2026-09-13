@@ -113,7 +113,7 @@ fn run_json(home: &Path, script: &tempfile::NamedTempFile, prompt: &str) -> Outp
     run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home)
+            .envs(home_env(home))
             .args(["--print", "--output-format", "json", "--cwd"])
             .arg(home)
             .arg(prompt),
@@ -217,10 +217,13 @@ fn posts(home: &Path, root: &SessionId, room: &str) -> Vec<String> {
 /// journaled under `contributor:<id>`, so this is exactly the readings the
 /// rooms contributor folded into that member's turns, and nothing else it was
 /// told.
+/// The readings a member's turns opened with. The rooms contributor also
+/// states the protocol once, ahead of the first of them; a reading is the
+/// piece that opens with its room's label.
 fn readings(home: &Path, root: &SessionId, member: &str) -> Vec<String> {
     said(&journal(home, &format!("agent/{root}/{member}")))
         .into_iter()
-        .filter(|(_, origin)| origin.surface == "contributor:rooms")
+        .filter(|(text, origin)| origin.surface == "contributor:rooms" && text.starts_with('['))
         .map(|(text, _)| text)
         .collect()
 }

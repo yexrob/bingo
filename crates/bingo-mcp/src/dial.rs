@@ -43,6 +43,21 @@ pub struct Connection {
     pub asker: Arc<Asker>,
 }
 
+/// What a dial came back with. A server that answered `401` is told apart
+/// from one that would not answer at all (ADR-0050 §3): the first is a
+/// sign-in nobody has done yet, the second a failure to retry.
+pub enum Dialled {
+    Connected(Box<Connection>),
+    Unauthorized { why: String },
+    Failed { why: String },
+}
+
+/// A refusal, before the manager decides what it means for this server.
+enum Refused {
+    Unauthorized(String),
+    Failed(String),
+}
+
 /// `<data_dir>/logs/mcp-<server>.log`.
 pub fn log_path(data_dir: &Path, server: &str) -> PathBuf {
     data_dir.join("logs").join(format!("mcp-{server}.log"))
@@ -54,13 +69,20 @@ pub async fn dial(
     server_name: &str,
     server: &Server,
     data_dir: &Path,
-) -> Result<Connection, String> {
-    match tokio::time::timeout(CONNECT_TIMEOUT, connect(server_name, server, data_dir)).await {
-        Ok(outcome) => outcome,
-        Err(_) => Err(format!(
-            "connect timed out after {}s",
-            CONNECT_TIMEOUT.as_secs()
-        )),
+    bearer: Option<&str>,
+) -> Dialled {
+    match tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        connect(server_name, server, data_dir, bearer),
+    )
+    .await
+    {
+        Ok(Ok(connection)) => Dialled::Connected(Box::new(connection)),
+        Ok(Err(Refused::Unauthorized(why))) => Dialled::Unauthorized { why },
+        Ok(Err(Refused::Failed(why))) => Dialled::Failed { why },
+        Err(_) => Dialled::Failed {
+            why: format!("connect timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+        },
     }
 }
 
@@ -68,7 +90,8 @@ async fn connect(
     server_name: &str,
     server: &Server,
     data_dir: &Path,
-) -> Result<Connection, String> {
+    bearer: Option<&str>,
+) -> Result<Connection, Refused> {
     let asker = Arc::new(Asker::new(server_name));
     match server {
         Server::Stdio {
@@ -86,14 +109,24 @@ async fn connect(
                 data_dir,
                 Arc::clone(&asker),
             )
-            .await?;
+            .await
+            .map_err(Refused::Failed)?;
             list_tools(service, asker).await
         }
         // Every failure of an HTTP dial goes through one place, because every
         // one of them may print the URI that was dialled.
-        Server::Http { url, headers } => over_http(url, headers, asker)
-            .await
-            .map_err(|why| redact(&why, url)),
+        Server::Http { url, headers, .. } => {
+            let headers = match bearer {
+                Some(bearer) => crate::auth::bearing(headers, bearer),
+                None => headers.clone(),
+            };
+            over_http(url, &headers, asker)
+                .await
+                .map_err(|refused| match refused {
+                    Refused::Unauthorized(why) => Refused::Unauthorized(redact(&why, url)),
+                    Refused::Failed(why) => Refused::Failed(redact(&why, url)),
+                })
+        }
     }
 }
 
@@ -101,22 +134,33 @@ async fn over_http(
     url: &str,
     headers: &BTreeMap<String, String>,
     asker: Arc<Asker>,
-) -> Result<Connection, String> {
+) -> Result<Connection, Refused> {
     let service = open_http(url, headers, Arc::clone(&asker)).await?;
     list_tools(service, asker).await
 }
 
 /// What the server says it can do, asked once, at the end of the handshake.
-async fn list_tools(service: Service, asker: Arc<Asker>) -> Result<Connection, String> {
-    let tools = service
-        .list_all_tools()
-        .await
-        .map_err(|e| format!("listing tools: {e}"))?;
+/// A `401` here is the same fact as a `401` on the handshake: the token this
+/// dial carried is not one this server accepts.
+async fn list_tools(service: Service, asker: Arc<Asker>) -> Result<Connection, Refused> {
+    let mut tools = service.list_all_tools().await.map_err(|e| {
+        let why = format!("listing tools: {e}");
+        match crate::auth::call_wants_authorization(&e) {
+            true => Refused::Unauthorized(why),
+            false => Refused::Failed(why),
+        }
+    })?;
+    order_tools(&mut tools);
     Ok(Connection {
         service: Arc::new(service),
         tools,
         asker,
     })
+}
+
+fn order_tools(tools: &mut [rmcp::model::Tool]) {
+    // Equal names keep their server-given precedence for first-wins consumers.
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
 }
 
 async fn spawn_child(
@@ -146,15 +190,21 @@ async fn open_http(
     url: &str,
     headers: &BTreeMap<String, String>,
     asker: Arc<Asker>,
-) -> Result<Service, String> {
-    let config =
-        StreamableHttpClientTransportConfig::with_uri(url).custom_headers(http_headers(headers)?);
+) -> Result<Service, Refused> {
+    let headers = http_headers(headers).map_err(Refused::Failed)?;
+    let config = StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers);
     serve_client(
         Client::new(asker),
         StreamableHttpClientTransport::from_config(config),
     )
     .await
-    .map_err(|e| format!("handshake: {e}"))
+    .map_err(|e| {
+        let why = format!("handshake: {e}");
+        match crate::auth::handshake_wants_authorization(&e) {
+            true => Refused::Unauthorized(why),
+            false => Refused::Failed(why),
+        }
+    })
 }
 
 /// A header value is where a person keeps their token, so a value this crate
@@ -212,6 +262,35 @@ fn open_log(data_dir: &Path, server_name: &str) -> std::io::Result<std::fs::File
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalogue_order_preserves_duplicate_definitions_and_precedence() {
+        let tools: Vec<_> = (0..64)
+            .map(|index| {
+                let name = ["zebra", "alpha", "middle"][index % 3];
+                rmcp::model::Tool::new(
+                    name,
+                    format!("Definition {index}"),
+                    Arc::new(serde_json::Map::from_iter([
+                        ("type".into(), serde_json::json!("object")),
+                        ("title".into(), serde_json::json!(format!("Schema {index}"))),
+                    ])),
+                )
+            })
+            .collect();
+        let expected: Vec<_> = ["alpha", "middle", "zebra"]
+            .into_iter()
+            .flat_map(|name| tools.iter().filter(move |tool| tool.name == name).cloned())
+            .collect();
+        let mut ordered = tools;
+        order_tools(&mut ordered);
+        assert_eq!(
+            ordered, expected,
+            "equal names retain every definition in first-wins order"
+        );
+        order_tools(&mut ordered);
+        assert_eq!(ordered, expected, "normalization is idempotent");
+    }
 
     #[test]
     fn a_server_logs_its_stderr_under_the_data_directory() {
@@ -276,13 +355,16 @@ mod tests {
         let server = Server::Http {
             url: "http://127.0.0.1:1/mcp?key=s3cret".into(),
             headers: BTreeMap::from([("Authorization".to_string(), "Bearer t0ken".to_string())]),
+            oauth: None,
         };
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let Err(why) = dial("remote", &server, dir.path()).await else {
+        let Dialled::Failed { why } = dial("remote", &server, dir.path(), Some("at_1")).await
+        else {
             panic!("nothing is listening on port 1");
         };
         assert!(!why.contains("s3cret"), "{why}");
         assert!(!why.contains("t0ken"), "{why}");
+        assert!(!why.contains("at_1"), "{why}");
     }
 
     #[tokio::test]
@@ -294,12 +376,12 @@ mod tests {
             cwd: None,
         };
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let Err(error) = dial("missing", &server, dir.path()).await else {
+        let Dialled::Failed { why } = dial("missing", &server, dir.path(), None).await else {
             panic!("there is no such command to dial");
         };
         assert!(
-            error.starts_with("spawning bingo-no-such-mcp-server"),
-            "{error}"
+            why.starts_with("spawning bingo-no-such-mcp-server"),
+            "{why}"
         );
     }
 }

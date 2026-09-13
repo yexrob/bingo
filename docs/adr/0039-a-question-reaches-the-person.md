@@ -90,5 +90,11 @@ a second representation.)
   the ticks alone, and words with nothing ticked stay `Answer::Text`).
   An elicitation property has room for one value, so there the words
   are what the server hears — recorded in the mapping's own doc.
+- *2026-09-08, M85:* the stance is weighed only for a question shaped
+  to carry a role — one on its own, or a form. A sign-in or a
+  confirmation names no option a stance could pick, and is not the
+  policy's to weigh: it goes to the person as a gate question does
+  under *ask*, so `/mcp login` in a bypass session asks as `/login`
+  does instead of being refused for naming no allowing option.
 
 Refs: ADR-0035 §5, ADR-0036 §2, ADR-0011; Plans: M43, M53

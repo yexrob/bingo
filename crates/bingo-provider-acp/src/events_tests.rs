@@ -319,3 +319,120 @@ fn a_replayed_user_turn_is_never_an_event() {
     let mut mapper = Mapper::default();
     assert!(mapper.update(update_of(replay)).is_empty());
 }
+
+// ---------------------------------------- the context the agent holds
+
+fn readings(events: &[ModelEvent]) -> Vec<(u64, u64)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ModelEvent::Context { used, window } => Some((*used, *window)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cuts(events: &[ModelEvent]) -> Vec<(u64, u64)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ModelEvent::Compacted { before, after } => Some((*before, *after)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// ADR-0055 §4: every `usage_update` is the agent's own count of what it
+/// holds, whoever sent it and whatever else rode with it.
+#[test]
+fn every_usage_update_is_a_reading() {
+    let claude = turn(
+        vec![fixtures::update_usage()],
+        fixtures::prompt_response_bare(),
+    );
+    assert_eq!(readings(&claude), [(12_000, 200_000)]);
+    let codex = turn(
+        vec![fixtures::update_usage_bare()],
+        fixtures::prompt_response_bare(),
+    );
+    assert_eq!(readings(&codex), [(400_000, 1_000_000)]);
+    assert!(cuts(&codex).is_empty(), "a first reading fell from nothing");
+}
+
+/// The frames a compaction really arrives as: a banner, the reading that
+/// fell, another banner. The fall is the only thing that says a cut happened,
+/// and the two banners are the adapter's status rather than the agent's words
+/// (ADR-0055 §4).
+#[test]
+fn a_reading_that_fell_is_the_cut_the_agent_made_and_the_banners_are_dropped() {
+    let events = turn(
+        vec![
+            fixtures::update_usage_bare(),
+            fixtures::update_compacting_banner(),
+            fixtures::update_usage_after_compaction(),
+            fixtures::update_compacted_banner(),
+            fixtures::update_agent_message_chunk(),
+        ],
+        fixtures::prompt_response_bare(),
+    );
+    assert_eq!(cuts(&events), [(400_000, 120_000)]);
+    assert_eq!(
+        readings(&events),
+        [(400_000, 1_000_000), (120_000, 1_000_000)]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .position(|e| matches!(e, ModelEvent::Compacted { .. })),
+        events
+            .iter()
+            .position(|e| matches!(e, ModelEvent::Context { used: 120_000, .. }))
+            .map(|at| at - 1),
+        "the cut is said before the reading it explains"
+    );
+    assert_eq!(
+        text_of(&events),
+        "Renaming ",
+        "and neither banner is anything the agent said"
+    );
+}
+
+/// The one banner a person needs: the agent tried to make room and could not.
+#[test]
+fn the_failure_banner_is_the_agents_own_words() {
+    let events = turn(
+        vec![fixtures::update_compaction_failed_banner()],
+        fixtures::prompt_response_bare(),
+    );
+    assert_eq!(
+        text_of(&events),
+        "\n\nCompacting failed: the summary model refused"
+    );
+}
+
+/// A conversation is read across its turns: the agent compacts between two of
+/// them as readily as inside one, and the fall is the same fall (ADR-0055 §4).
+#[test]
+fn a_fall_between_two_turns_is_still_a_cut() {
+    let mut first = Mapper::default();
+    first.update(update_of(fixtures::update_usage_bare()));
+    let held = first.held().expect("the agent said what it holds");
+    assert_eq!((held.used, held.window), (400_000, 1_000_000));
+
+    let mut second = Mapper::holding(Some(held));
+    let events = second.update(update_of(fixtures::update_usage_after_compaction()));
+    assert_eq!(cuts(&events), [(400_000, 120_000)]);
+    assert_eq!(readings(&events), [(120_000, 1_000_000)]);
+}
+
+/// A reading that grew is a conversation that grew: no cut, just the count.
+#[test]
+fn a_reading_that_rose_is_no_cut_at_all() {
+    let mut mapper = Mapper::holding(Some(Reading {
+        used: 100,
+        window: 1_000_000,
+    }));
+    let events = mapper.update(update_of(fixtures::update_usage_bare()));
+    assert!(cuts(&events).is_empty());
+    assert_eq!(readings(&events), [(400_000, 1_000_000)]);
+}

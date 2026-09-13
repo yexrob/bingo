@@ -34,8 +34,7 @@ never the wanted one.
    end. `FollowupTask` is deleted — registration, manifest line, prompt,
    and every reference swept.
 3. **The roster tells the truth.** `ListAgents` and the unknown-name hint
-   list siblings too, marked as such; `WaitAgent` resolves names the same
-   way `SendMessage` does.
+   list siblings too, marked as such.
 4. **A DM carries no obligation.** No ack timers, no debts on direct
    messages. Needing an answer from someone is a room `@name` (ADR-0022):
    a DM speaks, a mention owes.

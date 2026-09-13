@@ -178,6 +178,29 @@ pub(crate) async fn siblings_of(
     .await
 }
 
+/// A post into a room, signed by whoever made it. The room's own verbs speak
+/// in it this way (ADR-0053 §3–4) — a seating, an unseating and a closing are
+/// each a post the room reads — and they go in by the door every post goes in
+/// by, a delivery into the room's `Log` session, so the journal keeps them in
+/// order with everything else said there and the fan-out treats them alike.
+pub(crate) async fn say(
+    host: &HostHandle,
+    room: &SessionId,
+    author: &str,
+    text: String,
+) -> Result<(), KernelError> {
+    let input = Input::text(
+        text,
+        Origin {
+            surface: SURFACE.into(),
+            principal: Some(author.to_string()),
+            conversation: None,
+        },
+    );
+    host.deliver(room, IntentId::mint(), input, Delivery::Wake)
+        .await
+}
+
 /// A nudge, into a seat's own queue: a delivery from the room and nobody in it
 /// (ADR-0022 §3, ADR-0029 §3). The fold reads it as `[in #design]`, which a
 /// post — always signed — never reads as, so nothing here opens a debt or
@@ -242,6 +265,8 @@ mod tests {
             parent: SessionId::from_raw("ses_root"),
             members: seats.into_iter().map(|seat| seat.name).collect(),
             ears,
+            purpose: None,
+            closed: false,
         }
     }
 

@@ -88,6 +88,10 @@ async fn an_unknown_protocol_major_refuses_the_handshake_with_a_notice() {
         started.manager.tools().await.is_empty(),
         "a plugin whose wire is unknown contributes nothing"
     );
+    assert!(
+        started.manager.compactors().await.is_empty(),
+        "and no compactor of its contract can be dispatched"
+    );
     started.manager.shutdown().await;
 }
 

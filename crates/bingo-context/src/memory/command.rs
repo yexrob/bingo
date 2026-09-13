@@ -10,8 +10,7 @@ use async_trait::async_trait;
 use bingo_sdk::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, KernelError, View};
 
 use crate::memory::file::Memory;
-use crate::memory::{dir, migrate, store};
-use crate::root;
+use crate::memory::{dir, project_dir, store};
 
 const HEADERS: [&str; 4] = ["scope", "name", "type", "description"];
 
@@ -41,10 +40,8 @@ impl Command for MemoryCommand {
     }
 
     async fn run(&self, _args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
-        let root = root::of(&cx.cwd).await;
-        migrate::once(&self.data_dir, &root).await;
         let user = dir::user(&self.data_dir);
-        let project = dir::project(&self.data_dir, &root);
+        let project = project_dir(&self.data_dir, &cx.cwd).await;
         let mut listed = rows("user", &store::list(&user).await);
         listed.extend(rows("project", &store::list(&project).await));
         if listed.is_empty() {
@@ -114,7 +111,7 @@ mod tests {
         }
 
         async fn project(&self) -> PathBuf {
-            dir::project(self.data.path(), &root::of(self.cwd.path()).await)
+            project_dir(self.data.path(), self.cwd.path()).await
         }
 
         async fn remember(&self, at: &Path, name: &str, kind: Kind) {

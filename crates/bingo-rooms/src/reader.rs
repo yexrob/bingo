@@ -13,17 +13,49 @@
 //! Order: whatever opened the turn is already in the journal (a held briefing
 //! first of all, ADR-0027 §2), and this piece follows it, because a round-start
 //! contributor speaks after the inputs the turn absorbed.
+//!
+//! The protocol itself is said here too, once, ahead of the first reading: a
+//! seat learns what a room is at the moment it has one, and a session that
+//! never sits in one is never told. Nowhere else may say it — a rule stated
+//! twice is a rule somebody has to remember to change twice.
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContentPart, ContextContributor, ContextError, ContextPiece, ContextQuery, Placement,
-    SessionFilter, SessionId, SessionState, SessionSummary,
+    CONTRIBUTOR_PREFIX, ContentPart, ContextContributor, ContextError, ContextPiece, ContextQuery,
+    Item, ItemBody, Placement, SessionId, SessionState, SessionSummary,
 };
 
 use crate::cursor::{self, Unread};
 use crate::mentions::Post;
 use crate::name::{self, PARENT};
 use crate::room::{self, Room};
+
+/// The name this contributor's pieces are journaled under.
+const ID: &str = "rooms";
+
+/// What being in a room means, in the words a member acts on: how it reaches
+/// you, what opens a turn for you, and what you owe for a post that calls on
+/// you (ADR-0028 §2, ADR-0029, ADR-0034 §3–4).
+const PROTOCOL: &str = "\
+# Rooms
+
+You are seated in a room: a conversation every member reads. It is read, not \
+delivered — at the head of each of your turns you are handed everything each of \
+your rooms has said since you last read it, under `[#<room>, since you last \
+read]`, and nothing of it reaches you between turns.
+
+A turn opens for you when a post says `@<your name>`, when it says `@all` — \
+which calls on every member but the one who wrote it — and once your patience \
+runs out with something unread: 300 seconds, unless your seat was given \
+another. `Listen` retunes your own seat and nobody else's.
+
+Being called on is owed an answer: post it back to the room with \
+`SendMessage(to: \"#<room>\")` so whoever is next can carry it on, and say \
+`@<name>` when it falls to someone in particular. When what a post names is not \
+yours, end your turn without posting rather than answering for someone else.
+
+A room is opened for one purpose, said at the head of its reading; when the \
+work moves on, open another room rather than reseating this one.";
 
 /// What a member reads of its rooms, at the head of its own turn.
 #[derive(Debug, Default, Clone, Copy)]
@@ -32,7 +64,7 @@ pub struct Reader;
 #[async_trait]
 impl ContextContributor for Reader {
     fn id(&self) -> &str {
-        "rooms"
+        ID
     }
 
     fn placement(&self) -> Placement {
@@ -40,8 +72,9 @@ impl ContextContributor for Reader {
     }
 
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
-        let mut pieces = Vec::new();
-        for seat in seated_in(&query).await {
+        let seats = seated_in(&query).await;
+        let mut pieces = Vec::from_iter(protocol(&seats, query.items));
+        for seat in seats {
             if let Some(piece) = read(&query, &seat).await {
                 pieces.push(piece);
             }
@@ -50,12 +83,32 @@ impl ContextContributor for Reader {
     }
 }
 
+/// The protocol, for a session that has a seat and has not been handed it.
+/// What it has already been told is in its own journal, so nothing beside the
+/// journal remembers, and a compaction that dropped the piece says it again.
+fn protocol(seats: &[Seated], items: &[Item]) -> Option<ContextPiece> {
+    let unsaid = !seats.is_empty() && !items.iter().any(spoken_here);
+    unsaid.then(|| ContextPiece::User {
+        parts: vec![ContentPart::text(PROTOCOL)],
+        label: ID.to_string(),
+    })
+}
+
+/// Whether an item is one this contributor put in the journal.
+fn spoken_here(item: &Item) -> bool {
+    let ItemBody::User { origin, .. } = &item.body else {
+        return false;
+    };
+    origin.surface.strip_prefix(CONTRIBUTOR_PREFIX) == Some(ID)
+}
+
 /// One room this session sits in, as its own journal has it: which session it
-/// is, what it is called, the name it seats this session under, and the
-/// snapshot both answers were read from.
+/// is, what it is called and what for, the name it seats this session under,
+/// and the snapshot every one of those answers was read from.
 struct Seated {
     id: SessionId,
     title: String,
+    purpose: Option<String>,
     member: String,
     state: SessionState,
 }
@@ -69,16 +122,16 @@ async fn read(query: &ContextQuery<'_>, seat: &Seated) -> Option<ContextPiece> {
     if let Err(error) = cursor::advance(query.host, &seat.id, &seat.member, head).await {
         tracing::debug!(room = %seat.title, %error, "a seat's cursor did not move");
     }
-    let text = said(&seat.title, &unread.posts)?;
+    let text = said(&seat.title, seat.purpose.as_deref(), &unread.posts)?;
     Some(ContextPiece::User {
         parts: vec![ContentPart::text(text)],
         label: seat.title.clone(),
     })
 }
 
-/// The posts as the member reads them: the room and the reading above them,
-/// then one line per post under the name that wrote it.
-fn said(title: &str, posts: &[Post]) -> Option<String> {
+/// The posts as the member reads them: the room, what it is for and the
+/// reading above them, then one line per post under the name that wrote it.
+fn said(title: &str, purpose: Option<&str>, posts: &[Post]) -> Option<String> {
     if posts.is_empty() {
         return None;
     }
@@ -86,10 +139,17 @@ fn said(title: &str, posts: &[Post]) -> Option<String> {
         .iter()
         .map(|post| format!("{}: {}", post.author, post.text.trim()))
         .collect();
-    Some(format!(
-        "[{title}, since you last read]\n{}",
-        lines.join("\n")
-    ))
+    Some(format!("{}\n{}", header(title, purpose), lines.join("\n")))
+}
+
+/// The line above a reading. A room carries its one purpose here, where every
+/// member reads it every time (ADR-0053 §1); a room opened without one reads as
+/// it always did.
+fn header(title: &str, purpose: Option<&str>) -> String {
+    match purpose {
+        Some(purpose) => format!("[{title} — {purpose}, since you last read]"),
+        None => format!("[{title}, since you last read]"),
+    }
 }
 
 /// The rooms this session sits in, each with the name it is seated under. A
@@ -105,16 +165,28 @@ async fn seated_in(query: &ContextQuery<'_>) -> Vec<Seated> {
         };
         let room = room.seated(&state);
         let called = seated_as(query.session, &room);
-        if let Some(member) = room.members.iter().find(|m| name::same(m, &called)) {
-            seated.push(Seated {
-                id,
-                title: room.title.clone(),
-                member: member.clone(),
-                state,
-            });
+        let Some(member) = room.members.iter().find(|m| name::same(m, &called)) else {
+            continue;
+        };
+        if spent(&room, &state, member) {
+            continue;
         }
+        seated.push(Seated {
+            id,
+            title: room.title.clone(),
+            purpose: room.purpose.clone(),
+            member: member.clone(),
+            state,
+        });
     }
     seated
+}
+
+/// Whether a room has nothing left for this seat, ever: it has closed and the
+/// seat has read it to its end (ADR-0053 §4). Such a room is not a seat at all
+/// any more — it costs no reading and no protocol.
+fn spent(room: &Room, state: &SessionState, member: &str) -> bool {
+    room.closed && Unread::of(state, member).is_empty()
 }
 
 /// The name a room's roster would call this session: `parent` for the session
@@ -138,18 +210,7 @@ async fn rooms_around(query: &ContextQuery<'_>) -> Vec<(SessionId, Room)> {
 }
 
 async fn under(query: &ContextQuery<'_>, parent: &SessionId) -> Vec<(SessionId, Room)> {
-    let children = query
-        .host
-        .sessions(SessionFilter {
-            parent: Some(parent.clone()),
-            ..SessionFilter::default()
-        })
-        .await
-        .unwrap_or_default();
-    children
-        .into_iter()
-        .filter_map(|child| Room::of(&child).map(|room| (child.id, room)))
-        .collect()
+    room::under(query.host, parent).await.unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -157,16 +218,19 @@ mod tests {
     use super::*;
     use crate::ear::Seat;
     use crate::seat;
-    use crate::tests::{Fleet, ts};
-    use bingo_sdk::{ContextUsage, HostHandle, ItemId, ModelCapabilities, SessionState, TurnId};
+    use crate::tests::{Fleet, item, ts};
+    use bingo_sdk::{
+        ContextUsage, HostHandle, ItemId, ModelCapabilities, Origin, SessionState, TurnId,
+    };
     use std::path::Path;
 
-    /// The turn's own facts, none of which a room reads: what a contributor is
-    /// handed beside the session it speaks for.
+    /// The turn's own facts, and the journal the session opens the round with
+    /// — which is all a reading reads of it: whether the protocol was said.
     struct Turn {
         turn: TurnId,
         usage: ContextUsage,
         capabilities: ModelCapabilities,
+        items: Vec<Item>,
     }
 
     impl Default for Turn {
@@ -181,12 +245,26 @@ mod tests {
                     reasoning: false,
                     count_tokens: false,
                     caching: false,
+                    holds_context: false,
                 },
+                items: Vec::new(),
             }
         }
     }
 
     impl Turn {
+        /// A session that has already been handed the protocol, which is
+        /// every turn but a seat's first.
+        fn told() -> Turn {
+            Turn {
+                items: vec![item(ItemBody::User {
+                    parts: vec![ContentPart::text(PROTOCOL)],
+                    origin: Origin::surface(format!("{CONTRIBUTOR_PREFIX}{ID}")),
+                })],
+                ..Turn::default()
+            }
+        }
+
         fn query<'a>(
             &'a self,
             session: &'a SessionSummary,
@@ -197,7 +275,7 @@ mod tests {
                 host,
                 turn: &self.turn,
                 round: 0,
-                items: &[],
+                items: &self.items,
                 usage: &self.usage,
                 capabilities: &self.capabilities,
                 cwd: Path::new("/work/project"),
@@ -207,6 +285,14 @@ mod tests {
 
     /// A root with a scout under it, and a room seating them both.
     async fn tree(members: &[&str]) -> (Fleet, SessionId, SessionId, SessionId) {
+        opened_for(None, members).await
+    }
+
+    /// The same, with the purpose the room was opened for.
+    async fn opened_for(
+        purpose: Option<&str>,
+        members: &[&str],
+    ) -> (Fleet, SessionId, SessionId, SessionId) {
         let fleet = Fleet::default();
         let root = fleet.root();
         let scout = fleet.child(&root, "scout");
@@ -214,23 +300,43 @@ mod tests {
             .iter()
             .map(|word| Seat::read(word).expect("a roster word"))
             .collect();
-        let room = seat::seat(
-            &fleet.handle(),
-            &root,
-            Path::new("/work/project"),
-            "design",
-            &seats,
-        )
-        .await
-        .expect("a room this crate can open");
+        let room = seated(&fleet, &root, purpose, &seats).await;
         (fleet, root, scout, room)
     }
 
-    /// What one session's turn would be handed at its head.
+    /// `#design` under this session, opened or reseated as a person's door
+    /// does it.
+    async fn seated(
+        fleet: &Fleet,
+        parent: &SessionId,
+        purpose: Option<&str>,
+        seats: &[Seat],
+    ) -> SessionId {
+        seat::seat(
+            &fleet.handle(),
+            parent,
+            Path::new("/work/project"),
+            seat::Opening::person("design", purpose),
+            seats,
+        )
+        .await
+        .expect("a room this crate can open")
+    }
+
+    /// What one session's turn would be handed at its head, for a seat the
+    /// protocol has already reached — every turn but its first.
     async fn read_by(fleet: &Fleet, session: &SessionId) -> Vec<String> {
+        handed(fleet, session, &Turn::told()).await
+    }
+
+    /// The same, for a seat that has never been handed anything.
+    async fn first_read_by(fleet: &Fleet, session: &SessionId) -> Vec<String> {
+        handed(fleet, session, &Turn::default()).await
+    }
+
+    async fn handed(fleet: &Fleet, session: &SessionId, turn: &Turn) -> Vec<String> {
         let summary = fleet.summary(session);
         let host = fleet.handle();
-        let turn = Turn::default();
         let pieces = Reader
             .contribute(turn.query(&summary, &host))
             .await
@@ -341,15 +447,13 @@ mod tests {
         let room = fleet.room(&root, "design");
         fleet.post(&room, "said before you joined", Some("reviewer"), ts());
 
-        seat::seat(
-            &fleet.handle(),
+        seated(
+            &fleet,
             &root,
-            Path::new("/work/project"),
-            "design",
+            None,
             &[Seat::read("scout").expect("a roster word")],
         )
-        .await
-        .expect("a room this crate can open");
+        .await;
 
         assert_eq!(
             cursor_of(&fleet, &room, "scout"),
@@ -374,15 +478,13 @@ mod tests {
         fleet.post(&room, "the build is green", Some("reviewer"), ts());
         assert_eq!(cursor_of(&fleet, &room, "scout"), None, "nothing read yet");
 
-        seat::seat(
-            &fleet.handle(),
+        seated(
+            &fleet,
             &root,
-            Path::new("/work/project"),
-            "design",
+            None,
             &[Seat::read("scout").expect("a roster word")],
         )
-        .await
-        .expect("a room this crate can reseat");
+        .await;
 
         assert_eq!(cursor_of(&fleet, &room, "scout"), None);
         assert_eq!(
@@ -422,14 +524,131 @@ mod tests {
     /// The piece is a fold of posts, so a room with nothing to say makes none.
     #[test]
     fn a_reading_of_no_posts_is_no_piece_at_all() {
-        assert_eq!(said("#design", &[]), None);
+        assert_eq!(said("#design", None, &[]), None);
         let state = SessionState::new(crate::tests::summary("ses_x", None, None));
         assert_eq!(cursor::of_state(&state, "scout"), None);
+    }
+
+    /// ADR-0053 §1: the purpose is at the head of every reading, so a member
+    /// meets what the room is for before it meets what the room said.
+    #[tokio::test]
+    async fn a_reading_carries_the_purpose_the_room_was_opened_for() {
+        let (fleet, _, scout, room) =
+            opened_for(Some("settle the storage layout"), &["scout"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            [
+                "[#design — settle the storage layout, since you last read]\nreviewer: the build is green"
+            ]
+        );
+
+        let (fleet, _, scout, room) = tree(&["scout"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            ["[#design, since you last read]\nreviewer: the build is green"],
+            "a room opened without one reads as it always did"
+        );
+    }
+
+    /// ADR-0053 §4: a closed room is read to its end and then never — and once
+    /// there is nothing left in it, it is not a seat this session has at all.
+    #[tokio::test]
+    async fn a_closed_room_is_read_to_its_end_and_then_never_again() {
+        let (fleet, _, scout, room) = tree(&["scout"]).await;
+        fleet.post(&room, "it shipped", Some("reviewer"), ts());
+        seat::close(
+            &fleet.handle(),
+            &room,
+            &Room::of(&fleet.summary(&room)).expect("a room"),
+            "parent",
+            None,
+        )
+        .await
+        .expect("a room this crate can close");
+
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            ["[#design, since you last read]\nreviewer: it shipped"],
+            "what was said before it closed is still read"
+        );
+        assert!(read_by(&fleet, &scout).await.is_empty(), "and then never");
+        assert!(
+            first_read_by(&fleet, &scout).await.is_empty(),
+            "a room with nothing left in it is no longer a seat to be told about"
+        );
     }
 
     #[test]
     fn it_speaks_at_the_head_of_a_round_under_its_own_name() {
         assert_eq!(Reader.id(), "rooms");
         assert_eq!(Reader.placement(), Placement::RoundStart);
+    }
+
+    /// The protocol comes before the first thing a seat reads, and never
+    /// again: what it was told is the journal's to say, so nothing beside it
+    /// remembers.
+    #[tokio::test]
+    async fn a_seat_is_told_the_protocol_once_ahead_of_its_first_reading() {
+        let (fleet, _, scout, room) = tree(&["scout", "reviewer"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
+
+        let first = first_read_by(&fleet, &scout).await;
+        assert_eq!(
+            first,
+            [
+                PROTOCOL.to_string(),
+                "[#design, since you last read]\nreviewer: the build is green".to_string(),
+            ]
+        );
+
+        fleet.post(&room, "and the tests pass", Some("reviewer"), ts());
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            ["[#design, since you last read]\nreviewer: and the tests pass"],
+            "a seat that has it is not told twice"
+        );
+    }
+
+    /// A seated member is told before it has anything to read: a standby
+    /// member's first turn opens on its brief, and the room it will work in
+    /// is part of what it was seated for.
+    #[tokio::test]
+    async fn a_seat_with_nothing_to_read_is_still_told_what_a_room_is() {
+        let (fleet, _, scout, _) = tree(&["scout"]).await;
+        assert_eq!(first_read_by(&fleet, &scout).await, [PROTOCOL]);
+    }
+
+    /// And a session no room seats is told nothing: the protocol costs the
+    /// prompts that have a room in them and no others.
+    #[tokio::test]
+    async fn a_session_in_no_room_is_told_nothing() {
+        let (fleet, _, _, _) = tree(&["reviewer"]).await;
+        let stranger = fleet.child(&fleet.root(), "stranger");
+        assert!(first_read_by(&fleet, &stranger).await.is_empty());
+    }
+
+    /// The rules the protocol is the one owner of (ADR-0034 §3–4). Each was
+    /// stated in a plugin that owns no rooms until M83; the words may move,
+    /// but a member that is not told one of them cannot act on it.
+    #[test]
+    fn the_protocol_says_how_a_room_is_read_what_wakes_a_seat_and_what_it_owes() {
+        for rule in [
+            "[#<room>, since you last read]",
+            "`@<your name>`",
+            "`@all`",
+            "every member but the one who wrote it",
+            "once your patience runs out with something unread",
+            "300 seconds",
+            "`Listen`",
+            "post it back to the room",
+            "SendMessage(to: \"#<room>\")",
+            "end your turn without posting",
+            "opened for one purpose",
+            "open another room rather than reseating this one",
+        ] {
+            assert!(PROTOCOL.contains(rule), "{rule} is unsaid: {PROTOCOL}");
+        }
     }
 }

@@ -356,22 +356,13 @@ fn wordcount() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/wordcount")
 }
 
-fn python3() -> bool {
-    std::process::Command::new("python3")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 /// The offer is derived, never listed: a tool nobody in `bingo-provider-acp`
 /// has heard of — registered at boot by a plugin process, in Python — reaches
 /// the bridge with no edit in that crate (ADR-0036 §1).
 #[test]
 fn a_tool_a_plugin_registered_reaches_the_bridge_with_no_edit_here() {
     let Some(agent) = fake_agent() else { return };
-    if !python3() {
+    if !crate::python::python3() {
         eprintln!("the plugin's tool is skipped: no python3 here");
         return;
     }

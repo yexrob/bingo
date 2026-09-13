@@ -11,13 +11,17 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use base64::Engine;
 use bingo_sdk::{CancellationToken, InteractionId};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
-use crate::adapter::{Buttons, ChannelAdapter, Edit, Inbox, Incoming, Mode, Threads, Typing};
+use crate::adapter::{
+    Acknowledge, Buttons, ChannelAdapter, Edit, Files, Inbox, Incoming, Mark, Mode, Outcome,
+    Outgoing, Threads, Typing,
+};
 use crate::conversation::{Conversation, Posted};
 use crate::error::ChannelError;
 use crate::limits::{Dialect, Encoding, Limits};
@@ -32,6 +36,8 @@ pub struct Config {
     pub buttons: bool,
     pub typing: bool,
     pub threads: bool,
+    pub files: bool,
+    pub acknowledge: bool,
     /// What a group message must contain for the bot to be addressed.
     pub mention: String,
     /// `host:port` to speak NDJSON to. Without one the adapter only records.
@@ -51,6 +57,8 @@ impl Default for Config {
             buttons: true,
             typing: true,
             threads: true,
+            files: true,
+            acknowledge: true,
             mention: "@bingo".into(),
             peer: None,
         }
@@ -92,6 +100,24 @@ pub enum Record {
         id: Posted,
         text: String,
         mode: Mode,
+    },
+    File {
+        to: Conversation,
+        parent: Option<Posted>,
+        id: Posted,
+        name: String,
+        /// The bytes as they were handed over. A fixture keeps what it was
+        /// given: a length beside them would be a second way to say how big
+        /// the file was, and the wire speaks the bytes themselves.
+        bytes: Vec<u8>,
+        caption: Option<String>,
+    },
+    Acknowledge {
+        at: Posted,
+    },
+    Acknowledged {
+        at: Posted,
+        outcome: Outcome,
     },
 }
 
@@ -137,7 +163,7 @@ impl Loopback {
     }
 
     /// Refuse the next call of this mechanism, once. `"finish"`, `"ask"`,
-    /// `"send"` and `"replace"` are the names.
+    /// `"send"`, `"replace"` and `"acknowledge"` are the names.
     pub fn refuse_once(&self, mechanism: &'static str) {
         locked(&self.refusals).push(mechanism);
     }
@@ -295,6 +321,10 @@ fn spoken(record: &Record) -> Value {
             json!({"op": "settle", "id": at.as_str(), "outcome": outcome})
         }
         Record::Typing { to } => json!({"op": "typing", "chat": to.chat}),
+        Record::Acknowledge { at } => json!({"op": "acknowledge", "id": at.as_str()}),
+        Record::Acknowledged { at, outcome } => json!({
+            "op": "acknowledged", "id": at.as_str(), "outcome": outcome_name(*outcome),
+        }),
         Record::Reply {
             to,
             parent,
@@ -305,6 +335,26 @@ fn spoken(record: &Record) -> Value {
             "op": "reply", "chat": to.chat, "parent": parent.as_str(), "id": id.as_str(),
             "text": text, "mode": mode_name(*mode),
         }),
+        Record::File {
+            to,
+            parent,
+            id,
+            name,
+            bytes,
+            caption,
+        } => json!({
+            "op": "file", "chat": to.chat, "thread": to.thread,
+            "parent": parent.as_ref().map(Posted::as_str), "id": id.as_str(),
+            "name": name, "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "caption": caption,
+        }),
+    }
+}
+
+fn outcome_name(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Done => "done",
+        Outcome::Failed => "failed",
     }
 }
 
@@ -363,6 +413,40 @@ impl ChannelAdapter for Loopback {
 
     fn threads(&self) -> Option<&dyn Threads> {
         self.config.threads.then_some(self as &dyn Threads)
+    }
+
+    fn files(&self) -> Option<&dyn Files> {
+        self.config.files.then_some(self as &dyn Files)
+    }
+
+    fn acknowledge(&self) -> Option<&dyn Acknowledge> {
+        self.config.acknowledge.then_some(self as &dyn Acknowledge)
+    }
+}
+
+#[async_trait]
+impl Acknowledge for Loopback {
+    async fn begin(&self, at: &Posted) -> Result<Mark, ChannelError> {
+        self.refused("acknowledge")?;
+        self.record(Record::Acknowledge { at: at.clone() });
+        Ok(Mark(at.as_str().to_string()))
+    }
+
+    /// The mark has to name the message it was taken from. A platform is
+    /// handed back whatever it minted, and a runner that crossed two of them
+    /// would take a sign off the wrong message on a real platform, silently.
+    async fn end(&self, at: &Posted, mark: Mark, outcome: Outcome) -> Result<(), ChannelError> {
+        if mark.0 != at.as_str() {
+            return Err(ChannelError::Platform(format!(
+                "the mark {} is not {at}'s",
+                mark.0
+            )));
+        }
+        self.record(Record::Acknowledged {
+            at: at.clone(),
+            outcome,
+        });
+        Ok(())
     }
 }
 
@@ -442,6 +526,28 @@ impl Threads for Loopback {
     }
 }
 
+#[async_trait]
+impl Files for Loopback {
+    async fn post(
+        &self,
+        to: &Conversation,
+        parent: Option<&Posted>,
+        file: Outgoing,
+    ) -> Result<Posted, ChannelError> {
+        self.refused("file")?;
+        let id = self.mint();
+        self.record(Record::File {
+            to: to.clone(),
+            parent: parent.cloned(),
+            id: id.clone(),
+            name: file.name,
+            bytes: file.bytes,
+            caption: file.caption,
+        });
+        Ok(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,12 +563,16 @@ mod tests {
             buttons: false,
             typing: false,
             threads: false,
+            files: false,
+            acknowledge: false,
             ..Config::default()
         });
         assert!(bare.edit().is_none());
         assert!(bare.buttons().is_none());
         assert!(bare.typing().is_none());
         assert!(bare.threads().is_none());
+        assert!(bare.files().is_none());
+        assert!(bare.acknowledge().is_none());
         let full = without(Config::default());
         assert!(full.edit().is_some());
         assert!(full.buttons().is_some());
@@ -501,6 +611,35 @@ mod tests {
                 Record::Finish {
                     at: Posted::new("m1"),
                     text: "Hello".into(),
+                },
+            ]
+        );
+    }
+
+    /// The mark is the platform's to mint and the runner's to hand back
+    /// untouched; a runner that crossed two of them would take a sign off the
+    /// wrong message on a real platform, and say nothing about it.
+    #[tokio::test]
+    async fn a_sign_comes_off_only_with_the_mark_that_put_it_up() {
+        let loopback = without(Config::default());
+        let sign = loopback.acknowledge().expect("a sign");
+        let at = Posted::new("om_1");
+        let mark = sign.begin(&at).await.expect("a mark");
+        assert_eq!(mark, Mark("om_1".into()));
+        sign.end(&at, mark, Outcome::Done).await.expect("taken off");
+        assert!(
+            sign.end(&at, Mark("om_2".into()), Outcome::Done)
+                .await
+                .is_err(),
+            "another message's mark is not this message's"
+        );
+        assert_eq!(
+            loopback.records(),
+            [
+                Record::Acknowledge { at: at.clone() },
+                Record::Acknowledged {
+                    at,
+                    outcome: Outcome::Done,
                 },
             ]
         );
@@ -608,6 +747,21 @@ mod tests {
                     id: Posted::new("m3"),
                     text: "under it".into(),
                     mode: Mode::Once,
+                }),
+                spoken(&Record::File {
+                    to: Conversation::direct("oc_1"),
+                    parent: Some(Posted::new("m1")),
+                    id: Posted::new("m4"),
+                    name: "notes.txt".into(),
+                    bytes: b"by the chat\n".to_vec(),
+                    caption: Some("the notes".into()),
+                }),
+                spoken(&Record::Acknowledge {
+                    at: Posted::new("om_1"),
+                }),
+                spoken(&Record::Acknowledged {
+                    at: Posted::new("om_1"),
+                    outcome: Outcome::Failed,
                 }),
             ]
         );

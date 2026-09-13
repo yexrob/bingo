@@ -16,6 +16,11 @@ bingo-sdk.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+# The one setting this surface owns and the schema its claim carries
+# (`crate::settings`, M89). Both are already in this crate's tree — serde
+# under serde_json, schemars under the sdk — so neither costs a crate.
+serde.workspace = true
+schemars.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 jiff.workspace = true

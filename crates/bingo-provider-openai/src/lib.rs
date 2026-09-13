@@ -340,6 +340,7 @@ impl Provider for OpenAiProvider {
             images: self.images,
             count_tokens: false,
             caching: true,
+            ..EndpointCapabilities::default()
         }
     }
 
@@ -429,11 +430,17 @@ fn codex_issuer(base: Option<String>) -> Issuer {
         base: base.unwrap_or_else(|| CODEX_ISSUER.to_string()),
         authorize_path: "/oauth/authorize".into(),
         token_path: "/oauth/token".into(),
-        revoke_path: "/oauth/revoke".into(),
-        device_code_path: "/api/accounts/deviceauth/usercode".into(),
-        device_token_path: "/api/accounts/deviceauth/token".into(),
-        device_verify_path: "/codex/device".into(),
+        revoke_path: Some("/oauth/revoke".into()),
+        device: Some(bingo_auth_oauth::Device {
+            code_path: "/api/accounts/deviceauth/usercode".into(),
+            token_path: "/api/accounts/deviceauth/token".into(),
+            verify_path: "/codex/device".into(),
+        }),
         scope: "openid profile email offline_access".into(),
+        // This issuer mints for itself, and answers its refresh and its
+        // revocation in JSON rather than the form RFC 6749 asks for.
+        resource: None,
+        form_encoded: false,
         // Without `codex_cli_simplified_flow` the issuer routes to the web
         // flow and the login ends in an authentication error.
         authorize_extra: vec![
@@ -734,6 +741,7 @@ pub(crate) mod tests {
                 images: false,
                 count_tokens: false,
                 caching: true,
+                ..EndpointCapabilities::default()
             }
         );
     }

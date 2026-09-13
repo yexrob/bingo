@@ -1,266 +1,22 @@
-use std::any::Any;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+mod kernel;
+
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use bingo_sdk::{
-    Activation, Answer, Attachment, Catalog, CatalogEntry, CatalogKind, ClientIdentity,
-    CloseReason, Delivery, Env, ErrorCode, Event, Frame, FrameStream, GatewayStream, HistoryChunk,
-    HistoryPage, HostApi, HostHandle, Input, IntentId, InteractionId, InterruptScope, ItemStatus,
-    KernelError, OpenOptions, ResolvedBy, Seq, SessionFilter, SessionHandle, SessionId,
-    SessionPort, SessionSelector, SessionSpec, SessionState, SessionSummary, SurfaceOptions,
-    TurnStatus, Usage,
+    Activation, Answer, Env, ErrorCode, Event, HostApi, HostHandle, InteractionId, ItemStatus,
+    KernelError, ResolvedBy, SessionSelector, SurfaceOptions, TurnStatus, Usage,
 };
-use tokio::sync::mpsc;
 
 use super::*;
-use crate::adapter::{Incoming, Mode};
+use crate::access::{Access, Policy, Rule};
+use crate::adapter::{Incoming, Mode, Outcome};
 use crate::conversation::Posted;
 use crate::fixtures;
 use crate::lock::Claim;
 use crate::loopback::{self, Loopback, Record};
-
-fn locked<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    slot.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
-// ---- the kernel double ---------------------------------------------------
-
-/// One session: every attachment gets its own stream, so a chat and a TUI can
-/// both be looking at it, which is what the two-surface race needs.
-#[derive(Debug, Default)]
-pub struct TestSession {
-    key: String,
-    seq: AtomicU64,
-    watchers: Mutex<Vec<mpsc::UnboundedSender<Frame>>>,
-    submitted: Mutex<Vec<Input>>,
-    answers: Mutex<Vec<(InteractionId, Answer, Activation)>>,
-}
-
-impl TestSession {
-    fn attach(&self) -> FrameStream {
-        let (publisher, frames) = mpsc::unbounded_channel();
-        locked(&self.watchers).push(publisher);
-        Box::pin(futures::stream::unfold(frames, |mut frames| async move {
-            frames.recv().await.map(|frame| (frame, frames))
-        }))
-    }
-
-    /// Publish a frame as the kernel would, numbering it as it goes.
-    pub fn publish(&self, event: Event) {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let frame = fixtures::frame(seq, event);
-        locked(&self.watchers).retain(|watcher| watcher.send(frame.clone()).is_ok());
-    }
-
-    pub fn prompts(&self) -> Vec<String> {
-        locked(&self.submitted)
-            .iter()
-            .filter_map(|input| match input {
-                Input::Text { text, .. } => Some(text.clone()),
-                Input::Action { .. } => None,
-            })
-            .collect()
-    }
-
-    pub fn origins(&self) -> Vec<bingo_sdk::Origin> {
-        locked(&self.submitted)
-            .iter()
-            .filter_map(|input| match input {
-                Input::Text { origin, .. } => Some(origin.clone()),
-                Input::Action { .. } => None,
-            })
-            .collect()
-    }
-
-    /// The pictures beside each prompt, in the order they were submitted.
-    pub fn pictures(&self) -> Vec<Vec<bingo_sdk::Image>> {
-        locked(&self.submitted)
-            .iter()
-            .filter_map(|input| match input {
-                Input::Text { images, .. } => Some(images.clone()),
-                Input::Action { .. } => None,
-            })
-            .collect()
-    }
-
-    pub fn answers(&self) -> Vec<(InteractionId, Answer, Activation)> {
-        locked(&self.answers).clone()
-    }
-}
-
-#[async_trait]
-impl SessionPort for TestSession {
-    fn submit(&self, _intent: IntentId, input: Input) {
-        locked(&self.submitted).push(input);
-    }
-
-    fn interrupt(&self, _intent: IntentId, _scope: InterruptScope) {}
-
-    fn answer(
-        &self,
-        _intent: IntentId,
-        interaction: InteractionId,
-        answer: Answer,
-        activation: Activation,
-    ) {
-        locked(&self.answers).push((interaction, answer, activation));
-    }
-
-    async fn history(&self, _page: HistoryPage) -> Result<HistoryChunk, KernelError> {
-        Ok(HistoryChunk {
-            items: Vec::new(),
-            next: None,
-            generation: 0,
-        })
-    }
-
-    async fn events_since(&self, _since: Seq) -> Result<FrameStream, KernelError> {
-        Ok(self.attach())
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct TestHost {
-    sessions: Mutex<Vec<Arc<TestSession>>>,
-    /// Every selector `open` was called with, in order.
-    opened: Mutex<Vec<SessionSelector>>,
-}
-
-impl TestHost {
-    fn session(&self, key: &str) -> Option<Arc<TestSession>> {
-        locked(&self.sessions)
-            .iter()
-            .find(|session| session.key == key)
-            .cloned()
-    }
-
-    pub fn keys(&self) -> Vec<String> {
-        locked(&self.sessions)
-            .iter()
-            .map(|session| session.key.clone())
-            .collect()
-    }
-
-    pub fn opened(&self) -> Vec<SessionSelector> {
-        locked(&self.opened).clone()
-    }
-
-    fn attachment(&self, session: Arc<TestSession>) -> Attachment {
-        let mut summary = fixtures::summary();
-        summary.key = Some(session.key.clone());
-        Attachment {
-            session: SessionId::from_raw(fixtures::SESSION),
-            snapshot: SessionState::new(summary),
-            events: session.attach(),
-            handle: SessionHandle(session as Arc<dyn SessionPort>),
-        }
-    }
-}
-
-#[async_trait]
-impl HostApi for TestHost {
-    async fn sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
-        Ok(Vec::new())
-    }
-
-    async fn open(
-        &self,
-        selector: SessionSelector,
-        _who: ClientIdentity,
-        options: OpenOptions,
-    ) -> Result<Attachment, KernelError> {
-        assert!(options.children, "a chat attaches to the whole tree");
-        locked(&self.opened).push(selector.clone());
-        match selector {
-            SessionSelector::ByKey { key } => self
-                .session(&key)
-                .map(|session| self.attachment(session))
-                .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, "no such session")),
-            SessionSelector::Create {
-                spec: SessionSpec { key: Some(key), .. },
-            } => {
-                let session = Arc::new(TestSession {
-                    key,
-                    ..TestSession::default()
-                });
-                locked(&self.sessions).push(Arc::clone(&session));
-                Ok(self.attachment(session))
-            }
-            other => panic!("a chat never opens by {other:?}"),
-        }
-    }
-
-    async fn close(&self, _session: &SessionId, _reason: CloseReason) -> Result<(), KernelError> {
-        Ok(())
-    }
-
-    async fn delete(&self, _session: &SessionId) -> Result<(), KernelError> {
-        Ok(())
-    }
-
-    async fn deliver(
-        &self,
-        _to: &SessionId,
-        _intent: IntentId,
-        _input: Input,
-        _delivery: Delivery,
-    ) -> Result<(), KernelError> {
-        unreachable!("this double delivers nothing")
-    }
-
-    async fn extend(
-        &self,
-        _session: &SessionId,
-        _plugin: &str,
-        _kind: &str,
-        _payload: serde_json::Value,
-    ) -> Result<(), KernelError> {
-        unreachable!("this double extends nothing")
-    }
-
-    async fn signal(
-        &self,
-        _session: &SessionId,
-        _plugin: &str,
-        _kind: &str,
-        _payload: serde_json::Value,
-    ) -> Result<(), KernelError> {
-        unreachable!("this double signals nothing")
-    }
-
-    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
-        Ok(Catalog {
-            kind,
-            entries: Vec::<CatalogEntry>::new(),
-        })
-    }
-
-    fn gateway_events(&self) -> GatewayStream {
-        Box::pin(futures::stream::empty())
-    }
-
-    fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        None
-    }
-}
-
-/// A host nothing is ever asked of, for the tests that never get that far.
-pub fn nowhere() -> HostHandle {
-    HostHandle(Arc::new(TestHost::default()))
-}
-
-pub fn options(cwd: &str) -> SurfaceOptions {
-    SurfaceOptions {
-        cwd: cwd.into(),
-        // The channel surface mints its own keys; the selector is a
-        // placeholder it never reads.
-        selector: SessionSelector::Latest { cwd: cwd.into() },
-        prompt: None,
-        args: serde_json::Value::Null,
-        env: Arc::new(Env::rooted(cwd)),
-    }
-}
+use kernel::{TestHost, TestSession};
+pub use kernel::{nowhere, options};
 
 // ---- the fixture ---------------------------------------------------------
 
@@ -289,6 +45,10 @@ impl Chat {
     }
 
     fn with(config: loopback::Config) -> Self {
+        Self::under(config, Access::default())
+    }
+
+    fn under(config: loopback::Config, access: Access) -> Self {
         let home = tempfile::tempdir().expect("a temporary home");
         let loopback = Arc::new(Loopback::new(config));
         let surface = ChannelsSurface::new(
@@ -298,6 +58,7 @@ impl Chat {
                 min_chars: 1_000,
                 interval: Duration::from_millis(10),
             },
+            BTreeMap::from([(Loopback::ID.to_string(), access)]),
         );
         let host = Arc::new(TestHost::default());
         let handle = HostHandle(Arc::clone(&host) as Arc<dyn HostApi>);
@@ -363,6 +124,45 @@ fn said(conversation: Conversation, text: &str, addressed: bool) -> Incoming {
 
 fn hello(chat: &str) -> Incoming {
     said(Conversation::direct(chat), "run the tests", true)
+}
+
+/// The same, arriving under a handle — what a platform that threads gives the
+/// surface, and the only thing a sign can be put on.
+fn spoke(chat: &str, at: &str) -> Incoming {
+    match hello(chat) {
+        Incoming::Message {
+            conversation,
+            principal,
+            text,
+            images,
+            addressed,
+            ..
+        } => Incoming::Message {
+            conversation,
+            principal,
+            text,
+            images,
+            addressed,
+            parent: Some(Posted::new(at)),
+        },
+        click => click,
+    }
+}
+
+/// A turn that starts, goes wrong, and ends.
+async fn fails(session: &TestSession) {
+    session.publish(Event::TurnStarted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        inputs: Vec::new(),
+        origin: bingo_sdk::TurnOrigin::Submit,
+    });
+    session.publish(Event::TurnCompleted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        status: TurnStatus::Failed {
+            error: KernelError::new(ErrorCode::ProviderUnavailable, "no provider"),
+        },
+        usage: Usage::default(),
+    });
 }
 
 /// A turn that says one thing and ends.
@@ -477,6 +277,38 @@ async fn a_group_that_did_not_address_the_bot_opens_nothing() {
     );
 }
 
+/// The policy answers where the mention alone used to (ADR-0051 §4). A
+/// refusal is silent: nothing is opened, and nothing is said back — a person
+/// who may not speak here is not told so in the chat.
+#[tokio::test]
+async fn a_principal_the_policy_refuses_opens_nothing_and_hears_nothing() {
+    let chat = Chat::under(
+        loopback::Config::default(),
+        Access {
+            group: Rule {
+                policy: Policy::Blocklist,
+                list: BTreeSet::from(["ou_person".to_string()]),
+                mention: false,
+            },
+            ..Access::default()
+        },
+    );
+    chat.say(said(Conversation::group("oc_1"), "run the tests", false))
+        .await;
+    chat.say(hello("oc_2")).await;
+    chat.session("loopback/oc_2").await;
+    assert_eq!(
+        chat.host.keys(),
+        ["loopback/oc_2"],
+        "the blocklisted group opened no session"
+    );
+    assert!(
+        chat.loopback.records().is_empty(),
+        "and was answered with nothing: {:?}",
+        chat.loopback.records()
+    );
+}
+
 #[tokio::test]
 async fn an_answer_streams_into_one_message_and_is_finished_there() {
     let chat = Chat::open();
@@ -518,6 +350,74 @@ async fn without_an_edit_the_answer_arrives_whole_and_once() {
             text: "Two tests failed.".into(),
             mode: Mode::Once,
         }]
+    );
+}
+
+/// The sign brackets the turn a message started (ADR-0051 §5): up before the
+/// chat says anything back, down when that turn has ended.
+#[tokio::test]
+async fn a_sign_goes_up_on_the_message_that_spoke_and_comes_off_at_the_end() {
+    let chat = Chat::open();
+    chat.say(spoke("oc_1", "om_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    assert_eq!(
+        chat.records(1).await[0],
+        Record::Acknowledge {
+            at: Posted::new("om_1"),
+        },
+        "before a word is said back"
+    );
+    answers(&session, "Two tests failed.").await;
+    let records = chat.records(5).await;
+    assert_eq!(
+        records.last(),
+        Some(&Record::Acknowledged {
+            at: Posted::new("om_1"),
+            outcome: Outcome::Done,
+        }),
+        "{records:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_that_failed_takes_the_sign_off_as_a_failure() {
+    let chat = Chat::open();
+    chat.say(spoke("oc_1", "om_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    fails(&session).await;
+    let records = chat.records(3).await;
+    assert_eq!(
+        records.last(),
+        Some(&Record::Acknowledged {
+            at: Posted::new("om_1"),
+            outcome: Outcome::Failed,
+        }),
+        "{records:?}"
+    );
+}
+
+/// A sign is an affordance, not the answer. A platform that refused to put
+/// one up has not refused the turn.
+#[tokio::test]
+async fn a_sign_that_would_not_go_up_costs_no_part_of_the_answer() {
+    let chat = Chat::open();
+    chat.loopback.refuse_once("acknowledge");
+    chat.say(spoke("oc_1", "om_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    answers(&session, "Two tests failed.").await;
+    let records = chat.records(3).await;
+    assert!(
+        !records.iter().any(|record| matches!(
+            record,
+            Record::Acknowledge { .. } | Record::Acknowledged { .. }
+        )),
+        "no sign was ever up, so none comes off: {records:?}"
+    );
+    assert!(
+        records.iter().any(
+            |record| matches!(record, Record::Finish { text, .. } if text == "Two tests failed.")
+        ),
+        "the answer arrived anyway: {records:?}"
     );
 }
 
@@ -762,6 +662,7 @@ async fn a_second_surface_on_one_credential_refuses_loudly() {
         ChannelsSurface::new(
             vec![Arc::new(Loopback::new(loopback::Config::default())) as Arc<dyn ChannelAdapter>],
             Gate::default(),
+            BTreeMap::new(),
         )
     };
     // What the first process left behind while it runs.

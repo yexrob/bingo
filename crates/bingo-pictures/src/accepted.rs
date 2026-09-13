@@ -105,6 +105,7 @@ mod tests {
         let wider = Image {
             media_type: "image/bmp".into(),
             data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
+            path: None,
         };
         let image = accepted(wider).expect("a picture");
         assert_eq!(image.media_type, "image/png");
@@ -118,6 +119,7 @@ mod tests {
                 &base64::engine::general_purpose::STANDARD,
                 b"not a picture",
             ),
+            path: None,
         };
         assert!(matches!(accepted(wider), Err(PictureError::Undecodable(_))));
     }

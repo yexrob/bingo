@@ -34,6 +34,7 @@ A local coding-agent harness in Rust: a minimal kernel, everything else a plugin
 
 - ADR: one per boundary decision, ≤120 lines, template in `docs/adr/README.md`. Bug fixes are commit bodies.
 - Plan: `docs/plans/M<n>-<slug>.md`, ≤150 lines, written before code: Goal / Bricks / Files / Exit criteria / Non-goals / Risks; a Verified section is appended at the end.
+- `scripts/check_discipline.sh` warns above either length and never fails on one: the records already written are history, and history is not rewritten to satisfy a check added after it.
 
 ## Commits
 

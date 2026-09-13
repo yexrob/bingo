@@ -11,7 +11,7 @@ use bingo_sdk::{ContentPart, Image, ItemBody, ItemId, SessionState};
 use super::Cell;
 use super::kitty::MAX_CELLS;
 use super::linked::Linked;
-use crate::pictures::Held;
+use crate::pictures::{Held, dest};
 
 /// Where a picture on the screen came from: the three places this surface has
 /// one to draw.
@@ -58,7 +58,8 @@ impl Source {
 
     /// The picture itself, read back out of where it came from — one lookup
     /// that knows all three places, so nothing that needs the bytes has a
-    /// second one. The arguments are the three arms in order.
+    /// second one. A draft's picture is a file (ADR-0052), and the memo that
+    /// reads an answer's paths reads it too: the composer holds where it is.
     pub fn image_in<'a>(
         &self,
         state: &'a SessionState,
@@ -70,7 +71,7 @@ impl Source {
                 let found = state.items.iter().find(|kept| kept.id == *item)?;
                 pictures_of(&found.body).get(*part).copied()
             }
-            Source::Draft { token } => held.under(*token),
+            Source::Draft { token } => linked.image(&dest(held.under(*token)?)),
             Source::Linked { dest } => linked.image(dest),
         }
     }
@@ -205,6 +206,7 @@ mod tests {
         Image {
             media_type: "image/png".into(),
             data: data.into(),
+            path: None,
         }
     }
 
@@ -264,22 +266,32 @@ mod tests {
         }
     }
 
-    /// The two places a picture may be, through one lookup.
+    /// The two places a picture may be, through one lookup. A draft's is
+    /// the file the composer holds, read by the memo (ADR-0052): nothing
+    /// until the read lands, the picture after.
     #[test]
-    fn a_draft_is_read_out_of_what_the_composer_is_holding() {
+    fn a_draft_is_read_out_of_the_file_the_composer_is_holding() {
         let state = crate::test_support::folded(Vec::new());
         let mut held = Held::default();
-        let token = held.hold("", image("pasted"));
+        let path = std::path::PathBuf::from("/pasted/a.png");
+        let token = held.hold("", path.clone());
+        let mut linked = Linked::default();
         assert_eq!(
-            draft(token)
-                .source
-                .image_in(&state, &held, &Linked::default()),
+            draft(token).source.image_in(&state, &held, &linked),
+            None,
+            "not read yet"
+        );
+        linked.take(&dest(&path));
+        linked.answered(super::super::linked::Answer {
+            dest: dest(&path),
+            result: Ok(image("pasted")),
+        });
+        assert_eq!(
+            draft(token).source.image_in(&state, &held, &linked),
             Some(&image("pasted"))
         );
         assert_eq!(
-            draft(token + 1)
-                .source
-                .image_in(&state, &held, &Linked::default()),
+            draft(token + 1).source.image_in(&state, &held, &linked),
             None
         );
     }

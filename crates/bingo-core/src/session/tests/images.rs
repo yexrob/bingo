@@ -32,6 +32,7 @@ fn oversized_image() -> Image {
     Image {
         media_type: "image/png".into(),
         data: "A".repeat(base64_len),
+        path: None,
     }
 }
 
@@ -89,6 +90,7 @@ async fn an_unknown_media_type_is_invalid_input() {
     let bogus = Image {
         media_type: "image/tiff".into(),
         data: "AAAA".into(),
+        path: None,
     };
     mailbox.submit(
         IntentId::mint(),

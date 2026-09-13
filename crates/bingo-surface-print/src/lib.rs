@@ -26,8 +26,8 @@ use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
     Delivery, ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Image, Input, IntentId,
     IntentOutcome, Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin,
-    PluginError, PluginManifest, Question, Registrar, SessionHandle, SessionId, SessionState,
-    Surface, SurfaceKind, SurfaceOptions, TurnStatus,
+    PluginError, PluginManifest, Question, Registrar, Rung, SessionHandle, SessionId, SessionState,
+    Surface, SurfaceKind, SurfaceOptions,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -153,7 +153,9 @@ pub(crate) async fn drive(
             // The whole tree, whatever the mode: a sub-session's permission
             // prompt reaches a run only through it (ADR-0010 §3), and a run
             // that cannot see the prompt waits on it forever. What of the
-            // tree is reported is the renderer's decision.
+            // tree is reported is the renderer's decision. The tree's
+            // forwarder heals a lag itself and back-pressures rather than
+            // dropping frames, so no `Lagged` marker reaches this stream.
             OpenOptions::with_children(),
         )
         .await?;
@@ -291,17 +293,6 @@ impl<'a> Attached<'a> {
         self.states.get_mut(&frame.session)
     }
 
-    fn root(&self) -> &SessionState {
-        &self.states[&self.root]
-    }
-
-    /// Re-read the journal from the last frame applied, filling the gap a lag
-    /// marker announced.
-    async fn resync(&mut self) -> Result<(), KernelError> {
-        self.events = self.handle.events_since(self.root().seq).await?;
-        Ok(())
-    }
-
     /// A sub-session's frame concerns the run only when it needs a person:
     /// its turns, acks and closing are the root's business to report.
     fn concerns_the_run(&self, frame: &Frame) -> bool {
@@ -321,7 +312,6 @@ impl<'a> Attached<'a> {
                 &mut *self.err,
             )? {
                 Next::Await => {}
-                Next::Resync => self.resync().await?,
                 Next::Exit(exit) => return Ok(exit),
             }
         }
@@ -401,8 +391,6 @@ fn asks_a_person(event: &Event) -> bool {
 enum Next {
     /// Keep reading the current stream.
     Await,
-    /// Re-read the journal from the last applied frame.
-    Resync,
     Exit(Exit),
 }
 
@@ -419,10 +407,7 @@ fn react(
             handle.answer(IntentId::mint(), interaction.id.clone(), answer, activation);
             Ok(Next::Await)
         }
-        // The lagged stream ends at its marker; the reducer left `seq` at the
-        // last frame it applied, so replay from there fills the gap.
-        Event::Lagged { .. } => Ok(Next::Resync),
-        Event::TurnCompleted { status, .. } => Ok(Next::Exit(exit_for(status))),
+        Event::TurnCompleted { status, .. } => Ok(Next::Exit(Exit::for_turn(status))),
         Event::SessionClosed { reason } => {
             closed(&close_message(reason), err, console.human()).map(Next::Exit)
         }
@@ -467,14 +452,6 @@ fn closed(message: &str, err: &mut (dyn Write + Send), human: bool) -> Result<Ex
     Ok(Exit { code: 1 })
 }
 
-fn exit_for(status: &TurnStatus) -> Exit {
-    match status {
-        TurnStatus::Completed => Exit { code: 0 },
-        TurnStatus::Failed { .. } => Exit { code: 1 },
-        TurnStatus::Interrupted { .. } => Exit { code: 130 },
-    }
-}
-
 fn close_message(reason: &CloseReason) -> String {
     match reason {
         CloseReason::Client => "the session was closed".into(),
@@ -502,12 +479,9 @@ fn decide(
         ));
     }
     let answer = match &interaction.kind {
-        InteractionKind::Permission {
-            tool,
-            summary,
-            session_scope,
-            ..
-        } => ask_permission(tool, summary, session_scope.as_deref(), console, err)?,
+        InteractionKind::Permission { tool, summary, .. } => {
+            ask_permission(interaction, tool, summary, console, err)?
+        }
         InteractionKind::Question(question) => ask_question(interaction, question, console, err)?,
         InteractionKind::Form { questions, .. } => ask_form(questions, console, err)?,
         _ => refuse(interaction, "this surface cannot answer that"),
@@ -515,30 +489,48 @@ fn decide(
     Ok((answer, Activation::Keyboard))
 }
 
+/// The rungs this interaction offers, each behind the key that picks it, and
+/// nothing else: a key for an answer the kernel would refuse is not offered
+/// and does not answer. A line that names none of them is a refusal.
 fn ask_permission(
+    interaction: &Interaction,
     tool: &str,
     summary: &str,
-    session_scope: Option<&str>,
     console: &mut (dyn Console + Send),
     err: &mut (dyn Write + Send),
 ) -> io::Result<Answer> {
+    let rungs = interaction.rungs();
+    let keys: Vec<(char, &str, &Answer)> = rungs.iter().filter_map(keyed).collect();
+    let offered: Vec<&str> = keys.iter().map(|(_, words, _)| *words).collect();
     writeln!(
         err,
-        "[permission] {tool}: {summary}  [y]es / [a]lways this session / [n]o"
+        "[permission] {tool}: {summary}  {}",
+        offered.join(" / ")
     )?;
     err.flush()?;
-    Ok(match console.read_line()?.trim().chars().next() {
-        Some('y' | 'Y') => Answer::AllowOnce,
-        // Without a scope there is no session rule to install, so the
-        // widest honest answer is this one call.
-        Some('a' | 'A') => match session_scope {
-            Some(scope) => Answer::AllowSession {
-                scope: scope.to_string(),
-            },
-            None => Answer::AllowOnce,
+    let typed = console
+        .read_line()?
+        .trim()
+        .chars()
+        .next()
+        .map(|c| c.to_ascii_lowercase());
+    Ok(
+        match typed.and_then(|typed| keys.iter().find(|(key, ..)| *key == typed)) {
+            Some((.., answer)) => (*answer).clone(),
+            None => refuse(interaction, "no answer was picked"),
         },
-        _ => Answer::Deny { feedback: None },
-    })
+    )
+}
+
+/// The key a person types for a permission rung, and the words that offer it.
+fn keyed(rung: &Rung) -> Option<(char, &'static str, &Answer)> {
+    let (key, words) = match &rung.answer {
+        Answer::AllowOnce => ('y', "[y]es"),
+        Answer::AllowSession { .. } => ('a', "[a]lways this session"),
+        Answer::Deny { .. } => ('n', "[n]o"),
+        _ => return None,
+    };
+    Some((key, words, &rung.answer))
 }
 
 fn ask_question(
@@ -653,7 +645,7 @@ pub(crate) mod tests {
         HistoryChunk, HistoryPage, HostApi, InteractionId, InterruptReason, InterruptScope, Item,
         ItemBody, ItemId, ItemStatus, QuestionOption, Seq, SessionFilter, SessionHandle, SessionId,
         SessionPort, SessionSelector, SessionState, SessionSummary, ToolOutput, TurnId, TurnOrigin,
-        Usage,
+        TurnStatus, Usage,
     };
     use jiff::Timestamp;
     use serde_json::{Value, json};
@@ -1577,7 +1569,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn at_a_terminal_yes_allows_the_call_once() {
-        let run = answering(opened(permission(None)), "y").await;
+        let run = answering(opened(permission(Some("Read(//tmp)"))), "y").await;
         let answers = run.session.answers();
         assert_eq!(answers[0].1, Answer::AllowOnce);
         assert_eq!(answers[0].2, Activation::Keyboard);
@@ -1598,16 +1590,32 @@ pub(crate) mod tests {
         );
     }
 
+    /// Without a scope there is no session rule to install, so the line does
+    /// not offer one and the key that would have picked it answers nothing.
     #[tokio::test]
-    async fn always_without_a_scope_falls_back_to_allowing_once() {
+    async fn a_rung_the_interaction_does_not_carry_is_not_offered() {
         let run = answering(opened(permission(None)), "a").await;
-        assert_eq!(run.session.answers()[0].1, Answer::AllowOnce);
+        assert_eq!(
+            run.err,
+            "[permission] Read: Read Cargo.toml  [y]es / [n]o\n"
+        );
+        assert_eq!(
+            run.session.answers()[0].1,
+            Answer::Deny {
+                feedback: Some("no answer was picked".into())
+            }
+        );
     }
 
     #[tokio::test]
     async fn anything_else_denies() {
         let run = answering(opened(permission(None)), "").await;
-        assert_eq!(run.session.answers()[0].1, Answer::Deny { feedback: None });
+        assert_eq!(
+            run.session.answers()[0].1,
+            Answer::Deny {
+                feedback: Some("no answer was picked".into())
+            }
+        );
     }
 
     #[tokio::test]
@@ -1681,24 +1689,6 @@ pub(crate) mod tests {
     async fn a_question_answered_with_nonsense_is_cancelled() {
         let run = answering(opened(question(&[("a", "Cargo.toml")])), "z").await;
         assert_eq!(run.session.answers()[0].1, Answer::Cancel);
-    }
-
-    /// The live stream ends at the marker; the surface re-reads the journal
-    /// from the last frame it applied and finds the completion there.
-    #[tokio::test]
-    async fn a_lag_marker_re_reads_the_journal_and_the_turn_still_ends() {
-        let run = headless(vec![
-            frame(
-                3,
-                Event::Lagged {
-                    from: Seq(2),
-                    to: Seq(3),
-                },
-            ),
-            completed(4),
-        ])
-        .await;
-        assert_eq!(run.exit, Ok(Exit { code: 0 }));
     }
 
     #[tokio::test]

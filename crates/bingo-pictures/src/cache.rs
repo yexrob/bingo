@@ -20,7 +20,6 @@
 //! which is the only moment anything here knows an address was asked for.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// The directory this machine keeps pictures in, under the data directory. The
@@ -85,15 +84,8 @@ impl Cache {
         let _ = self.written(url, bytes);
     }
 
-    /// Through a temporary name and a rename, which is what makes two writers
-    /// safe: the entry appears whole or not at all.
     fn written(&self, url: &str, bytes: &[u8]) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
-        let temporary = self.dir.join(temporary(url));
-        std::fs::write(&temporary, bytes)?;
-        std::fs::rename(&temporary, self.path(url)).inspect_err(|_| {
-            let _ = std::fs::remove_file(&temporary);
-        })
+        crate::file::written(&self.path(url), bytes)
     }
 }
 
@@ -108,34 +100,10 @@ pub fn fresh(mtime: SystemTime, now: SystemTime, ttl: Duration) -> bool {
         .unwrap_or(true)
 }
 
-/// The name of `url`'s entry: a hash of the address in hex, so the name is
-/// short, is a name on every file system, and is the same on every run.
-///
-/// FNV-1a over 128 bits, spelled here because no digest of that width is in
-/// this workspace's dependency tree and one crate over the budget is one too
-/// many (`scripts/budget.toml`). It has one job — telling two addresses apart —
-/// and 128 bits is far more than a cache of a few hundred entries can collide
-/// in. It is not a signature and nothing here treats it as one.
+/// The name of `url`'s entry: a hash of the address, so one address is one
+/// entry and two are two, whatever their length or their punctuation.
 fn named(url: &str) -> String {
-    format!("{:032x}", hashed(url))
-}
-
-/// The name one write uses before its rename: the entry's own name, this
-/// process, and a number no other write in it repeats — two processes, or two
-/// tests, must not rename each other's half-written file into place.
-fn temporary(url: &str) -> String {
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, Ordering::Relaxed);
-    format!("{}.{}.{n}.tmp", named(url), std::process::id())
-}
-
-const FNV_OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
-const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
-
-fn hashed(text: &str) -> u128 {
-    text.bytes().fold(FNV_OFFSET, |hash, byte| {
-        (hash ^ u128::from(byte)).wrapping_mul(FNV_PRIME)
-    })
+    crate::file::named(url.as_bytes())
 }
 
 #[cfg(test)]

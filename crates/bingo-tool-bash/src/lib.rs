@@ -79,7 +79,9 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 pub struct BashArgs {
     /// The command to run.
     pub command: String,
-    /// Start it and answer at once with a job id, instead of waiting for it.
+    /// Omit or set false to wait when the next action needs output or exit status.
+    /// Set true only for servers/watchers or while useful independent work continues;
+    /// it returns a job id, not a completed result. Duration alone is not a reason.
     pub background: Option<bool>,
     /// How long to let it run, in milliseconds, when the call waits. Defaults
     /// to 120000, and 600000 is the most that will be honoured. A background
@@ -281,18 +283,26 @@ fn description() -> String {
          file tools' job, not this one's: a shell `cat`, `ls`, `find` or `grep` costs a permission \
          and answers with less than they do. Use this for building, testing and running \
          programs.\n\n\
-         Prefer `background: true` for anything you do not need the answer to in your very next \
-         step — a server, a watcher, a long build or test run. It answers at once with a job id: \
-         `BashOutput` reads what the job has written, `KillShell` ends it, and you are told when \
-         it finishes, so waiting is a choice rather than the only way. `notify_on` and \
-         `notify_regex` have you told the moment a line you care about appears. They tell you \
-         once unless `notify_all: true` keeps them watching for the whole job, which tells you \
-         again at most once every thirty seconds and counts the lines that matched in between. A \
-         command that could never finish on its own — `watch`, `tail -f`, a loop with no end, a \
-         trailing `&` — is backgrounded whatever the call said.\n\n\
-         Without `background`, the call waits for the command to exit, for {default} milliseconds \
-         unless `timeout` says otherwise ({max} milliseconds at most); a person watching may move \
-         it into the background while it runs, and then the call answers with a job id instead. \
+         Choose by dependency: omit `background` or set it to `false` when your next action \
+         needs the output or exit status. Small probes, prerequisite builds, and validation \
+         required before claiming success should wait in the foreground with a suitable \
+         `timeout`. Use `background: true` only for servers/watchers or when useful independent \
+         work can continue while it runs. Duration alone is not a reason to background a \
+         command.\n\n\
+         Background calls return a job id, not a completed result. If a finite prerequisite is \
+         backgrounded, wait for its completion notification, then read its output and exit \
+         status with `BashOutput` after completion before taking dependent actions or claiming \
+         success. For a long-lived server, wait for its readiness signal, not its exit. \
+         Do not restart it or treat it as completed. `KillShell` ends a job. \
+         `notify_on` and `notify_regex` have you told the moment a line you care about appears. \
+         They tell you once unless `notify_all: true` keeps them watching for the whole job, \
+         which tells you again at most once every thirty seconds and counts the lines that \
+         matched in between. A command that could never finish on its own — `watch`, `tail -f`, \
+         a loop with no end, a trailing `&` — is backgrounded whatever the call said.\n\n\
+         With `background` omitted or false, the call waits for the command to exit, for \
+         {default} milliseconds unless `timeout` says otherwise ({max} milliseconds at most); \
+         a person watching may move it into the background while it runs, and then the call \
+         answers with a job id instead. \
          stdin is closed, so nothing can prompt: a command that needs a terminal (a full-screen \
          monitor, an editor, a pager, `sudo` without `-n`, `ssh` without a remote command, a bare \
          REPL) is refused with the reason and the way round it.",
@@ -318,8 +328,7 @@ impl Tool for BashTool {
             trusted: true,
             // Whether two commands may run at once is the model's judgment,
             // exactly as it is for two edits: it emitted them in one step. The
-            // gate still serializes anything it does not allow outright, and a
-            // long command belongs in the background (ADR-0018), not in a batch.
+            // gate still serializes anything it does not allow outright.
             concurrency_safe: true,
             // The tool caps its own output; the kernel's clip would take the
             // exit line with it.
@@ -371,8 +380,13 @@ static MANIFEST: PluginManifest = PluginManifest {
     config: None,
 };
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct BashPlugin;
+/// The plugin holds the job table rather than handing it out and forgetting
+/// it: ending what this run started is the plugin's own work, and `stop` is
+/// where it happens.
+#[derive(Debug, Default)]
+pub struct BashPlugin {
+    jobs: Arc<Jobs>,
+}
 
 #[async_trait]
 impl Plugin for BashPlugin {
@@ -381,17 +395,26 @@ impl Plugin for BashPlugin {
     }
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
-        let jobs = Arc::new(Jobs::new());
         let promotions = Arc::new(Promotions::new());
-        registrar.tool(Arc::new(BashTool::new(jobs.clone(), promotions.clone())) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(BashOutputTool::new(jobs.clone())) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(KillShellTool::new(jobs)) as Arc<dyn Tool>);
+        registrar
+            .tool(Arc::new(BashTool::new(self.jobs.clone(), promotions.clone())) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(BashOutputTool::new(self.jobs.clone())) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(KillShellTool::new(self.jobs.clone())) as Arc<dyn Tool>);
         registrar.add(Contribution::Command(
             Arc::new(ShellCommand) as Arc<dyn Command>
         ));
         registrar.add(Contribution::Command(
             Arc::new(PromoteCommand::new(promotions)) as Arc<dyn Command>,
         ));
+        Ok(())
+    }
+
+    /// A job lives exactly as long as this process (ADR-0018), and here is
+    /// where that ends: every group still running is asked to stop and then
+    /// made to, and waited for. `run::Group`'s drop was doing this alone —
+    /// unawaited, and only as far as tearing the runtime down ever got.
+    async fn stop(&self) -> Result<(), PluginError> {
+        self.jobs.end_all(kill::WAIT).await;
         Ok(())
     }
 }
@@ -650,7 +673,8 @@ pub(crate) mod tests {
             Value::Null,
             bingo_sdk::Env::rooted("/tmp"),
         );
-        BashPlugin.register(&mut registrar).expect("register");
+        let plugin = BashPlugin::default();
+        plugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
         let names: Vec<String> = contributions
             .iter()
@@ -664,9 +688,9 @@ pub(crate) mod tests {
             names,
             ["Bash", "BashOutput", "KillShell", "!", "bash.promote"]
         );
-        assert_eq!(BashPlugin.manifest().id, "bingo.tools.bash");
+        assert_eq!(plugin.manifest().id, "bingo.tools.bash");
         assert_eq!(
-            BashPlugin.manifest().provides,
+            plugin.manifest().provides,
             &[
                 "tool:Bash",
                 "tool:BashOutput",
@@ -723,7 +747,7 @@ pub(crate) mod tests {
         );
         assert!(
             spec.description.contains("background: true"),
-            "the description leans async (ADR-0018 §1)"
+            "the description explains explicit background work"
         );
         assert_eq!(spec.input_schema["type"], "object");
         for field in [
@@ -747,6 +771,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_spec_chooses_waiting_by_dependency_not_duration() {
+        let (_jobs, _promotions, tool) = tool();
+        let spec = tool.spec();
+        for guidance in [
+            "omit `background` or set it to `false`",
+            "output or exit status",
+            "prerequisite builds",
+            "validation required before claiming success",
+            "useful independent work",
+            "Duration alone is not a reason",
+            "Do not restart it or treat it as completed",
+            "after completion",
+            "readiness signal, not its exit",
+            "backgrounded whatever the call said",
+            "a person watching may move",
+        ] {
+            assert!(spec.description.contains(guidance), "missing {guidance}");
+        }
+        let background = spec.input_schema["properties"]["background"]["description"]
+            .as_str()
+            .expect("background guidance");
+        for guidance in [
+            "Omit or set false",
+            "output or exit status",
+            "independent work",
+            "Duration alone",
+        ] {
+            assert!(background.contains(guidance), "missing {guidance}");
+        }
+    }
+
+    #[test]
     fn a_call_bounds_itself_within_the_tool_s_ceiling() {
         assert_eq!(deadline(None), Duration::from_millis(DEFAULT_TIMEOUT_MS));
         assert_eq!(deadline(Some(5_000)), Duration::from_millis(5_000));
@@ -757,31 +813,38 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_command_comes_back_in_the_shape_the_model_reads() {
-        let (_jobs, _promotions, tool) = tool();
-        let (_host, cx) = context();
-        let out = tool
-            .call(serde_json::json!({"command": "echo hi"}), &cx)
-            .await
-            .expect("the call ran");
-        assert_eq!(text(&out), "$ echo hi\nhi\n[Exited with code 0]");
-        assert!(!out.is_error);
+    async fn omitted_or_false_background_returns_completed_output_and_status() {
+        for input in [
+            serde_json::json!({"command": "echo hi"}),
+            serde_json::json!({"command": "echo hi", "background": false}),
+        ] {
+            let (jobs, _promotions, tool) = tool();
+            let (_host, cx) = context();
+            let out = tool.call(input, &cx).await.expect("the call ran");
+            assert_eq!(text(&out), "$ echo hi\nhi\n[Exited with code 0]");
+            assert!(!out.is_error);
+            assert!(out.display.is_none(), "no background job display");
+            assert!(jobs.find("").is_err(), "no job was filed");
+        }
     }
 
     #[tokio::test]
-    async fn a_failing_command_is_an_error_result_with_its_code() {
-        let (_jobs, _promotions, tool) = tool();
-        let (_host, cx) = context();
-        let out = tool
-            .call(serde_json::json!({"command": "exit 7"}), &cx)
-            .await
-            .expect("the call ran");
-        assert!(out.is_error);
-        assert!(
-            text(&out).ends_with("[Exited with code 7]"),
-            "{}",
-            text(&out)
-        );
+    async fn omitted_or_false_background_returns_failure_output_and_status() {
+        for input in [
+            serde_json::json!({"command": "echo failed >&2; exit 7"}),
+            serde_json::json!({"command": "echo failed >&2; exit 7", "background": false}),
+        ] {
+            let (jobs, _promotions, tool) = tool();
+            let (_host, cx) = context();
+            let out = tool.call(input, &cx).await.expect("the call ran");
+            assert!(out.is_error);
+            assert_eq!(
+                text(&out),
+                "$ echo failed >&2; exit 7\nfailed\n[Exited with code 7]"
+            );
+            assert!(out.display.is_none(), "no background job display");
+            assert!(jobs.find("").is_err(), "no job was filed");
+        }
     }
 
     #[tokio::test]
@@ -887,6 +950,39 @@ pub(crate) mod tests {
     }
 
     // ---- background (ADR-0018 §2) ----------------------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_background_returns_a_job_whose_completed_result_can_be_read() {
+        let (_dir, _kernel, cx) = scratch();
+        let (jobs, _promotions, tool) = tool();
+        let out = tool
+            .call(
+                serde_json::json!({"command": "echo done; exit 3", "background": true}),
+                &cx,
+            )
+            .await
+            .expect("the call answered");
+        assert!(!out.is_error, "starting a job is not its eventual exit");
+        let Some(bingo_sdk::View::Custom { data, .. }) = &out.display else {
+            panic!("a background call carries its job id");
+        };
+        let id = data["id"].as_str().expect("the job id");
+        assert!(text(&out).contains(id));
+        assert!(!text(&out).contains("[Exited with code"));
+        let job = jobs.find(id).expect("the job exists even if already over");
+        assert_eq!(job.wait().await, jobs::State::Exited { code: 3 });
+        let result = BashOutputTool::new(jobs)
+            .call(serde_json::json!({"id": id}), &cx)
+            .await
+            .expect("the completed job can be read");
+        assert!(text(&result).contains("\ndone\n"), "{}", text(&result));
+        assert!(
+            text(&result).contains("exited with code 3"),
+            "{}",
+            text(&result)
+        );
+    }
 
     #[tokio::test]
     async fn a_background_call_answers_at_once_with_a_job_and_its_log() {
@@ -1037,6 +1133,47 @@ pub(crate) mod tests {
         panic!(
             "the log never said the session was gone: {:?}",
             std::fs::read_to_string(&job.log)
+        );
+    }
+
+    /// Nothing this run started outlives it: `stop` ends every job the way
+    /// `KillShell` does — asked, then made to — and waits for it, instead of
+    /// leaving the group to a drop nobody observes.
+    ///
+    /// Unix only, as every test here that spawns is: `run::shell` resolves
+    /// `/bin/bash` or `/bin/sh`, so on Windows there is nothing to end.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_the_plugin_ends_every_job_it_had_running() {
+        let (_dir, _kernel, cx) = scratch();
+        let plugin = BashPlugin::default();
+        let mut registrar = Registrar::new(
+            "bingo.tools.bash",
+            Value::Null,
+            bingo_sdk::Env::rooted("/tmp"),
+        );
+        plugin.register(&mut registrar).expect("register");
+        let contributions = registrar.into_contributions();
+        let Some(Contribution::Tool(bash)) = contributions.first() else {
+            panic!("the first contribution is the Bash tool");
+        };
+        let out = bash
+            .call(
+                serde_json::json!({"command": "sleep 30", "background": true}),
+                &cx,
+            )
+            .await
+            .expect("the call answered");
+        assert!(!out.is_error, "{}", text(&out));
+        let job = only_job(&plugin.jobs);
+        assert_eq!(job.state(), jobs::State::Running);
+
+        plugin.stop().await.expect("the plugin stopped");
+
+        assert_eq!(job.state(), jobs::State::Killed, "the group was ended");
+        assert!(
+            plugin.jobs.running().is_empty(),
+            "and `stop` waited for it, rather than leaving it to a drop"
         );
     }
 

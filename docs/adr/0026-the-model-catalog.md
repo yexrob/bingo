@@ -29,29 +29,28 @@ Nothing hands any of it to a model.
    a model can act on.
 3. **`SpawnAgent` points at it**: the `model` and `provider` field docs say
    to call `ListModels` when choosing rather than guessing an id.
-4. **Refused.** An `image_gen` capability flag: nothing in bingo can
-   request image generation, and a flag nothing reads is a brick for an
-   imagined future — carried until an image-generating tool exists, at
-   which point the snapshot's output modalities are the source. Also
-   refused: calling `Provider::models()` live from the tool — a network
-   call inside a read-only tool, and a second answer beside the embedded
-   snapshot; the live list stays where it is, serving the auth'd flows
-   that already use it.
+4. **Refused: a network call on a reader's path, and a second source of
+   facts.** An `image_gen` capability flag: nothing in bingo can request
+   image generation, and a flag nothing reads is a brick for an imagined
+   future — carried until an image-generating tool exists, at which point
+   the snapshot's output modalities are the source. Refused with it:
+   calling `Provider::models()` live from the tool.
 
-   **Amended (M35).** What was refused is a network call on a reader's
-   path and a second source of *facts*; a cached list of *ids*, fetched
-   in the background and enriched from the one snapshot, is neither —
-   the endpoint owns which ids exist behind its base url (a named
-   instance, ADR-0017, serves its proxy's models and not its wire
-   shape's), and the snapshot still owns what each of them can do. So
-   `catalog(Models)` answers from a per-provider cache under `data_dir`
-   that a task per provider refreshes when it is missing or a day old,
-   never inside a turn, never inside `Host::build` and never for a
-   provider that cannot sign in; the entries say `source: endpoint |
-   catalogue | configured`, a changed list publishes
+   A cached list of *ids*, fetched in the background and enriched from
+   the one snapshot, is neither — the endpoint owns which ids exist
+   behind its base url (a named instance, ADR-0017, serves its proxy's
+   models and not its wire shape's), and the snapshot still owns what
+   each of them can do. So `catalog(Models)` answers from a per-provider
+   cache under `data_dir` that a task per provider refreshes when it is
+   missing or a day old, never inside a turn, never inside `Host::build`
+   and never for a provider that cannot sign in; the entries say
+   `source: endpoint | catalogue | configured`, a changed list publishes
    `GatewayEvent::CatalogChanged{Models}`, and `/models refresh` asks
    now. Nothing writes a proxy's ids into the snapshot, and no fact is
    ever taken from `/v1/models`.
+   *(Amended M35, no date recorded: the refusal was of any live model
+   list at all; it narrowed to the reader's path and to facts, and the
+   background cache of ids joined.)*
 
 ## Consequences
 

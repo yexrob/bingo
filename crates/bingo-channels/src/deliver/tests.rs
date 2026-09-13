@@ -175,10 +175,13 @@ fn the_pending_snapshot_never_overwrites_the_final_text() {
     assert!(chat.feed(said(4, "itm_1", "Hello there")).is_empty());
     assert_eq!(
         chat.feed(turn_completed(5)),
-        [Op::Finalize {
-            text: "Hello there".into(),
-            question: None,
-        }]
+        [
+            Op::Finalize {
+                text: "Hello there".into(),
+                question: None,
+            },
+            Op::Ended { failed: false },
+        ]
     );
     assert!(
         chat.wait(5_000).is_empty(),
@@ -186,11 +189,14 @@ fn the_pending_snapshot_never_overwrites_the_final_text() {
     );
 }
 
+/// Nothing to say, and the one thing every turn says anyway: that it ended.
+/// A sign put up when it began has to come off (ADR-0051 §5), and a turn that
+/// answered with nothing is exactly the turn that would otherwise keep it.
 #[test]
-fn a_turn_with_nothing_to_say_delivers_nothing() {
+fn a_turn_with_nothing_to_say_still_says_it_ended() {
     let mut chat = Chat::new();
     chat.feed(turn_started(1));
-    assert!(chat.feed(turn_completed(2)).is_empty());
+    assert_eq!(chat.feed(turn_completed(2)), [Op::Ended { failed: false }]);
 }
 
 #[test]
@@ -214,6 +220,29 @@ fn a_failed_turn_finalizes_what_there_was_and_then_says_why() {
             Op::Status {
                 text: "no provider".into(),
             },
+            Op::Ended { failed: true },
+        ]
+    );
+}
+
+/// A turn the person stopped ended the way they asked it to. Only a failure
+/// is a failure: a cross beside an interruption would say otherwise.
+#[test]
+fn an_interrupted_turn_ends_without_having_failed() {
+    let mut chat = Chat::new();
+    chat.feed(turn_started(1));
+    assert_eq!(
+        chat.feed(turn_ended(
+            2,
+            TurnStatus::Interrupted {
+                reason: bingo_sdk::InterruptReason::UserCancel,
+            }
+        )),
+        [
+            Op::Status {
+                text: "the turn was interrupted (UserCancel)".into(),
+            },
+            Op::Ended { failed: false },
         ]
     );
 }
@@ -283,10 +312,13 @@ fn text_after_a_question_opens_a_new_message_and_repeats_nothing() {
     );
     assert_eq!(
         chat.feed(turn_completed(6)),
-        [Op::Finalize {
-            text: "Second.".into(),
-            question: None,
-        }]
+        [
+            Op::Finalize {
+                text: "Second.".into(),
+                question: None,
+            },
+            Op::Ended { failed: false },
+        ]
     );
 }
 
@@ -392,10 +424,13 @@ fn the_platforms_dialect_and_length_are_applied_once_here() {
     chat.feed(said(2, "itm_1", "look:\n```rust\nfn main() {}\n```"));
     assert_eq!(
         chat.feed(turn_completed(3)),
-        [Op::Finalize {
-            text: "look:\nfn ma…".into(),
-            question: None,
-        }],
+        [
+            Op::Finalize {
+                text: "look:\nfn ma…".into(),
+                question: None,
+            },
+            Op::Ended { failed: false },
+        ],
         "the fence is dropped for a plain chat, and what is left is cut to fit"
     );
 }
@@ -408,10 +443,13 @@ fn several_assistant_items_in_one_turn_read_as_one_answer() {
     chat.feed(said(3, "itm_2", "Second."));
     assert_eq!(
         chat.feed(turn_completed(4)),
-        [Op::Finalize {
-            text: "First.\n\nSecond.".into(),
-            question: None,
-        }]
+        [
+            Op::Finalize {
+                text: "First.\n\nSecond.".into(),
+                question: None,
+            },
+            Op::Ended { failed: false },
+        ]
     );
 }
 

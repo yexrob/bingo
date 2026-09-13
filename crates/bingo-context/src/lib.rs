@@ -3,12 +3,14 @@
 //!
 //! The kernel owns the ruler — the thresholds, the acceptance rule and the
 //! breaker — and this plugin owns the strategy: what a summary says, which
-//! files reach the prompt, and what a working turn leaves behind (ADR-0006).
+//! files reach the prompt, and where the model keeps what it remembers
+//! (ADR-0006, ADR-0044, ADR-0049).
 
+mod baseline;
 mod compact;
 mod estimate;
 mod files;
-mod hook;
+pub mod guide;
 mod instructions;
 mod memory;
 mod prompt;
@@ -16,7 +18,6 @@ mod root;
 mod split;
 mod stream;
 mod tail;
-mod transcript;
 
 #[cfg(test)]
 mod fixtures;
@@ -32,18 +33,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, ConfigClaim, ContextContributor, Contribution, Hook, Merge, Plugin, PluginError,
-    PluginManifest, Registrar,
+    Command, ContextContributor, Contribution, Plugin, PluginError, PluginManifest, Registrar,
 };
-use schemars::JsonSchema;
-use serde::Deserialize;
 
 pub use compact::SummaryCompactor;
-pub use hook::MemoryHook;
 pub use instructions::InstructionsContributor;
 pub use memory::{MemoryCommand, MemoryContributor};
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.context",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
@@ -52,49 +49,15 @@ static MANIFEST: PluginManifest = PluginManifest {
         "context:instructions",
         "context:memory",
         "command:memory",
+        "service:bingo.context.pages",
     ],
     requires: &[],
-    config: Some(ConfigClaim {
-        keys: &[("context", Merge::Replace)],
-        schema,
-    }),
+    config: None,
 };
 
-fn schema() -> schemars::Schema {
-    schemars::schema_for!(Settings)
-}
-
-/// The claimed slice, as the kernel hands it over.
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Settings {
-    #[serde(default)]
-    pub context: Context,
-}
-
-/// A typo here would silently turn memory off, so an unknown key is a startup
-/// failure rather than a silence.
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Context {
-    /// Whether a working turn is asked what it learned. The memory that was
-    /// already written still reaches the prompt.
-    #[serde(default = "on")]
-    pub memory: bool,
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Self { memory: on() }
-    }
-}
-
-fn on() -> bool {
-    true
-}
-
 /// Registers the summary compactor, the instruction files, the two memory
-/// scopes, the command that lists them and the hook that writes to them.
+/// scopes and the command that lists them. Nothing writes a memory but the
+/// model, with the tools it already has (ADR-0049).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ContextPlugin;
 
@@ -105,7 +68,6 @@ impl Plugin for ContextPlugin {
     }
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
-        let settings: Settings = registrar.config()?;
         let config_dir = registrar.env().config_dir.clone();
         let data_dir: PathBuf = registrar.env().data_dir.clone();
         registrar.add(Contribution::Compactor(Arc::new(SummaryCompactor)));
@@ -118,11 +80,10 @@ impl Plugin for ContextPlugin {
         registrar.add(Contribution::Command(
             Arc::new(MemoryCommand::new(data_dir.clone())) as Arc<dyn Command>,
         ));
-        if settings.context.memory {
-            registrar.add(Contribution::Hook(
-                Arc::new(MemoryHook::new(data_dir)) as Arc<dyn Hook>
-            ));
-        }
+        registrar.add(Contribution::Hook(Arc::new(baseline::BaselineHook::new(
+            data_dir,
+        ))));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -140,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_says_what_it_provides() {
+    fn the_manifest_says_what_it_provides_and_claims_no_settings() {
         assert_eq!(MANIFEST.id, "bingo.context");
         assert_eq!(
             MANIFEST.provides,
@@ -148,47 +109,41 @@ mod tests {
                 "compactor:summary",
                 "context:instructions",
                 "context:memory",
-                "command:memory"
+                "command:memory",
+                "service:bingo.context.pages",
             ]
         );
-        let claim = MANIFEST.config.expect("a config claim");
-        assert_eq!(claim.keys, [("context", Merge::Replace)]);
+        assert!(
+            MANIFEST
+                .provides
+                .contains(&format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)).as_str()),
+            "the page's key is spelled the one way (ADR-0054 §1)"
+        );
+        assert!(MANIFEST.config.is_none(), "no switch turns memory off");
     }
 
+    /// The baseline hook is the one hook: nothing here writes a memory.
     #[test]
-    fn memory_is_on_unless_it_is_turned_off() {
-        let settings: Settings = serde_json::from_value(json!({})).expect("an empty slice");
-        assert!(settings.context.memory);
-        let settings: Settings =
-            serde_json::from_value(json!({ "context": { "memory": false } })).expect("a slice");
-        assert!(!settings.context.memory);
-    }
-
-    #[test]
-    fn a_misspelled_key_is_a_startup_failure_not_a_silence() {
-        let slice = json!({ "context": { "memoy": false } });
-        assert!(serde_json::from_value::<Settings>(slice).is_err());
-    }
-
-    #[test]
-    fn the_plugin_registers_a_compactor_two_contributors_the_command_and_the_hook() {
+    fn the_plugin_registers_a_compactor_two_contributors_the_command_and_one_hook() {
         let contributions = contributions(json!({}));
-        assert_eq!(contributions.len(), 5);
+        // The hook is nobody's promise: it is the baseline's own, and the
+        // manifest names the five things another plugin could ask for.
+        assert_eq!(contributions.len(), MANIFEST.provides.len() + 1);
         assert!(matches!(contributions[0], Contribution::Compactor(_)));
         assert!(matches!(contributions[1], Contribution::Context(_)));
         assert!(matches!(contributions[2], Contribution::Context(_)));
         assert!(matches!(contributions[3], Contribution::Command(_)));
-        assert!(matches!(contributions[4], Contribution::Hook(_)));
-    }
-
-    #[test]
-    fn memory_turned_off_registers_no_hook_and_still_contributes() {
-        let contributions = contributions(json!({ "context": { "memory": false } }));
-        assert_eq!(contributions.len(), 4);
-        assert!(
-            !contributions
-                .iter()
-                .any(|c| matches!(c, Contribution::Hook(_)))
-        );
+        let Contribution::Hook(hook) = &contributions[4] else {
+            panic!("the fifth contribution is the baseline hook");
+        };
+        assert_eq!(hook.id(), "context:baselines");
+        assert_eq!(hook.matcher().points, [bingo_sdk::HookPoint::Session]);
+        match &contributions[5] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 }

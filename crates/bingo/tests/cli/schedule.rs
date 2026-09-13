@@ -13,10 +13,6 @@ use jiff::{SignedDuration, Timestamp};
 
 use super::*;
 
-/// Long enough for a process to boot, take the claim and fire; a schedule
-/// that has not fired by then is a failure, not a slow machine.
-const PATIENCE: Duration = Duration::from_secs(30);
-
 fn schedules(home: &Path) -> PathBuf {
     home.join(".bingo/data/schedules")
 }
@@ -72,6 +68,17 @@ fn only_entry(home: &Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// The pid in the runner's claim, if a process holds it. Written by
+/// `bingo-schedule`'s `Claim` when the timer loop starts, so a test that sees
+/// its own process's pid there knows that process is looking at the store.
+fn held_by(home: &Path) -> Option<u32> {
+    std::fs::read_to_string(schedules(home).join("runner.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// The journal of the session a schedule fires on, once there is one.
 fn transcript(home: &Path, key: &str) -> Option<String> {
     for session in std::fs::read_dir(sessions(home)).ok()?.flatten() {
@@ -84,18 +91,6 @@ fn transcript(home: &Path, key: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Poll until something is there, or fail saying what never happened.
-fn until<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
-    let started = Instant::now();
-    loop {
-        if let Some(found) = look() {
-            return found;
-        }
-        assert!(started.elapsed() < PATIENCE, "{what} never happened");
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// A bingo that stays up while the test watches the disk: `serve --stdio`
@@ -122,7 +117,7 @@ impl Running {
     fn spawn(home: &Path, script: &tempfile::NamedTempFile, extra: &[&str]) -> Self {
         let mut child = bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home)
+            .envs(home_env(home))
             .args(["serve", "--stdio"])
             .args(extra)
             .arg("--cwd")
@@ -132,6 +127,13 @@ impl Running {
             .expect("the binary runs");
         let stdin = child.stdin.take();
         Self { child, stdin }
+    }
+
+    /// What this process writes into the runner's claim when it takes it,
+    /// which is how a test knows the store is this one's and not the last
+    /// one's.
+    fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Close stdin and wait: the surface ends, the host shuts down, and the
@@ -200,7 +202,7 @@ fn the_schedule_command_folds_to_stdout_under_print() {
     let out = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args(["--print", "--cwd"])
             .arg(home.path())
             .arg("/schedule"),
@@ -288,7 +290,16 @@ fn an_overdue_schedule_fires_once_however_long_it_was_overdue() {
     // The clock moved, so the next process owes nothing until the hour is up.
     let restart = super::script(r#"{"responses":[{"steps":[{"text":"the second run"}]}]}"#);
     let second = Running::start(home.path(), &restart);
-    std::thread::sleep(Duration::from_secs(2));
+    // Wait for the restart to hold the runner's claim rather than for a
+    // clock: until it does it has not looked at the store at all, and a fixed
+    // wait would be a guess at how long this box takes to boot a bingo.
+    until("the restart took the runner's claim", || {
+        held_by(home.path()).filter(|pid| *pid == second.pid())
+    });
+    // A negative: no wait can prove a fire will never come, only that none
+    // came. Short and fixed on purpose — it is a window after the runner is
+    // known to be looking, not a guess at when it started.
+    std::thread::sleep(Duration::from_millis(500));
     let journal = transcript(home.path(), "schedule/cccc3333").expect("the session is still there");
     assert!(
         !journal.contains("the second run"),
@@ -382,7 +393,7 @@ fn a_second_process_runs_with_the_schedules_dormant_and_says_who_has_them() {
     let out = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args(["--print", "--cwd"])
             .arg(home.path())
             .arg("/schedule"),
@@ -497,7 +508,7 @@ fn the_wake_command_answers_under_print_and_finds_nothing_standing() {
         let out = run_within(
             bingo()
                 .env("BINGO_FAKE_SCRIPT", script.path())
-                .env("HOME", home.path())
+                .envs(home_env(home.path()))
                 .args(["--print", "--cwd"])
                 .arg(home.path())
                 .arg(args),
@@ -510,11 +521,13 @@ fn the_wake_command_answers_under_print_and_finds_nothing_standing() {
     assert!(asked("/wake off").contains("no wake is standing"));
 }
 
-/// The bound a person sets (ADR-0019 §8): the tool is still offered, so a
-/// model that reaches for it is told whose decision it was, and nothing is
-/// written.
+/// The bound a person sets (ADR-0019 §8, amended 2026-09-07): the tool is not
+/// offered at all, so its description costs nothing on every request of a
+/// person who has none of it. A model that reaches for it anyway finds no such
+/// tool — the same answer a child asking for `SpawnAgent` gets — and the run
+/// still ends well with nothing written.
 #[test]
-fn wakes_a_person_turned_off_are_refused_and_the_run_still_ends_well() {
+fn a_person_who_turned_wakes_off_is_offered_no_wake_tool() {
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join(".bingo");
     std::fs::create_dir_all(&config).unwrap();
@@ -535,12 +548,13 @@ fn wakes_a_person_turned_off_are_refused_and_the_run_still_ends_well() {
     let out = scripted_run(home.path(), &script, &[], "watch the build");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let said = stdout(&out);
+    assert!(!said.contains("Waking you at"), "nothing was set: {said}");
     assert!(
-        said.contains("schedule.wakes"),
-        "the model is told why: {said}"
+        said.contains("tool not found: Wake"),
+        "the call found no such tool: {said}"
     );
     assert!(
-        !said.contains("Waking you at"),
-        "and nothing was set: {said}"
+        !said.contains("`schedule.wakes` is false"),
+        "and there is no description left to explain itself with: {said}"
     );
 }

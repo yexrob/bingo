@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "bingo plugin",
-  "protocol": 5,
+  "protocol": 1,
   "$defs": {
     "Action": {
       "type": "object",
@@ -253,6 +253,26 @@
             "source"
           ],
           "description": "Completed from a catalog kind the command validates against."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "words"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "description": "One of the words the command lists itself, in the order it offers\nthem. A surface completes from the list; the kernel carries it."
         }
       ]
     },
@@ -359,37 +379,6 @@
           ]
         }
       ]
-    },
-    "CommandCompleteParams": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "partial": {
-          "type": "string"
-        },
-        "cwd": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "partial",
-        "cwd"
-      ]
-    },
-    "CommandCompleteResult": {
-      "type": "object",
-      "properties": {
-        "completions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Completion"
-          },
-          "default": []
-        }
-      }
     },
     "CommandOutcome": {
       "oneOf": [
@@ -533,6 +522,28 @@
         "family"
       ]
     },
+    "CompactError": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/KernelError"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage",
+          "default": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 0
+          }
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "description": "A rejected summary still bills any usage observed before it failed."
+    },
     "CompactReason": {
       "oneOf": [
         {
@@ -651,15 +662,41 @@
       ]
     },
     "CompactorCompactResult": {
-      "type": "object",
-      "properties": {
-        "compaction": {
-          "$ref": "#/$defs/Compaction"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "compaction": {
+              "$ref": "#/$defs/Compaction"
+            },
+            "kind": {
+              "type": "string",
+              "const": "completed"
+            }
+          },
+          "required": [
+            "kind",
+            "compaction"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/CompactError"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
         }
-      },
-      "required": [
-        "compaction"
-      ]
+      ],
+      "description": "Declared failures retain observed usage; generic transport errors cannot\nreport what a process spent before the connection failed."
     },
     "CompactorContext": {
       "type": "object",
@@ -677,8 +714,8 @@
         "capabilities": {
           "$ref": "#/$defs/ModelCapabilities"
         },
-        "model": {
-          "type": "string"
+        "request": {
+          "$ref": "#/$defs/ModelRequest"
         },
         "failures": {
           "type": "integer",
@@ -696,7 +733,7 @@
       "required": [
         "usage",
         "capabilities",
-        "model",
+        "request",
         "failures",
         "keepBudget"
       ],
@@ -713,23 +750,6 @@
         "id"
       ],
       "description": "A compaction strategy a process says it has. One field, and the same shape\nas every other declaration: a plugin's answer to \"what do you contribute\"\nreads the same way whatever the kind."
-    },
-    "Completion": {
-      "type": "object",
-      "properties": {
-        "value": {
-          "type": "string"
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "value"
-      ]
     },
     "ConfigView": {
       "type": "object",
@@ -940,7 +960,7 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
-          "description": "`used` at which the older turns are summarised."
+          "description": "`used` at which the older turns are summarised, equal to `window`\nwhere the kernel draws no line because the endpoint holds the context\nand cuts it itself (ADR-0055 §2)."
         }
       },
       "required": [
@@ -1091,9 +1111,23 @@
         "caching": {
           "type": "boolean",
           "default": false
+        },
+        "holdsContext": {
+          "type": "boolean",
+          "description": "The conversation lives on the endpoint's side, and so does the ruler\nover it: the kernel sends the newest turn, measures nothing and cuts\nnothing (ADR-0055 §1).",
+          "default": false
+        },
+        "contextWindow": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The window this endpoint last named for this model. A server's word on\nitself outranks every guess at it (ADR-0055 §2)."
         }
       },
-      "description": "What an endpoint does with a request, as only the provider can know:\nwhether image parts reach the model, whether tokens can be counted ahead,\nwhether prefixes are cached. The model's own facts — window, output\nbudget, reasoning, vision — are the kernel catalogue's (ADR-0004)."
+      "description": "What an endpoint does with a request, as only the provider can know:\nwhether image parts reach the model, whether tokens can be counted ahead,\nwhether prefixes are cached, whether the conversation is its own. The\nmodel's own facts — window, output budget, reasoning, vision — are the\nkernel catalogue's (ADR-0004)."
     },
     "Entry": {
       "type": "object",
@@ -2225,6 +2259,13 @@
         "data": {
           "type": "string",
           "description": "Base64 payload."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where the same bytes are on this machine, when they are anywhere: a\npicture read off a disk, or one a surface wrote before handing it on\n(ADR-0052). A location, not a second copy — absent from the wire and\nthe journal when there is none, so a picture without one is the\nbytes it always was."
         }
       },
       "required": [
@@ -3226,6 +3267,11 @@
         "caching": {
           "type": "boolean",
           "default": false
+        },
+        "holdsContext": {
+          "type": "boolean",
+          "description": "The endpoint holds this conversation and measures it itself\n(ADR-0055 §1): the kernel draws no line in a window it does not own.",
+          "default": false
         }
       },
       "required": [
@@ -3470,6 +3516,56 @@
             "input"
           ],
           "description": "The complete call. `input` is the raw JSON text; the loop parses it once."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "used": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "window": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "context"
+            }
+          },
+          "required": [
+            "type",
+            "used",
+            "window"
+          ],
+          "description": "What the endpoint says it is holding for this session: its own count,\nagainst its own window (ADR-0055 §2). Sent as often as it likes; the\nlast one of a round is what that round reports."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "before": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "after": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "compacted"
+            }
+          },
+          "required": [
+            "type",
+            "before",
+            "after"
+          ],
+          "description": "A cut the endpoint made in the context it holds (ADR-0055 §3). The\njournal lost nothing by it: it is a row, not a rewrite."
         },
         {
           "type": "object",
@@ -3978,7 +4074,8 @@
           "default": {
             "images": false,
             "countTokens": false,
-            "caching": false
+            "caching": false,
+            "holdsContext": false
           }
         }
       },
@@ -4311,6 +4408,7 @@
         },
         "busy": {
           "type": "boolean",
+          "description": "A turn is running. A summary travels without the turn it describes —\na host listing carries no `SessionState` — so the kernel stamps this\non every summary it publishes and nothing else writes it. A client\nthat holds the state derives the same fact with `SessionState::busy`.",
           "default": false
         },
         "messages": {
@@ -5004,14 +5102,6 @@
       },
       "result": {
         "$ref": "#/$defs/CommandRunResult"
-      }
-    },
-    "command/complete": {
-      "params": {
-        "$ref": "#/$defs/CommandCompleteParams"
-      },
-      "result": {
-        "$ref": "#/$defs/CommandCompleteResult"
       }
     },
     "context/contribute": {

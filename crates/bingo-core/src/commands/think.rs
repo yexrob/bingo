@@ -20,8 +20,8 @@ impl Command for ThinkCommand {
         super::spec(
             "think",
             &levels(),
-            ArgSpec::Free {
-                hint: "level, or off".into(),
+            ArgSpec::Words {
+                values: Effort::words().map(str::to_string).collect(),
             },
             true,
         )

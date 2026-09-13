@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 658
 expression: "draw_sized(80, 30, &state, &ui, now)"
 ---
 "enter        send the message · open the focused block                          "
@@ -15,6 +14,7 @@ expression: "draw_sized(80, 30, &state, &ui, now)"
 "alt+b/f      move one word                                                      "
 "ctrl+w/u/k   delete word · to line start · to line end                          "
 "pgup/pgdn    scroll the transcript                                              "
+"v · drag     select · ↑↓←→ or a drag extend · y, ctrl+c or release copy         "
 "ctrl+g       the same list · ↑↓ to walk it                                      "
 "ctrl+t       show / hide the task list                                          "
 "ctrl+p       plugin state (rooms, panels to pin)                                "
@@ -28,7 +28,6 @@ expression: "draw_sized(80, 30, &state, &ui, now)"
 "click        a picture · open it                                                "
 "?            toggle this panel                                                  "
 "                                                                                "
-"/help    shortcuts and commands                                                 "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"

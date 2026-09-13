@@ -3,8 +3,9 @@
 
 mod acp_proxy;
 mod channels;
-mod gateway;
+mod env;
 mod login;
+mod mcp;
 mod provider;
 mod update;
 
@@ -182,6 +183,12 @@ enum Command {
         #[command(subcommand)]
         action: ProviderAction,
     },
+    /// The MCP servers this machine dials, and the sign-ins they need
+    /// (ADR-0050 §4).
+    Mcp {
+        #[command(subcommand)]
+        action: mcp::Action,
+    },
     /// Listen on the configured IM channels and nothing else (ADR-0016).
     Channels {
         #[command(subcommand)]
@@ -190,7 +197,7 @@ enum Command {
     /// One resident bingo per data dir, managed like a service (ADR-0020).
     Gateway {
         #[command(subcommand)]
-        verb: gateway::Verb,
+        verb: bingo_gateway::Verb,
     },
     /// The stdio↔socket pump an ACP agent spawns to reach this run's shared
     /// tools (ADR-0036 §3). Hidden: it is a row in a `session/new` this
@@ -243,6 +250,7 @@ impl Command {
             Command::Serve { .. }
             | Command::Channels { .. }
             | Command::Gateway { .. }
+            | Command::Mcp { .. }
             | Command::Provider { .. }
             | Command::Update { .. }
             | Command::AcpMcpProxy => None,
@@ -352,8 +360,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let config = host_config(&cli, &cwd)?;
     let demo = demo_ui(&cli, &config.layers);
     let listening = channels_wanted(&cli, &config.layers);
-    let cache_days = picture_cache_days(&config.layers)?;
-    let updates = update_wanted(&config.layers);
+    let decided = Decided::of(&config.layers)?;
     let host = Host::build(plugins(demo)?, config)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
@@ -362,7 +369,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
         return code;
     }
     let env = Arc::new(environment(&cwd));
-    let (id, options) = surface_for(work, cli, &cwd, &env, interactive, cache_days, updates)?;
+    let (id, options) = surface_for(work, cli, &cwd, &env, interactive, decided)?;
     let beside = match listening && id != bingo_channels::SURFACE_ID {
         true => start_channels(&host, channel_options(cwd, env)),
         false => None,
@@ -396,17 +403,14 @@ fn surface_for(
     cwd: &std::path::Path,
     env: &Arc<Env>,
     interactive: bool,
-    cache_days: Option<u64>,
-    updates: bool,
+    decided: Decided,
 ) -> Result<(&'static str, SurfaceOptions), KernelError> {
     let (cwd, env) = (cwd.to_path_buf(), env.clone());
     Ok(match work {
         Work::Rpc { stdio } => ("rpc", serve_options(stdio, cwd, env)?),
         Work::Channels | Work::Gateway => (bingo_channels::SURFACE_ID, channel_options(cwd, env)),
-        Work::Session if interactive => {
-            ("tui", surface_options(cli, cwd, env, cache_days, updates))
-        }
-        Work::Session => ("print", surface_options(cli, cwd, env, cache_days, updates)),
+        Work::Session if interactive => ("tui", surface_options(cli, cwd, env, decided)),
+        Work::Session => ("print", surface_options(cli, cwd, env, decided)),
     })
 }
 
@@ -435,11 +439,11 @@ fn work_of(cli: &Cli) -> Work {
 fn resident(
     work: Work,
     cwd: &std::path::Path,
-) -> Result<Option<gateway::run::Resident>, KernelError> {
+) -> Result<Option<bingo_gateway::run::Resident>, KernelError> {
     match work {
-        Work::Gateway => gateway::run::enter(
-            &gateway::paths::Paths::new(&environment(cwd)),
-            &gateway::probe::Kill,
+        Work::Gateway => bingo_gateway::run::enter(
+            &bingo_gateway::paths::Paths::new(&environment(cwd)),
+            &bingo_gateway::probe::Kill,
         )
         .map(Some),
         _ => Ok(None),
@@ -473,6 +477,7 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
         // but the bytes it is carrying (ADR-0036 §3).
         Some(Command::AcpMcpProxy) => Some(acp_proxy::run().await),
         Some(Command::Provider { .. }) => Some(added_provider(&env).await),
+        Some(Command::Mcp { action }) => Some(configured_mcp(cli, &env, cwd, action).await),
         // An asked-for update always asks: the daily stamp is the start-up
         // check's discipline, not a person's.
         Some(Command::Update { check }) => Some(update::run(&env, *check).await),
@@ -483,10 +488,26 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
             action: Some(ChannelsAction::Secret { adapter }),
         }) => Some(channel_secret(&env, adapter).await),
         Some(Command::Gateway { verb }) if !verb.is_run() => {
-            Some(gateway::dispatch(verb, &env, cwd, cli.settings.as_deref()).await)
+            Some(bingo_gateway::dispatch(verb, &env, cwd, cli.settings.as_deref()).await)
         }
         _ => None,
     }
+}
+
+/// `bingo mcp …`: the servers this machine dials (ADR-0050 §4). It reads the
+/// same layers a run would, `--mcp-config` included, so what it lists is what
+/// the next session dials.
+async fn configured_mcp(
+    cli: &Cli,
+    env: &Env,
+    cwd: &std::path::Path,
+    action: &mcp::Action,
+) -> Result<i32, KernelError> {
+    let extra = match &cli.mcp_config {
+        Some(path) => Some(mcp_layer(path)?),
+        None => None,
+    };
+    mcp::run(action, env, cwd, cli.settings.as_deref(), extra).await
 }
 
 /// `bingo channels add <adapter>`: app id and secret in one sitting.
@@ -510,6 +531,21 @@ fn update_wanted(layers: &[settings::Layer]) -> bool {
         .rev()
         .find(|layer| layer.value.contains_key(bingo_update::SETTING))
         .is_none_or(|layer| bingo_update::wanted(&Value::Object(layer.value.clone())))
+}
+
+/// The widest a line of prose is drawn, or nothing at all — the width the
+/// transcript has (design §7). The highest layer that mentions the key
+/// decides, as `update.check` does; the surface owns the spelling.
+fn tui_measure(layers: &[settings::Layer]) -> Option<usize> {
+    layers
+        .iter()
+        .rev()
+        .find(|layer| {
+            layer
+                .value
+                .contains_key(bingo_surface_tui::settings::SETTING)
+        })
+        .and_then(|layer| bingo_surface_tui::settings::measure(&Value::Object(layer.value.clone())))
 }
 
 /// Whether a chat is being listened on: the flag, else any settings layer
@@ -663,9 +699,9 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(JsonlStorePlugin::default()),
         Box::new(ContextPlugin),
         Box::new(FsPlugin),
-        Box::new(BashPlugin),
+        Box::new(BashPlugin::default()),
         Box::new(WebPlugin),
-        Box::new(SkillsPlugin),
+        Box::new(SkillsPlugin::default()),
         Box::new(McpPlugin::default()),
         Box::new(PluginRpcPlugin::default()),
         Box::new(AgentsPlugin),
@@ -724,13 +760,7 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     Ok(config)
 }
 
-fn surface_options(
-    cli: Cli,
-    cwd: PathBuf,
-    env: Arc<Env>,
-    cache_days: Option<u64>,
-    updates: bool,
-) -> SurfaceOptions {
+fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>, decided: Decided) -> SurfaceOptions {
     SurfaceOptions {
         selector: selector(&cli, cwd.clone()),
         cwd,
@@ -740,11 +770,37 @@ fn surface_options(
             "inputFormat": cli.input_format.as_str(),
             "permissionPromptTool": cli.permission_prompt_tool.map(PromptTool::as_str),
             "noPrintOnExit": cli.no_print_on_exit,
-            "updateCheck": updates,
+            "updateCheck": decided.updates,
             "images": cli.image,
-            "pictureCacheDays": cache_days,
+            "pictureCacheDays": decided.cache_days,
+            "measure": decided.measure,
         }),
         env,
+    }
+}
+
+/// What the settings layers settled before a host existed: the keys that
+/// decide something for a surface, which is handed the answers with the rest
+/// of its arguments rather than reading them for itself (ADR-0003 §2). Each
+/// is read the same way — the highest layer that names the key wins — and the
+/// plugin that claims the key owns its spelling.
+#[derive(Clone, Copy, Debug)]
+struct Decided {
+    /// How long a fetched picture is kept (`pictures.cacheDays`, M61).
+    cache_days: Option<u64>,
+    /// Whether a start may ask whether a newer release is out (ADR-0043 §4).
+    updates: bool,
+    /// The widest a line of prose is drawn (`tui.measure`, design §7).
+    measure: Option<usize>,
+}
+
+impl Decided {
+    fn of(layers: &[settings::Layer]) -> Result<Self, KernelError> {
+        Ok(Self {
+            cache_days: picture_cache_days(layers)?,
+            updates: update_wanted(layers),
+            measure: tui_measure(layers),
+        })
     }
 }
 
@@ -818,4 +874,51 @@ fn cli_layer(cli: &Cli) -> Map<String, Value> {
         layer.insert("permissions".into(), Value::Object(permissions));
     }
     layer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layer(source: &str, value: serde_json::Value) -> settings::Layer {
+        settings::Layer::new(
+            source,
+            value.as_object().expect("a settings object").clone(),
+        )
+    }
+
+    /// The measure is read the way `update.check` is: one key, one reading,
+    /// and the highest layer that names it decides (ADR-0003 §2).
+    #[test]
+    fn the_highest_layer_that_names_the_measure_is_the_one_read() {
+        assert_eq!(tui_measure(&[]), None);
+        assert_eq!(tui_measure(&[layer("user", json!({}))]), None);
+        assert_eq!(
+            tui_measure(&[layer("user", json!({ "tui": { "measure": 80 } }))]),
+            Some(80)
+        );
+        assert_eq!(
+            tui_measure(&[
+                layer("user", json!({ "tui": { "measure": 80 } })),
+                layer("project", json!({ "tui": { "measure": 100 } })),
+            ]),
+            Some(100)
+        );
+        assert_eq!(
+            tui_measure(&[
+                layer("user", json!({ "tui": { "measure": 80 } })),
+                layer("project", json!({ "model": "gpt-5" })),
+            ]),
+            Some(80),
+            "a layer that says nothing about it does not answer for it"
+        );
+        assert_eq!(
+            tui_measure(&[
+                layer("user", json!({ "tui": { "measure": 80 } })),
+                layer("cli", json!({ "tui": { "measure": 0 } })),
+            ]),
+            None,
+            "and a higher layer takes the measure back off"
+        );
+    }
 }

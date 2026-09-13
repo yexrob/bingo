@@ -189,6 +189,8 @@ mod tests {
             parent: parent.clone(),
             members: seated.into_iter().map(|seat| seat.name).collect(),
             ears,
+            purpose: None,
+            closed: false,
         }
     }
 

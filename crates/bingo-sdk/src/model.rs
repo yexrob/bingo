@@ -89,6 +89,13 @@ pub struct Image {
     pub media_type: String,
     /// Base64 payload.
     pub data: String,
+    /// Where the same bytes are on this machine, when they are anywhere: a
+    /// picture read off a disk, or one a surface wrote before handing it on
+    /// (ADR-0052). A location, not a second copy — absent from the wire and
+    /// the journal when there is none, so a picture without one is the
+    /// bytes it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
 }
 
 impl Image {
@@ -109,6 +116,15 @@ impl Image {
             .iter()
             .find(|(name, _)| *name == ext)
             .map(|(_, media)| *media)
+    }
+
+    /// The extension a media type is written under: the table read the
+    /// other way, for a surface that writes a picture before it sends it.
+    pub fn extension_of(media_type: &str) -> Option<&'static str> {
+        MEDIA_TYPES
+            .iter()
+            .find(|(_, known)| *known == media_type)
+            .map(|(ext, _)| *ext)
     }
 
     /// Whether a media type is one the table knows, whoever handed it in.
@@ -132,7 +148,26 @@ impl Image {
         Ok(Image {
             media_type,
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            path: None,
         })
+    }
+
+    /// The same picture, knowing where its bytes are.
+    pub fn at(self, path: impl Into<PathBuf>) -> Image {
+        Image {
+            path: Some(path.into()),
+            ..self
+        }
+    }
+
+    /// The words that tell a model where this picture is, beside the
+    /// picture itself: the one spelling every provider writes, so a path a
+    /// model is told is a path it can hand to a tool. Nothing for a picture
+    /// that is nowhere.
+    pub fn whereabouts(&self) -> Option<String> {
+        self.path
+            .as_ref()
+            .map(|path| format!("[picture: {}]", path.display()))
     }
 
     /// A picture read off disk (std, not tokio: a surface calls this off its
@@ -145,7 +180,7 @@ impl Image {
             path: path.to_path_buf(),
             source,
         })?;
-        Self::from_bytes(media_type, &bytes)
+        Ok(Self::from_bytes(media_type, &bytes)?.at(path))
     }
 
     /// The decoded size, from the base64 length alone — no decode needed.
@@ -393,8 +428,9 @@ impl FinishReason {
 
 /// What an endpoint does with a request, as only the provider can know:
 /// whether image parts reach the model, whether tokens can be counted ahead,
-/// whether prefixes are cached. The model's own facts — window, output
-/// budget, reasoning, vision — are the kernel catalogue's (ADR-0004).
+/// whether prefixes are cached, whether the conversation is its own. The
+/// model's own facts — window, output budget, reasoning, vision — are the
+/// kernel catalogue's (ADR-0004).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointCapabilities {
@@ -404,6 +440,15 @@ pub struct EndpointCapabilities {
     pub count_tokens: bool,
     #[serde(default)]
     pub caching: bool,
+    /// The conversation lives on the endpoint's side, and so does the ruler
+    /// over it: the kernel sends the newest turn, measures nothing and cuts
+    /// nothing (ADR-0055 §1).
+    #[serde(default)]
+    pub holds_context: bool,
+    /// The window this endpoint last named for this model. A server's word on
+    /// itself outranks every guess at it (ADR-0055 §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// What a turn may assume about its model: the kernel's resolution of the
@@ -422,6 +467,10 @@ pub struct ModelCapabilities {
     pub count_tokens: bool,
     #[serde(default)]
     pub caching: bool,
+    /// The endpoint holds this conversation and measures it itself
+    /// (ADR-0055 §1): the kernel draws no line in a window it does not own.
+    #[serde(default)]
+    pub holds_context: bool,
 }
 
 /// Provider stream events. Never published; the accumulator folds them into items.
@@ -480,6 +529,19 @@ pub enum ModelEvent {
         id: String,
         name: String,
         input: String,
+    },
+    /// What the endpoint says it is holding for this session: its own count,
+    /// against its own window (ADR-0055 §2). Sent as often as it likes; the
+    /// last one of a round is what that round reports.
+    Context {
+        used: u64,
+        window: u64,
+    },
+    /// A cut the endpoint made in the context it holds (ADR-0055 §3). The
+    /// journal lost nothing by it: it is a row, not a rewrite.
+    Compacted {
+        before: u64,
+        after: u64,
     },
     Finish {
         usage: Usage,
@@ -607,6 +669,7 @@ mod tests {
         let part = ContentPart::Image(Image {
             media_type: "image/png".into(),
             data: "iVBORw0KGgo=".into(),
+            path: None,
         });
         let json = serde_json::to_value(&part).unwrap();
         assert_eq!(
@@ -620,11 +683,37 @@ mod tests {
         assert_eq!(serde_json::from_value::<ContentPart>(json).unwrap(), part);
     }
 
+    /// A picture that knows where it is says so on the wire, and one that
+    /// does not is the bytes it always was: no recorded frame changes
+    /// (ADR-0052 §2).
+    #[test]
+    fn a_path_rides_with_the_picture_and_is_absent_when_there_is_none() {
+        let image = Image::from_bytes("image/png", b"abc").unwrap();
+        assert!(image.path.is_none());
+        assert_eq!(image.whereabouts(), None);
+        let placed = image.clone().at("/shots/a.png");
+        let json = serde_json::to_value(&placed).unwrap();
+        assert_eq!(json["path"], "/shots/a.png");
+        assert_eq!(serde_json::from_value::<Image>(json).unwrap(), placed);
+        assert_eq!(
+            placed.whereabouts().as_deref(),
+            Some("[picture: /shots/a.png]")
+        );
+        assert!(!serde_json::to_string(&image).unwrap().contains("path"));
+    }
+
+    #[test]
+    fn the_table_reads_both_ways() {
+        assert_eq!(Image::extension_of("image/jpeg"), Some("jpg"));
+        assert_eq!(Image::extension_of("image/tiff"), None);
+    }
+
     #[test]
     fn a_payload_that_is_only_padding_is_bounded_not_a_panic() {
         let image = Image {
             media_type: "image/png".into(),
             data: "==".into(),
+            path: None,
         };
         assert_eq!(image.decoded_len(), 0);
     }
@@ -694,6 +783,7 @@ mod tests {
         std::fs::write(&path, [0x89, b'P', b'N', b'G']).unwrap();
         let image = Image::read(&path).unwrap();
         assert_eq!(image.media_type, "image/png");
+        assert_eq!(image.path.as_deref(), Some(path.as_path()));
     }
 
     #[test]
@@ -716,6 +806,59 @@ mod tests {
         };
         let json = serde_json::to_string(&part).unwrap();
         assert!(!json.contains("providerMetadata"));
+    }
+
+    /// The two events an endpoint that holds its own context sends
+    /// (ADR-0055 §2, §3). The wire shape is the contract: a plugin provider
+    /// speaks them over the rpc, so the tag and the field names are pinned
+    /// here rather than left to the derive.
+    #[test]
+    fn a_reading_and_a_cut_are_tagged_and_round_trip() {
+        let reading = ModelEvent::Context {
+            used: 412_000,
+            window: 1_000_000,
+        };
+        let json = serde_json::to_value(&reading).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "context", "used": 412_000, "window": 1_000_000 })
+        );
+        assert_eq!(serde_json::from_value::<ModelEvent>(json).unwrap(), reading);
+
+        let cut = ModelEvent::Compacted {
+            before: 967_000,
+            after: 120_000,
+        };
+        let json = serde_json::to_value(&cut).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "compacted", "before": 967_000, "after": 120_000 })
+        );
+        assert_eq!(serde_json::from_value::<ModelEvent>(json).unwrap(), cut);
+    }
+
+    /// An endpoint that says nothing about either holds nothing and names no
+    /// window: every recorded capability set predating ADR-0055 reads that
+    /// way, which is what it always meant.
+    #[test]
+    fn an_endpoint_that_says_nothing_holds_nothing() {
+        let capabilities: EndpointCapabilities =
+            serde_json::from_value(serde_json::json!({ "images": true })).unwrap();
+        assert!(capabilities.images);
+        assert!(!capabilities.holds_context);
+        assert_eq!(capabilities.context_window, None);
+        let held = EndpointCapabilities {
+            holds_context: true,
+            context_window: Some(1_000_000),
+            ..EndpointCapabilities::default()
+        };
+        let json = serde_json::to_value(held).unwrap();
+        assert_eq!(json["holdsContext"], Value::Bool(true));
+        assert_eq!(json["contextWindow"], Value::from(1_000_000));
+        assert_eq!(
+            serde_json::from_value::<EndpointCapabilities>(json).unwrap(),
+            held
+        );
     }
 
     #[test]

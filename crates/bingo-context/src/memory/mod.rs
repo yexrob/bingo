@@ -1,12 +1,10 @@
 //! What the agent remembers: one fact per file, in two directories, with each
 //! directory's index in the prompt and the bodies only when the model opens
-//! one (ADR-0044).
+//! one (ADR-0044). The model is the one writer (ADR-0049).
 
 mod command;
 pub(crate) mod dir;
 pub(crate) mod file;
-pub(crate) mod index;
-pub(crate) mod migrate;
 pub(crate) mod store;
 mod teach;
 
@@ -16,19 +14,23 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContextContributor, ContextError, ContextPiece, ContextQuery, Placement, SystemBlock,
+    ContextContributor, ContextError, ContextPiece, ContextQuery, HostHandle, Placement, SessionId,
+    SystemBlock,
 };
 
-use crate::{files, root};
+use crate::{baseline, files, root};
 
 /// Lines an index may spend in the prompt. Past it the newest are kept and
 /// the cut is said: a memory written this morning outranks one from last
-/// month, and an index is read newest-last.
-pub const INDEX_LINES: usize = 200;
+/// month, and an index is read newest-last. Sixty is a hint; two hundred was
+/// a document, and the lines that do not fit are the lines to merge.
+pub const INDEX_LINES: usize = 60;
 
 /// After the instructions, before anything a turn adds: what the agent
 /// remembers is context, not a rule.
 const ORDER: i32 = -5;
+
+pub(crate) const ID: &str = "context:memory";
 
 /// What an empty scope says, so a directory that is not there yet is still a
 /// directory the model knows to write in.
@@ -49,25 +51,57 @@ impl MemoryContributor {
 #[async_trait]
 impl ContextContributor for MemoryContributor {
     fn id(&self) -> &str {
-        "context:memory"
+        ID
     }
 
     fn placement(&self) -> Placement {
         Placement::System { order: ORDER }
     }
 
-    /// The teaching is cached and the indexes are not: the words never change,
-    /// and the hook writes an index at the end of every working turn while the
-    /// model may write one in the middle of it.
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
-        let root = root::of(query.cwd).await;
-        migrate::once(&self.data_dir, &root).await;
-        Ok(vec![
-            ContextPiece::System(teach::block()),
-            ContextPiece::System(scope("the user", &dir::user(&self.data_dir)).await),
-            ContextPiece::System(scope("this project", &dir::project(&self.data_dir, &root)).await),
-        ])
+        baseline::contribute(self.id(), query, async {
+            vec![
+                teach::block(),
+                scope("the user", &dir::user(&self.data_dir)).await,
+                scope(
+                    "this project",
+                    &project_dir(&self.data_dir, query.cwd).await,
+                )
+                .await,
+            ]
+        })
+        .await
     }
+}
+
+/// The kind the two directories are published under, beside the baselines:
+/// `{ "user": <dir>, "project": <dir> }`, the same paths the headings carry
+/// for the model, as data for a surface that draws a call on a memory file as
+/// what it is (M84). A session's directories are fixed by its cwd, so they are
+/// written once, when the session starts; a surface that cannot read them
+/// draws the call as any other.
+pub(crate) const DIRECTORIES: &str = "memory";
+
+pub(crate) async fn publish(host: &HostHandle, session: &SessionId, data_dir: &Path, cwd: &Path) {
+    let payload = serde_json::json!({
+        "user": dir::user(data_dir).display().to_string(),
+        "project": project_dir(data_dir, cwd).await.display().to_string(),
+    });
+    if let Err(error) = host
+        .extend(session, baseline::PLUGIN, DIRECTORIES, payload)
+        .await
+    {
+        tracing::warn!(%error, "memory: the directories were not published");
+    }
+}
+
+/// Where this project's memories are: the root the directory belongs to and
+/// the commit its repository began with, asked once here so the contributor
+/// and the command answer the same directory.
+pub(crate) async fn project_dir(data_dir: &Path, cwd: &Path) -> PathBuf {
+    let root = root::of(cwd).await;
+    let commit = root::commit(&root).await;
+    dir::project(data_dir, &root, commit.as_deref())
 }
 
 /// One scope's index, under a heading that says where its directory is: the
@@ -86,19 +120,17 @@ async fn scope(whose: &str, at: &Path) -> SystemBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::baseline::testing::Journal;
     use crate::memory::file::{Kind, Memory};
-    use crate::query::Asked;
 
     fn contributor(data: &tempfile::TempDir) -> MemoryContributor {
         MemoryContributor::new(data.path().to_path_buf())
     }
 
     async fn blocks(data: &tempfile::TempDir, cwd: &Path) -> Vec<String> {
-        let asked = Asked::at(cwd);
-        contributor(data)
-            .contribute(asked.query())
+        Journal::at(cwd)
+            .contribute(&contributor(data), cwd)
             .await
-            .expect("memory never fails a turn")
             .iter()
             .map(text)
             .collect()
@@ -107,7 +139,7 @@ mod tests {
     fn text(piece: &ContextPiece) -> String {
         match piece {
             ContextPiece::System(block) => block.text.clone(),
-            ContextPiece::User { .. } => String::new(),
+            ContextPiece::User { .. } => panic!("memory is system context, not a user item"),
         }
     }
 
@@ -118,6 +150,33 @@ mod tests {
             kind: Kind::Project,
             body: "a body no prompt ever carries\n".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn indexes_are_retained_until_the_history_generation_changes() {
+        let data = tempfile::tempdir().expect("a data dir");
+        let cwd = tempfile::tempdir().expect("a cwd");
+        let journal = Journal::at(cwd.path());
+        let contributor = contributor(&data);
+        let first = journal.contribute(&contributor, cwd.path()).await;
+        assert_eq!(first.len(), 3);
+        let user = dir::user(data.path());
+        store::save(&user, &a_fact("a-habit", "new preference"))
+            .await
+            .expect("a memory");
+        assert_eq!(journal.contribute(&contributor, cwd.path()).await, first);
+
+        journal.state().history_generation += 1;
+        let changed = journal.contribute(&contributor, cwd.path()).await;
+        assert_eq!(text(&changed[0]), text(&first[0]));
+        assert!(text(&changed[1]).contains("new preference"));
+        std::fs::write(dir::index(&user), "").expect("clear index");
+        assert_eq!(journal.contribute(&contributor, cwd.path()).await, changed);
+
+        journal.state().history_generation += 1;
+        let cleared = journal.contribute(&contributor, cwd.path()).await;
+        assert_eq!(cleared, first);
+        assert_eq!(journal.state().seq.0, 3, "one capture per generation");
     }
 
     #[test]
@@ -144,8 +203,7 @@ mod tests {
     async fn the_prompt_carries_the_index_and_never_a_body() {
         let data = tempfile::tempdir().expect("a data dir");
         let cwd = tempfile::tempdir().expect("a cwd");
-        let root = cwd.path().canonicalize().expect("a real path");
-        let at = dir::project(data.path(), &root);
+        let at = project_dir(data.path(), cwd.path()).await;
         store::save(&at, &a_fact("a-fact", "one line"))
             .await
             .expect("a memory");
@@ -165,8 +223,7 @@ mod tests {
     async fn a_long_index_contributes_its_newest_lines_and_says_so() {
         let data = tempfile::tempdir().expect("a data dir");
         let cwd = tempfile::tempdir().expect("a cwd");
-        let root = cwd.path().canonicalize().expect("a real path");
-        let at = dir::project(data.path(), &root);
+        let at = project_dir(data.path(), cwd.path()).await;
         let long: String = (1..=INDEX_LINES + 10)
             .map(|i| format!("- [Fact {i}](fact-{i}.md) — line {i}\n"))
             .collect();
@@ -175,21 +232,9 @@ mod tests {
 
         let blocks = blocks(&data, cwd.path()).await;
         assert!(blocks[2].contains("[… 10 earlier lines not shown]"));
-        assert!(blocks[2].contains("fact-11.md") && blocks[2].contains("fact-210.md"));
+        let oldest_kept = format!("fact-{}.md", 11);
+        let newest = format!("fact-{}.md", INDEX_LINES + 10);
+        assert!(blocks[2].contains(&oldest_kept) && blocks[2].contains(&newest));
         assert!(!blocks[2].contains("fact-10.md"));
-    }
-
-    #[tokio::test]
-    async fn the_old_single_file_is_migrated_before_it_is_read() {
-        let data = tempfile::tempdir().expect("a data dir");
-        let cwd = tempfile::tempdir().expect("a cwd");
-        let root = cwd.path().canonicalize().expect("a real path");
-        let old = dir::legacy(data.path(), &root);
-        std::fs::create_dir_all(old.parent().expect("a parent")).expect("the memory dir");
-        std::fs::write(&old, "the tests run with cargo test\n").expect("the old file");
-
-        let blocks = blocks(&data, cwd.path()).await;
-        assert!(blocks[2].contains("imported.md"), "{}", blocks[2]);
-        assert!(!old.exists());
     }
 }

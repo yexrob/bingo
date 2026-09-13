@@ -8,9 +8,7 @@ use bingo_sdk::ContextUsage;
 pub const RECOUNT_GROWTH: u64 = 20_000;
 pub const RECOUNT_ROUNDS: u32 = 5;
 
-/// Tool results the microcompact leaves intact, normally and on the retry
-/// after an overflow.
-pub const KEEP_RECENT_RESULTS: usize = 10;
+/// Tool results the retry leaves intact after an overflow.
 pub const KEEP_RECENT_AFTER_OVERFLOW: usize = 4;
 /// A result shorter than this is not worth eliding.
 pub const ELIDE_MIN_CHARS: usize = 1_000;
@@ -20,8 +18,6 @@ pub const ELIDE_MIN_CHARS: usize = 1_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Thresholds {
     pub effective: u64,
-    /// Past this the wire loses stale tool results.
-    pub micro: u64,
     /// Past this the person is told once.
     pub warn: u64,
     /// Past this the plugin is asked for a summary.
@@ -36,10 +32,22 @@ impl Thresholds {
         let trigger = effective * 9 / 10;
         Self {
             effective,
-            micro: effective / 2,
             warn: trigger.saturating_sub(20_000),
             trigger,
             keep: effective / 4,
+        }
+    }
+
+    /// The lines for a context the endpoint holds (ADR-0055 §1): the window
+    /// is the endpoint's own and nothing is drawn in it. There is no output
+    /// budget to reserve — the kernel sends no request whose size it decides
+    /// — nothing to warn at, nothing to cut at, and nothing to keep.
+    pub fn held(window: u64) -> Self {
+        Self {
+            effective: window,
+            warn: 0,
+            trigger: window,
+            keep: 0,
         }
     }
 }
@@ -103,10 +111,20 @@ mod tests {
     fn the_lines_follow_the_effective_window() {
         let lines = Thresholds::of(50_000, 10_000);
         assert_eq!(lines.effective, 40_000);
-        assert_eq!(lines.micro, 20_000);
         assert_eq!(lines.warn, 16_000);
         assert_eq!(lines.trigger, 36_000);
         assert_eq!(lines.keep, 10_000);
+    }
+
+    /// ADR-0055 §1: a held window has no lines in it, so nothing the kernel
+    /// draws can fire — and `trigger` says so by being the window itself.
+    #[test]
+    fn a_held_window_has_no_lines_in_it() {
+        let lines = Thresholds::held(1_000_000);
+        assert_eq!(lines.effective, 1_000_000);
+        assert_eq!(lines.trigger, 1_000_000);
+        assert_eq!(lines.warn, 0);
+        assert_eq!(lines.keep, 0);
     }
 
     #[test]
@@ -143,11 +161,10 @@ mod tests {
         }
 
         #[test]
-        fn the_lines_are_ordered_and_leave_half_the_window(
+        fn the_lines_are_ordered_within_the_effective_window(
             window in 1_000u64..2_000_000, max_tokens in 1u32..1_000_000
         ) {
             let lines = Thresholds::of(window, max_tokens);
-            prop_assert!(lines.micro <= lines.trigger);
             prop_assert!(lines.warn <= lines.trigger);
             prop_assert!(lines.trigger <= lines.effective);
             prop_assert!(lines.keep <= lines.effective);

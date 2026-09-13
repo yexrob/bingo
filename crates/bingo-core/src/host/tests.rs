@@ -262,7 +262,7 @@ async fn open_create_runs_a_turn_and_the_session_is_findable_afterwards() {
             break;
         }
     }
-    assert_eq!(snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(snapshot.last_status(), Some(&TurnStatus::Completed));
     let request = &provider.requests()[0];
     assert!(request.system[0].text.starts_with("You are bingo"));
     assert!(

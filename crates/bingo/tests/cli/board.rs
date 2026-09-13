@@ -88,7 +88,7 @@ fn root_of(out: &Output) -> SessionId {
 /// foreground, so the script's responses are handed out root, root, root,
 /// root, member, member, member, member, root, root, root, in that order.
 const BOARD: &str = r##"{"responses":[
-    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"build","members":["worker"]}}}]},
+    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"build","purpose":"take the work off the board","members":["worker"]}}}]},
     {"steps":[{"toolCall":{"name":"TaskCreate","input":{"subject":"write the plan","in":"#build"}}}]},
     {"steps":[{"toolCall":{"name":"TaskCreate","input":{"subject":"ship it","owner":"ghost","in":"#build"}}}]},
     {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"worker","prompt":"take a task off the board","background":false}}}]},
@@ -108,7 +108,7 @@ fn a_member_reads_a_room_s_board_claims_a_task_and_the_parent_sees_it() {
     let out = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args([
                 "--print",
                 "--output-format",
@@ -180,7 +180,7 @@ fn a_member_reads_a_room_s_board_claims_a_task_and_the_parent_sees_it() {
 
 /// The first run leaves one task claimed and unfinished on the board.
 const CLAIMED: &str = r##"{"responses":[
-    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"build","members":["worker"]}}}]},
+    {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"build","purpose":"take the work off the board","members":["worker"]}}}]},
     {"steps":[{"toolCall":{"name":"TaskCreate","input":{"subject":"write the plan","in":"#build"}}}]},
     {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"worker","prompt":"take a task off the board","background":false}}}]},
     {"steps":[{"toolCall":{"name":"TaskUpdate","input":{"id":1,"status":"in_progress","claim":true,"in":"#build"}}}]},
@@ -218,7 +218,7 @@ fn a_task_left_by_a_member_that_is_gone_reads_as_gone() {
     let first = run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script(CLAIMED).path())
-            .env("HOME", home.path())
+            .envs(home_env(home.path()))
             .args([
                 "--print",
                 "--output-format",

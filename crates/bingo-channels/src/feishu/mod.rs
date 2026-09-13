@@ -12,25 +12,32 @@
 //! lives there, the secret comes from the environment.
 
 pub mod api;
+pub mod attachments;
 pub mod bootstrap;
 pub mod card;
 pub mod chunks;
+pub mod content;
 pub mod event;
 pub mod frame;
-pub mod pictures;
+pub mod merged;
 pub mod posted;
 pub mod send;
 pub mod token;
+pub mod upload;
 pub mod ws;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bingo_sdk::CancellationToken;
 use serde_json::{Value, json};
 
-use crate::adapter::{Buttons, ChannelAdapter, Edit, Inbox, Mode, Threads};
+use crate::adapter::{
+    Acknowledge, Buttons, ChannelAdapter, Edit, Files, Inbox, Mark, Mode, Outcome, Outgoing,
+    Threads,
+};
 use crate::conversation::{Conversation, Posted};
 use crate::error::ChannelError;
 use crate::limits::{Dialect, Encoding, Limits};
@@ -38,27 +45,41 @@ use crate::question::Question;
 use api::{Api, ApiError};
 use posted::Handle;
 use send::Queue;
+use upload::{Endpoint, Route};
 
 /// Who this bot is, asked once at startup: there is no `is_mentioned` flag on
 /// an event, only a list of mentions to look ourselves up in.
 const WHOAMI: &str = "/open-apis/bot/v3/info";
 const MESSAGES: &str = "/open-apis/im/v1/messages";
+const IMAGES: &str = "/open-apis/im/v1/images";
+const FILES: &str = "/open-apis/im/v1/files";
+const REACTIONS: &str = "reactions";
 const CARDS: &str = "/open-apis/cardkit/v1/cards";
 
 /// A card is capped at 30 KB serialised, and JSON escaping is not free, so the
 /// text this surface will put in one stops short of it.
 const MAX_TEXT: usize = 20_000;
 
+/// The sign that the bot is working, and the one a failure leaves behind.
+/// Both are keys from Feishu's own emoji list; a key it does not know is
+/// refused whole.
+/// <https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce>
+const WORKING: &str = "Typing";
+const FAILED: &str = "CrossMark";
+
 pub struct Config {
     pub app_id: String,
     pub app_secret: String,
     /// Where the API lives. Overridable so a test can be Feishu.
     pub base: String,
+    /// Where an attachment a message carried lands (ADR-0051 §2).
+    pub attachments: PathBuf,
 }
 
 pub struct Feishu {
     api: Api,
     app_secret: String,
+    attachments: PathBuf,
     limits: Limits,
     queue: Queue,
     /// This bot's own open id, once `run` has asked for it.
@@ -84,6 +105,7 @@ impl Feishu {
         Self {
             api: Api::new(config.base, &config.app_id, &config.app_secret),
             app_secret: config.app_secret,
+            attachments: config.attachments,
             limits: Limits {
                 max_text: (MAX_TEXT, Encoding::Utf8Bytes),
                 dialect: Dialect::Markdown,
@@ -203,6 +225,64 @@ impl Feishu {
         self.spend(self.api.put(&path, body).await)
     }
 
+    /// Post under the message that started this where there is one, and as a
+    /// message of its own where there is not — what a reply already does.
+    async fn deliver(
+        &self,
+        to: &Conversation,
+        parent: Option<&Posted>,
+        kind: &str,
+        content: Value,
+    ) -> Result<Handle, ChannelError> {
+        match parent {
+            Some(parent) => self.post_reply(to, parent, kind, content).await,
+            None => self.post(to, kind, content).await,
+        }
+    }
+
+    /// The bytes up, and the content of the message that will carry them back.
+    async fn uploaded(&self, route: &Route, file: &Outgoing) -> Result<Value, ChannelError> {
+        match route.endpoint {
+            Endpoint::Image => {
+                let key = self
+                    .upload(IMAGES, &[("image_type", route.file_type)], "image", file)
+                    .await?;
+                Ok(json!({ "image_key": key }))
+            }
+            Endpoint::File => {
+                let fields = [("file_type", route.file_type), ("file_name", &*file.name)];
+                let key = self.upload(FILES, &fields, "file", file).await?;
+                Ok(json!({ "file_key": key }))
+            }
+        }
+    }
+
+    /// One multipart upload, and the single key its answer is worth. Both
+    /// endpoints answer `data.<field>_key` and nothing else is read.
+    async fn upload(
+        &self,
+        path: &str,
+        fields: &[(&str, &str)],
+        field: &str,
+        file: &Outgoing,
+    ) -> Result<String, ChannelError> {
+        let (content_type, body) =
+            upload::multipart(&boundary(), fields, (field, &file.name, &file.bytes));
+        let answer = self.api.post_multipart(path, &content_type, body).await?;
+        let key = format!("{field}_key");
+        answer["data"][&key]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| ChannelError::Platform(format!("feishu kept no {key}")))
+    }
+
+    /// One emoji on one message.
+    async fn react(&self, message_id: &str, emoji: &str) -> Result<Value, ChannelError> {
+        let body = json!({ "reaction_type": { "emoji_type": emoji } });
+        let path = format!("{MESSAGES}/{message_id}/{REACTIONS}");
+        Ok(self.api.post(&path, body).await?)
+    }
+
     /// A rate limit or a busy card costs this frame, not the stream.
     fn spend(&self, outcome: Result<Value, ApiError>) -> Result<(), ChannelError> {
         match outcome {
@@ -214,6 +294,16 @@ impl Feishu {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// A boundary the body it delimits cannot contain: the nanosecond it was
+/// minted, which no file being uploaded has a copy of.
+fn boundary() -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("----bingo{nonce:x}")
 }
 
 fn message_id(answer: &Value) -> Result<String, ChannelError> {
@@ -253,7 +343,15 @@ impl ChannelAdapter for Feishu {
         }
         let me = self.whoami().await?;
         *locked(&self.me) = me.clone();
-        ws::listen(&self.api, &self.app_secret, &me, &inbox, &cancel).await
+        ws::listen(
+            &self.api,
+            &self.app_secret,
+            &me,
+            &self.attachments,
+            &inbox,
+            &cancel,
+        )
+        .await
     }
 
     async fn send(
@@ -286,6 +384,14 @@ impl ChannelAdapter for Feishu {
     fn threads(&self) -> Option<&dyn Threads> {
         Some(self)
     }
+
+    fn files(&self) -> Option<&dyn Files> {
+        Some(self)
+    }
+
+    fn acknowledge(&self) -> Option<&dyn Acknowledge> {
+        Some(self)
+    }
 }
 
 #[async_trait]
@@ -305,8 +411,12 @@ impl Edit for Feishu {
         };
         self.write(&card_id, text).await?;
         let sequence = self.sequence(&card_id);
+        // `settings` is a JSON *string*, not an object: the endpoint answers
+        // an object with 9499 and the card never closes, which costs the
+        // whole answer a second time as a plain message.
+        // <https://open.feishu.cn/document/cardkit-v1/card/settings>
         let body = json!({
-            "settings": { "config": { "streaming_mode": false } },
+            "settings": json!({ "config": { "streaming_mode": false } }).to_string(),
             "sequence": sequence,
             "uuid": format!("{card_id}-{sequence}"),
         });
@@ -369,6 +479,69 @@ impl Threads for Feishu {
             }
         };
         Ok(handle.posted())
+    }
+}
+
+#[async_trait]
+impl Files for Feishu {
+    /// The bytes go up first and come back as a key; the message that carries
+    /// the key is a message like any other, so it queues per chat with the
+    /// rest and hangs under whatever a reply would (ADR-0051 §3).
+    ///
+    /// A caption is its own text message after the file, not a `post` around
+    /// it: a picture inside a rich post is not a picture a person can open
+    /// full-screen, and the words are worth more than the layout.
+    async fn post(
+        &self,
+        to: &Conversation,
+        parent: Option<&Posted>,
+        file: Outgoing,
+    ) -> Result<Posted, ChannelError> {
+        let route = upload::route(&file.name, &file.bytes);
+        let content = self.uploaded(&route, &file).await?;
+        let handle = self.deliver(to, parent, route.msg_type, content).await?;
+        if let Some(caption) = &file.caption {
+            self.deliver(to, parent, "text", json!({ "text": caption }))
+                .await?;
+        }
+        Ok(handle.posted())
+    }
+}
+
+/// A reaction on the message that spoke, taken off when the turn ends and a
+/// `CrossMark` left in its place when that turn failed (ADR-0051 §5). Wanting
+/// `im:message.reactions:write_only`.
+/// <https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create>
+/// <https://open.feishu.cn/document/server-docs/im-v1/message-reaction/delete>
+#[async_trait]
+impl Acknowledge for Feishu {
+    async fn begin(&self, at: &Posted) -> Result<Mark, ChannelError> {
+        let answer = self.react(&reactable(at)?, WORKING).await?;
+        answer["data"]["reaction_id"]
+            .as_str()
+            .map(|id| Mark(id.to_string()))
+            .ok_or_else(|| ChannelError::Platform("feishu added no reaction".into()))
+    }
+
+    /// The cross is added after the sign comes off and is left in place: it is
+    /// the record that this message's turn went wrong.
+    async fn end(&self, at: &Posted, mark: Mark, outcome: Outcome) -> Result<(), ChannelError> {
+        let message_id = reactable(at)?;
+        let path = format!("{MESSAGES}/{message_id}/{REACTIONS}/{}", mark.0);
+        self.api.delete(&path).await?;
+        if outcome == Outcome::Failed {
+            self.react(&message_id, FAILED).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Only a message carries reactions. A card sent by its id is not one, and
+/// nothing this surface knows can turn it into one.
+fn reactable(at: &Posted) -> Result<String, ChannelError> {
+    match Handle::of(at) {
+        Some(Handle::Message(id)) => Ok(id),
+        _ => Err(ChannelError::Unsupported("reacting to a card")),
     }
 }
 

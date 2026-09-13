@@ -268,6 +268,24 @@ pub fn child_permission() -> Interaction {
 }
 
 /// Fold frames into a fresh state, the way every client does.
+/// A draft carrying `image` the way a paste leaves it (ADR-0052): the token
+/// in the line, a file's path held under it, and the memo already holding
+/// what that file reads as — so a test that draws or clicks the strip needs
+/// no disk. The path is made up and never read.
+pub fn drafted(ui: &mut crate::ui::Ui, image: bingo_sdk::Image) -> u32 {
+    let token = crate::pictures::next_token(ui.composer.text());
+    let path = std::path::PathBuf::from(format!("/draft/{token}.png"));
+    let dest = crate::pictures::dest(&path);
+    ui.linked.take(&dest);
+    ui.linked.answered(crate::graphics::linked::Answer {
+        dest,
+        result: Ok(image),
+    });
+    ui.pictures.hold(ui.composer.text(), path);
+    ui.composer.insert(&crate::pictures::placeholder(token));
+    token
+}
+
 pub fn folded(frames: Vec<Frame>) -> SessionState {
     let mut state = state();
     for frame in &frames {
@@ -873,6 +891,18 @@ pub fn receipt_item(
 /// The frame that puts a tool on screen while it is still running.
 pub fn started_tool(seq: u64, item: Item) -> Frame {
     frame(seq, Event::ItemStarted { item })
+}
+
+/// A root whose own turn has ended while `agents` it started are still at
+/// work: the shape a parent that ended its turn to be woken is in (M81).
+pub fn waited_on(agents: u64) -> Tree {
+    let mut tree = Tree::new(state());
+    for agent in 2..2 + agents {
+        let announced = agent_announced(agent, &format!("agent-{agent}"));
+        tree.apply(&agent_frame(agent, 1, announced));
+        tree.apply(&agent_frame(agent, 2, started("trn_9")));
+    }
+    tree
 }
 
 /// A transcript whose tool call spawned a sub-session, and that child's own

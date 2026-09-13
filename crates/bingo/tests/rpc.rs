@@ -124,7 +124,7 @@ async fn open_submit_and_the_events_arrive_in_seq_order_with_the_clients_intent(
     );
     let state: &SessionState = &attachment.snapshot;
     assert!(state.items.iter().any(|i| matches!(&i.body, bingo_sdk::ItemBody::Assistant { text } if text == "Hello over the wire.")));
-    assert_eq!(state.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(state.last_status(), Some(&TurnStatus::Completed));
     kernel.shutdown().await.unwrap();
 }
 
@@ -233,18 +233,36 @@ async fn one_interrupt_ends_the_turn_and_the_command_it_was_running() {
 
     // Nothing in the group is writing any more, the loop the shell put in the
     // background included.
-    tokio::time::sleep(SETTLE).await;
-    let after = std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
-    tokio::time::sleep(SETTLE).await;
-    let later = std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
-    assert_eq!(after, later, "the process group outlived the interrupt");
+    assert!(
+        settled(&ticks).await,
+        "the process group outlived the interrupt"
+    );
     kernel.shutdown().await.unwrap();
 }
 
-/// Long enough that a killed group has certainly stopped writing, short
-/// enough to wait twice.
+/// One look-to-look window: long enough that a group still running has
+/// certainly written into it, short enough to look many times.
 #[cfg(unix)]
 const SETTLE: Duration = Duration::from_millis(400);
+
+/// Whether the file stops growing, polled until it does or the patience runs
+/// out. The negative it stands for cannot be waited for directly — no length
+/// of sleep proves nothing will be written — but a group that outlived the
+/// interrupt writes a tick every fiftieth of a second, so it never stands
+/// still through one window and this runs out on it instead.
+#[cfg(unix)]
+async fn settled(path: &std::path::Path) -> bool {
+    let mut last = u64::MAX;
+    for _ in 0..(LIMIT.as_millis() / SETTLE.as_millis()) {
+        tokio::time::sleep(SETTLE).await;
+        let now = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if now == last {
+            return true;
+        }
+        last = now;
+    }
+    false
+}
 
 /// Poll until the file has something in it, bounded generously.
 #[cfg(unix)]
@@ -295,7 +313,10 @@ async fn a_permission_is_answered_over_the_wire_and_the_tool_runs() {
             .iter()
             .any(|f| matches!(f.event, Event::InteractionResolved { .. }))
     );
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     assert_eq!(
         std::fs::read_to_string(server.cwd().join("made.txt")).unwrap(),
         "by the wire\n"
@@ -325,7 +346,10 @@ async fn a_retry_is_visible_on_the_wire() {
             .iter()
             .any(|f| matches!(f.event, Event::TurnRetrying { attempt: 1, .. }))
     );
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     kernel.shutdown().await.unwrap();
 }
 
@@ -335,7 +359,7 @@ async fn a_session_written_by_a_print_run_reopens_by_id_with_its_items() {
     let cwd = server.cwd();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_bingo"))
         .env("BINGO_FAKE_SCRIPT", cwd.join("script.json"))
-        .env("HOME", &cwd)
+        .envs(support::home::home_env(&cwd))
         .args(["--print", "--output-format", "json", "--cwd"])
         .arg(&cwd)
         .arg("first")
@@ -515,7 +539,10 @@ async fn a_shell_line_and_a_permission_mode_dispatch_as_commands() {
             .all(|f| !matches!(f.event, Event::InteractionOpened { .. })),
         "acceptEdits asks nothing for a Write"
     );
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     assert_eq!(
         std::fs::read_to_string(server.cwd().join("quiet.txt")).unwrap(),
         "no prompt\n"
@@ -604,7 +631,10 @@ async fn an_mcp_server_from_mcp_config_offers_its_tool_through_the_gate() {
         Activation::Pointer,
     );
     until_completed(&mut attachment).await;
-    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        attachment.snapshot.last_status(),
+        Some(&TurnStatus::Completed)
+    );
     let echoed = attachment
         .snapshot
         .items

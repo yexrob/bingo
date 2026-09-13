@@ -19,22 +19,60 @@ pub async fn bind() -> Result<Loopback, AuthError> {
     Ok(Loopback::in_range(FIRST_PORT, PORTS).await?)
 }
 
+/// The one port a registration already named, because a registered redirect
+/// URI is exact-matched and a different port is a different client. `None`,
+/// or a port somebody else holds, falls back to the range: the caller then
+/// registers again (ADR-0050, R-port).
+pub async fn bind_named(port: Option<u16>) -> Result<Loopback, AuthError> {
+    match port {
+        Some(port) => match Loopback::in_range(port, 1).await {
+            Ok(loopback) => Ok(loopback),
+            Err(_) => bind().await,
+        },
+        None => bind().await,
+    }
+}
+
 /// `localhost` rather than `127.0.0.1`: the issuer's allow-list is written
 /// with the name.
 pub fn uri(port: u16) -> String {
     format!("http://localhost:{port}{}", callback::PATH)
 }
 
+/// Both spellings of the same socket, which is what a registration names:
+/// MCP's own text says `localhost`, RFC 8252 prefers the literal address, and
+/// a server that exact-matches one of them will not match the other.
+pub fn uris(port: u16) -> Vec<String> {
+    vec![
+        uri(port),
+        format!("http://127.0.0.1:{port}{}", callback::PATH),
+    ]
+}
+
+/// The port a redirect URI names, so a login can try the one a registration
+/// was made with before making another.
+pub fn port_of(uri: &str) -> Option<u16> {
+    uri.rsplit_once(':')?
+        .1
+        .split('/')
+        .next()?
+        .parse::<u16>()
+        .ok()
+}
+
 /// Accept the redirect and answer it, whatever it turns out to be: a browser
 /// left staring at a dead socket tells a person nothing.
-pub async fn receive(loopback: Loopback, expected_state: &str) -> Result<String, AuthError> {
+pub async fn receive(
+    loopback: Loopback,
+    expected_state: &str,
+) -> Result<callback::Callback, AuthError> {
     loop {
         let mut connection = loopback.accept().await?;
         let outcome = match connection.request().await {
             // A browser opens sockets it never sends on; the redirect is still
             // coming.
             Ok(None) => continue,
-            Ok(Some(request)) => code(&request.head.target, expected_state),
+            Ok(Some(request)) => checked(&request.head.target, expected_state),
             Err(error) => Err(error.into()),
         };
         connection.reply(&page(&outcome)).await;
@@ -42,17 +80,17 @@ pub async fn receive(loopback: Loopback, expected_state: &str) -> Result<String,
     }
 }
 
-fn code(target: &str, expected_state: &str) -> Result<String, AuthError> {
+fn checked(target: &str, expected_state: &str) -> Result<callback::Callback, AuthError> {
     let callback = callback::parse(target)?;
     if callback.state != expected_state {
         return Err(AuthError::Invalid(
             "the callback state does not match".into(),
         ));
     }
-    Ok(callback.code)
+    Ok(callback)
 }
 
-fn page(outcome: &Result<String, AuthError>) -> Response {
+fn page(outcome: &Result<callback::Callback, AuthError>) -> Response {
     match outcome {
         Ok(_) => Response::html(
             "200 OK",
@@ -75,7 +113,10 @@ mod tests {
 
     /// A real port, hit by a real client: the parser has its own unit tests,
     /// so what is proved here is the socket half and the answer a browser sees.
-    async fn redirect(query: &str, expected_state: &str) -> (u16, Result<String, AuthError>) {
+    async fn redirect(
+        query: &str,
+        expected_state: &str,
+    ) -> (u16, Result<callback::Callback, AuthError>) {
         let loopback = bind().await.expect("a callback port");
         let url = format!("{}?{query}", uri(loopback.port()));
         let request = tokio::spawn(async move { reqwest::get(url).await });
@@ -93,7 +134,7 @@ mod tests {
     async fn the_right_state_yields_the_code_and_a_page_that_says_so() {
         let (status, outcome) = redirect("code=ac-1&state=st-1", "st-1").await;
         assert_eq!(status, 200);
-        assert_eq!(outcome.expect("a code"), "ac-1");
+        assert_eq!(outcome.expect("a code").code, "ac-1");
     }
 
     #[tokio::test]
@@ -108,6 +149,39 @@ mod tests {
         let (status, outcome) = redirect("error=access_denied", "st-1").await;
         assert_eq!(status, 400);
         assert!(matches!(outcome, Err(AuthError::Invalid(_))), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_registration_names_both_spellings_of_the_one_socket() {
+        assert_eq!(
+            uris(1455),
+            [
+                "http://localhost:1455/auth/callback",
+                "http://127.0.0.1:1455/auth/callback",
+            ]
+        );
+        assert_eq!(port_of("http://localhost:1460/auth/callback"), Some(1460));
+        assert_eq!(port_of("http://127.0.0.1:1460/auth/callback"), Some(1460));
+        assert_eq!(port_of("https://example.com/auth/callback"), None);
+    }
+
+    /// R-port: the next login takes the port the registration named, and a
+    /// port already held falls back rather than failing the login.
+    #[tokio::test]
+    async fn the_named_port_is_taken_when_it_is_free_and_given_up_when_it_is_not() {
+        let first = bind_named(None).await.expect("any port");
+        let named = first.port();
+        let again = bind_named(Some(named)).await.expect("a fallback port");
+        assert_ne!(again.port(), named, "the port is held by the first bind");
+        drop(first);
+        drop(again);
+        let free = bind().await.expect("a port");
+        let port = free.port();
+        drop(free);
+        assert_eq!(
+            bind_named(Some(port)).await.expect("the named port").port(),
+            port
+        );
     }
 
     #[tokio::test]

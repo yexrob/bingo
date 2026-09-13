@@ -78,8 +78,8 @@ pub struct HookContext {
     pub session: SessionId,
     pub turn: Option<TurnId>,
     pub cwd: PathBuf,
-    /// The session's provider and model, for a hook that asks the model
-    /// (memory extraction at turn end). Absent outside a session, and for a
+    /// The session's provider and model, for a hook that asks the model a
+    /// question beside the conversation. Absent outside a session, and for a
     /// session nothing answers.
     pub provider: Option<Arc<dyn Provider>>,
     pub model: Option<String>,

@@ -1,6 +1,6 @@
 # ADR-0035 — An agent answers as a model
 
-Status: accepted · 2026-09-02 · Plan: M38
+Status: accepted · 2026-09-02 · Plan: M38 · first consequence amended by ADR-0055: the ruler shapes nothing for a held context, and the agent's own compaction is a row
 
 ## Context
 

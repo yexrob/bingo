@@ -31,6 +31,7 @@ use crate::config::Adapter;
 use crate::connection::Connection;
 use crate::crossing::{self, Crossing};
 use crate::error::AcpError;
+use crate::events::Reading;
 use crate::inbox::Inbox;
 use crate::knobs::{Declared, Knobs, Wanted, Wire};
 use crate::ladder::{self, Opening};
@@ -59,6 +60,10 @@ pub struct Link {
     /// What this agent said its knobs are, and where bingo has turned them
     /// (ADR-0037). They belong to the conversation and end with it.
     pub knobs: Knobs,
+    /// What the agent last said about the context it holds (ADR-0055 §4). It
+    /// belongs to the conversation and not to the turn: a `used` that fell
+    /// between two turns is the same cut it would have been inside one.
+    held: Mutex<Option<Reading>>,
     inbox: Arc<Inbox>,
     /// Dropping this ends the process group.
     _adapter: child::Adapter,
@@ -74,6 +79,16 @@ impl Link {
     /// What the agent must be told first, said once and then forgotten.
     pub async fn take_preamble(&self) -> Option<String> {
         self.preamble.lock().await.take()
+    }
+
+    /// What the agent last said it holds, for the turn about to be folded.
+    pub async fn held(&self) -> Option<Reading> {
+        *self.held.lock().await
+    }
+
+    /// What it said during the turn just folded, for the one after it.
+    pub async fn hold(&self, reading: Reading) {
+        *self.held.lock().await = Some(reading);
     }
 
     /// Hand the tool list of the request about to be served to the doors, and
@@ -284,6 +299,7 @@ impl Sessions {
             preamble: Mutex::new(prelude(entered.preamble.as_deref(), crossing.is_some())),
             crossing,
             knobs: Knobs::new(entered.declared),
+            held: Mutex::new(None),
             inbox,
             _adapter: handle,
         });

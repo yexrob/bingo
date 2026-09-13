@@ -48,6 +48,7 @@ kernel's identity.
    old `<key>.md` is present gets `<key>/imported.md`, type `project`,
    described as what the old memory file held and indexed; then the old file
    is removed. A directory that exists has been through this.
+   *(Retired 2026-09-08, ADR-0049: every project that had a file has been through it; the code is gone, and the key is now the root commit.)*
 7. **`/memory`** answers a `View::Table` of both scopes — scope, name, type,
    description — read from the files, for the person who cannot read the
    prompt. Correcting a memory is `Read` and `Edit`, or their own editor.

@@ -28,7 +28,7 @@ fn bingo() -> Command {
     // endpoint it can sign in to what it serves (ADR-0026 §4), and a suite
     // must not reach the network because whoever ran it has a key exported.
     // A test that wants one sets it itself, and still wins — this is a floor.
-    cmd.env("HOME", isolated_home())
+    cmd.envs(home_env(isolated_home()))
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("BINGO_FAKE_SCRIPT")
@@ -40,6 +40,29 @@ fn bingo() -> Command {
 
 fn run(cmd: &mut Command) -> Output {
     cmd.output().expect("the binary runs")
+}
+
+/// How long any one wait here may take before it is called a hang.
+///
+/// A ceiling and not a wait: a test polls for the thing it is waiting for and
+/// goes on the moment it is there, so a fast box never feels this and a slow
+/// one is not failed for being slow. Generous, because CI has fewer cores than
+/// a developer's box and a run here spawns real subprocesses.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// Poll until something is there, or fail saying what never happened.
+///
+/// The one shape a test waits in: no test sleeps for a guess at how long a
+/// machine takes, because that guess is the machine it was written on.
+fn until<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
+    let started = Instant::now();
+    loop {
+        if let Some(found) = look() {
+            return found;
+        }
+        assert!(started.elapsed() < PATIENCE, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// `run`, for a scenario whose failure is a hang: past `limit` the process is
@@ -361,7 +384,7 @@ fn an_edit_is_asked_and_denied_off_a_tty_under_the_default_policy() {
 fn anthropic_without_credentials_fails_before_any_turn() {
     let out = run(bingo()
         .env_remove("ANTHROPIC_API_KEY")
-        .env("HOME", tempfile::tempdir().unwrap().path())
+        .envs(home_env(tempfile::tempdir().unwrap().path()))
         .args(["--print", "--provider", "anthropic", "hello"]));
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stdout(&out), "");
@@ -381,7 +404,7 @@ fn plan_mode_denies_a_write_and_the_turn_goes_on() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir.path())
+        .envs(home_env(dir.path()))
         .args(["--print", "--permission-mode", "plan", "--cwd"])
         .arg(dir.path())
         .arg("write it"));
@@ -414,7 +437,7 @@ fn bash_runs_only_when_the_flags_allow_it() {
         let script = script(script_json);
         let out = run(bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", dir.path())
+            .envs(home_env(dir.path()))
             .args(["--print", "--cwd"])
             .arg(dir.path())
             .args(flags)
@@ -439,7 +462,7 @@ fn a_slow_bash_command_streams_its_tail_as_deltas() {
     );
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", dir.path())
+        .envs(home_env(dir.path()))
         .args([
             "--print",
             "--output-format",
@@ -507,7 +530,7 @@ async fn web_fetch_hands_the_model_the_page_as_markdown() {
     let out = tokio::task::spawn_blocking(move || {
         run(bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", tempfile::tempdir().unwrap().path())
+            .envs(home_env(tempfile::tempdir().unwrap().path()))
             .args([
                 "--print",
                 "--output-format",
@@ -585,7 +608,7 @@ fn openai(server: &wiremock::MockServer, cwd: &std::path::Path, prompt: &str) ->
     let mut cmd = bingo();
     cmd.env("OPENAI_API_KEY", "sk-test")
         .env("OPENAI_BASE_URL", server.uri())
-        .env("HOME", cwd)
+        .envs(home_env(cwd))
         .args([
             "--print",
             "--provider",
@@ -649,7 +672,7 @@ async fn openai_runs_a_tool_round_and_feeds_the_result_back() {
 fn openai_without_credentials_names_the_variable_before_any_turn() {
     let out = run(bingo()
         .env_remove("OPENAI_API_KEY")
-        .env("HOME", tempfile::tempdir().unwrap().path())
+        .envs(home_env(tempfile::tempdir().unwrap().path()))
         .args([
             "--print",
             "--provider",
@@ -682,18 +705,28 @@ fn scripted_run(
 ) -> Output {
     run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
-        .env("HOME", home)
+        .envs(home_env(home))
         .args(["--print", "--output-format", "json", "--cwd"])
         .arg(home)
         .args(extra)
         .arg(prompt))
 }
 
+#[path = "../support/home.rs"]
+mod home;
+use home::home_env;
+
+#[path = "../support/python.rs"]
+mod python;
+
 mod acp;
+mod again;
 mod agents;
+mod asking;
 mod batch;
 mod board;
 mod checkpoints;
+mod compaction_prefix;
 mod context;
 mod experience;
 mod gateway;
@@ -702,9 +735,11 @@ mod images;
 mod instances;
 mod jobs;
 mod login;
+mod mcp;
 mod mentions;
 mod models;
 mod peers;
+mod prefix;
 mod provider_add;
 mod rooms;
 mod schedule;

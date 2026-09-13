@@ -5,13 +5,12 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-/// Prose is read, not scanned: however wide the terminal is, a line of it
-/// stops here (design §7).
-pub const MEASURE: usize = 100;
-
-/// The width prose is wrapped to inside a region `width` columns wide.
-pub fn measure(width: usize) -> usize {
-    width.min(MEASURE)
+/// The width prose is wrapped to inside a region `width` columns wide: the
+/// whole of it, or the narrower line a person asked for (`tui.measure`,
+/// [`crate::settings`]; design §7). The number is theirs — this crate names
+/// none of its own.
+pub fn measure(width: usize, cap: Option<usize>) -> usize {
+    cap.map_or(width, |cap| width.min(cap))
 }
 
 /// Wrap one styled line to `width` columns, keeping each span's style. An empty
@@ -61,7 +60,7 @@ fn place(
         }
         return;
     }
-    if *used + token_width > width && *used > 0 {
+    if *used + token_width > width && *used > 0 && token_width <= width {
         break_line(out, current, used);
     }
     if token_width <= width {
@@ -69,7 +68,10 @@ fn place(
         *used += token_width;
         return;
     }
-    for piece in split_wide(token, width) {
+    // Wider than any line: it is cut anyway, so its first piece fills what
+    // is left of this one — prose with no spaces in it, a long path — and
+    // the mark or word before it keeps its company.
+    for piece in split_wide(token, width, width - *used) {
         if *used + piece.width() > width && *used > 0 {
             break_line(out, current, used);
         }
@@ -94,16 +96,20 @@ fn break_line(out: &mut Vec<Line<'static>>, current: &mut Vec<Span<'static>>, us
     *used = 0;
 }
 
-/// A word longer than the whole line is cut on grapheme boundaries.
-fn split_wide(token: &str, width: usize) -> Vec<String> {
+/// A word longer than the whole line is cut on grapheme boundaries: the
+/// first piece to `first` columns, the room left on the line it starts on,
+/// and the rest to the width.
+fn split_wide(token: &str, width: usize, first: usize) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut piece = String::new();
     let mut used = 0usize;
+    let mut limit = if first == 0 { width } else { first };
     for grapheme in token.graphemes(true) {
         let w = grapheme.width();
-        if used + w > width && !piece.is_empty() {
+        if used + w > limit && !piece.is_empty() {
             pieces.push(std::mem::take(&mut piece));
             used = 0;
+            limit = width;
         }
         piece.push_str(grapheme);
         used += w;
@@ -145,6 +151,15 @@ mod tests {
         lines.iter().map(|l| l.to_string()).collect()
     }
 
+    /// The transcript fills what it is given until a person says otherwise
+    /// (design §7, M89).
+    #[test]
+    fn a_measure_is_the_region_until_a_person_asks_for_less() {
+        assert_eq!(measure(200, None), 200);
+        assert_eq!(measure(200, Some(100)), 100);
+        assert_eq!(measure(80, Some(100)), 80, "and never more than the region");
+    }
+
     #[test]
     fn words_break_at_spaces_and_drop_the_space_at_the_break() {
         let line = Line::from("the quick brown fox jumps");
@@ -158,6 +173,22 @@ mod tests {
     fn a_word_wider_than_the_line_is_cut() {
         let line = Line::from("abcdefghijkl");
         assert_eq!(text(&wrap(&line, 5)), vec!["abcde", "fghij", "kl"]);
+    }
+
+    /// Prose with no spaces in it — Chinese, a long path — starts beside the
+    /// mark that introduces it rather than under it on a line of its own.
+    #[test]
+    fn a_word_wider_than_the_line_fills_the_line_it_starts_on() {
+        let line = Line::from(vec![Span::raw("ab "), Span::raw("cdefghij")]);
+        assert_eq!(text(&wrap(&line, 5)), vec!["ab cd", "efghi", "j"]);
+        let line = Line::from(vec![
+            Span::raw("⏺ 备注: "),
+            Span::raw("已经帮你查看了记忆索引"),
+        ]);
+        assert_eq!(
+            text(&wrap(&line, 14)),
+            vec!["⏺ 备注: 已经帮", "你查看了记忆索", "引"]
+        );
     }
 
     #[test]

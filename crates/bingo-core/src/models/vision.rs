@@ -39,7 +39,12 @@ fn has_image(part: &ContentPart) -> bool {
 
 fn project(part: &ContentPart, note: &str) -> ContentPart {
     match part {
-        ContentPart::Image(_) => ContentPart::text(note),
+        // A picture that is a file is still a file: the model cannot see
+        // it, but it can hand the path on (ADR-0052 §3).
+        ContentPart::Image(image) => ContentPart::text(match image.whereabouts() {
+            Some(words) => format!("{note} {words}"),
+            None => note.to_string(),
+        }),
         ContentPart::ToolResult {
             tool_use_id,
             parts,
@@ -62,6 +67,7 @@ mod tests {
         ContentPart::Image(Image {
             media_type: "image/png".into(),
             data: "iVBORw0KGgo=".into(),
+            path: None,
         })
     }
 
@@ -99,5 +105,20 @@ mod tests {
             "the source is not modified"
         );
         assert_eq!(omitted_note("m"), "[image omitted: m has no vision]");
+    }
+
+    /// A model that cannot see is still told where the file is, so it can
+    /// hand the path to a tool (ADR-0052 §3).
+    #[test]
+    fn a_picture_with_a_path_leaves_its_path_behind() {
+        let image = Image::from_bytes("image/png", b"png")
+            .expect("small")
+            .at("/shots/a.png");
+        let messages = vec![Message::user(vec![ContentPart::Image(image)])];
+        let projected = project_images_out(&messages, "note").expect("changed");
+        assert_eq!(
+            projected[0].parts,
+            vec![ContentPart::text("note [picture: /shots/a.png]")]
+        );
     }
 }

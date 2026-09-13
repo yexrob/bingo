@@ -657,7 +657,6 @@ mod tests {
             name::INITIALIZE,
             name::TOOL_CALL,
             name::COMMAND_RUN,
-            name::COMMAND_COMPLETE,
             name::CONTEXT_CONTRIBUTE,
             name::COMPACTOR_COMPACT,
             name::PROVIDER_STREAM,

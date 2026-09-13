@@ -198,6 +198,8 @@ mod tests {
             parent: root,
             members: members.iter().map(|m| m.to_string()).collect(),
             ears: Default::default(),
+            purpose: None,
+            closed: false,
         };
         (fleet, id, room, mention(Owed::Member("scout".into())))
     }

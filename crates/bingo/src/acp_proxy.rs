@@ -14,7 +14,7 @@ use bingo_sdk::{ErrorCode, KernelError};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 /// Dial, say which conversation this is, then move bytes until either end
-/// stops.
+/// stops — and leave there, because a pump cannot be unwound.
 pub async fn run() -> Result<i32, KernelError> {
     let address = Address::from_raw(required(ADDRESS_VAR)?);
     let token = required(TOKEN_VAR)?;
@@ -23,7 +23,21 @@ pub async fn run() -> Result<i32, KernelError> {
         .await
         .map_err(unreachable)?;
     pump(stream).await;
-    Ok(0)
+    given_up()
+}
+
+/// The pump's end is this process's end.
+///
+/// The stdin half of [`pump`] is a blocking read, and a blocking read cannot
+/// be cancelled: when the bridge closes first, that read is still outstanding,
+/// and only the agent holding the other end of the pipe can finish it.
+/// Dropping the runtime waits for every blocking task, so a proxy that
+/// returned would sit in its own shutdown until the agent closed its stdin —
+/// while the agent waits for this process to end. Nothing more is lost by
+/// leaving here than the pump gives up anyway: it never waits for its other
+/// half to drain.
+fn given_up() -> ! {
+    std::process::exit(0)
 }
 
 /// Both are set by the run that spawned this, or this was not spawned by one.

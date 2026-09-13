@@ -122,7 +122,7 @@ pub struct Suggestion {
 }
 
 /// The dropdown for the line being typed: command names while the caret is
-/// still in the name, catalogue values once the command is known.
+/// still in the name, the values its spec lists once the command is known.
 pub fn suggestions(line: &str, specs: &[CommandSpec], catalogues: &Catalogues) -> Vec<Suggestion> {
     let Some(rest) = line.strip_prefix('/') else {
         return Vec::new();
@@ -177,23 +177,33 @@ fn named(name: &str, spec: &CommandSpec) -> Suggestion {
     }
 }
 
-/// Values for a command whose argument names a catalogue.
+/// Values for a command whose spec lists them: a catalogue's ids, or the
+/// command's own words. The spec describes the first word of the argument and
+/// nothing after it, so a partial that has moved past that word offers nothing.
 fn arguments(
     name: &str,
     partial: &str,
     specs: &[CommandSpec],
     catalogues: &Catalogues,
 ) -> Vec<Suggestion> {
-    let Some(spec) = specs.iter().find(|s| s.name == name) else {
+    if partial.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let Some(spec) = specs
+        .iter()
+        .find(|s| s.name == name || s.aliases.iter().any(|a| a == name))
+    else {
         return Vec::new();
     };
-    let ArgSpec::Catalog { source } = &spec.args else {
-        return Vec::new();
+    let values: &[String] = match &spec.args {
+        ArgSpec::Catalog { source } => match catalogues.get(source) {
+            Some(ids) => ids,
+            None => return Vec::new(),
+        },
+        ArgSpec::Words { values } => values,
+        ArgSpec::None | ArgSpec::Free { .. } => return Vec::new(),
     };
-    let Some(ids) = catalogues.get(source) else {
-        return Vec::new();
-    };
-    matching::rank(partial, ids, String::as_str)
+    matching::rank(partial, values, String::as_str)
         .into_iter()
         .map(|id| Suggestion {
             value: format!("/{name} {id}"),
@@ -317,6 +327,52 @@ mod tests {
             vec!["anthropic/claude-sonnet-5", "some/on-1"],
             "the contiguous match leads, and the one with a gap follows"
         );
+    }
+
+    /// A command that lists its own words is completed from them, in its own
+    /// order when the partial says nothing, ranked when it does.
+    #[test]
+    fn a_word_list_completes_from_the_command_s_own_words() {
+        let specs = vec![spec(
+            "think",
+            ArgSpec::Words {
+                values: ["low", "high", "off"].map(str::to_string).to_vec(),
+            },
+        )];
+        assert_eq!(labels("/think ", &specs), vec!["low", "high", "off"]);
+        assert_eq!(labels("/think o", &specs), vec!["off", "low"]);
+        assert_eq!(
+            suggestions("/think hi", &specs, &Catalogues::new())[0].value,
+            "/think high"
+        );
+    }
+
+    /// The spec describes the first word: `/mcp login <server>` lists verbs,
+    /// and a server name is the plugin's to know.
+    #[test]
+    fn a_second_word_is_not_completed_from_the_first_word_s_list() {
+        let specs = vec![spec(
+            "mcp",
+            ArgSpec::Words {
+                values: vec!["login".into(), "logout".into()],
+            },
+        )];
+        assert_eq!(labels("/mcp lo", &specs), vec!["login", "logout"]);
+        assert!(labels("/mcp login ", &specs).is_empty());
+        assert!(labels("/mcp login lo", &specs).is_empty());
+    }
+
+    /// An alias reaches the same list its command does.
+    #[test]
+    fn an_alias_completes_the_argument_its_command_does() {
+        let mut spec = spec(
+            "permission",
+            ArgSpec::Words {
+                values: vec!["plan".into()],
+            },
+        );
+        spec.aliases = vec!["permissions".to_string()];
+        assert_eq!(labels("/permissions p", &[spec]), vec!["plan"]);
     }
 
     #[test]

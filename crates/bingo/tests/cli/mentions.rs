@@ -141,7 +141,7 @@ fn run_in(home: &Path, script: &tempfile::NamedTempFile, extra: &[&str], prompt:
     run_within(
         bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home)
+            .envs(home_env(home))
             .args(["--print", "--cwd"])
             .arg(home)
             .args(extra)

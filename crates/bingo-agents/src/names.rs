@@ -100,7 +100,7 @@ pub async fn resolve(
     caller: &SessionId,
     to: &str,
 ) -> Result<SessionSummary, KernelError> {
-    let to = to.trim().trim_start_matches('@');
+    let to = addressed(to);
     if to == PARENT {
         return parent(host, caller).await;
     }
@@ -108,6 +108,13 @@ pub async fn resolve(
         return room(host, caller, to).await;
     }
     agent(host, caller, to).await
+}
+
+/// The name a `to` means: what a caller wrote, trimmed, with the leading `@`
+/// a person writes it with taken off. One reading of an address, wherever one
+/// is read.
+pub fn addressed(to: &str) -> &str {
+    to.trim().trim_start_matches('@')
 }
 
 /// An agent by name: a child of the caller, else a teammate beside it — the

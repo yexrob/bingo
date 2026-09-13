@@ -11,10 +11,11 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContentPart, Event, Frame, Hook, HookContext, HookMatcher, HookPoint, Item, ItemBody,
-    KernelError, Origin, Phase, SessionFilter, SessionId,
+    ContentPart, Event, Frame, Hook, HookContext, HookMatcher, HookPoint, HostHandle, Item,
+    ItemBody, KernelError, Origin, Phase, SessionFilter, SessionId,
 };
 use jiff::Timestamp;
+use serde_json::Value;
 
 use crate::chase::Chaser;
 use crate::deadline::Deadline;
@@ -57,15 +58,14 @@ impl Hook for RoomsHook {
         match &frame.event {
             Event::SessionUpdated { summary } => {
                 if let Some(room) = self.rooms.register(summary) {
-                    self.reckon(&frame.session, &room, cx).await;
-                    self.backlog(&frame.session, &room, cx).await;
+                    self.first_read(&frame.session, &room, cx).await;
                 }
             }
             Event::Extension {
                 plugin,
                 kind,
                 payload,
-            } if plugin == PLUGIN => self.rooms.extended(&frame.session, kind, payload),
+            } if plugin == PLUGIN => self.extended(&frame.session, kind, payload, cx).await,
             Event::ItemCompleted { item } => self.item(&frame.session, item, cx).await,
             _ => {}
         }
@@ -76,7 +76,7 @@ impl RoomsHook {
     /// The rooms `.bingo/team.json` declares, opened under the session that
     /// just started, exactly as `/room <name> [member…]` would open them.
     async fn seat_declared(&self, cx: &HookContext) {
-        let declared = match team::rooms(&cx.cwd) {
+        let declared = match team::rooms(&cx.host, &cx.cwd).await {
             Ok(declared) => declared,
             Err(error) => {
                 tracing::warn!(%error, "the team file seats nobody this run");
@@ -125,11 +125,14 @@ impl RoomsHook {
             .clone()
             .unwrap_or_else(|| PARENT.to_string());
         match post::fan_out(&cx.host, room, &author, text).await {
-            Ok(waiting) => {
+            // A closed room wakes nobody later: its last post is the last
+            // thing there is to read, and no patience is timed for it.
+            Ok(waiting) if !room.closed => {
                 self.deadline
                     .waiting(&cx.host, session, room, &waiting)
                     .await
             }
+            Ok(_) => {}
             Err(error) => {
                 tracing::warn!(room = %room.title, %error, "a post did not wake every member")
             }
@@ -138,25 +141,47 @@ impl RoomsHook {
 
     /// What the room owes now, and what to do about it: chase whoever has not
     /// answered, and show the parent what stands. Both read the one authority
-    /// — the room's own journal — and nothing kept here.
+    /// — the room's own journal — and nothing kept here. A closed room owes
+    /// nothing whatever its posts say (ADR-0053 §4), so the fold it is chased
+    /// against is empty and every timer it had is cancelled.
     async fn reckon(&self, session: &SessionId, room: &Room, cx: &HookContext) {
-        let open = mentions::of_room(&cx.host, session).await;
+        let open = match room.closed {
+            true => Vec::new(),
+            false => mentions::of_room(&cx.host, session).await,
+        };
         self.chaser
             .reconcile(&cx.host, room, session, &open, Timestamp::now());
         self.show(&room.parent, cx).await;
     }
 
-    /// A room this process had not seen before: its patient seats may have
-    /// been holding its posts since before this process started, and a backlog
-    /// found there is nudged once (ADR-0029 §3). The roster comes from the
-    /// room's own snapshot, because the announce itself carries none.
-    async fn backlog(&self, session: &SessionId, room: &Room, cx: &HookContext) {
+    /// A room this process had not seen before, read for the first time: what
+    /// it owes now, and whose patience ran out while nobody was timing it
+    /// (ADR-0029 §3). Both come from the room's own snapshot, because the
+    /// announce carries neither — and a room that closed before this process
+    /// started asks nothing of anybody.
+    async fn first_read(&self, session: &SessionId, room: &Room, cx: &HookContext) {
         let Some(state) = room::read(&cx.host, session).await else {
             return;
         };
-        self.deadline
-            .overdue(&cx.host, session, &room.seated(&state))
-            .await;
+        let room = room.seated(&state);
+        self.reckon(session, &room, cx).await;
+        if !room.closed {
+            self.deadline.overdue(&cx.host, session, &room).await;
+        }
+    }
+
+    /// One of this plugin's frames in a room's journal. A closing is the one
+    /// that changes what the room owes without anything being said in it, so
+    /// it is reckoned again here: the debts it carried are dropped, the timers
+    /// chasing them cancelled, and the card redrawn without them.
+    async fn extended(&self, session: &SessionId, kind: &str, payload: &Value, cx: &HookContext) {
+        self.rooms.extended(session, kind, payload);
+        if kind != room::CLOSED {
+            return;
+        }
+        if let Some(room) = self.rooms.get(session) {
+            self.reckon(session, &room, cx).await;
+        }
     }
 
     /// The card on a session: every debt in every room under it, or nothing at
@@ -164,18 +189,32 @@ impl RoomsHook {
     async fn show(&self, parent: &SessionId, cx: &HookContext) {
         let mut debts = Vec::new();
         for (id, room) in self.rooms.under(parent) {
-            let open = mentions::of_room(&cx.host, &id).await;
-            debts.extend(owed::debts(&room.title, &open));
+            debts.extend(stands(&cx.host, &id, &room).await);
         }
         owed::publish(&cx.host, parent, owed::view(debts)).await;
     }
 }
 
+/// What one room owes, as its own journal says: nothing at all once it has
+/// closed (ADR-0053 §4). Both answers come from one read of the room, and from
+/// the room rather than from what this process has folded so far — a room read
+/// for the first time may have closed before this process started.
+async fn stands(host: &HostHandle, id: &SessionId, room: &Room) -> Vec<owed::Debt> {
+    let Some(state) = room::read(host, id).await else {
+        return Vec::new();
+    };
+    match room::closed_of(&state) {
+        true => Vec::new(),
+        false => owed::debts(&room.title, &mentions::of_state(&state)),
+    }
+}
+
 /// One room a project declares, seated exactly as `/room <name> [member…]`
-/// would seat it — ears and all.
+/// would seat it — ears and all, and the purpose the file gives it.
 async fn declared_room(cx: &HookContext, entry: &team::Entry) -> Result<(), KernelError> {
     let seats = entry.seats()?;
-    seat::seat(&cx.host, &cx.session, &cx.cwd, &entry.name, &seats).await?;
+    let opening = seat::Opening::person(&entry.name, entry.purpose.as_deref());
+    seat::seat(&cx.host, &cx.session, &cx.cwd, opening, &seats).await?;
     Ok(())
 }
 
@@ -199,10 +238,12 @@ mod tests {
     use super::*;
     use crate::ear::Seat;
     use crate::room::payload;
-    use crate::tests::{Fleet, extension, hook_context, posted, stamped, ts, updated};
+    use crate::tests::{
+        Fleet, Stub, extended, extension, hook_context, posted, stamped, ts, updated,
+    };
     use bingo_sdk::Delivery;
-    use serde_json::Value;
-    use std::path::{Path, PathBuf};
+    use serde_json::json;
+    use std::path::Path;
 
     /// The seats a roster line asks for: a bare name is patient, `name:0` live.
     fn seats(roster: &[&str]) -> Vec<Seat> {
@@ -367,69 +408,80 @@ mod tests {
         );
     }
 
-    /// A project whose team file declares one room, and the directory a
-    /// session in it works from.
-    fn project(source: &str) -> (tempfile::TempDir, PathBuf) {
-        let home = tempfile::tempdir().expect("a temporary home");
-        let file = home.path().join(".bingo").join("team.json");
-        std::fs::create_dir_all(file.parent().expect("a directory")).expect("a directory");
-        std::fs::write(&file, source).expect("a file");
-        let cwd = home.path().to_path_buf();
-        (home, cwd)
+    /// The directory a session in a project works from. Where the team file
+    /// is and what it says are the owning plugin's (ADR-0031); what reaches
+    /// this hook is the `rooms` its service answers with.
+    fn cwd() -> &'static Path {
+        Path::new("/work/project")
     }
 
-    const DECLARED: &str = r#"{
-        "roles": [{"name": "reviewer"}],
-        "rooms": [{"name": "design", "members": ["reviewer", "scout"]}]
-    }"#;
+    /// A fleet whose team file declares these rooms.
+    fn declaring(section: Value) -> Fleet {
+        Fleet::default().serving(crate::team::TEAM, Stub::declaring(section))
+    }
+
+    fn declared() -> Value {
+        json!([{"name": "design", "members": ["reviewer", "scout"]}])
+    }
 
     #[tokio::test]
     async fn a_project_s_rooms_are_seated_when_a_person_s_session_opens() {
-        let (_home, cwd) = project(DECLARED);
-        let fleet = Fleet::default();
+        let fleet = declaring(declared());
         let root = fleet.root();
         let hook = RoomsHook::default();
-        hook.on_session(Phase::Start, &hook_context(&root, &fleet, &cwd))
+        hook.on_session(Phase::Start, &hook_context(&root, &fleet, cwd()))
             .await;
 
         let created = fleet.created();
         assert_eq!(created.len(), 1, "{created:?}");
         assert_eq!(created[0].title.as_deref(), Some("#design"));
-        assert_eq!(created[0].cwd, cwd);
+        assert_eq!(created[0].cwd, cwd());
         let room = fleet.titled("#design").expect("the room was opened");
         assert_eq!(fleet.members(&room), ["reviewer", "scout"]);
     }
 
     #[tokio::test]
     async fn an_agent_s_session_opening_seats_nothing() {
-        let (_home, cwd) = project(DECLARED);
-        let fleet = Fleet::default();
+        let fleet = declaring(declared());
         let root = fleet.root();
         let child = fleet.child(&root, "reviewer");
         let hook = RoomsHook::default();
-        hook.on_session(Phase::Start, &hook_context(&child, &fleet, &cwd))
+        hook.on_session(Phase::Start, &hook_context(&child, &fleet, cwd()))
             .await;
         assert!(fleet.created().is_empty());
     }
 
     #[tokio::test]
     async fn a_session_ending_seats_nothing() {
-        let (_home, cwd) = project(DECLARED);
-        let fleet = Fleet::default();
+        let fleet = declaring(declared());
         let root = fleet.root();
         RoomsHook::default()
-            .on_session(Phase::End, &hook_context(&root, &fleet, &cwd))
+            .on_session(Phase::End, &hook_context(&root, &fleet, cwd()))
             .await;
         assert!(fleet.created().is_empty());
     }
 
     #[tokio::test]
     async fn a_project_that_declares_none_seats_none() {
-        let (_home, cwd) = project(r#"{"roles": [{"name": "reviewer"}]}"#);
-        let fleet = Fleet::default();
+        let fleet = declaring(Value::Null);
         let root = fleet.root();
         RoomsHook::default()
-            .on_session(Phase::Start, &hook_context(&root, &fleet, &cwd))
+            .on_session(Phase::Start, &hook_context(&root, &fleet, cwd()))
+            .await;
+        assert!(fleet.created().is_empty());
+    }
+
+    /// A team file the plugin that owns it could not read seats nobody this
+    /// run, and stops nothing: the session opens either way.
+    #[tokio::test]
+    async fn a_team_file_that_will_not_parse_seats_nobody_and_fails_nothing() {
+        let fleet = Fleet::default().serving(
+            crate::team::TEAM,
+            Stub::refusing("/work/project/.bingo/team.json: { not json"),
+        );
+        let root = fleet.root();
+        RoomsHook::default()
+            .on_session(Phase::Start, &hook_context(&root, &fleet, cwd()))
             .await;
         assert!(fleet.created().is_empty());
     }
@@ -445,7 +497,7 @@ mod tests {
             &fleet.handle(),
             &root,
             Path::new("/work/project"),
-            "design",
+            seat::Opening::person("design", None),
             &seats(members),
         )
         .await
@@ -561,6 +613,80 @@ mod tests {
         );
         assert_eq!(*closed, Value::Null, "answered, and the card goes");
         assert!(chases(&fleet).is_empty(), "nobody was chased for it");
+    }
+
+    /// A room closed as `CloseRoom` closes one, and the frame that left in its
+    /// journal — which is what the hook sees of it.
+    async fn closed(fleet: &Fleet, room: &SessionId) -> Event {
+        seat::close(
+            &fleet.handle(),
+            room,
+            &Room::of(&fleet.summary(room)).expect("a room"),
+            PARENT,
+            None,
+        )
+        .await
+        .expect("a room this crate can close");
+        let closing =
+            crate::room::Closed::of_state(&fleet.state(room)).expect("the frame the close left");
+        extended(room::CLOSED, closing.payload())
+    }
+
+    /// ADR-0053 §4: a closed room owes nothing. A debt this process would have
+    /// chased the moment it read the room is dropped with the room, and the
+    /// card carries no row for it.
+    #[tokio::test(start_paused = true)]
+    async fn a_room_found_closed_is_chased_for_nothing_and_carries_no_card() {
+        let (fleet, root, room) = standing(&["scout"]).await;
+        fleet.post(&room, "@scout what does the log say?", None, ts());
+        closed(&fleet, &room).await;
+
+        announce(&fleet, &RoomsHook::default(), &room).await;
+        settle().await;
+        assert!(chases(&fleet).is_empty(), "{:?}", fleet.delivered());
+        assert!(
+            fleet
+                .signalled(&root, owed::KIND)
+                .iter()
+                .all(Value::is_null),
+            "a closed room owes nothing: {:?}",
+            fleet.signalled(&root, owed::KIND)
+        );
+    }
+
+    /// And a room that closes while this process is watching drops what it
+    /// owed: the card goes, and the timer chasing the debt is cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn a_closing_takes_the_room_s_debts_off_the_card_and_cancels_their_chase() {
+        let (fleet, root, room) = standing(&["scout"]).await;
+        let hook = RoomsHook::default();
+        announce(&fleet, &hook, &room).await;
+        says(&fleet, &hook, &room, None, "@scout look at the build").await;
+        settle().await;
+        let owing = fleet.signalled(&root, owed::KIND);
+        assert_eq!(
+            owing.last().expect("a card")["rows"][0][1],
+            "scout",
+            "{owing:?}"
+        );
+
+        let closing = closed(&fleet, &room).await;
+        let cx = hook_context(&room, &fleet, Path::new("/work/project"));
+        hook.on_event(&stamped(10, closing, &room), &cx).await;
+        settle().await;
+        assert_eq!(
+            fleet.signalled(&root, owed::KIND).last(),
+            Some(&Value::Null),
+            "the card went with the room"
+        );
+
+        tokio::time::advance(crate::chase::PATIENCE).await;
+        settle().await;
+        assert!(
+            chases(&fleet).is_empty(),
+            "nobody is chased for a closed room: {:?}",
+            chases(&fleet)
+        );
     }
 
     #[test]

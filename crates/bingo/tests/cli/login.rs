@@ -9,7 +9,7 @@ fn a_provider_without_a_sign_in_says_so() {
     let home = tempfile::tempdir().unwrap();
     let script = script(r#"{"responses":[]}"#);
     let out = run(bingo()
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .env("BINGO_FAKE_SCRIPT", script.path())
         .args(["login", "fake", "--cwd"])
         .arg(home.path()));
@@ -26,7 +26,7 @@ fn a_provider_without_a_sign_in_says_so() {
 fn an_unknown_provider_is_refused_by_name() {
     let home = tempfile::tempdir().unwrap();
     let out = run(bingo()
-        .env("HOME", home.path())
+        .envs(home_env(home.path()))
         .args(["logout", "nope", "--cwd"])
         .arg(home.path()));
     assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
@@ -141,7 +141,7 @@ fn auth_json(home: &std::path::Path) -> std::path::PathBuf {
 
 fn codex(home: &std::path::Path, settings: &std::path::Path) -> Command {
     let mut cmd = bingo();
-    cmd.env("HOME", home)
+    cmd.envs(home_env(home))
         .env("BINGO_NO_BROWSER", "1")
         .arg("--settings")
         .arg(settings)

@@ -14,6 +14,7 @@ mod support;
 use std::process::Stdio;
 use std::time::Duration;
 
+use base64::Engine;
 use bingo_sdk::{
     Activation, Answer, ClientIdentity, HostApi, IntentId, OpenOptions, Origin, SessionSelector,
 };
@@ -90,7 +91,9 @@ fn is(op: &Value, name: &str) -> bool {
 struct Chat {
     peer: Peer,
     _child: Child,
-    _home: tempfile::TempDir,
+    /// The session's working directory as well as its home: what a path the
+    /// model names is resolved against.
+    home: tempfile::TempDir,
 }
 
 impl Chat {
@@ -108,7 +111,7 @@ impl Chat {
             .arg("--settings")
             .arg(&settings_path)
             .env("BINGO_FAKE_SCRIPT", &script_path)
-            .env("HOME", home.path())
+            .envs(support::home::home_env(home.path()))
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .spawn()
@@ -116,8 +119,12 @@ impl Chat {
         Chat {
             peer: Peer::accept(&listener).await,
             _child: child,
-            _home: home,
+            home,
         }
+    }
+
+    fn wrote(&self, name: &str, body: &str) {
+        std::fs::write(self.home.path().join(name), body).unwrap();
     }
 }
 
@@ -139,6 +146,25 @@ const WRITES_A_FILE: &str = r#"{"responses":[
     {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"made.txt","content":"by the chat\n"}}}]},
     {"steps":[{"text":"Written."}]}
 ]}"#;
+
+/// A turn that posts a file the test wrote, and then says it is done.
+const SENDS_A_FILE: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SendFile","input":{"path":"notes.txt","caption":"the notes"}}}]},
+    {"steps":[{"text":"Sent."}]}
+]}"#;
+
+/// The same, for a path nothing wrote. The second response waits for the
+/// refusal's own words, so it is only ever spent on a turn that was told them.
+const SENDS_A_MISSING_FILE: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SendFile","input":{"path":"absent.txt"}}}]},
+    {"when":{"contains":"no such file"},"steps":[{"text":"There is no such file."}]}
+]}"#;
+
+/// Settings whose gate is already answered for one tool: this scenario is
+/// about the file, and a rule is how a person stops being asked (M86 risks).
+fn allowing(tool: &str) -> Value {
+    json!({ "permissions": { "allow": [tool] } })
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_opens_a_session_and_the_answer_streams_into_one_edited_message() {
@@ -378,6 +404,107 @@ async fn a_group_is_ignored_until_the_bot_is_mentioned() {
     );
 }
 
+/// The settings one policy test runs on. Everything else is the default,
+/// which is what ran before there was a policy at all.
+fn under(access: Value) -> Value {
+    json!({ "channels": { "loopback": { "access": access } } })
+}
+
+/// One group speaks and is refused, another speaks and is answered. The
+/// refused chat is a chat of its own, so a leak has nowhere to hide: every
+/// op the channel emits names the chat it went to.
+async fn only_one_group_is_heard(access: Value, refused: Value, heard: Value, chat: &str) {
+    let mut chat_under = Chat::open(&answering("Hello."), under(access)).await;
+    chat_under.peer.say(refused).await;
+    chat_under.peer.say(heard).await;
+    let ops = chat_under.peer.until(|op| is(op, "finish")).await;
+    assert!(
+        ops.iter().any(|op| op["chat"] == json!(chat)),
+        "the admitted group was answered: {ops:#?}"
+    );
+    assert!(
+        ops.iter()
+            .all(|op| op["chat"].is_null() || op["chat"] == json!(chat)),
+        "and nothing was said anywhere else: {ops:#?}"
+    );
+}
+
+fn in_group(chat: &str, principal: &str, text: &str) -> Value {
+    json!({
+        "kind": "message", "chat": chat, "group": true,
+        "principal": principal, "text": text,
+    })
+}
+
+/// A blocklisted principal opens no session and gets no reply — and is not
+/// told so either (ADR-0051 §4).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocklisted_principal_in_a_group_is_answered_with_nothing() {
+    only_one_group_is_heard(
+        json!({ "group": { "policy": "blocklist", "list": ["u_loud"], "mention": false } }),
+        // Mentioned, so the mention alone would have admitted it: what
+        // refuses it is the policy and nothing else.
+        in_group("oc_loud", "u_loud", "@bingo what do you think?"),
+        in_group("oc_quiet", "u_quiet", "what do you think?"),
+        "oc_quiet",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_admin_is_heard_in_a_group_that_admits_only_admins() {
+    only_one_group_is_heard(
+        json!({
+            "admins": ["u_admin"],
+            "group": { "policy": "admins", "mention": false },
+        }),
+        in_group("oc_no", "u_1", "@bingo what do you think?"),
+        in_group("oc_yes", "u_admin", "what do you think?"),
+        "oc_yes",
+    )
+    .await;
+}
+
+/// A chat's own rule replaces the one for groups whole, and a rule that wants
+/// no mention engages on a plain line — the amendment to ADR-0016 §4.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chats_own_rule_engages_without_the_mention_the_others_need() {
+    only_one_group_is_heard(
+        json!({ "rules": { "oc_open": { "mention": false } } }),
+        in_group("oc_shut", "u_1", "what do you think?"),
+        in_group("oc_open", "u_1", "what do you think?"),
+        "oc_open",
+    )
+    .await;
+}
+
+/// The sign brackets the turn the message started (ADR-0051 §5): up before
+/// the chat says anything back, down after the answer is finished.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_working_sign_brackets_the_turn_a_message_started() {
+    let mut chat = Chat::open(&answering("Two tests failed."), json!({})).await;
+    chat.peer
+        .say(json!({
+            "kind": "message", "chat": "oc_1", "principal": "u_1",
+            "text": "run the tests", "parent": "om_1",
+        }))
+        .await;
+    let ops = chat.peer.until(|op| is(op, "acknowledged")).await;
+    let at = |name: &str| ops.iter().position(|op| is(op, name));
+    let up = at("acknowledge").unwrap_or_else(|| panic!("the sign goes up: {ops:#?}"));
+    let said = at("reply").unwrap_or_else(|| panic!("the answer is posted: {ops:#?}"));
+    let done = at("finish").unwrap_or_else(|| panic!("and finished: {ops:#?}"));
+    let down = ops.len() - 1;
+    assert!(
+        up < said,
+        "the sign is up before a word is said back: {ops:#?}"
+    );
+    assert!(done < down, "and comes off after the answer: {ops:#?}");
+    assert_eq!(ops[up]["id"], json!("om_1"), "on the message that spoke");
+    assert_eq!(ops[down]["id"], json!("om_1"));
+    assert_eq!(ops[down]["outcome"], json!("done"));
+}
+
 /// The one thing a chat must never do quietly: two processes on one app take
 /// half of its events each and neither knows (ADR-0016 §5).
 #[test]
@@ -398,7 +525,7 @@ fn a_second_process_on_one_credential_refuses_loudly() {
             .arg(home.path())
             .arg("--settings")
             .arg(&settings)
-            .env("HOME", home.path())
+            .envs(support::home::home_env(home.path()))
             .env_remove("BINGO_FAKE_SCRIPT")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -423,5 +550,48 @@ fn a_second_process_on_one_credential_refuses_loudly() {
     assert!(
         stderr.contains("another bingo already runs"),
         "a second process refuses loudly: {stderr}"
+    );
+}
+
+/// A file leaves this machine because the model asked for it by name, never
+/// because a tag was parsed out of its prose (ADR-0051 §3).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_posts_a_file_into_the_chat_it_is_talking_in() {
+    let mut chat = Chat::open(SENDS_A_FILE, allowing("SendFile")).await;
+    chat.wrote("notes.txt", "by the chat\n");
+    chat.peer.chats("oc_1", "send me the notes").await;
+    let ops = chat.peer.until(|op| is(op, "file")).await;
+    let sent = ops.last().expect("the file");
+    assert_eq!(sent["chat"], json!("oc_1"));
+    assert_eq!(sent["name"], json!("notes.txt"), "the name, not the path");
+    assert_eq!(sent["caption"], json!("the notes"));
+    assert_eq!(
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(sent["bytes"].as_str().expect("the bytes"))
+                .expect("base64")
+        )
+        .expect("the file is text"),
+        "by the chat\n",
+        "the bytes off this machine's disk, not the path to them"
+    );
+    // And the turn went on, with the tool's receipt behind it.
+    chat.peer.until(|op| op["text"] == json!("Sent.")).await;
+}
+
+/// A refusal is words the model can act on, in the transcript it reads back:
+/// the second response is addressed to them, so a turn that never saw them
+/// never finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_that_is_not_there_is_refused_in_words_the_model_reads() {
+    let mut chat = Chat::open(SENDS_A_MISSING_FILE, allowing("SendFile")).await;
+    chat.peer.chats("oc_1", "send me the notes").await;
+    let ops = chat
+        .peer
+        .until(|op| op["text"] == json!("There is no such file."))
+        .await;
+    assert!(
+        !ops.iter().any(|op| is(op, "file")),
+        "nothing was posted: {ops:#?}"
     );
 }

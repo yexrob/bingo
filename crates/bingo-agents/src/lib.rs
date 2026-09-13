@@ -4,20 +4,22 @@
 //! a roster is `sessions{parent}`, and `@name` is a submit hook that
 //! redirects.
 //!
-//! Six tools, two hooks, two commands:
+//! Five tools, two hooks, two commands:
 //!
 //! - `SpawnAgent` mints a child under the calling tool item and delivers the
 //!   prompt. In the foreground it waits for the child's final text; in the
 //!   background it returns the name and leaves a watcher to wake the parent.
 //! - `SendMessage` wakes an agent — a child, a teammate beside the caller, or
-//!   `parent` — or posts into a room's journal, `WaitAgent` joins one or
-//!   several agents under one deadline and reads what each said,
-//!   `ListAgents` reads the tree, `ListModels` reads the model catalogue,
+//!   `parent` — or posts into a room's journal, `ListAgents` reads the
+//!   tree, `ListModels` reads the model catalogue,
 //!   `SetThinking` moves how hard this session or a child thinks.
 //! - `@name rest` in the composer reaches the child of that name.
 //! - A root session opening in a project with a `.bingo/team.json` seats the
 //!   roles it declares, as children of itself.
 //! - `/agents` shows the roster a person needs; `/team` what was declared.
+//! - `agents.team` is the one door onto `.bingo/team.json` for the plugins
+//!   that own its other keys: this plugin parses the file, and nobody else
+//!   knows where it is (ADR-0031).
 //!
 //! Every tool is declared read-only and trusted: none of them reads or writes
 //! anything outside the process, and what a child then does is gated in the
@@ -25,6 +27,7 @@
 
 mod command;
 mod definition;
+pub mod guide;
 mod hook;
 mod layers;
 mod library;
@@ -33,18 +36,19 @@ mod message;
 mod models;
 mod names;
 mod note;
+mod rooms;
 mod serial;
 mod spawn;
 mod team;
 mod thinking;
-mod wait;
 mod watch;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, Contribution, Hook, Plugin, PluginError, PluginManifest, Registrar, Tool, ToolTraits,
+    Command, Contribution, Hook, Plugin, PluginError, PluginManifest, Registrar, ServiceHandle,
+    Tool, ToolTraits, WireService,
 };
 
 pub use command::AgentsCommand;
@@ -55,9 +59,8 @@ pub use message::MessageTool;
 pub use models::ListModelsTool;
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
-pub use team::{SeatHook, TeamCommand};
+pub use team::{SeatHook, TEAM, TeamCommand, TeamFile};
 pub use thinking::SetThinkingTool;
-pub use wait::WaitAgentTool;
 
 static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.agents",
@@ -66,7 +69,6 @@ static MANIFEST: PluginManifest = PluginManifest {
     provides: &[
         "tool:SpawnAgent",
         "tool:SendMessage",
-        "tool:WaitAgent",
         "tool:ListAgents",
         "tool:ListModels",
         "tool:SetThinking",
@@ -74,12 +76,31 @@ static MANIFEST: PluginManifest = PluginManifest {
         "hook:team",
         "command:agents",
         "command:team",
+        "service:agents.team",
+        "service:bingo.agents.pages",
     ],
     requires: &[],
     // Definitions are files, not settings, and the limits on a session tree
     // are the kernel's.
     config: None,
 };
+
+/// `.bingo/team.json` under the key another plugin looks it up by. The typed
+/// lookup is a `ServiceHandle` over the wire face, which is how a service met
+/// by method rather than by type is reached from in process (ADR-0031 §4) —
+/// and it must be met that way, because `team` is a noun the kernel has no
+/// word for and a plugin may not import this one to get a trait.
+///
+/// No wire face is opened: every key of the file answers through one method,
+/// and a key nobody has claimed yet is not this plugin's to hand a stranger.
+fn team_file() -> Contribution {
+    let wire = Arc::new(TeamFile) as Arc<dyn WireService>;
+    Contribution::Service {
+        key: TEAM.to_string(),
+        value: Arc::new(ServiceHandle::new(wire)),
+        wire: None,
+    }
+}
 
 /// What every tool here is. They read the session tree and post into a
 /// queue: nothing outside the process changes, and a child's own calls are
@@ -109,7 +130,6 @@ impl Plugin for AgentsPlugin {
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.tool(Arc::new(SpawnAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(MessageTool) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(WaitAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListModelsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(SetThinkingTool) as Arc<dyn Tool>);
@@ -123,6 +143,8 @@ impl Plugin for AgentsPlugin {
         registrar.add(Contribution::Command(
             Arc::new(TeamCommand) as Arc<dyn Command>
         ));
+        registrar.add(team_file());
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -147,7 +169,6 @@ mod plugin_tests {
             [
                 "tool:SpawnAgent",
                 "tool:SendMessage",
-                "tool:WaitAgent",
                 "tool:ListAgents",
                 "tool:ListModels",
                 "tool:SetThinking",
@@ -155,6 +176,8 @@ mod plugin_tests {
                 "hook:team",
                 "command:agents",
                 "command:team",
+                "service:agents.team",
+                &format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)),
             ]
         );
         assert!(MANIFEST.requires.is_empty());
@@ -179,7 +202,6 @@ mod plugin_tests {
             [
                 "SpawnAgent",
                 "SendMessage",
-                "WaitAgent",
                 "ListAgents",
                 "ListModels",
                 "SetThinking"
@@ -201,6 +223,19 @@ mod plugin_tests {
             })
             .collect();
         assert_eq!(commands, ["agents", "team"]);
+        let services: Vec<(&str, bool)> = contributions
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Service { key, wire, .. } => Some((key.as_str(), wire.is_some())),
+                _ => None,
+            })
+            .collect();
+        let page = bingo_sdk::Pages::key(MANIFEST.id);
+        assert_eq!(
+            services,
+            [("agents.team", false), (page.as_str(), false)],
+            "the team file and this plugin's page, in process only (ADR-0031 §3)"
+        );
     }
 
     #[test]

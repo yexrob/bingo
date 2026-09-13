@@ -31,11 +31,10 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// The picture `source` names, in a type a provider accepts. `cache` is where
 /// a fetched one is kept and looked for; `None` for a caller that keeps none.
 pub async fn load(source: &Source, cache: Option<&Cache>) -> Result<Image, PictureError> {
-    let bytes = match source {
-        Source::Path(path) => read(path)?,
-        Source::Url(url) => remote(url, cache).await?,
-    };
-    sniffed(&bytes)
+    match source {
+        Source::Path(path) => Ok(sniffed(&read(path)?)?.at(path.as_path())),
+        Source::Url(url) => sniffed(&remote(url, cache).await?),
+    }
 }
 
 /// A URL out of the cache where a young enough copy is in it, and off the

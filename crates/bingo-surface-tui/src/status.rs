@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::{self, Now};
-use crate::tree::{self, Status, Tree};
+use crate::tree::{self, Scope, Tree, Wants};
 use crate::ui::Ui;
 use crate::{keys, permission, shells, theme, wake};
 
@@ -57,13 +57,13 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
     if ui.exit_armed(now.instant) {
         parts.push(Span::styled(crate::input::ARM_HINT, theme::text()));
     }
-    if let Some(waiting) = count(tree, Wants::Attention) {
+    if let Some(waiting) = tree::count(tree, Wants::Attention, Scope::Others) {
         parts.push(Span::styled(
             format!("{waiting} needs you (ctrl+g)"),
             theme::attention(now),
         ));
     }
-    if let Some(running) = count(tree, Wants::Running) {
+    if let Some(running) = tree::count(tree, Wants::Running, Scope::Others) {
         parts.push(Span::styled(format!("{running} running"), theme::dim()));
     }
     parts.extend(shells::counted(tree.viewed()));
@@ -73,27 +73,6 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
         parts.push(Span::styled(HINT, theme::dim()));
     }
     join(parts)
-}
-
-/// What the sessions other than the one on screen are doing. The session in
-/// view speaks for itself: its turn is the activity row and its card is the
-/// brightest thing on the screen.
-enum Wants {
-    Attention,
-    Running,
-}
-
-fn count(tree: &Tree, wants: Wants) -> Option<usize> {
-    let n = tree
-        .rows()
-        .iter()
-        .filter(|row| row.session != tree.view())
-        .filter(|row| match wants {
-            Wants::Attention => row.attention,
-            Wants::Running => row.status == Some(Status::Running),
-        })
-        .count();
-    (n > 0).then_some(n)
 }
 
 /// The wake the model set on this session, counted down against the frame's
@@ -344,7 +323,7 @@ pub fn styles(line: &Line<'static>) -> Vec<(String, ratatui::style::Style)> {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use bingo_sdk::{ContextUsage, Event, TurnId};
+    use bingo_sdk::{ContextUsage, Event, ItemBody, ItemStatus, TurnId};
 
     fn text(tree: &Tree, ui: &Ui, width: usize) -> String {
         at(tree, ui, width, scene().1)
@@ -464,6 +443,55 @@ mod tests {
         );
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(41_900), "41k");
+    }
+
+    /// An ACP session as the frames arrive (ADR-0055): the agent's own count
+    /// against the agent's own window, and the cut the agent made drawn as
+    /// the compaction row it is. Nothing here is a rendering change — it is
+    /// the numbers the kernel now sends, on the screen a person reads.
+    #[test]
+    fn a_context_the_agent_holds_reads_as_its_own_count_and_its_own_cut() {
+        let (ui, now) = scene();
+        let state = folded(vec![
+            frame(
+                1,
+                Event::TurnUsage {
+                    turn: TurnId::from_raw("trn_1"),
+                    usage: Default::default(),
+                    context: ContextUsage {
+                        used: 400_000,
+                        window: 1_000_000,
+                        trigger: 1_000_000,
+                    },
+                },
+            ),
+            frame(
+                2,
+                Event::ItemCompleted {
+                    item: item(
+                        "itm_1",
+                        ItemStatus::Completed,
+                        ItemBody::Compaction {
+                            summary: String::new(),
+                            replaced: 0,
+                            before: 400_000,
+                            after: 120_000,
+                            duration_ms: 0,
+                        },
+                    ),
+                },
+            ),
+        ]);
+        let screen = render(&state, &ui, now);
+        assert!(screen.contains("400k/1000k"), "{screen}");
+        assert!(
+            !screen.contains("/compact"),
+            "the agent cuts its own context, and 40% is not a warning: {screen}"
+        );
+        assert!(
+            screen.contains("context compacted (400000 → 120000 tokens)"),
+            "{screen}"
+        );
     }
 
     #[test]

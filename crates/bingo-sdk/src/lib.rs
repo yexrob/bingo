@@ -14,6 +14,7 @@ pub mod hook;
 pub mod host;
 pub mod ids;
 pub mod model;
+pub mod page;
 pub mod plugin;
 pub mod policy;
 pub mod provider;
@@ -28,15 +29,18 @@ pub mod tokens;
 pub mod tool;
 pub mod view;
 
-pub use command::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, Completion};
-pub use compactor::{CompactContext, CompactReason, Compaction, Compactor};
-pub use contributor::{ContextContributor, ContextError, ContextPiece, ContextQuery, Placement};
+pub use command::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec};
+pub use compactor::{CompactContext, CompactError, CompactReason, Compaction, Compactor};
+pub use contributor::{
+    CONTRIBUTOR_PREFIX, ContextContributor, ContextError, ContextPiece, ContextQuery, Placement,
+};
 pub use error::{ErrorCode, KernelError};
 pub use event::*;
 pub use hook::{Hook, HookContext, HookMatcher, HookOutcome, HookPoint, Phase};
 pub use host::*;
 pub use ids::*;
 pub use model::*;
+pub use page::{Page, Pages};
 pub use plugin::{
     CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, HookSource, Merge,
     Plugin, PluginError, PluginManifest, ProviderSource, Registrar, ToolSource,
@@ -46,7 +50,7 @@ pub use provider::{AuthStatus, LoginMethod, ModelInfo, Provider};
 /// `Service` and `Services` stay behind `service::`: the kernel has a bundle
 /// of its own by that name, and a glob import must not make either ambiguous.
 pub use service::{ServiceError, ServiceHandle, WireService};
-pub use state::{Applied, LiveTurn, Retry, SessionState};
+pub use state::{Applied, LastTurn, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};
 pub use tool::{

@@ -19,7 +19,7 @@ use crate::fold::{self, Fold, Folds};
 use crate::graphics::{Decoded, Linked, Picture};
 use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{acp, markdown, paths, shells, tasks, theme, thoughts, wrap};
+use crate::{acp, markdown, memory, paths, shells, tasks, theme, thoughts, worked, wrap};
 
 /// What was said into a session: a person's line, a subsystem's notice, a
 /// room's conversation.
@@ -105,6 +105,9 @@ pub struct Rows<'a> {
     /// read from the set the shell's plugin signals: what the row under a
     /// backgrounded call says is true of now, not of when the call closed.
     pub shells: Vec<String>,
+    /// Where the session's memories are (M84), read from what the memory
+    /// plugin publishes: a call on one of them is drawn as remembering.
+    pub memory: memory::Directories,
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
@@ -117,6 +120,10 @@ pub struct Rows<'a> {
     /// (M63). Terminal-side, like the fold and the scroll: it is a fact about
     /// this machine, not about the conversation.
     pub update: Option<&'a str>,
+    /// The widest a line of prose may be drawn, where a person set one
+    /// (`tui.measure`, [`crate::settings`]; design §7). Nothing at all is the
+    /// region's own width, so the transcript fills the terminal it is in.
+    pub measure: Option<usize>,
     /// Which second of the opening this frame is (M70, M72): the piece plays
     /// *inside* the welcome box and lands on it, so the box is derived from the
     /// second rather than drawn twice. Nothing at all once it is over.
@@ -145,9 +152,11 @@ impl<'a> Rows<'a> {
             pictures,
             linked,
             shells: shells::running(state),
+            memory: memory::of(state),
             title: state.summary.title.as_deref(),
             driver: state.summary.driver,
             update: None,
+            measure: None,
             opening: None,
         }
     }
@@ -160,6 +169,11 @@ impl<'a> Rows<'a> {
     /// Which second of the opening this frame is, while it plays.
     pub fn opening(self, opening: Option<f32>) -> Self {
         Self { opening, ..self }
+    }
+
+    /// The measure a person set for prose, as this run was told it.
+    pub fn measuring(self, measure: Option<usize>) -> Self {
+        Self { measure, ..self }
     }
 }
 
@@ -212,14 +226,15 @@ impl Landing {
 }
 
 impl Rows<'_> {
-    /// Prose is read, not scanned: it stops at the measure (design §7).
-    fn measure(&self) -> usize {
-        wrap::measure(self.width)
+    /// The cells this block is laid out in: the region's own width, or the
+    /// narrower line a person asked for (design §7).
+    fn measured(&self) -> usize {
+        wrap::measure(self.width, self.measure)
     }
 
     /// The cells a result has, once the `⎿` gutter has taken its own.
     fn result_width(&self) -> usize {
-        self.measure().saturating_sub(connector().width()).max(1)
+        self.measured().saturating_sub(connector().width()).max(1)
     }
 
     /// A path as a person reads it, from this session's own directory.
@@ -303,6 +318,9 @@ pub fn item_block(
     rows: &Rows<'_>,
     cue: Cue,
 ) -> Block {
+    if matches!(&item.body, ItemBody::User { origin, .. } if origin.is_context()) {
+        return Block::default();
+    }
     // How much of this block is on the screen — what `ctrl+o` and a click both
     // write, over the start its kind has. One question, asked once, here.
     let fold = fold::fold_of(rows.folds, item);
@@ -413,13 +431,15 @@ fn called(
     else {
         return Vec::new();
     };
+    let (name, about) = memory::call(name, input, rows.cwd, &rows.memory)
+        .unwrap_or_else(|| (name.as_str(), summarize(input)));
     match agents.get(&item.id) {
         Some(child) => child_row(child, input, rows),
         None => tool_call(
             Call {
                 status: item.status,
                 name,
-                about: summarize(input),
+                about,
                 output: output.as_ref(),
                 progress: progress.as_deref(),
                 fold,
@@ -510,7 +530,7 @@ fn marked(
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
     let mark = Span::styled(format!("{glyph} "), style);
-    under(mark, body, speaks_indent(), rows.measure())
+    under(mark, body, speaks_indent(), rows.measured())
 }
 
 /// What came back.
@@ -521,7 +541,7 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
         Span::styled(mark, theme::dim()),
         body,
         indent,
-        rows.measure(),
+        rows.measured(),
     )
 }
 
@@ -534,7 +554,7 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 /// of placeholder cells is not text, and cooling it would spend the colour the
 /// picture's own number is carried in.
 fn assistant(text: &str, status: ItemStatus, fold: Fold, rows: &Rows<'_>, cue: Cue) -> Block {
-    let written = markdown::rendered(text, rows.measure().saturating_sub(speaks_indent()));
+    let written = markdown::rendered(text, rows.measured().saturating_sub(speaks_indent()));
     let lit = match arriving(status, rows, cue) {
         Some(age) => comet(written.lines, age),
         None => written.lines,
@@ -619,15 +639,6 @@ struct Call<'a> {
     run: Option<Run<'a>>,
 }
 
-impl Call<'_> {
-    /// Whether it came back wrong: its own status, or an output the tool
-    /// marked as an error. One question, asked here, so the bullet that says
-    /// so and the words that cool out of it can never disagree.
-    fn failed(&self) -> bool {
-        self.status == ItemStatus::Failed || self.output.is_some_and(|output| output.is_error)
-    }
-}
-
 /// The row one skill run wears, whichever door it came through: the model's
 /// `Skill(guide)` call and a person's own `/guide` are the same thing
 /// happening, so this is the only place either is drawn (design §4).
@@ -652,7 +663,7 @@ fn asked(run: Run<'_>, rows: &Rows<'_>, landing: Landing) -> Line<'static> {
 }
 
 fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
-    let failed = call.failed();
+    let failed = call.status.failed(call.output);
     let style = live_bullet(call.status, failed, rows);
     let landing = Landing::of(cue, failed, rows);
     let mut out = match call.run {
@@ -886,12 +897,25 @@ fn calls(item: &Item, tool: &str) -> bool {
     matches!(&item.body, ItemBody::ToolCall { name, .. } if name == tool)
 }
 
-/// A turn that failed says why on a `⏺` of its own, derived from `last_turn`
-/// rather than kept as a line of the surface's own. It belongs to no item, so
-/// it is the transcript's last block rather than one of them.
-pub fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let Some(TurnStatus::Failed { error }) = state.last_turn.as_ref().filter(|_| !state.busy())
-    else {
+/// What stands under the last turn once it is over and nothing runs: why it
+/// failed, then what it cost (`✻ Worked for 15m 11s · done 13:48`). Both are
+/// derived from `last_turn` rather than kept as lines of the surface's own,
+/// and neither belongs to an item, so this is the transcript's last block
+/// rather than one of them: it scrolls with the answer it closes (M84,
+/// 2026-09-08, user-directed — not a row pinned over the composer) and the
+/// next turn takes it away.
+pub fn closing(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    if state.busy() {
+        return Vec::new();
+    }
+    let mut out = failure(state, rows);
+    out.extend(worked(state, rows));
+    out
+}
+
+/// A turn that failed says why on a `⏺` of its own.
+fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let Some(TurnStatus::Failed { error }) = state.last_status() else {
         return Vec::new();
     };
     speaks(
@@ -902,6 +926,24 @@ pub fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
         ))],
         rows,
     )
+}
+
+/// `✻ Worked for 15m 11s · done 13:48`, dim: the verb the verdict earns, how
+/// long the turn ran, and the hour it ended on. A turn that answered at once
+/// says nothing, as it drew no row while it ran.
+fn worked(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let Some(turn) = state.last_turn.as_ref() else {
+        return Vec::new();
+    };
+    if worked::ran(turn) < worked::SAY_AFTER {
+        return Vec::new();
+    }
+    let (what, when) = worked::words(turn, rows.now.wall, &jiff::tz::TimeZone::system());
+    vec![Line::from(vec![
+        Span::styled(format!("{} ", theme::spark()), theme::presence()),
+        Span::styled(what, theme::dim()),
+        Span::styled(when, theme::dim()),
+    ])]
 }
 
 /// A full-width divider with its reason in the middle of the left run.
@@ -918,8 +960,8 @@ fn rule(text: &str, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::test_support::{
-        agent_call, assistant, completed, delivered, folded, frame, item, post, receipt_item,
-        running_tool, scene, started, started_tool, tool, ts, user as person,
+        agent_call, assistant, completed, delivered, extended, folded, frame, item, post,
+        receipt_item, running_tool, scene, started, started_tool, tool, ts, user as person,
     };
     use bingo_sdk::{Event, ItemId};
 
@@ -970,6 +1012,67 @@ mod tests {
     /// own: these tests are about the grammar under it.
     fn rendered(state: &SessionState) -> Vec<String> {
         rendered_with(state, &Folds::new(), &[])
+    }
+
+    /// A call on a memory file is drawn as remembering (M84): the verb for the
+    /// tool, the memory's own name — and the same call on any other file is
+    /// what it was.
+    #[test]
+    fn a_call_on_a_memory_file_is_drawn_as_remembering() {
+        let published = frame(
+            1,
+            extended(
+                "_bingo.context",
+                "memory",
+                serde_json::json!({"user": "/data/memory/user", "project": "/data/memory/web-2bf6c26a7362cd1f"}),
+            ),
+        );
+        let calls = [
+            tool(
+                "itm_1",
+                "Read",
+                serde_json::json!({"file_path": "/data/memory/web-2bf6c26a7362cd1f/the-build.md"}),
+                Some(ToolOutput::text("run cargo test")),
+                ItemStatus::Completed,
+            ),
+            tool(
+                "itm_2",
+                "Write",
+                serde_json::json!({"file_path": "/data/memory/user/MEMORY.md", "content": "- …"}),
+                Some(ToolOutput::text("written")),
+                ItemStatus::Completed,
+            ),
+            tool(
+                "itm_3",
+                "Read",
+                serde_json::json!({"file_path": "src/lib.rs"}),
+                Some(ToolOutput::text("mod a;")),
+                ItemStatus::Completed,
+            ),
+        ];
+        let mut frames = vec![published];
+        frames.extend(
+            calls
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| frame(i as u64 + 2, Event::ItemCompleted { item })),
+        );
+        let lines = rendered(&folded(frames));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Recall from memory(the-build)")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Write memory(MEMORY.md)")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Read(src/lib.rs)")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("Read(/data")), "{lines:?}");
     }
 
     /// A call that moved the task list is no row: the list under the activity
@@ -1085,7 +1188,62 @@ mod tests {
                 None,
                 "you have seen this before"
             )]),
-            vec!["> you have seen this before".to_string()],
+            Vec::<String>::new(),
+        );
+    }
+
+    #[test]
+    fn internal_context_never_appears_as_a_transcript_row() {
+        let text = format!(
+            "Memory index\n{}",
+            (0..40).map(|n| format!("fact-{n}\n")).collect::<String>()
+        );
+        let state = stated(vec![
+            person("itm_ask", "Show the current state"),
+            delivered("itm_context", "contributor:context:memory", None, &text),
+            delivered("itm_peer", "agent", Some("reviewer"), "Review completed"),
+            crate::test_support::assistant(
+                "itm_answer",
+                "Here is the result",
+                ItemStatus::Completed,
+            ),
+        ]);
+        let hidden = Folds::from([(ItemId::from_raw("itm_context"), Fold::Open)]);
+        for lines in [rendered(&state), rendered_with(&state, &hidden, &[])] {
+            let text = lines.join("\n");
+            assert!(text.contains("Show the current state"), "{text}");
+            assert!(text.contains("Review completed"), "{text}");
+            assert!(text.contains("Here is the result"), "{text}");
+            assert!(!text.contains("Memory index"), "{text}");
+            assert!(!text.contains("fact-"), "{text}");
+            assert!(!text.contains("context:memory"), "{text}");
+        }
+        let (ui, now) = scene();
+        let screen = crate::test_support::draw_sized(80, 24, &state, &ui, now);
+        assert!(screen.contains("Show the current state"), "{screen}");
+        assert!(screen.contains("Review completed"), "{screen}");
+        assert!(!screen.contains("Memory index"), "{screen}");
+        assert!(!screen.contains("fact-"), "{screen}");
+        assert_eq!(
+            state.items.len(),
+            4,
+            "presentation must not erase the journal"
+        );
+    }
+
+    #[test]
+    fn internal_context_does_not_supply_a_session_brief_or_rewind_prompt() {
+        let state = stated(vec![delivered(
+            "itm_context",
+            "contributor:runtime",
+            None,
+            "Hidden runtime state",
+        )]);
+        assert_eq!(crate::tree::brief(&state), None);
+        assert!(
+            crate::rewind::turns(&state)
+                .iter()
+                .all(|turn| turn.asked.is_none())
         );
     }
 
@@ -1895,30 +2053,41 @@ mod tests {
         );
     }
 
+    /// The widest row a state draws at `width`, past the welcome box.
+    fn widest_row(state: &SessionState, width: usize, measure: Option<usize>) -> usize {
+        let welcomed = crate::welcome::lines(state, width, None).len();
+        let mut blocks = crate::blocks::Blocks::default();
+        let folds = Folds::new();
+        let pictures = Decoded::default();
+        let linked = Linked::default();
+        let rows =
+            Rows::of(state, width, &folds, &[], &pictures, &linked, scene().1).measuring(measure);
+        let height = blocks.sync(state, &Agents::new(), &rows, Vec::new());
+        blocks
+            .window(0, height)
+            .iter()
+            .skip(welcomed)
+            .map(|line| line.to_string().trim_end().width())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Prose fills the terminal, and the measure is the person's (design §7,
+    /// M89): the cap is what they set, not what this crate believes.
     #[test]
-    fn the_measure_stops_prose_at_a_hundred_columns() {
+    fn prose_fills_the_width_until_a_person_asks_for_less() {
         let state = folded(vec![frame(
             1,
             Event::ItemCompleted {
                 item: assistant("itm_1", &"word ".repeat(60), ItemStatus::Completed),
             },
         )]);
-        let welcomed = crate::welcome::lines(&state, 160, None).len();
-        let mut blocks = crate::blocks::Blocks::default();
-        let folds = Folds::new();
-        let pictures = Decoded::default();
-        let linked = Linked::default();
-        let rows = Rows::of(&state, 160, &folds, &[], &pictures, &linked, scene().1);
-        let height = blocks.sync(&state, &Agents::new(), &rows, Vec::new());
-        let widest = blocks
-            .window(0, height)
-            .iter()
-            .skip(welcomed)
-            .map(|line| line.to_string().trim_end().width())
-            .max()
-            .unwrap_or(0);
-        assert!(widest <= wrap::MEASURE, "{widest} cells");
-        assert!(widest > 80, "and it uses the measure it has: {widest}");
+        let filled = widest_row(&state, 160, None);
+        assert!(filled > 100, "the region is the measure: {filled} cells");
+        assert!(filled <= 160, "and never wider than it: {filled} cells");
+        let capped = widest_row(&state, 160, Some(100));
+        assert!(capped <= 100, "{capped} cells");
+        assert!(capped > 80, "and it uses the measure it has: {capped}");
     }
 
     #[test]

@@ -17,9 +17,10 @@ use bingo_sdk::{
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::adapter::{ChannelAdapter, Incoming, Mode};
+use crate::adapter::{ChannelAdapter, Incoming, Mark, Mode, Outcome};
 use crate::conversation::{Conversation, Posted};
 use crate::deliver::{Deliverer, Op};
+use crate::directory::{Directory, Seat};
 use crate::error::ChannelError;
 use crate::gate::Gate;
 use crate::question::{Question, Settled};
@@ -47,8 +48,14 @@ pub struct Runner {
     deliverer: Deliverer,
     /// The message the answer is streaming into, while there is one.
     streaming: Option<Posted>,
-    /// The message a reply would hang under, from whoever spoke last.
-    parent: Option<Posted>,
+    /// Where this conversation is, for whoever else needs to reach it — the
+    /// tool that posts a file into it (ADR-0051 §3). The message a reply hangs
+    /// under lives in the seat, so this runner and that tool cannot disagree
+    /// about which message that is.
+    directory: Directory,
+    /// The message being worked on and the sign that says so, while a turn
+    /// this chat started is running (ADR-0051 §5).
+    working: Option<(Posted, Mark)>,
     asked: BTreeMap<InteractionId, Asked>,
     inbound: mpsc::Receiver<Incoming>,
 }
@@ -62,6 +69,7 @@ impl Runner {
         conversation: Conversation,
         cwd: std::path::PathBuf,
         gate: Gate,
+        directory: Directory,
         inbound: mpsc::Receiver<Incoming>,
     ) -> Result<Self, KernelError> {
         let key = format!("{}/{}", adapter.id(), conversation.path());
@@ -73,6 +81,14 @@ impl Runner {
             handle,
         } = attachment;
         let deliverer = Deliverer::new(adapter.limits().clone(), gate, key.clone());
+        directory.sit(
+            session.clone(),
+            Seat {
+                adapter: Arc::clone(&adapter),
+                conversation: conversation.clone(),
+                parent: None,
+            },
+        );
         Ok(Self {
             adapter,
             conversation,
@@ -82,7 +98,8 @@ impl Runner {
             handle,
             deliverer,
             streaming: None,
-            parent: None,
+            directory,
+            working: None,
             asked: BTreeMap::new(),
             key,
             inbound,
@@ -94,8 +111,13 @@ impl Runner {
     }
 
     /// Frames out, replies in, until the session's stream ends or the chat
-    /// goes away.
+    /// goes away — and then this conversation is nobody's to reach.
     pub async fn run(mut self) {
+        self.pump().await;
+        self.directory.leave(&self.root);
+    }
+
+    async fn pump(&mut self) {
         loop {
             let due = self.deliverer.due();
             tokio::select! {
@@ -116,12 +138,6 @@ impl Runner {
     }
 
     async fn saw(&mut self, frame: &Frame) {
-        // A lag marker ends the live stream at the gap; the reducer left
-        // `seq` at the last frame applied, so replaying from there fills it.
-        if matches!(frame.event, Event::Lagged { .. }) {
-            self.resync().await;
-            return;
-        }
         let Some(state) = self.state_of(frame) else {
             return;
         };
@@ -159,16 +175,6 @@ impl Runner {
         self.states.get_mut(&frame.session)
     }
 
-    async fn resync(&mut self) {
-        let since = self.states[&self.root].seq;
-        match self.handle.events_since(since).await {
-            Ok(events) => self.events = events,
-            Err(error) => {
-                tracing::warn!(%error, key = %self.key, "the journal could not be re-read")
-            }
-        }
-    }
-
     async fn perform(&mut self, ops: Vec<Op>) {
         for op in ops {
             if let Err(error) = self.deliver(op).await {
@@ -186,6 +192,55 @@ impl Runner {
             Op::Finalize { text, question } => self.finalize(&text, question).await,
             Op::Status { text } => self.post(&text).await.map(drop),
             Op::Resolved { question, outcome } => self.settle(&question, &outcome).await,
+            Op::Ended { failed } => {
+                self.ended(failed).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// Say that the message just submitted is being worked on, where the
+    /// platform has a way to say it.
+    ///
+    /// One sign at a time: a second message arriving mid-turn would strand
+    /// the first sign with nothing left holding its mark, and the sign
+    /// already up says exactly what the second one would.
+    async fn acknowledge(&mut self) {
+        if self.working.is_some() {
+            return;
+        }
+        let Some(at) = self.directory.parent(&self.root) else {
+            return;
+        };
+        let adapter = Arc::clone(&self.adapter);
+        let Some(sign) = adapter.acknowledge() else {
+            return;
+        };
+        match sign.begin(&at).await {
+            Ok(mark) => self.working = Some((at, mark)),
+            Err(error) => {
+                tracing::warn!(%error, key = %self.key, "the chat could not say it was working");
+            }
+        }
+    }
+
+    /// The sign comes off however the turn went. A platform that will not
+    /// take it off has not failed the turn and has not lost the answer, so it
+    /// costs a warning and nothing else.
+    async fn ended(&mut self, failed: bool) {
+        let Some((at, mark)) = self.working.take() else {
+            return;
+        };
+        let adapter = Arc::clone(&self.adapter);
+        let Some(sign) = adapter.acknowledge() else {
+            return;
+        };
+        let outcome = match failed {
+            true => Outcome::Failed,
+            false => Outcome::Done,
+        };
+        if let Err(error) = sign.end(&at, mark, outcome).await {
+            tracing::warn!(%error, key = %self.key, "the chat kept the sign it was working");
         }
     }
 
@@ -336,7 +391,7 @@ impl Runner {
         post(
             Arc::clone(&self.adapter),
             self.conversation.clone(),
-            self.parent.clone(),
+            self.directory.parent(&self.root),
             text.to_string(),
             mode,
         )
@@ -351,7 +406,7 @@ impl Runner {
                 parent,
                 ..
             } => {
-                self.parent = parent;
+                self.directory.under(&self.root, parent);
                 self.said(&principal, text, images).await;
             }
             Incoming::Click {
@@ -365,19 +420,22 @@ impl Runner {
     async fn said(&mut self, principal: &str, text: String, images: Vec<Image>) {
         match self.answering(&text) {
             Some((id, answer)) => self.settles(id, answer).await,
-            None => self.handle.submit(
-                IntentId::mint(),
-                Input::Text {
-                    text,
-                    images,
-                    origin: Origin {
-                        surface: SURFACE_ID.into(),
-                        principal: Some(principal.to_string()),
-                        conversation: Some(self.key.clone()),
+            None => {
+                self.handle.submit(
+                    IntentId::mint(),
+                    Input::Text {
+                        text,
+                        images,
+                        origin: Origin {
+                            surface: SURFACE_ID.into(),
+                            principal: Some(principal.to_string()),
+                            conversation: Some(self.key.clone()),
+                        },
+                        delivery: Delivery::Wake,
                     },
-                    delivery: Delivery::Wake,
-                },
-            ),
+                );
+                self.acknowledge().await;
+            }
         }
     }
 
@@ -464,7 +522,9 @@ async fn attach(
         surface: SURFACE_ID.to_string(),
     };
     // The whole tree: a sub-agent's permission prompt reaches a person only
-    // through the attachment that can see it (ADR-0010 §3).
+    // through the attachment that can see it (ADR-0010 §3). Its forwarder
+    // heals a lag itself and back-pressures rather than dropping frames, so
+    // no `Lagged` marker reaches this stream.
     let options = OpenOptions::with_children();
     match host
         .open(

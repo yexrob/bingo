@@ -90,7 +90,9 @@ pub fn parse(file: &str, text: &str) -> Result<Memory, Malformed> {
 }
 
 /// The bytes a memory is kept as. Printing what was parsed gives the same
-/// bytes back, so a file this writes is a file this reads.
+/// bytes back, so the fixture a test writes is a file the parser reads; the
+/// model writes its own with `Write`, which is why nothing else prints one.
+#[cfg(test)]
 pub fn print(memory: &Memory) -> String {
     let Memory {
         name,
@@ -180,54 +182,6 @@ fn unquote(text: &str) -> &str {
         }
     }
     text
-}
-
-/// Words a slug may hold, and bytes it may spend. A file name is read by a
-/// person scanning a directory, so it is short enough to scan.
-const SLUG_WORDS: usize = 8;
-const SLUG_BYTES: usize = 48;
-
-/// A file name for a fact: its first words, lowercased and hyphenated.
-/// `None` when the fact holds nothing a name may keep.
-pub fn slug(fact: &str) -> Option<String> {
-    let joined = words(fact);
-    let name = joined[..cut_at(&joined, SLUG_BYTES)].trim_end_matches('-');
-    (!name.is_empty()).then(|| unreserved(name))
-}
-
-fn words(fact: &str) -> String {
-    fact.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .take(SLUG_WORDS)
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
-/// The longest prefix of at most `max` bytes that ends on a character.
-fn cut_at(text: &str, max: usize) -> usize {
-    let mut cut = max.min(text.len());
-    while cut > 0 && !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    cut
-}
-
-/// A name something else has already claimed, given a suffix: `MEMORY.md` is
-/// the index, and Windows keeps `con`, `nul` and the ports whatever extension
-/// they wear.
-fn unreserved(name: &str) -> String {
-    if ["memory", "con", "prn", "aux", "nul"].contains(&name) || is_port(name) {
-        return format!("{name}-note");
-    }
-    name.to_string()
-}
-
-fn is_port(name: &str) -> bool {
-    let Some((head, digit)) = name.split_at_checked(3) else {
-        return false;
-    };
-    matches!(head, "com" | "lpt") && matches!(digit.as_bytes(), [b'1'..=b'9'])
 }
 
 #[cfg(test)]
@@ -371,33 +325,5 @@ type: project
         let memory = parse("a-fact", text).expect("a memory");
         assert_eq!(memory.description, "one line");
         assert_eq!(memory.body, "x\n");
-    }
-
-    #[test]
-    fn a_slug_is_the_first_words_of_the_fact() {
-        assert_eq!(
-            slug("The build runs `cargo test`."),
-            Some("the-build-runs-cargo-test".into())
-        );
-        assert_eq!(slug("  "), None);
-        assert_eq!(slug("!!! ???"), None);
-    }
-
-    #[test]
-    fn a_slug_is_short_enough_to_scan() {
-        let long = slug("one two three four five six seven eight nine ten").expect("a slug");
-        assert_eq!(long, "one-two-three-four-five-six-seven-eight");
-        let wide = slug(&"x".repeat(200)).expect("a slug");
-        assert_eq!(wide.len(), SLUG_BYTES);
-        assert!(!wide.ends_with('-'));
-    }
-
-    #[test]
-    fn a_name_the_index_or_windows_has_claimed_is_moved_aside() {
-        assert_eq!(slug("Memory"), Some("memory-note".into()));
-        assert_eq!(slug("NUL"), Some("nul-note".into()));
-        assert_eq!(slug("com1"), Some("com1-note".into()));
-        assert_eq!(slug("com10"), Some("com10".into()), "only the nine ports");
-        assert_eq!(slug("memory of a turn"), Some("memory-of-a-turn".into()));
     }
 }

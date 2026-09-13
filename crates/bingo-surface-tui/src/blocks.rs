@@ -216,13 +216,18 @@ struct Segment<'a> {
 #[derive(Default)]
 pub struct Blocks {
     width: usize,
+    /// The measure prose was wrapped to inside that width (`tui.measure`,
+    /// design §7). It is beside the width because it is the other half of the
+    /// geometry a block is a rendering of, and neither half is on the item.
+    measure: Option<usize>,
     /// The welcome box, on a session this surface opened; it belongs to no item.
     head: Vec<Line<'static>>,
     blocks: Vec<Entry>,
     /// The transcript's height in wrapped lines, counted while the blocks are
     /// brought up to date rather than walked for again.
     height: usize,
-    /// The failed turn's line, which belongs to no item.
+    /// What closes the last turn — its failure, its cost — which belongs to
+    /// no item.
     tail: Vec<Line<'static>>,
     /// The live cards, where there is no rail to put them in (ADR-0013 §2):
     /// they belong to no item either, and they sit under the running rows.
@@ -245,10 +250,7 @@ impl Blocks {
         rows: &Rows<'_>,
         live: Vec<Line<'static>>,
     ) -> usize {
-        if self.width != rows.width {
-            self.blocks.clear();
-            self.width = rows.width;
-        }
+        self.relaid(rows);
         let boxed = welcome::lines(state, rows.width, rows.update);
         // The opening plays in the welcome box's place and lands on it, so while
         // it runs the box *is* the frame (M70, M72; design §11).
@@ -263,11 +265,23 @@ impl Blocks {
         }
         // Whatever is left behind the last item was rewound away.
         self.blocks.truncate(kept);
-        self.tail = transcript::failure(state, rows);
+        self.tail = transcript::closing(state, rows);
         self.live = live;
         self.moving = self.still_moving(rows.now);
         self.height = self.measure();
         self.height
+    }
+
+    /// Drop every block the frame is no longer laid out for. A block is a
+    /// rendering at one geometry, and the geometry is both numbers: the width
+    /// of the region and the measure prose is wrapped to inside it.
+    fn relaid(&mut self, rows: &Rows<'_>) {
+        if self.width == rows.width && self.measure == rows.measure {
+            return;
+        }
+        self.blocks.clear();
+        self.width = rows.width;
+        self.measure = rows.measure;
     }
 
     /// Whether any block would draw differently on the next frame, as of this
@@ -836,8 +850,14 @@ mod tests {
             .clone(),
         ]);
         let mut with_failure = state.clone();
-        with_failure.last_turn = Some(bingo_sdk::TurnStatus::Failed {
-            error: bingo_sdk::KernelError::new(bingo_sdk::ErrorCode::Internal, "boom"),
+        with_failure.last_turn = Some(bingo_sdk::LastTurn {
+            id: bingo_sdk::TurnId::from_raw("trn_1"),
+            status: bingo_sdk::TurnStatus::Failed {
+                error: bingo_sdk::KernelError::new(bingo_sdk::ErrorCode::Internal, "boom"),
+            },
+            started_at: ts(),
+            ended_at: ts(),
+            usage: Default::default(),
         });
         let mut blocks = cache();
         let plain = sync(&mut blocks, &state, 60);

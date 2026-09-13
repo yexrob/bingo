@@ -518,12 +518,11 @@ fn picker(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
 /// A run owns the keyboard while it is being drawn: the arrows take its far
 /// end, `y` and `ctrl+c` copy it, anything else lets it go and is typed.
 fn selecting(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    let height = ui.transcript().0;
     match key.code {
-        KeyCode::Up => ui.select.walk(-1, 0, height),
-        KeyCode::Down => ui.select.walk(1, 0, height),
-        KeyCode::Left => ui.select.walk(0, -1, height),
-        KeyCode::Right => ui.select.walk(0, 1, height),
+        KeyCode::Up => walk_run(ui, -1, 0, now),
+        KeyCode::Down => walk_run(ui, 1, 0, now),
+        KeyCode::Left => walk_run(ui, 0, -1, now),
+        KeyCode::Right => walk_run(ui, 0, 1, now),
         KeyCode::Char('y') | KeyCode::Char('c') => return copy(ui),
         KeyCode::Esc => ui.select.clear(),
         _ => {
@@ -534,8 +533,22 @@ fn selecting(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     Vec::new()
 }
 
+/// Take the far end of the run where the key points, and bring the view after
+/// it. A run's cells are lines of the whole transcript rather than of the
+/// screenful it is parked on (§3), so the arrows reach what has scrolled away
+/// — and what a person is choosing has to stay in front of them.
+fn walk_run(ui: &mut Ui, lines: isize, columns: isize, now: Now) {
+    let (height, rows) = ui.transcript();
+    ui.select.walk(lines, columns, height);
+    let Some(head) = ui.select.run.map(|run| run.head) else {
+        return;
+    };
+    ui.scroll.reveal(head.line, height, rows, now.instant);
+}
+
 /// Take what is inside the run, and let it go: a selection is answered once.
-fn copy(ui: &mut Ui) -> Vec<Effect> {
+/// One road, whether a key asked or a button was released ([`crate::pointer`]).
+pub fn copy(ui: &mut Ui) -> Vec<Effect> {
     let text = ui
         .select
         .run
@@ -796,10 +809,11 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now, delivery: Delivery) -> Vec<Effect>
         })],
         Some(Local::Resume(None)) => vec![Effect::ListSessions],
         Some(Local::Exit) => vec![Effect::Exit],
-        // The pasted pictures the line still names go beside it; the ones it
-        // mentions by path are read by the loop, which knows the directory.
+        // The pictures — the tokens the line still names and the `@word`s
+        // in it — are files, read by the loop, which knows the directory and
+        // what is held (`run::submit`).
         None => vec![Effect::Submit(Input::Text {
-            images: ui.pictures.carried(&text),
+            images: Vec::new(),
             text,
             origin: Origin::surface(SURFACE_ID),
             delivery,
@@ -975,26 +989,22 @@ mod tests {
         assert!(ui.composer.is_empty());
     }
 
-    /// The tokens still in the line at `⏎` say which held pictures go, in
-    /// the line's order; a deleted token's picture stays behind.
+    /// The line goes as typed, tokens and all, and carries no picture of its
+    /// own: every picture it names is a file the loop reads on its way out
+    /// (`run::submit`, ADR-0052), so `⏎` here is words alone.
     #[test]
-    fn a_pasted_picture_goes_beside_the_line_that_still_names_it() {
+    fn a_line_with_tokens_goes_as_typed_and_its_pictures_are_read_later() {
         let (mut ui, now) = scene();
         let tree = solo(&state());
-        let first = bingo_sdk::Image::from_bytes("image/png", b"one").unwrap();
-        let second = bingo_sdk::Image::from_bytes("image/png", b"two").unwrap();
-        let n = ui.pictures.hold("", first);
-        ui.composer
-            .insert(&format!("see {} ", crate::pictures::placeholder(n)));
-        let n = ui.pictures.hold(ui.composer.text(), second.clone());
-        ui.composer.insert(&crate::pictures::placeholder(n));
-        ui.composer.set("see [image 2]");
+        ui.pictures
+            .hold("", std::path::PathBuf::from("/pasted/one.png"));
+        ui.composer.set("see [image 1]");
         let effects = on_key(&mut ui, &tree, key(KeyCode::Enter), now);
         assert_eq!(
             effects,
             vec![Effect::Submit(Input::Text {
-                text: "see [image 2]".into(),
-                images: vec![second],
+                text: "see [image 1]".into(),
+                images: Vec::new(),
                 origin: Origin::surface(SURFACE_ID),
                 delivery: Delivery::Wake,
             })],
@@ -2272,6 +2282,85 @@ mod tests {
         assert!(ui.select.run.is_none(), "copying lets it go");
     }
 
+    /// A page back, settled, so a run started at the top of the screen has
+    /// transcript on either side of it.
+    fn reading_back(state: &SessionState) -> (Ui, Now) {
+        let (mut ui, now) = scene();
+        render(state, &ui, now);
+        press(&mut ui, state, key(KeyCode::PageUp), now);
+        let now = settled_at(now);
+        render(state, &ui, now);
+        (ui, now)
+    }
+
+    /// The frame after an ease has run out: what the screen shows once the
+    /// transcript has arrived where a key sent it.
+    fn settled_at(now: Now) -> Now {
+        later(now, crate::scroll::EASE.as_millis() as i64)
+    }
+
+    /// The arrows reach the whole transcript, so the view goes with them: a
+    /// far end walked one line past the last row on the screen brings that
+    /// line onto it, and nothing else moves.
+    #[test]
+    fn walking_the_far_end_off_the_screen_brings_the_view_after_it() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let (_, rows) = ui.transcript();
+        let top = ui.painted.borrow().top;
+        press(&mut ui, &state, typed('v'), now);
+        assert_eq!(
+            ui.select.run.map(|run| run.head.line),
+            Some(top),
+            "a run starts at the first line on the screen"
+        );
+        for _ in 0..rows {
+            press(&mut ui, &state, key(KeyCode::Down), now);
+        }
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        let painted = ui.painted.borrow();
+        assert_eq!(painted.top, top + 1, "one line, and only one");
+        assert_eq!(
+            painted.row_of(top + rows),
+            u16::try_from(rows - 1).ok(),
+            "the far end is on the last row of the screen"
+        );
+    }
+
+    #[test]
+    fn walking_it_off_the_top_brings_the_view_back_up() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let top = ui.painted.borrow().top;
+        assert!(top > 0, "there is transcript above the screen");
+        press(&mut ui, &state, typed('v'), now);
+        press(&mut ui, &state, key(KeyCode::Up), now);
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        let painted = ui.painted.borrow();
+        assert_eq!(painted.top, top - 1);
+        assert_eq!(
+            painted.row_of(top - 1),
+            Some(0),
+            "the far end is on the first row of the screen"
+        );
+    }
+
+    /// Sideways is not a reason to move: a view that jumped on every `→`
+    /// would chase a column the screen already shows.
+    #[test]
+    fn walking_the_far_end_across_a_line_moves_nothing() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let top = ui.painted.borrow().top;
+        press(&mut ui, &state, typed('v'), now);
+        press(&mut ui, &state, key(KeyCode::Right), now);
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        assert_eq!(ui.painted.borrow().top, top);
+    }
+
     #[test]
     fn a_letter_ends_a_run_and_is_typed() {
         let state = long_transcript(60);
@@ -2303,6 +2392,22 @@ mod tests {
         press(&mut ui, &state, typed('v'), now);
         assert!(press(&mut ui, &state, key(KeyCode::Esc), now).is_empty());
         assert!(ui.select.run.is_none());
+    }
+
+    /// A hand still out past the edge is let go with the run it was drawing:
+    /// nothing walks the view afterwards.
+    #[test]
+    fn esc_lets_go_of_a_hand_held_past_the_edge() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let foot = below_the_transcript(&ui, 1);
+        on_mouse(&mut ui, &tree, click(2, 4), now);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        assert!(ui.select.dragging.is_some());
+        press(&mut ui, &state, key(KeyCode::Esc), now);
+        assert!(ui.select.run.is_none(), "esc lets it go");
+        assert!(ui.select.dragging.is_none(), "and the hand with it");
     }
 
     // ---- the mouse ------------------------------------------------------
@@ -2679,6 +2784,211 @@ mod tests {
         }
     }
 
+    // ---- the selection follows the hand (M92) -----------------------------
+
+    /// The rows of the transcript region as the last frame cut them.
+    fn region(ui: &Ui) -> ratatui::layout::Rect {
+        ui.painted.borrow().regions.transcript
+    }
+
+    /// A screen row `past` rows below the last one the transcript was drawn
+    /// on: the activity row, the input box, the status line.
+    fn below_the_transcript(ui: &Ui, past: u16) -> u16 {
+        let region = region(ui);
+        region.y + region.height + past - 1
+    }
+
+    /// A drag past the foot takes the view with it, by as many lines as the
+    /// pointer is rows past the region, and the run reaches the line that is
+    /// now drawn there.
+    #[test]
+    fn a_drag_below_the_transcript_scrolls_by_the_overshoot() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let (_, rows) = ui.transcript();
+        let top = ui.painted.borrow().top;
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 3);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        assert_eq!(
+            ui.select.run.map(|run| run.head.line),
+            Some(top + 3 + rows - 1),
+            "the run reaches the line now drawn at the foot"
+        );
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        assert_eq!(
+            ui.painted.borrow().top,
+            top + 3,
+            "three rows past, three lines"
+        );
+        assert!(ui.select.dragging.is_some(), "the hand is still out there");
+    }
+
+    /// Back inside the region, the run reaches the cell under the pointer and
+    /// the view stops walking.
+    #[test]
+    fn a_drag_back_inside_the_transcript_stops_the_walk() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 2);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        assert!(ui.select.dragging.is_some());
+        on_mouse(&mut ui, &tree, dragged(6, 5), now);
+        assert!(ui.select.dragging.is_none(), "the hand came back");
+        let top = ui.painted.borrow().top;
+        ui.drag_step(later(now, 500));
+        assert_eq!(ui.painted.borrow().top, top, "and nothing walks without it");
+    }
+
+    /// A hand that stays out there takes a line every [`crate::select::
+    /// EDGE_PACE`], measured from the last one it took — the loop asks on
+    /// every frame, and the frames are shorter than the pace.
+    #[test]
+    fn a_hand_held_past_the_foot_takes_a_line_every_pace() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 1);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        let reached = |ui: &Ui| ui.select.run.map(|run| run.head.line);
+        let head = reached(&ui);
+        ui.drag_step(later(now, 49));
+        assert_eq!(reached(&ui), head, "not yet");
+        ui.drag_step(later(now, 50));
+        assert_eq!(reached(&ui), head.map(|line| line + 1), "a line");
+        ui.drag_step(later(now, 60));
+        assert_eq!(reached(&ui), head.map(|line| line + 1), "and one at a time");
+        ui.drag_step(later(now, 100));
+        assert_eq!(reached(&ui), head.map(|line| line + 2));
+    }
+
+    /// It stops at the transcript's own last line: a hand may go on holding,
+    /// and the frames another step would cost are not owed.
+    #[test]
+    fn a_walk_past_the_foot_stops_at_the_last_line() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let (height, _) = ui.transcript();
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        let foot = below_the_transcript(&ui, 1);
+        on_mouse(&mut ui, &tree, dragged(4, foot), now);
+        for step in 1..=height {
+            ui.drag_step(later(now, 50 * step as i64));
+        }
+        assert_eq!(ui.select.run.map(|run| run.head.line), Some(height - 1));
+        assert!(ui.select.dragging.is_none(), "there is nothing further");
+    }
+
+    /// The first row of the transcript is as far up as a terminal can report:
+    /// a hand resting there walks the view back up a line at a time, and stops
+    /// at the transcript's first line.
+    #[test]
+    fn a_hand_held_at_the_top_walks_the_view_back_up() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let top = ui.painted.borrow().top;
+        assert!(top > 0, "there is transcript above the screen");
+        let head_row = region(&ui).y;
+        on_mouse(&mut ui, &tree, click(4, 3), now);
+        on_mouse(&mut ui, &tree, dragged(4, head_row), now);
+        assert_eq!(
+            ui.select.run.map(|run| run.head.line),
+            Some(top),
+            "the run reaches the first line on the screen, and the view holds"
+        );
+        ui.drag_step(later(now, 50));
+        assert_eq!(ui.select.run.map(|run| run.head.line), Some(top - 1));
+        for step in 2..=top + 1 {
+            ui.drag_step(later(now, 50 * step as i64));
+        }
+        assert_eq!(ui.select.run.map(|run| run.head.line), Some(0));
+        assert!(ui.select.dragging.is_none(), "there is nothing further");
+    }
+
+    /// Releasing the button is the copy: what the hand drew goes to the
+    /// terminal's clipboard, the run is let go, and the notice says how much.
+    #[test]
+    fn releasing_a_drag_copies_what_it_reached_and_says_how_much() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        let (_, rows) = ui.transcript();
+        let top = ui.painted.borrow().top;
+        // Three rows past the foot, so three lines the screen was not showing
+        // join the run; the first of them with anything on it is the proof.
+        let hidden = ui
+            .transcript_text()
+            .get(top + rows..top + rows + 3)
+            .unwrap_or_default()
+            .iter()
+            .map(|line| line.trim_end().to_string())
+            .find(|line| !line.is_empty())
+            .expect("a line below the screen at the press");
+        let head_row = region(&ui).y;
+        let foot = below_the_transcript(&ui, 3);
+        on_mouse(&mut ui, &tree, click(0, head_row), now);
+        on_mouse(&mut ui, &tree, dragged(40, foot), now);
+        let copied = on_mouse(&mut ui, &tree, released(40, foot), now);
+        let [Effect::Copy(text)] = copied.as_slice() else {
+            panic!("releasing copies: {copied:?}")
+        };
+        assert!(
+            text.contains(&hidden),
+            "the run reached what the screen had not: {hidden:?} in {text:?}"
+        );
+        assert!(ui.select.run.is_none(), "copying lets it go");
+        assert!(ui.select.dragging.is_none());
+        assert_eq!(
+            ui.notice().map(|notice| notice.text.clone()),
+            Some(format!("copied {} lines", rows + 3))
+        );
+    }
+
+    /// A press and a release on one cell is a click, and a click means what it
+    /// has always meant: the block takes the focus and its fold goes round.
+    #[test]
+    fn a_press_and_a_release_on_one_cell_is_still_a_click() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(4, 5), now);
+        let folded = ui.folds.len();
+        let copied = on_mouse(&mut ui, &tree, released(4, 5), now);
+        assert!(copied.is_empty(), "a click copies nothing: {copied:?}");
+        assert!(ui.notice().is_none(), "and says nothing");
+        assert!(ui.select.block.is_some(), "the block is still focused");
+        assert_eq!(
+            ui.folds.len(),
+            folded,
+            "and the fold the press cycled stands"
+        );
+    }
+
+    /// The wheel is a second hand: it moves the view under a run being drawn
+    /// and the run stays where the first hand put it.
+    #[test]
+    fn the_wheel_scrolls_under_a_run_and_keeps_it() {
+        let state = long_transcript(60);
+        let (mut ui, now) = reading_back(&state);
+        let tree = solo(&state);
+        on_mouse(&mut ui, &tree, click(2, 4), now);
+        on_mouse(&mut ui, &tree, dragged(6, 6), now);
+        let run = ui.select.run;
+        let top = ui.painted.borrow().top;
+        on_mouse(&mut ui, &tree, wheel(true, 6, 6), now);
+        let now = settled_at(now);
+        render(&state, &ui, now);
+        assert_eq!(ui.painted.borrow().top, top - WHEEL as usize);
+        assert_eq!(ui.select.run, run, "the run is the hand's, not the wheel's");
+    }
+
     #[test]
     fn a_click_on_a_child_row_steps_into_it() {
         let tree = folded_tree(vec![
@@ -2807,8 +3117,7 @@ mod tests {
     fn a_click_on_a_strips_thumbnail_opens_it() {
         let state = state();
         let (mut ui, now) = scene();
-        let token = ui.pictures.hold("", bingo_pictures::testing::png(100, 100));
-        ui.composer.insert(&crate::pictures::placeholder(token));
+        let token = crate::test_support::drafted(&mut ui, bingo_pictures::testing::png(100, 100));
         crate::graphics::with(crate::graphics::drawing(), || {
             let screen = render(&state, &ui, now);
             let row = cells_row(&screen);

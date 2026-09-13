@@ -18,12 +18,19 @@ ws = set(members)
 # sdk and on other libraries (ADR-0042 §2 — cargo itself refuses a cycle), and any plugin
 # may depend on it.
 libraries = {n for n in ws if (members[n].get("metadata") or {}).get("bingo", {}).get("tier") == "library"}
-plugins = {n for n in ws if n not in ("bingo", "bingo-sdk", "bingo-core") and n not in libraries}
+# A composition (ADR-0020, amended 2026-09-07) is a piece of the binary that
+# was moved out of it: it may depend on whatever the binary may, and only the
+# binary may depend on it.
+compositions = {n for n in ws if (members[n].get("metadata") or {}).get("bingo", {}).get("tier") == "composition"}
+plugins = {n for n in ws if n not in ("bingo", "bingo-sdk", "bingo-core") and n not in libraries and n not in compositions}
 bad = []
 for n in libraries:
     for d in deps(n) & ws:
         if d != "bingo-sdk" and d not in libraries:
             bad.append(f"{n} -> {d} (a library depends on bingo-sdk and other libraries only)")
+for n in ws - {"bingo"} - compositions:
+    for d in deps(n) & compositions:
+        bad.append(f"{n} -> {d} (a composition is the binary's own; only bingo may depend on it)")
 for n in plugins:
     for d in deps(n) & ws:
         if d == "bingo-core":
@@ -85,7 +92,7 @@ python3 - <<'PY' || fail=1
 import re, sys, pathlib
 # Names that are only ever a tool's, anywhere; names that are also words (Read, Write, Edit)
 # only quoted or backticked as a whole token.
-names = r"\b(SpawnAgent|SendMessage|WaitAgent|ListAgents|ListModels|Listen|TaskCreate|TaskUpdate|TaskGet|TaskList|AskUserQuestion|WebFetch|WebSearch|Bash|Glob|Grep|Skill)\b|[`\"](Read|Write|Edit)[`\"]"
+names = r"\b(SpawnAgent|SendMessage|ListAgents|ListModels|Listen|Seat|Unseat|CloseRoom|TaskCreate|TaskUpdate|TaskGet|TaskList|AskUserQuestion|WebFetch|WebSearch|Bash|Glob|Grep|Skill)\b|[`\"](Read|Write|Edit)[`\"]"
 bad = []
 for f in list(pathlib.Path("crates/bingo-sdk/src").rglob("*.rs")) + list(pathlib.Path("crates/bingo-core/src").rglob("*.rs")):
     if "test" in f.name or "tests" in f.parts:
@@ -173,5 +180,17 @@ for f in sorted(pathlib.Path("crates").rglob("*.rs")):
             print(f"warn {f}:{start} fn {name} is {n} lines (>{WARN})")
 sys.exit(1 if bad else 0)
 PY
+
+# 7. Record length (CLAUDE.md, Records): a plan warns above 150 lines, an ADR above 120.
+#    A warning, never a failure — the records already written are history, and history is
+#    not rewritten to satisfy a check added after it.
+long_records() { # directory, name glob, limit
+  while IFS= read -r f; do
+    n=$(awk 'END{print NR}' "$f")
+    if [ "$n" -gt "$3" ]; then say "warn $f: $n lines (>$3)"; fi
+  done < <(find "$1" -name "$2" | sort)
+}
+long_records docs/plans 'M*.md' 150
+long_records docs/adr '0*.md' 120
 
 [ "$fail" -eq 0 ] && say "discipline ok" || { say "discipline FAILED"; exit 1; }

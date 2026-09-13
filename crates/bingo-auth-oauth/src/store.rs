@@ -32,6 +32,31 @@ pub enum Entry {
     },
     #[serde(rename = "api")]
     Api { key: String },
+    /// One MCP server's sign-in, under the key `mcp:<server name>` (ADR-0050
+    /// §2). The registration and the tokens are one fact about one server:
+    /// the client bingo registered is only usable against the issuer it was
+    /// registered with, and only through the redirect URI it named, so a
+    /// discovery that yields a different issuer drops this whole entry.
+    #[serde(rename = "mcpOauth", rename_all = "camelCase")]
+    McpOAuth {
+        issuer: String,
+        client_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_secret: Option<String>,
+        redirect_uri: String,
+        access: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh: Option<String>,
+        /// Unix seconds; `0` when the issuer said nothing.
+        expires: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+}
+
+/// The store key one MCP server's credential lives under.
+pub fn mcp_key(server: &str) -> String {
+    format!("mcp:{server}")
 }
 
 /// Read-modify-write over the whole file. bingo is one process per user, so
@@ -235,6 +260,72 @@ mod tests {
                 "openai": { "type": "api", "key": "sk-1" },
             })
         );
+    }
+
+    /// ADR-0050 §2's shape, pinned as JSON: this file is read back by later
+    /// runs and by a person, so a renamed field fails here and not against a
+    /// server that then asks for a fresh sign-in nobody understands.
+    #[test]
+    fn an_mcp_entry_is_written_under_its_server_in_the_shape_the_adr_names() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let store = store(&directory);
+        store
+            .write(
+                &mcp_key("binlesson"),
+                Entry::McpOAuth {
+                    issuer: "https://as.example.com".into(),
+                    client_id: "cl_1".into(),
+                    client_secret: None,
+                    redirect_uri: "http://localhost:1455/auth/callback".into(),
+                    access: "at_1".into(),
+                    refresh: Some("rt_1".into()),
+                    expires: 1_786_000_000,
+                    scope: Some("mcp:tools".into()),
+                },
+            )
+            .expect("a write");
+        let raw = std::fs::read_to_string(store.path()).expect("the file");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw).expect("json"),
+            json!({
+                "mcp:binlesson": {
+                    "type": "mcpOauth",
+                    "issuer": "https://as.example.com",
+                    "clientId": "cl_1",
+                    "redirectUri": "http://localhost:1455/auth/callback",
+                    "access": "at_1",
+                    "refresh": "rt_1",
+                    "expires": 1_786_000_000,
+                    "scope": "mcp:tools",
+                }
+            })
+        );
+    }
+
+    /// A public client has no secret, an issuer may grant no refresh token
+    /// and may name no scope: none of the three is written as a null.
+    #[test]
+    fn what_the_server_never_gave_is_absent_rather_than_empty() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let store = store(&directory);
+        let entry = Entry::McpOAuth {
+            issuer: "https://as.example.com".into(),
+            client_id: "cl_1".into(),
+            client_secret: None,
+            redirect_uri: "http://127.0.0.1:1455/auth/callback".into(),
+            access: "at_1".into(),
+            refresh: None,
+            expires: 0,
+            scope: None,
+        };
+        store
+            .write(&mcp_key("plain"), entry.clone())
+            .expect("write");
+        let raw = std::fs::read_to_string(store.path()).expect("the file");
+        for absent in ["clientSecret", "refresh", "scope"] {
+            assert!(!raw.contains(absent), "{absent} is in {raw}");
+        }
+        assert_eq!(store.read(&mcp_key("plain")).expect("a read"), Some(entry));
     }
 
     #[test]

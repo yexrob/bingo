@@ -38,13 +38,6 @@ spent, stop — say what you found and set no further wake.
 
 The person sees the wake that stands and can end it at any time.";
 
-/// What settings say when wakes are off. Nothing is written, and the model is
-/// told whose decision it was rather than left guessing at a failure.
-const OFF: &str = "\
-Wakes are off here: `schedule.wakes` is false in this person's settings. \
-Finish what you can in this turn and say what is left, or ask them to turn \
-wakes on.";
-
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct Ask {
@@ -102,13 +95,11 @@ impl Ask {
 #[derive(Debug)]
 pub struct WakeTool {
     schedules: Arc<Schedules>,
-    /// `schedule.wakes`: a person may have none of this (ADR-0019 §8).
-    wakes: bool,
 }
 
 impl WakeTool {
-    pub fn new(schedules: Arc<Schedules>, wakes: bool) -> Self {
-        Self { schedules, wakes }
+    pub fn new(schedules: Arc<Schedules>) -> Self {
+        Self { schedules }
     }
 
     /// A wake takes the place of the one that stood. It is this process's
@@ -204,9 +195,6 @@ impl Tool for WakeTool {
     }
 
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        if !self.wakes {
-            return Ok(ToolOutput::error(OFF));
-        }
         let args: Ask =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         let wanted = match args.wanted() {
@@ -228,7 +216,7 @@ mod tests {
     use serde_json::json;
 
     fn tool(fixture: &Fixture) -> WakeTool {
-        WakeTool::new(fixture.schedules.clone(), true)
+        WakeTool::new(fixture.schedules.clone())
     }
 
     async fn wake_call(fixture: &Fixture, input: Value) -> ToolOutput {
@@ -361,24 +349,6 @@ mod tests {
                 .pending(&fixture.context().session),
             None,
             "nothing was set"
-        );
-    }
-
-    #[tokio::test]
-    async fn wakes_a_person_turned_off_are_refused_and_nothing_is_written() {
-        let fixture = Fixture::new();
-        let out = WakeTool::new(fixture.schedules.clone(), false)
-            .call(json!({"after": "5m", "note": "no"}), &fixture.context())
-            .await
-            .expect("an answer");
-        assert!(out.is_error);
-        assert!(text(&out).contains("schedule.wakes"), "{}", text(&out));
-        assert_eq!(
-            fixture
-                .schedules
-                .wakes()
-                .pending(&fixture.context().session),
-            None
         );
     }
 

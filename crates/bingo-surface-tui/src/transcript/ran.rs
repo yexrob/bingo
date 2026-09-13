@@ -42,7 +42,7 @@ fn typed(command: &str, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let mark = Span::styled(format!("{PROMPT} "), theme::dim());
     let body = vec![Line::from(Span::styled(command.to_string(), theme::text()))];
     said::barred(
-        under(mark, body, speaks_indent(), rows.measure()),
+        under(mark, body, speaks_indent(), rows.measured()),
         rows.width,
     )
 }

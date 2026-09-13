@@ -8,26 +8,46 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │                               · permission gate · tool executor · plugin host · ContextUsage ruler
 │                               · ContextView::fold (journal → provider messages)
 ├── plugins (each its own crate, depends on bingo-sdk and the libraries only)
-│   providers   bingo-provider-fake · -anthropic · -openai (openai + codex) · -acp (an agent as a model)
+│   providers   bingo-provider-fake · -anthropic · -openai (openai + codex)
+│               bingo-provider-acp          an external agent answers as a model (ADR-0035); its
+│                                           bridge is how that agent reaches this run's shared
+│                                           tools, as MCP (ADR-0036)
 │   tools       bingo-tool-fs · bingo-tool-bash · bingo-tool-web · bingo-mcp · bingo-agents
+│   bridge      bingo-plugin-rpc            a `plugin.json` spawns a process; its tools, commands,
+│                                           contributors, compactors, providers and hooks are this
+│                                           tree's own types as JSON-RPC over its stdio (ADR-0015)
 │   policy      bingo-permissions · bingo-hooks-shell
 │   session     bingo-store-jsonl (journal + index) · bingo-context (compactor + memory)
 │               bingo-checkpoints (a file's bytes before the turn that changed them · /rewind)
 │   features    bingo-skills · bingo-rooms · bingo-tasks · bingo-experience · bingo-schedule   (a team is resident agents: bingo-agents)
-│   surfaces    bingo-surface-print · bingo-surface-rpc · bingo-surface-tui · bingo-acp · bingo-channels
+│   surfaces    bingo-surface-print · bingo-surface-rpc · bingo-surface-tui · bingo-channels
 │   demo        bingo-demo-ui               off unless `--demo-ui`: the worked example of ADR-0013's
 │                                           three lanes, and what a plugin author reads first
+├── compositions (`tier = "composition"`: the binary's own, moved out of it; only bingo depends
+│                on one, ADR-0020)
+│   bingo-gateway               one resident bingo per data dir, managed like a service: the
+│                               verbs, the pidfile, the log sink, the unit file, the doctor.
+│                               The bin keeps only the host that `gateway run` holds (ADR-0020)
 ├── libraries (`tier = "library"`: register nothing, depend on bingo-sdk and each other, ADR-0042 §2)
 │   bingo-auth-oauth            PKCE redirect · device code · auth.json · single-flight refresh (ADR-0012)
+│                               · the resource-server side: a `401`'s challenge, RFC 9728/8414 discovery,
+│                                 RFC 7591 registration, and one MCP server's sign-in (ADR-0050)
 │   bingo-loopback              a port on 127.0.0.1 · one request at a time · the page a tool holds open
 │                               until the person answers it · the browser opener (ADR-0042)
 │   bingo-pictures              a picture as pixels: whatever a decoder reads, as the PNG a terminal
 │                               takes and the type a provider accepts · a path or a URL this machine
 │                               fetches · the one place that knows a decoder (ADR-0041)
+│   bingo-update                whether a newer release is out, and the two renames that replace
+│                               this binary · the one place an archive's name is spelled (ADR-0043)
 └── bingo-sdk                   stable API: ids · Message/ContentPart · Frame/Event/Item · SessionState + apply
                                 · traits (Plugin, Provider, Tool, PermissionPolicy, Hook, ContextContributor,
                                   Command, Surface, SessionStore, Compactor) · HostApi · Service registry · testing fakes
 ```
+
+There is no ACP surface: bingo speaks ACP as a client, never as an agent. The four `Surface`
+impls are print, rpc, tui and channels; what ACP there is lives in `bingo-provider-acp` and in
+`crates/bingo/src/acp_proxy.rs`, the hidden `acp-mcp-proxy` mode an agent spawns to reach the
+bridge (ADR-0036 §3).
 
 Dependency direction is strictly downward; the forbidden edges are listed in ADR-0001 and asserted by `scripts/check_discipline.sh`.
 

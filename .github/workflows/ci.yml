@@ -54,12 +54,21 @@ jobs:
       - run: scripts/tui-smoke.sh
   windows:
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Blocking. "Every platform the release ships" is a rule about building,
+      # and a Windows build breaking is the build breaking: a unix-only API
+      # written without its counterpart fails here and nowhere else.
+      - run: cargo check --workspace --all-targets --locked
+      # The one step here that is not blocking. Every command a shell runs
+      # still goes to a shell resolved as `/bin/bash` or `/bin/sh`
+      # (`bingo-tool-bash/src/run.rs`, `bingo-hooks-shell/src/run.rs`), so on
+      # Windows the suites that spawn one fail at spawn. Which dialect a
+      # Windows bingo writes is M6's question; this step is required with it.
       - run: cargo test --workspace --locked
+        continue-on-error: true
   deny:
     runs-on: ubuntu-latest
     steps:

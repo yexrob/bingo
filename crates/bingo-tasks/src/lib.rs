@@ -29,6 +29,7 @@ mod command;
 mod contributor;
 mod create;
 mod get;
+pub mod guide;
 mod journal;
 mod list;
 mod render;
@@ -62,6 +63,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "tool:TaskList",
         "command:tasks",
         "context:tasks",
+        "service:bingo.tasks.pages",
     ],
     requires: &[],
     // A task list is a session's own state, not a setting.
@@ -129,6 +131,7 @@ impl Plugin for TasksPlugin {
         registrar.add(Contribution::Context(
             Arc::new(TasksContributor) as Arc<dyn ContextContributor>
         ));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -153,6 +156,7 @@ mod plugin_tests {
                 "tool:TaskList",
                 "command:tasks",
                 "context:tasks",
+                &format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)),
             ]
         );
         assert!(MANIFEST.requires.is_empty());
@@ -176,6 +180,13 @@ mod plugin_tests {
         assert_eq!(tools, ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"]);
         assert!(matches!(contributions[4], Contribution::Command(_)));
         assert!(matches!(contributions[5], Contribution::Context(_)));
+        match &contributions[6] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 
     #[test]

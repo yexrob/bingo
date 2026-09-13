@@ -3,7 +3,7 @@
 //!
 //! Every params and result type is an sdk type or a struct of sdk types. The
 //! bridge adds envelopes, never shapes: `ToolSpec`, `CommandSpec`,
-//! `ToolOutput`, `CommandOutcome`, `Completion`, `ContextPiece`, `Compaction`,
+//! `ToolOutput`, `CommandOutcome`, `ContextPiece`, `Compaction`,
 //! `ModelRequest`, `ModelEvent` and `ProviderError` cross verbatim, so a plugin
 //! author writes against the kernel's own vocabulary. What a process may not
 //! hold — the host handle a `ContextQuery` carries, the provider a
@@ -36,22 +36,21 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bingo_sdk::{
-    CommandOutcome, CommandSpec, CompactContext, CompactReason, Compaction, Completion,
-    ContextPiece, ContextQuery, ContextUsage, EndpointCapabilities, Env, Frame, HookContext,
-    HookMatcher, HookOutcome, Input, Item, ModelCapabilities, ModelEvent, ModelInfo, ModelRequest,
-    Phase, Placement, ProviderError, SessionId, SessionSummary, ToolCall, ToolOutput, ToolSpec,
-    TurnId,
+    CommandOutcome, CommandSpec, CompactContext, CompactReason, Compaction, ContextPiece,
+    ContextQuery, ContextUsage, EndpointCapabilities, Env, Frame, HookContext, HookMatcher,
+    HookOutcome, Input, Item, ModelCapabilities, ModelEvent, ModelInfo, ModelRequest, Phase,
+    Placement, ProviderError, SessionId, SessionSummary, ToolCall, ToolOutput, ToolSpec, TurnId,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The major the host speaks. A process that answers with another one is
-/// refused rather than guessed at (ADR-0015 §Consequences). Five since
-/// ADR-0032 opened hooks, whose declaration is read at the handshake: a plugin
-/// written for one major says so and is refused, rather than being asked what
-/// it cannot answer.
-pub const PROTOCOL: u32 = 5;
+/// refused rather than guessed at (ADR-0015 §Consequences). It stays at one
+/// until a plugin outside this repository speaks it: until then the wire
+/// changes in place and `schema/plugin.json` is the record of what it is,
+/// and a number nobody is held to would only count our own edits.
+pub const PROTOCOL: u32 = 1;
 
 /// Every name that travels on the wire, in one place.
 pub mod name {
@@ -61,8 +60,6 @@ pub mod name {
     pub const TOOL_CALL: &str = "tool/call";
     /// Kernel → plugin: run one `/name`.
     pub const COMMAND_RUN: &str = "command/run";
-    /// Kernel → plugin: what could follow this `/name`'s partial argument.
-    pub const COMMAND_COMPLETE: &str = "command/complete";
     /// Kernel → plugin: what this contributor adds to the round in the query.
     pub const CONTEXT_CONTRIBUTE: &str = "context/contribute";
     /// Kernel → plugin: summarise this transcript.
@@ -250,21 +247,6 @@ pub struct CommandRunResult {
     pub outcome: CommandOutcome,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandCompleteParams {
-    pub name: String,
-    pub partial: String,
-    pub cwd: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandCompleteResult {
-    #[serde(default)]
-    pub completions: Vec<Completion>,
-}
-
 /// One round, as a process that is not in the host can read it.
 ///
 /// The serializable projection of the sdk's `ContextQuery` (ADR-0030 §5): the
@@ -326,7 +308,7 @@ pub struct CompactorContext {
     pub items: Vec<Item>,
     pub usage: ContextUsage,
     pub capabilities: ModelCapabilities,
-    pub model: String,
+    pub request: ModelRequest,
     /// Consecutive compactions the kernel discarded; at `BREAKER_TRIP` the
     /// breaker is tripped and a strategy takes its rung that needs no model.
     pub failures: u32,
@@ -340,7 +322,7 @@ impl From<&CompactContext<'_>> for CompactorContext {
             items: cx.items.to_vec(),
             usage: cx.usage,
             capabilities: cx.capabilities.clone(),
-            model: cx.model.to_string(),
+            request: cx.request.clone(),
             failures: cx.failures,
             keep_budget: cx.keep_budget,
         }
@@ -356,10 +338,17 @@ pub struct CompactorCompactParams {
     pub reason: CompactReason,
 }
 
+/// Declared failures retain observed usage; generic transport errors cannot
+/// report what a process spent before the connection failed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactorCompactResult {
-    pub compaction: Compaction,
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CompactorCompactResult {
+    Completed { compaction: Compaction },
+    Failed { error: bingo_sdk::CompactError },
 }
 
 /// One model response, asked for. The request crosses as the sdk writes it —
@@ -603,11 +592,6 @@ pub static METHODS: &[Method] = &[
         schema_of::<CommandRunResult>,
     ),
     (
-        name::COMMAND_COMPLETE,
-        schema_of::<CommandCompleteParams>,
-        schema_of::<CommandCompleteResult>,
-    ),
-    (
         name::CONTEXT_CONTRIBUTE,
         schema_of::<ContextContributeParams>,
         schema_of::<ContextContributeResult>,
@@ -736,6 +720,7 @@ mod tests {
             reasoning: false,
             count_tokens: false,
             caching: false,
+            holds_context: false,
         }
     }
 
@@ -839,7 +824,7 @@ mod tests {
                 items: Vec::new(),
                 usage: usage(),
                 capabilities: capabilities(),
-                model: "m".into(),
+                request: request(),
                 failures: 1,
                 keep_budget: 250,
             },
@@ -1016,7 +1001,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&spec).expect("it serialises"),
             json!({ "id": "quiet", "models": [], "endpoint": {
-                "images": false, "countTokens": false, "caching": false
+                "images": false, "countTokens": false, "caching": false,
+                "holdsContext": false
             }}),
             "an absent family is absent on the wire, never the id repeated"
         );
@@ -1357,8 +1343,28 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_compaction_failure_preserves_native_usage_in_its_tagged_fixture() {
+        let fixture = json!({
+            "kind": "failed",
+            "error": {
+                "error": {"code": "CONTEXT_OVERFLOW", "message": "remote summary too long"},
+                "usage": {"inputTokens": 101, "outputTokens": 17, "cacheReadTokens": 23, "cacheWriteTokens": 31, "reasoningTokens": 5}
+            }
+        });
+        let result: CompactorCompactResult =
+            serde_json::from_value(fixture.clone()).expect("typed failure fixture");
+        assert_eq!(serde_json::to_value(result).expect("roundtrip"), fixture);
+        let schema = schemars::schema_for!(CompactorCompactResult);
+        let encoded = serde_json::to_string(&schema).expect("schema");
+        assert!(encoded.contains("CompactError"));
+        assert!(encoded.contains("completed"));
+        assert!(encoded.contains("failed"));
+    }
+
+    #[test]
     fn a_compaction_comes_back_as_the_sdk_writes_it() {
         let result: CompactorCompactResult = serde_json::from_value(json!({
+            "kind": "completed",
             "compaction": {
                 "summary": "what happened",
                 "boundary": "itm_7",
@@ -1367,10 +1373,13 @@ mod tests {
             }
         }))
         .expect("a compaction");
-        assert_eq!(result.compaction.boundary.as_str(), "itm_7");
-        assert!(result.compaction.kept.is_empty());
+        let CompactorCompactResult::Completed { compaction } = result else {
+            panic!("completed fixture");
+        };
+        assert_eq!(compaction.boundary.as_str(), "itm_7");
+        assert!(compaction.kept.is_empty());
         assert_eq!(
-            result.compaction.usage,
+            compaction.usage,
             bingo_sdk::Usage::default(),
             "a strategy that spends nothing says nothing"
         );

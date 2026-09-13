@@ -23,7 +23,7 @@ pub(super) async fn put(
     // and one this host does not run is not answered for at all.
     let mailbox = host.live(session)?.mailbox;
     let refusing = kind.answer_for(AnswerRole::Refusing);
-    match host.policy().stance(session).await {
+    match stance_on(host, session, &kind).await {
         Stance::Allow => {
             return kind
                 .answer_for(AnswerRole::Allowing)
@@ -37,6 +37,19 @@ pub(super) async fn put(
     match mailbox.ask(None, kind, answers).await {
         Ok(answer) => Ok(answer),
         Err(unasked) => refusing.ok_or(unasked),
+    }
+}
+
+/// Where the policy stands on this question. Only a question shaped to carry
+/// a role — one on its own, or a form of them — is the policy's to weigh; a
+/// sign-in or a confirmation asks nothing a stance could answer, and goes to
+/// the person as a gate question does under *ask* (ADR-0039 §2, 2026-09-08).
+async fn stance_on(host: &Host, session: &SessionId, kind: &InteractionKind) -> Stance {
+    match kind {
+        InteractionKind::Question(_) | InteractionKind::Form { .. } => {
+            host.policy().stance(session).await
+        }
+        _ => Stance::Ask,
     }
 }
 

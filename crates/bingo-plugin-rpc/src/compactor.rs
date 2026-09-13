@@ -13,7 +13,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bingo_sdk::{CompactContext, CompactReason, Compaction, Compactor, ErrorCode, KernelError};
+use bingo_sdk::{
+    CompactContext, CompactError, CompactReason, Compaction, Compactor, ErrorCode, KernelError,
+};
 
 use crate::connection::Connection;
 use crate::deadline;
@@ -46,7 +48,7 @@ impl RemoteCompactor {
         }
     }
 
-    async fn ask(&self, params: CompactorCompactParams) -> Result<Compaction, KernelError> {
+    async fn ask(&self, params: CompactorCompactParams) -> Result<Compaction, CompactError> {
         let value = serde_json::to_value(params)
             .map_err(|e| self.failed(ErrorCode::Internal, e.to_string()))?;
         let answered = tokio::time::timeout(
@@ -55,14 +57,21 @@ impl RemoteCompactor {
         )
         .await;
         match answered {
-            Ok(Ok(value)) => serde_json::from_value::<CompactorCompactResult>(value)
-                .map(|result| result.compaction)
-                .map_err(|e| self.failed(ErrorCode::Internal, e.to_string())),
-            Ok(Err(error)) => Err(self.failed(ErrorCode::Internal, error.message)),
-            Err(_) => Err(self.failed(
-                ErrorCode::Timeout,
-                format!("no compaction within {}s", deadline::COMPACT.as_secs()),
-            )),
+            Ok(Ok(value)) => {
+                let result = serde_json::from_value::<CompactorCompactResult>(value)
+                    .map_err(|e| self.failed(ErrorCode::Internal, e.to_string()))?;
+                match result {
+                    CompactorCompactResult::Completed { compaction } => Ok(compaction),
+                    CompactorCompactResult::Failed { error } => Err(error),
+                }
+            }
+            Ok(Err(error)) => Err(self.failed(ErrorCode::Internal, error.message).into()),
+            Err(_) => Err(self
+                .failed(
+                    ErrorCode::Timeout,
+                    format!("no compaction within {}s", deadline::COMPACT.as_secs()),
+                )
+                .into()),
         }
     }
 
@@ -77,7 +86,7 @@ impl Compactor for RemoteCompactor {
         &self,
         cx: CompactContext<'_>,
         reason: CompactReason,
-    ) -> Result<Compaction, KernelError> {
+    ) -> Result<Compaction, CompactError> {
         self.ask(self.params(&cx, reason)).await
     }
 }
@@ -86,6 +95,33 @@ impl Compactor for RemoteCompactor {
 mod tests {
     use super::*;
     use crate::testing::{capabilities, unanswering};
+
+    #[test]
+    fn the_remote_context_carries_the_native_parent_request() {
+        let request: bingo_sdk::ModelRequest = serde_json::from_value(serde_json::json!({
+            "model": "m", "maxTokens": 500, "system": [], "messages": [],
+            "tools": [], "session": "ses_parent",
+            "providerOptions": {"openai": {"seed": 7}}
+        }))
+        .expect("native request fixture");
+        let cx = CompactContext {
+            items: &[],
+            usage: Default::default(),
+            capabilities: &capabilities(),
+            provider: Arc::new(crate::testing::NoProvider),
+            request: &request,
+            cancel: Default::default(),
+            failures: 2,
+            keep_budget: 100,
+        };
+        let value = serde_json::to_value(CompactorContext::from(&cx)).expect("wire context");
+        assert_eq!(
+            value["request"],
+            serde_json::to_value(request).expect("request")
+        );
+        assert!(value.get("model").is_none());
+        assert!(value.get("provider").is_none());
+    }
 
     fn spec() -> CompactorSpec {
         CompactorSpec { id: "cut".into() }
@@ -103,7 +139,7 @@ mod tests {
                     usage: Default::default(),
                     capabilities: &capabilities(),
                     provider: Arc::new(crate::testing::NoProvider),
-                    model: "m",
+                    request: &serde_json::from_value(serde_json::json!({"model":"m", "maxTokens":100, "system":[], "messages":[], "tools":[]})).expect("request"),
                     cancel: Default::default(),
                     failures: 0,
                     keep_budget: 100,
@@ -112,8 +148,13 @@ mod tests {
             )
             .await
             .expect_err("a process that says nothing compacts nothing");
-        assert_eq!(error.code, ErrorCode::Timeout);
-        assert!(error.message.starts_with("slow: "), "{error}");
-        assert!(error.message.contains("within 60s"), "{error}");
+        assert_eq!(error.error.code, ErrorCode::Timeout);
+        assert_eq!(
+            error.usage,
+            bingo_sdk::Usage::default(),
+            "transport timeout has no observed remote usage"
+        );
+        assert!(error.error.message.starts_with("slow: "), "{error}");
+        assert!(error.error.message.contains("within 60s"), "{error}");
     }
 }

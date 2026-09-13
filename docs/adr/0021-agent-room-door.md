@@ -1,6 +1,6 @@
 # ADR-0021 — OpenRoom: agents may open rooms
 
-Status: accepted · 2026-08-31 · Plan: M18
+Status: accepted · 2026-08-31 · Plan: M18 · amended 2026-09-10 (ADR-0053: a standing name is refused at this door; `purpose` required; the roster moves by `Seat`/`Unseat`/`CloseRoom`)
 
 ## Context
 

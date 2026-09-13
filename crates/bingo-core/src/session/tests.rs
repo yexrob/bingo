@@ -6,7 +6,9 @@ use serde_json::json;
 use super::*;
 use crate::test_support::*;
 
+mod busy;
 mod commands;
+mod completion;
 mod images;
 mod invoke;
 mod log;
@@ -126,7 +128,7 @@ async fn submit_starts_a_turn_and_streams_it_to_the_end() {
         ]
     );
     assert!(!state.busy());
-    assert_eq!(state.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(state.last_status(), Some(&TurnStatus::Completed));
     let user = &state.items[0];
     assert_eq!(user.intent.as_ref(), Some(&intent));
     assert_eq!(
@@ -191,7 +193,7 @@ async fn a_busy_session_queues_and_the_queue_opens_the_next_turn() {
     let labels = drive(&mut events, &mut state, turn_completed).await;
     assert!(labels.contains(&"ack:Applied".to_string()));
     assert!(
-        matches!(state.last_turn, Some(TurnStatus::Interrupted { .. })),
+        matches!(state.last_status(), Some(TurnStatus::Interrupted { .. })),
         "{:?}",
         state.last_turn
     );
@@ -276,7 +278,7 @@ async fn a_permission_is_answered_once_and_late_answers_are_rejected() {
     assert_eq!(labels[0], "interactionResolved");
     assert_eq!(labels[1], "ack:Applied");
     assert!(state.interactions.is_empty());
-    assert_eq!(state.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(state.last_status(), Some(&TurnStatus::Completed));
     let tool = state
         .items
         .iter()
@@ -313,11 +315,45 @@ async fn events_of(mailbox: &Mailbox) -> Vec<Frame> {
     out
 }
 
+/// One frame of a journal a test writes by hand.
+fn journal_frame(seq: u64, event: Event) -> Frame {
+    Frame {
+        seq: Seq(seq),
+        ts: jiff::Timestamp::from_second(0).unwrap(),
+        session: SessionId::from_raw("ses_1"),
+        cause: None,
+        event,
+    }
+}
+
 fn state_ack(frames: &[Frame], intent: &IntentId) -> Option<IntentOutcome> {
     frames.iter().find_map(|f| match &f.event {
         Event::IntentAck { intent: i, outcome } if i == intent => Some(outcome.clone()),
         _ => None,
     })
+}
+
+/// ADR-0055 §1: bingo does not summarise a conversation it does not hold, and
+/// says so in the provider's own name rather than asking an agent that would
+/// refuse — or, worse, run tools to answer.
+#[tokio::test]
+async fn compacting_a_held_session_is_refused_in_the_providers_name() {
+    let mailbox = spawn(summary("ses_1"), None, Services::none(), |_| {
+        let mut cfg = config(ScriptedProvider::new(vec![]), vec![], Arc::new(NoHost));
+        if let Some(model) = cfg.model.as_mut() {
+            model.capabilities.holds_context = true;
+        }
+        Arc::new(cfg)
+    });
+    let error = mailbox
+        .compact(None)
+        .await
+        .expect_err("the agent holds this one");
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.message,
+        "`scripted` holds this context and compacts it itself; bingo does not"
+    );
 }
 
 #[tokio::test]
@@ -441,7 +477,7 @@ async fn closing_cancels_the_turn_and_ends_the_journal() {
     .await;
     assert!(labels.contains(&"ack:Rejected".to_string()), "{labels:?}");
     assert!(matches!(
-        state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Interrupted { .. })
     ));
     assert!(state.closed);
@@ -466,7 +502,7 @@ async fn a_panicking_turn_is_reported_as_lost_not_hung() {
     );
     drive(&mut events, &mut state, turn_completed).await;
     assert!(matches!(
-        &state.last_turn,
+        state.last_status(),
         Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost && error.message.contains("tool exploded")
     ));
     assert!(!state.busy());
@@ -519,22 +555,14 @@ async fn history_pages_backwards_from_the_newest_item() {
 #[tokio::test]
 async fn a_journal_cut_inside_a_turn_resumes_with_that_turn_lost() {
     let head = summary("ses_1");
-    let ts = jiff::Timestamp::from_second(0).unwrap();
-    let frame = |seq: u64, event: Event| Frame {
-        seq: Seq(seq),
-        ts,
-        session: SessionId::from_raw("ses_1"),
-        cause: None,
-        event,
-    };
     let frames = vec![
-        frame(
+        journal_frame(
             1,
             Event::SessionUpdated {
                 summary: head.clone(),
             },
         ),
-        frame(
+        journal_frame(
             2,
             Event::TurnStarted {
                 turn: TurnId::from_raw("trn_old"),
@@ -556,7 +584,7 @@ async fn a_journal_cut_inside_a_turn_resumes_with_that_turn_lost() {
     );
     assert!(state.turn.is_none() && !state.busy());
     assert!(
-        matches!(&state.last_turn, Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost),
+        matches!(state.last_status(), Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost),
         "{:?}",
         state.last_turn
     );
@@ -578,27 +606,19 @@ fn a_journal_without_its_head_cannot_be_resumed() {
 
 #[tokio::test]
 async fn a_journal_that_ends_closed_resumes_open() {
-    let head = summary("ses_1");
-    let ts = jiff::Timestamp::from_second(0).unwrap();
     let frames = vec![
-        Frame {
-            seq: Seq(1),
-            ts,
-            session: SessionId::from_raw("ses_1"),
-            cause: None,
-            event: Event::SessionUpdated {
-                summary: head.clone(),
+        journal_frame(
+            1,
+            Event::SessionUpdated {
+                summary: summary("ses_1"),
             },
-        },
-        Frame {
-            seq: Seq(2),
-            ts,
-            session: SessionId::from_raw("ses_1"),
-            cause: None,
-            event: Event::SessionClosed {
+        ),
+        journal_frame(
+            2,
+            Event::SessionClosed {
                 reason: CloseReason::Shutdown,
             },
-        },
+        ),
     ];
     let provider = ScriptedProvider::new(vec![Script::Events(text("open again"))]);
     let mailbox = resume(frames, None, Services::none(), |_| {

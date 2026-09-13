@@ -9,6 +9,7 @@
 
 pub mod command;
 pub mod decide;
+pub mod guide;
 pub mod mode;
 pub mod path;
 pub mod rule;
@@ -37,11 +38,15 @@ pub use decide::decide;
 pub use mode::{Mode, UnknownMode};
 pub use rule::Rule;
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.permissions",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["policy:permissions", "command:permission"],
+    provides: &[
+        "policy:permissions",
+        "command:permission",
+        "service:bingo.permissions.pages",
+    ],
     requires: &[],
     config: Some(ConfigClaim {
         keys: &[
@@ -111,6 +116,7 @@ impl Plugin for PermissionsPlugin {
         registrar.add(Contribution::Command(
             Arc::new(PermissionCommand::new(policy)) as Arc<dyn Command>,
         ));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -279,7 +285,17 @@ mod tests {
         assert_eq!(MANIFEST.id, "bingo.permissions");
         assert_eq!(
             MANIFEST.provides,
-            ["policy:permissions", "command:permission"]
+            [
+                "policy:permissions",
+                "command:permission",
+                "service:bingo.permissions.pages",
+            ]
+        );
+        assert!(
+            MANIFEST
+                .provides
+                .contains(&format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)).as_str()),
+            "the page's key is spelled the one way (ADR-0054 §1)"
         );
         let claim = MANIFEST.config.expect("a config claim");
         assert_eq!(claim.keys.len(), 5);
@@ -304,11 +320,18 @@ mod tests {
             .register(&mut registrar)
             .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 2);
+        assert_eq!(contributions.len(), MANIFEST.provides.len());
         assert!(matches!(contributions[0], Contribution::Policy(_)));
         match &contributions[1] {
             Contribution::Command(command) => assert_eq!(command.spec().name, "permission"),
             other => panic!("expected a command, got {other:?}"),
+        }
+        match &contributions[2] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, "bingo.permissions.pages");
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
         }
     }
 

@@ -67,9 +67,23 @@ pub fn question(to: &Conversation, question: &Question, limits: &Limits) -> Valu
         .collect();
     let mut elements = vec![markdown(&question.prompt)];
     if !buttons.is_empty() {
-        elements.push(json!({ "tag": "action", "actions": buttons }));
+        elements.push(row(buttons));
     }
     card(elements)
+}
+
+/// Buttons side by side. Schema 2.0 dropped the interaction container
+/// (`"tag": "action"`) — a button is an element in its own right — and a card
+/// that still sends one is refused whole, which is a permission that falls
+/// back to words every time. A row is a `column_set` of auto-width columns,
+/// one button each.
+/// <https://open.feishu.cn/document/feishu-cards/card-json-v2-components/interactive-components/button>
+fn row(buttons: Vec<Value>) -> Value {
+    let columns: Vec<Value> = buttons
+        .into_iter()
+        .map(|button| json!({ "tag": "column", "width": "auto", "elements": [button] }))
+        .collect();
+    json!({ "tag": "column_set", "flex_mode": "flow", "columns": columns })
 }
 
 /// The same question with the buttons taken off and the outcome under it —

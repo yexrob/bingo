@@ -65,6 +65,15 @@ pub const BINDINGS: &[Binding] = &[
         description: "scroll the transcript",
     },
     Binding {
+        // One gesture on one row (M92): the sheet does not scroll and this
+        // table already fills eighty by twenty-four, so a row added is a row
+        // pushed off. The key and the drag draw the same run — cells of the
+        // whole transcript, reaching what has scrolled away — and the page
+        // says what holding it past an edge does.
+        keys: "v · drag",
+        description: "select · ↑↓←→ or a drag extend · y, ctrl+c or release copy",
+    },
+    Binding {
         keys: "ctrl+g",
         description: "the same list · ↑↓ to walk it",
     },

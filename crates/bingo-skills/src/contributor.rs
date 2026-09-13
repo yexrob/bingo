@@ -61,10 +61,15 @@ impl ContextContributor for SkillsContributor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{Tree, asked};
+    use crate::tests::{PAGES, Tree, asked, host_with_pages};
 
     async fn block(tree: &Tree) -> Vec<ContextPiece> {
         let library = Arc::new(Library::new(bingo_sdk::Env::rooted(tree.root())));
+        // The listing is the index of the pages as well as of the skills on
+        // disk (ADR-0054 §2), so the block is asked with a host that has some.
+        library
+            .read_pages(&host_with_pages(&[("bingo.example", PAGES)]))
+            .await;
         let asked = asked(&tree.cwd());
         SkillsContributor::new(library)
             .contribute(asked.query())

@@ -40,6 +40,10 @@ pub enum Op {
         question: InteractionId,
         outcome: String,
     },
+    /// The turn is over, however it went. Emitted for every turn — a turn
+    /// with nothing to say still ends — because a sign put up when it began
+    /// has to come off (ADR-0051 §5).
+    Ended { failed: bool },
 }
 
 /// The message being streamed into: what the platform has, what is held back,
@@ -271,6 +275,9 @@ impl Deliverer {
         if let Some(text) = ended(status) {
             ops.push(self.status(&text));
         }
+        ops.push(Op::Ended {
+            failed: matches!(status, TurnStatus::Failed { .. }),
+        });
         self.turn = None;
         ops
     }

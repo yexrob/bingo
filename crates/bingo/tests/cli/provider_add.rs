@@ -17,7 +17,7 @@ fn auth_json(home: &std::path::Path) -> std::path::PathBuf {
 
 fn add(home: &std::path::Path) -> Command {
     let mut cmd = bingo();
-    cmd.env("HOME", home)
+    cmd.envs(home_env(home))
         .args(["provider", "add", "--cwd"])
         .arg(home);
     cmd
@@ -95,7 +95,7 @@ async fn an_added_provider_is_written_down_and_the_next_run_uses_it() {
     let h = home.path().to_path_buf();
     let out = tokio::task::spawn_blocking(move || {
         run(bingo()
-            .env("HOME", &h)
+            .envs(home_env(&h))
             .env_remove("OPENAI_API_KEY")
             .args([
                 "--print",

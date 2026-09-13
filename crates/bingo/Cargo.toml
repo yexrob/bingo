@@ -46,6 +46,9 @@ bingo-auth-oauth.workspace = true
 # the two renames that replace this binary (M63, ADR-0043). A library, and
 # the one place the archive names are spelled.
 bingo-update.workspace = true
+# `bingo gateway`: every verb but `run`, and what `run` holds while this
+# binary builds the host (ADR-0020).
+bingo-gateway.workspace = true
 # Its downloads. Already in this binary's tree under the providers, so it
 # costs no crate.
 reqwest.workspace = true
@@ -54,17 +57,9 @@ tokio.workspace = true
 serde_json.workspace = true
 # The terminal prompter behind `bingo login` implements the sdk's `Prompter`.
 async-trait.workspace = true
-# M17 (ADR-0020 §2): `gateway start` detaches through `ProcessSession`, so a
-# resident bingo outlives the terminal without this crate spelling `unsafe`.
-process-wrap.workspace = true
-# The gateway's pidfile is a record on disk, so it is derived, not hand-built.
-serde.workspace = true
-# Its start time, in the same spelling the schedule store writes.
-jiff.workspace = true
-# M17 (ADR-0020 §6): the gateway installs the tracing sink; `warn!` from any
-# plugin lands in `gateway.log` instead of nowhere.
+# One line on stderr when a beside listener loses the lock it expected to lose.
+# The sink that catches it is the gateway's (ADR-0020 §6).
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }

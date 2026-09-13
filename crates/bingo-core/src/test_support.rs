@@ -22,6 +22,12 @@ pub enum Script {
     Events(Vec<Result<ModelEvent, ProviderError>>),
     Hang(Vec<ModelEvent>),
     Fail(ProviderError),
+    /// The stream call itself explodes, so the turn loop panics where no
+    /// `Result` can carry the news back.
+    Panic,
+    /// The stream call never returns: a request whose first byte never
+    /// arrives, which is the longest await of a round.
+    Establishing,
 }
 
 pub struct ScriptedProvider {
@@ -37,6 +43,13 @@ pub struct ScriptedProvider {
     serves: Mutex<Result<Vec<ModelInfo>, String>>,
     /// Its credentials; `NotApplicable`, as the sdk's default is.
     auth: Mutex<AuthStatus>,
+    /// Whether an exact count ever comes back. A recount is an await of the
+    /// round like any other, so a test needs one that never does.
+    counts: Mutex<bool>,
+    /// The window it holds the conversation in, where it holds one at all
+    /// (ADR-0055 §1). `None` is a provider that holds nothing, as every
+    /// provider but an agent's is.
+    holds: Mutex<Option<u64>>,
 }
 
 impl ScriptedProvider {
@@ -67,7 +80,22 @@ impl ScriptedProvider {
             family,
             serves: Mutex::new(Ok(Vec::new())),
             auth: Mutex::new(AuthStatus::NotApplicable),
+            counts: Mutex::new(true),
+            holds: Mutex::new(None),
         })
+    }
+
+    /// A provider whose exact count never comes back.
+    pub fn never_counts(self: Arc<Self>) -> Arc<Self> {
+        *self.counts.lock().unwrap() = false;
+        self
+    }
+
+    /// A provider that keeps the conversation on its own side and measures it
+    /// itself (ADR-0055 §1), the way an ACP adapter does.
+    pub fn holding(self: Arc<Self>, window: u64) -> Arc<Self> {
+        *self.holds.lock().unwrap() = Some(window);
+        self
     }
 
     /// A provider nobody has signed in to.
@@ -119,7 +147,12 @@ impl Provider for ScriptedProvider {
         self.auth.lock().unwrap().clone()
     }
     fn endpoint(&self, _: &str) -> EndpointCapabilities {
-        EndpointCapabilities::default()
+        let held = *self.holds.lock().unwrap();
+        EndpointCapabilities {
+            holds_context: held.is_some(),
+            context_window: held,
+            ..EndpointCapabilities::default()
+        }
     }
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         self.serves
@@ -140,11 +173,19 @@ impl Provider for ScriptedProvider {
                 message: "script exhausted".into(),
             }),
             Some(Script::Fail(e)) => Err(e),
+            Some(Script::Panic) => panic!("provider exploded"),
             Some(Script::Events(evs)) => Ok(Box::pin(futures::stream::iter(evs))),
             Some(Script::Hang(evs)) => Ok(Box::pin(
                 futures::stream::iter(evs.into_iter().map(Ok)).chain(futures::stream::pending()),
             )),
+            Some(Script::Establishing) => std::future::pending().await,
         }
+    }
+    async fn count_tokens(&self, request: &ModelRequest) -> Result<u64, ProviderError> {
+        if !*self.counts.lock().unwrap() {
+            std::future::pending::<()>().await;
+        }
+        Ok(request.messages.len() as u64)
     }
 }
 
@@ -312,6 +353,7 @@ pub fn capabilities() -> ModelCapabilities {
         reasoning: false,
         count_tokens: false,
         caching: false,
+        holds_context: false,
     }
 }
 
@@ -379,6 +421,7 @@ pub fn config(
 pub struct ScriptedCompactor {
     answers: Mutex<VecDeque<Result<Compaction, KernelError>>>,
     pub calls: Mutex<Vec<(CompactReason, u32, u64)>>,
+    pub requests: Mutex<Vec<ModelRequest>>,
 }
 
 impl ScriptedCompactor {
@@ -386,6 +429,7 @@ impl ScriptedCompactor {
         Arc::new(Self {
             answers: Mutex::new(answers.into()),
             calls: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         })
     }
 
@@ -412,7 +456,8 @@ impl Compactor for ScriptedCompactor {
         &self,
         cx: CompactContext<'_>,
         reason: CompactReason,
-    ) -> Result<Compaction, KernelError> {
+    ) -> Result<Compaction, CompactError> {
+        self.requests.lock().unwrap().push(cx.request.clone());
         self.calls
             .lock()
             .unwrap()
@@ -422,6 +467,7 @@ impl Compactor for ScriptedCompactor {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Err(KernelError::new(ErrorCode::Internal, "compactor exhausted")))
+            .map_err(Into::into)
     }
 }
 

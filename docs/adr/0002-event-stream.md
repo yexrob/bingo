@@ -16,6 +16,7 @@ The old bingo carried four event enums for one stream (`StreamEvent → EngineEv
 6. **Backpressure is the kernel's to announce.** Each subscriber has a bounded channel; on overflow the kernel sends `Lagged { from, to }` and the client re-reads `events_since(seq)`. The kernel never blocks on a client.
 7. **The model stream never leaves the loop.** `ModelEvent` mirrors the Vercel `@ai-sdk/provider` V4 stream-part algebra (per-block ids, `text/reasoning/tool-input` start/delta/end, `Finish { usage, finish_reason { unified, raw } }`, provider metadata keyed by provider id). The accumulator folds it into `Item`s; only `Item`s and `Event`s are published.
 8. **Plugin-owned resources** (roster, rooms, tasks) travel as `Event::Extension { plugin, kind, payload }`; the kernel does not enumerate them.
+   *(Amended 2026-09-08, M84: the fold keeps the turn that last ended whole — `SessionState.last_turn` is a `LastTurn { id, status, started_at, ended_at, usage }` folded from the live turn it closes and the frame that closed it, where it was the status alone — so a surface can say `Worked for 15m 11s · done 13:48` without keeping a clock of its own. Nothing new is on the wire: the clocks are two frames' `ts`, the usage is `TurnCompleted`'s.)*
 
 ## Consequences
 

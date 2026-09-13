@@ -255,6 +255,37 @@ async fn a_question_that_marks_no_option_is_never_answered_for_the_person() {
     assert!(error.message.contains("allowing"), "{}", error.message);
 }
 
+/// A sign-in names no option a stance could pick, and is not the policy's
+/// to weigh: `/mcp login` in a bypass session asks the person as `/login`
+/// does, rather than being refused for naming no allowing option.
+#[tokio::test]
+async fn a_sign_in_is_put_to_the_person_whatever_the_stance() {
+    let host = standing(Stance::Allow, vec![]).await;
+    let mut attachment = attach(&host).await;
+    let session = attachment.session.clone();
+    let asking = tokio::spawn({
+        let host = Arc::clone(&host);
+        async move {
+            host.ask(
+                &session,
+                InteractionKind::Login {
+                    provider: "binlesson".into(),
+                    flow: LoginFlow::Browser {
+                        url: "https://as.example.com/authorize".into(),
+                    },
+                },
+                vec![AnswerSpec::Cancel],
+            )
+            .await
+        }
+    });
+    let id = opened(&mut attachment).await;
+    attachment
+        .handle
+        .answer(IntentId::mint(), id, Answer::Cancel, Activation::Pointer);
+    assert_eq!(asking.await.unwrap().unwrap(), Answer::Cancel);
+}
+
 #[tokio::test]
 async fn a_session_this_host_does_not_run_is_never_answered_for() {
     let host = standing(Stance::Allow, vec![]).await;

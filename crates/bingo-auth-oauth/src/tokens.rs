@@ -95,6 +95,21 @@ impl Tokens {
                 expires_at: (*expires > 0).then_some(*expires),
                 account_id: account_id.clone(),
             }),
+            // The registration half of the entry is the caller's; what is
+            // read here is the one thing every credential has — a token with
+            // an expiry, and whatever will renew it.
+            Entry::McpOAuth {
+                access,
+                refresh,
+                expires,
+                ..
+            } => Some(Tokens {
+                access: access.clone(),
+                refresh: refresh.clone(),
+                id_token: None,
+                expires_at: (*expires > 0).then_some(*expires),
+                account_id: None,
+            }),
             Entry::Api { .. } => None,
         }
     }

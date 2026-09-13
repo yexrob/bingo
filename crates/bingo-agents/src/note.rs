@@ -4,9 +4,14 @@
 //! of its promises do not hold in a child: that the prose of a turn is read by
 //! whoever asked, and that a question can be put to the person. Say so, rather
 //! than letting the model plan against a surface it does not have. Everything
-//! here is a fact about this product — the ways out are the parent, the
-//! teammates beside this agent and the rooms it is in, and permission prompts
-//! are the one interaction that still reaches a person.
+//! here is a fact about this product — the ways out are the parent and the
+//! teammates beside this agent, and permission prompts are the one interaction
+//! that still reaches a person.
+//!
+//! What a room is and what it owes is not said here. A seat is told that by
+//! the plugin that owns rooms, at the head of the turn it first reads one
+//! (ADR-0034 §4); a plugin that owns no rooms teaching them to every child is
+//! the same protocol written twice.
 
 /// Prepended to every child's system prompt, before the definition's body.
 pub const NOTE: &str = "\
@@ -29,15 +34,6 @@ pub const NOTE: &str = "\
   is not a task to answer: read it, then deal with what came after it. Nobody
   is waiting on the reply of a turn that opened this way, so what you produce
   travels by a room or a message, not by ending your turn.
-- A room you sit in is read at the head of your turn, under
-  `[#<room>, since you last read]`: everything it has said since you last read
-  it, at once. A room wakes you when a post names you with `@<your name>`, or
-  when your patience runs out with something unread — so the first question is
-  whether the work it names is yours. When it is, post the result back to the
-  room — `SendMessage(to: \"#<room>\")` — so whoever is next can carry it on;
-  when it is not, end your turn without posting rather than answering for
-  someone else. `@name` in a room is how you ask for an answer and are owed one,
-  and `@all` says it to every member but you.
 - Do not put questions to the person: `AskUserQuestion` is not a sub-agent's
   tool, and a question asked instead of an answer is a turn spent on nothing.
   Permission prompts are the exception and do reach them, so a call that needs
@@ -78,10 +74,6 @@ mod tests {
         assert!(NOTE.contains("returned as the result"));
         assert!(NOTE.contains("AskUserQuestion"));
         assert!(
-            NOTE.contains("SendMessage(to: \"#<room>\")"),
-            "a room is a way back too"
-        );
-        assert!(
             NOTE.contains("teammates beside you"),
             "a sub-agent has peers to write to (ADR-0024)"
         );
@@ -93,22 +85,13 @@ mod tests {
             NOTE.contains("Only a message opens another one"),
             "one delivery: an idle agent is woken, so the note may not say otherwise"
         );
-        assert!(
-            NOTE.contains("[#<room>, since you last read]"),
-            "how a room is read (ADR-0034 §4)"
-        );
-        assert!(
-            NOTE.contains("when your patience runs out with something unread"),
-            "and what wakes a member for one (ADR-0034 §3)"
-        );
         assert!(!NOTE.contains("colleague"), "a child has no colleagues");
     }
 
-    /// The member's half of the room pattern (ADR-0027 §4): arriving on a
-    /// held brief, and the two things a post can be — yours or someone
-    /// else's.
+    /// The spawn's half of the standby pattern (ADR-0027 §4): a first turn
+    /// that opens on a held brief, and nobody waiting on its reply.
     #[test]
-    fn the_note_teaches_the_member_side_of_a_room() {
+    fn the_note_teaches_the_brief_a_seated_agent_opens_on() {
         assert!(
             NOTE.contains("standing brief"),
             "a seated member's first turn reads its brief before what woke it"
@@ -117,13 +100,20 @@ mod tests {
             NOTE.contains("is waiting on the reply of a turn that opened this way"),
             "a standby spawn leaves no watcher, so the note may not promise one"
         );
-        assert!(
-            NOTE.contains("post the result back"),
-            "when the work is yours, the room is where it goes"
-        );
-        assert!(
-            NOTE.contains("end your turn without posting"),
-            "and when it is not, silence is the whole of the answer"
-        );
+    }
+
+    /// The protocol of a room belongs to the plugin that owns rooms, which
+    /// says it to a seat as it first reads one (ADR-0034 §4). Said here as
+    /// well it would be one rule in two hands.
+    #[test]
+    fn the_note_leaves_the_room_protocol_to_the_rooms_plugin() {
+        for taught in [
+            "[#<room>, since you last read]",
+            "SendMessage(to: \"#<room>\")",
+            "patience",
+            "@all",
+        ] {
+            assert!(!NOTE.contains(taught), "{taught} is the rooms plugin's");
+        }
     }
 }

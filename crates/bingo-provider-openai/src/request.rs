@@ -40,6 +40,9 @@ pub fn encode(request: &ModelRequest, variant: Variant) -> Value {
     if let Some(effort) = request.reasoning {
         add_reasoning(&mut body, &request.model, effort);
     }
+    if let Some(session) = &request.session {
+        body.insert("prompt_cache_key".into(), json!(session.as_str()));
+    }
     merge_provider_options(&mut body, request.provider_options.get(PROVIDER));
     Value::Object(body)
 }
@@ -214,6 +217,7 @@ mod tests {
             ContentPart::Image(Image {
                 media_type: "image/png".into(),
                 data: "iVBORw0KGgo=".into(),
+                path: None,
             }),
         ])]);
         insta::assert_json_snapshot!(encode(&request, Variant::Default));

@@ -55,18 +55,21 @@ mod command;
 mod contributor;
 mod expand;
 mod frontmatter;
+mod guide;
 mod layers;
 mod library;
 mod listing;
+mod pages;
 mod scan;
 mod skill;
 mod tool;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContextContributor, Contribution, Plugin, PluginError, PluginManifest, Registrar, Tool,
+    ContextContributor, Contribution, HostHandle, Plugin, PluginError, PluginManifest, Registrar,
+    Tool,
 };
 
 pub use command::{SkillCommand, SkillCommands};
@@ -76,19 +79,28 @@ pub use library::Library;
 pub use skill::Skill;
 pub use tool::{SkillArgs, SkillTool};
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.skills",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["command:skills", "tool:Skill", "context:skills"],
+    provides: &[
+        "command:skills",
+        "tool:Skill",
+        "context:skills",
+        "service:bingo.skills.pages",
+    ],
     requires: &[],
     config: None,
 };
 
 /// Registers the command source, the `Skill` tool and the prompt line, all
 /// reading one library.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SkillsPlugin;
+#[derive(Debug, Default)]
+pub struct SkillsPlugin {
+    /// Built in `register`, where the environment is, and read by `start`,
+    /// which is handed nothing but the host.
+    library: OnceLock<Arc<Library>>,
+}
 
 #[async_trait]
 impl Plugin for SkillsPlugin {
@@ -105,8 +117,23 @@ impl Plugin for SkillsPlugin {
         ))));
         registrar.tool(Arc::new(SkillTool::new(Arc::clone(&library))) as Arc<dyn Tool>);
         registrar.add(Contribution::Context(
-            Arc::new(SkillsContributor::new(library)) as Arc<dyn ContextContributor>,
+            Arc::new(SkillsContributor::new(Arc::clone(&library))) as Arc<dyn ContextContributor>,
         ));
+        // This plugin's own page reaches the gathering the way every other
+        // plugin's does, through the catalogue and the key (ADR-0054 §2).
+        registrar.add(guide::contribution(registrar));
+        self.library
+            .set(library)
+            .map_err(|_| PluginError::Failed("the skills plugin registered twice".into()))
+    }
+
+    /// The pages every loaded plugin wrote, read once the registry is whole
+    /// (ADR-0054 §2). Nothing is dialled and nothing is read off disk: a page
+    /// is a static string another plugin already registered.
+    async fn start(&self, host: HostHandle) -> Result<(), PluginError> {
+        if let Some(library) = self.library.get() {
+            library.read_pages(&host).await;
+        }
         Ok(())
     }
 }
@@ -124,24 +151,38 @@ mod plugin_tests {
         assert_eq!(MANIFEST.id, "bingo.skills");
         assert_eq!(
             MANIFEST.provides,
-            ["command:skills", "tool:Skill", "context:skills"]
+            [
+                "command:skills",
+                "tool:Skill",
+                "context:skills",
+                "service:bingo.skills.pages",
+            ]
         );
         assert!(MANIFEST.requires.is_empty());
         assert!(MANIFEST.config.is_none(), "skills are files, not settings");
     }
 
     #[test]
-    fn registering_reads_nothing_and_contributes_three_things() {
+    fn registering_reads_nothing_and_contributes_what_the_manifest_promises() {
         let mut registrar = Registrar::new(
             "bingo.skills",
             serde_json::Value::Null,
             Env::rooted("/nowhere/at/all"),
         );
-        SkillsPlugin.register(&mut registrar).expect("register");
+        SkillsPlugin::default()
+            .register(&mut registrar)
+            .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 3);
+        assert_eq!(contributions.len(), MANIFEST.provides.len());
         assert!(matches!(contributions[0], Contribution::Commands(_)));
         assert!(matches!(contributions[1], Contribution::Tool(_)));
         assert!(matches!(contributions[2], Contribution::Context(_)));
+        match &contributions[3] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 }

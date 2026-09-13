@@ -267,18 +267,19 @@ fn reasoning_metadata(done: Option<&Value>) -> ProviderMetadata {
     )])
 }
 
-/// The Responses wire reports `input_tokens` inclusive of the cached prefix;
-/// the sdk keeps the two apart so the ruler can tell a cache read from fresh
-/// input, and the kernel sums them back.
+/// The Responses wire reports `input_tokens` inclusive of cache reads and
+/// writes; the sdk keeps all three counts apart, and the kernel sums them back.
 fn usage_of(response: &Value) -> Usage {
     let usage = response.get("usage").unwrap_or(&Value::Null);
     let cached = detail(usage, "input_tokens_details", "cached_tokens");
+    let written = detail(usage, "input_tokens_details", "cache_write_tokens");
     Usage {
-        input_tokens: u64_at(usage, "input_tokens").saturating_sub(cached),
+        input_tokens: u64_at(usage, "input_tokens")
+            .saturating_sub(cached)
+            .saturating_sub(written),
         output_tokens: u64_at(usage, "output_tokens"),
         cache_read_tokens: cached,
-        // Responses caches automatically and never bills a write.
-        cache_write_tokens: 0,
+        cache_write_tokens: written,
         reasoning_tokens: detail(usage, "output_tokens_details", "reasoning_tokens"),
     }
 }

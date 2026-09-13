@@ -54,6 +54,7 @@ pub mod config;
 pub mod dispatch;
 pub mod env_file;
 pub mod events;
+pub mod guide;
 pub mod hook;
 pub mod matcher;
 pub mod program;
@@ -68,11 +69,11 @@ use bingo_sdk::{ConfigClaim, Contribution, Hook, Plugin, PluginError, PluginMani
 pub use config::{HookEvent, Hooks, Settings};
 pub use hook::ShellHooks;
 
-static MANIFEST: PluginManifest = PluginManifest {
+pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.hooks.shell",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["hook:shell"],
+    provides: &["hook:shell", "service:bingo.hooks.shell.pages"],
     requires: &[],
     config: Some(ConfigClaim {
         keys: config::CLAIMED,
@@ -94,6 +95,7 @@ impl Plugin for ShellHooksPlugin {
         let settings: Settings = registrar.config()?;
         let hooks = Arc::new(ShellHooks::new(&settings.hooks, &registrar.env().data_dir));
         registrar.add(Contribution::Hook(hooks as Arc<dyn Hook>));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -117,8 +119,15 @@ mod tests {
             .register(&mut registrar)
             .expect("registers");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions.len(), MANIFEST.provides.len());
         assert!(matches!(contributions[0], Contribution::Hook(_)));
+        match &contributions[1] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 
     #[test]
@@ -127,7 +136,10 @@ mod tests {
         ShellHooksPlugin
             .register(&mut registrar)
             .expect("registers");
-        assert_eq!(registrar.into_contributions().len(), 1);
+        assert_eq!(
+            registrar.into_contributions().len(),
+            MANIFEST.provides.len()
+        );
     }
 
     #[test]

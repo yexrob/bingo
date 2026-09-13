@@ -15,22 +15,35 @@
 //!
 //! Only a terminal that draws pictures gets one. Everywhere else the box is
 //! exactly what it was: the tokens in the line already say what is attached.
+//!
+//! A held picture is a file (ADR-0052), and its pixels are the memo's
+//! ([`Linked`]), read once like an answer's `![…](path)`: a token whose
+//! file the memo has not read yet draws nothing this frame and is drawn on
+//! the one after the read lands.
 
 use bingo_sdk::Image;
 
+use crate::graphics::linked::Linked;
 use crate::graphics::picture::Source;
 use crate::graphics::{Band, Decoded, Graphics, band};
-use crate::pictures::Held;
+use crate::pictures::{Held, dest};
 
 /// The strip for a line, `width` columns wide.
-pub fn rows(held: &Held, line: &str, graphics: Graphics, decoded: &Decoded, width: u16) -> Band {
+pub fn rows(
+    held: &Held,
+    line: &str,
+    linked: &Linked,
+    graphics: Graphics,
+    decoded: &Decoded,
+    width: u16,
+) -> Band {
     let Graphics::Kitty { cell, .. } = graphics else {
         return Band::default();
     };
     let carried: Vec<(Source, &Image)> = held
         .shown(line)
         .into_iter()
-        .map(|(token, image)| (Source::Draft { token }, image))
+        .filter_map(|(token, path)| Some((Source::Draft { token }, linked.image(&dest(path))?)))
         .collect();
     band::of(&carried, cell, decoded, width)
 }
@@ -43,21 +56,33 @@ mod tests {
     use bingo_pictures::testing::png;
 
     /// The pictures of a line, held under the tokens it names.
-    fn holding(pictures: &[(u32, u32)]) -> (Held, String) {
+    /// The pictures of a line, held under the tokens it names as files the
+    /// memo has already read.
+    fn holding(pictures: &[(u32, u32)]) -> (Held, Linked, String) {
         let mut held = Held::default();
+        let mut linked = Linked::default();
         let mut line = String::new();
         for (width, height) in pictures {
-            let token = held.hold(&line, png(*width, *height));
+            let token = crate::pictures::next_token(&line);
+            let path = std::path::PathBuf::from(format!("/draft/{token}.png"));
+            let dest = dest(&path);
+            linked.take(&dest);
+            linked.answered(crate::graphics::linked::Answer {
+                dest,
+                result: Ok(png(*width, *height)),
+            });
+            held.hold(&line, path);
             line.push_str(&crate::pictures::placeholder(token));
         }
-        (held, line)
+        (held, linked, line)
     }
 
     fn strip(pictures: &[(u32, u32)], width: u16) -> Band {
-        let (held, line) = holding(pictures);
+        let (held, linked, line) = holding(pictures);
         rows(
             &held,
             &line,
+            &linked,
             graphics::drawing(),
             &Decoded::default(),
             width,
@@ -94,12 +119,11 @@ mod tests {
     /// the sentence moves in the strip.
     #[test]
     fn the_strip_is_in_the_lines_own_order() {
-        let mut held = Held::default();
-        held.hold("", png(100, 100));
-        held.hold("[image 1]", png(200, 200));
+        let (held, linked, _) = holding(&[(100, 100), (200, 200)]);
         let drawn = rows(
             &held,
             "[image 2] then [image 1]",
+            &linked,
             graphics::drawing(),
             &Decoded::default(),
             60,
@@ -117,17 +141,40 @@ mod tests {
     fn a_line_with_no_picture_and_a_terminal_with_none_have_no_strip() {
         assert_eq!(strip(&[], 60), Band::default());
         assert_eq!(strip(&[], 60).height(), 0);
-        let (held, line) = holding(&[(100, 100)]);
-        let off = rows(&held, &line, Graphics::Off, &Decoded::default(), 60);
+        let (held, linked, line) = holding(&[(100, 100)]);
+        let off = rows(
+            &held,
+            &line,
+            &linked,
+            Graphics::Off,
+            &Decoded::default(),
+            60,
+        );
         assert_eq!(off, Band::default());
         let typed = rows(
             &Held::default(),
             "[image 1]",
+            &linked,
             graphics::drawing(),
             &Decoded::default(),
             60,
         );
         assert_eq!(typed, Band::default(), "a token typed by hand is words");
+        let mut unread = Held::default();
+        unread.hold("", std::path::PathBuf::from("/draft/9.png"));
+        let waiting = rows(
+            &unread,
+            "[image 1]",
+            &Linked::default(),
+            graphics::drawing(),
+            &Decoded::default(),
+            60,
+        );
+        assert_eq!(
+            waiting,
+            Band::default(),
+            "a file not read yet draws nothing"
+        );
     }
 
     /// A narrow box shows fewer of them and still shows one: whether there is

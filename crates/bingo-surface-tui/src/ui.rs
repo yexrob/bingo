@@ -32,7 +32,7 @@ use crate::rewind::Rewind;
 use crate::roster;
 use crate::scroll::Scroll;
 use crate::search::Search;
-use crate::select::Select;
+use crate::select::{self, Cell, Dragging, Edge, Select};
 use crate::tree::{self, Row, Tree};
 use crate::views::Marks;
 
@@ -474,6 +474,11 @@ pub struct Ui {
     pub linked: Linked,
     /// A newer release than this build, as the start-up check found it (M63).
     pub update: Option<String>,
+    /// The widest a line of prose is drawn, where a person set a measure
+    /// (`tui.measure`, [`crate::settings`]; design §7). Terminal-side like the
+    /// fold and the scroll, and read once at the start: it is a fact about
+    /// this machine, not about the conversation.
+    pub measure: Option<usize>,
     /// The opening, while it is playing (M70, redrawn by M72; design §11). It
     /// is drawn in the welcome box's place and it lands on that box, so the
     /// moment it has run out it is taken away and the box the transcript has
@@ -523,6 +528,7 @@ impl Ui {
             decoded: Decoded::default(),
             linked: Linked::default(),
             update: None,
+            measure: None,
             intro: None,
             files: RefCell::default(),
         }
@@ -713,6 +719,47 @@ impl Ui {
     /// The rows a page key moves by: the screenful a person is looking at.
     pub fn page(&self) -> usize {
         self.transcript().1.max(1)
+    }
+
+    /// A drag held past an edge of the transcript: scroll towards it, and take
+    /// the run's far end to the line now drawn at that edge.
+    ///
+    /// It remembers that the hand is still out there — unless what the edge
+    /// reached is the transcript's own first or last line, where a hand may go
+    /// on holding but there is nothing further to reach, and the frames
+    /// another step would cost are not owed.
+    ///
+    /// The far end is measured against where the scroll is *going*, never
+    /// against where its ease has reached: a drag sends events far faster than
+    /// the ease is long, and the run would fall behind the view it is moving.
+    pub fn drag_edge(&mut self, edge: Edge, column: usize, now: Now) {
+        let (height, rows) = self.transcript();
+        self.scroll.by(edge.lines(), height, rows, now.instant);
+        let line = edge.line(self.scroll.target(height, rows), rows, height);
+        self.select.extend(Cell { line, column });
+        self.select.dragging = edge.beyond(line, height).then_some(Dragging {
+            edge,
+            stepped: now.instant,
+        });
+    }
+
+    /// One line more of a drag the hand is still holding past an edge, once
+    /// [`select::EDGE_PACE`] has come round again. The loop asks every frame,
+    /// and a frame is owed for as long as this has something to do.
+    pub fn drag_step(&mut self, now: Now) {
+        let Some(held) = self.select.dragging else {
+            return;
+        };
+        if now.since(held.stepped) < select::EDGE_PACE {
+            return;
+        }
+        self.drag_edge(held.edge.step(), self.head_column(), now);
+    }
+
+    /// The column the run's far end is at: a drag walking past an edge keeps
+    /// the column the pointer left the region at.
+    fn head_column(&self) -> usize {
+        self.select.run.map_or(0, |run| run.head.column)
     }
 }
 

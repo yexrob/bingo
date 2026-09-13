@@ -35,6 +35,7 @@ pub fn rows(state: &SessionState) -> Vec<CardId> {
     state
         .extensions
         .iter()
+        .filter(|(plugin, _)| !bingo_sdk::is_internal_extension(plugin))
         .flat_map(|(plugin, kinds)| {
             kinds.keys().map(|kind| CardId {
                 plugin: plugin.clone(),
@@ -313,6 +314,55 @@ mod tests {
     fn a_session_no_plugin_has_written_to_says_so() {
         let drawn = sheet(&state());
         assert_eq!(drawn, vec![NOTHING.to_string()]);
+    }
+
+    #[test]
+    fn internal_extension_namespaces_never_become_panels_or_pinned_cards() {
+        for private in ["_private.example", "bingo.context"] {
+            let state = folded(vec![
+                frame(
+                    1,
+                    extended(private, "capture", json!({"hidden": "baseline text"})),
+                ),
+                frame(
+                    2,
+                    extended(
+                        "bingo.demo.ui",
+                        "board",
+                        json!({"kind":"panel", "title":"Board", "child":{"kind":"text", "text":"ready"}}),
+                    ),
+                ),
+            ]);
+            let visible = CardId {
+                plugin: "bingo.demo.ui".into(),
+                kind: "board".into(),
+            };
+            assert_eq!(rows(&state), vec![visible.clone()]);
+            let session = SessionId::from_raw("ses_1");
+            let pins = BTreeSet::from([
+                Pin {
+                    session: session.clone(),
+                    card: CardId {
+                        plugin: private.into(),
+                        kind: "capture".into(),
+                    },
+                },
+                Pin {
+                    session: session.clone(),
+                    card: visible.clone(),
+                },
+            ]);
+            let cards = crate::rail::cards(&state, &session, &pins);
+            assert_eq!(
+                cards.iter().map(|card| card.id.clone()).collect::<Vec<_>>(),
+                vec![visible]
+            );
+            assert!(!sheet(&state).join("\n").contains("baseline text"));
+            assert!(
+                state.extensions.contains_key(private),
+                "raw state is retained"
+            );
+        }
     }
 
     #[test]

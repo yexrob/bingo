@@ -46,6 +46,18 @@ impl From<ApiError> for ChannelError {
     }
 }
 
+/// A binary answer: the bytes, and what the peer called them.
+///
+/// The type is a hint and no more — what a picture is, is the bytes' own to
+/// say (ADR-0041), and they are sniffed where they become an `Image`. For a
+/// document it is the one thing that says whether there are words in it worth
+/// putting in the message as well as on disk.
+#[derive(Debug)]
+pub struct Binary {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+}
+
 pub struct Api {
     http: reqwest::Client,
     base: String,
@@ -107,12 +119,14 @@ impl Api {
         self.send(reqwest::Method::PATCH, path, Some(body)).await
     }
 
-    /// A binary resource — a picture a message carried. Feishu answers these
-    /// with the bytes, not the JSON envelope, so a refusal is read off the
-    /// status. The type is not read off the `Content-Type`: what a picture is
-    /// is the bytes' to say (ADR-0041), and they are sniffed where they are
-    /// turned into an `Image`.
-    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>, ApiError> {
+    pub async fn delete(&self, path: &str) -> Result<Value, ApiError> {
+        self.send(reqwest::Method::DELETE, path, None).await
+    }
+
+    /// A binary resource — whatever a message carried besides its words.
+    /// Feishu answers these with the bytes, not the JSON envelope, so a
+    /// refusal is read off the status.
+    pub async fn get_bytes(&self, path: &str) -> Result<Binary, ApiError> {
         let bearer = self
             .tokens
             .bearer(&self.http, &self.base, std::time::Instant::now())
@@ -131,11 +145,47 @@ impl Api {
                 message: response.text().await.unwrap_or_default(),
             });
         }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase();
         let bytes = response
             .bytes()
             .await
             .map_err(|e| ApiError::Transport(format!("feishu: {e}")))?;
-        Ok(bytes.to_vec())
+        Ok(Binary {
+            bytes: bytes.to_vec(),
+            content_type,
+        })
+    }
+
+    /// A form, already built. The body is the caller's (`super::upload`):
+    /// what a multipart body looks like is a wire format with its own
+    /// fixtures, and reqwest's `multipart` feature is not enabled for it.
+    pub async fn post_multipart(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<Value, ApiError> {
+        let bearer = self
+            .tokens
+            .bearer(&self.http, &self.base, std::time::Instant::now())
+            .await?;
+        request(
+            self.http
+                .post(format!("{}{path}", self.base))
+                .bearer_auth(bearer)
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(body),
+        )
+        .await
     }
 
     async fn send(

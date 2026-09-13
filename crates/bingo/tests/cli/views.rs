@@ -97,7 +97,7 @@ fn a_binary_without_a_script_has_no_fake_provider() {
     let dir = tempfile::tempdir().unwrap();
     let out = run_within(
         bingo()
-            .env("HOME", dir.path())
+            .envs(home_env(dir.path()))
             .env_remove("ANTHROPIC_API_KEY")
             .args(["--print", "--cwd"])
             .arg(dir.path())

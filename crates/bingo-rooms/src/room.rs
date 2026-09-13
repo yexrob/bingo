@@ -2,10 +2,16 @@
 //! (ADR-0011 §1) under a person's, keyed `rooms/…` and titled `#name`; its
 //! members are the latest `members` extension published into its journal, and
 //! nothing here keeps a copy of either beside them.
+//!
+//! Three kinds say the whole of it: `members` is who is in it, `opened` why it
+//! is there, and `closed` that it has ended (ADR-0053 §1 and §4). Each is read
+//! back here and nowhere else, so no caller can hold a second idea of one.
 
 use bingo_sdk::{
-    Driver, HostHandle, OpenOptions, SessionId, SessionSelector, SessionState, SessionSummary, View,
+    Driver, HostHandle, KernelError, OpenOptions, SessionFilter, SessionId, SessionSelector,
+    SessionState, SessionSummary, View,
 };
+use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use crate::ear::{self, Ears, Seat};
@@ -14,6 +20,23 @@ use crate::identity;
 /// The one kind this plugin publishes for a room as a whole. A payload is the
 /// whole of a room's membership (ADR-0011 §2), so writing it replaces it.
 pub const MEMBERS: &str = "members";
+
+/// Why the room was opened, and who opened it (ADR-0053 §1): one purpose per
+/// room, read at the head of every reading, and the signing name the roster
+/// verbs check a caller against.
+pub const OPENED: &str = "opened";
+
+/// That the room has ended (ADR-0053 §4). The frame is the whole of what
+/// closing means: the session is not ended and nothing is deleted, because the
+/// journal is the record.
+pub const CLOSED: &str = "closed";
+
+/// The fields those two payloads carry. They are read by hand out of a
+/// persisted journal, so each is written down once.
+const PURPOSE: &str = "purpose";
+const BY: &str = "by";
+const AT: &str = "at";
+const WHY: &str = "why";
 
 /// The seats in that payload that are not live, with the patience each asked
 /// for (ADR-0029 §2). A payload without it is an all-live roster.
@@ -27,6 +50,68 @@ pub const EAR: &str = "ear:";
 /// plugin owns `rooms`.
 pub const KEY: &str = "rooms/";
 
+/// Why a room is there, as the frame that opened it says (ADR-0053 §1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opened {
+    /// The one thing it is for. A person's `/room` and a team file may say
+    /// none, and then the readings carry none either.
+    pub purpose: Option<String>,
+    /// The signing name of whoever opened it — `parent` for a person's door —
+    /// which with the holder is who may change its roster (ADR-0053 §5).
+    pub by: String,
+}
+
+impl Opened {
+    pub fn payload(&self) -> Value {
+        json!({ PURPOSE: self.purpose, BY: self.by })
+    }
+
+    /// What an opening payload says, or nothing for one that is not an
+    /// opening: `by` is what the roster rule reads, so a payload without it
+    /// answers nobody's question.
+    pub fn of_payload(payload: &Value) -> Option<Opened> {
+        Some(Opened {
+            purpose: payload[PURPOSE].as_str().map(str::to_string),
+            by: payload[BY].as_str()?.to_string(),
+        })
+    }
+
+    pub fn of_state(state: &SessionState) -> Option<Opened> {
+        Opened::of_payload(published(state, OPENED)?)
+    }
+}
+
+/// The end of a room, as the frame that closed it says (ADR-0053 §4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Closed {
+    pub at: Timestamp,
+    pub by: String,
+    /// What was said about it, where the caller said anything.
+    pub why: Option<String>,
+}
+
+impl Closed {
+    pub fn payload(&self) -> Value {
+        json!({ AT: self.at.to_string(), BY: self.by, WHY: self.why })
+    }
+
+    /// What a closing payload says, or nothing for one that says nothing this
+    /// build can read. Whether the room is closed is [`closed_of`]'s answer
+    /// and never this one's: a payload nothing here understands closed the
+    /// room all the same.
+    pub fn of_payload(payload: &Value) -> Option<Closed> {
+        Some(Closed {
+            at: payload[AT].as_str()?.parse().ok()?,
+            by: payload[BY].as_str()?.to_string(),
+            why: payload[WHY].as_str().map(str::to_string),
+        })
+    }
+
+    pub fn of_state(state: &SessionState) -> Option<Closed> {
+        Closed::of_payload(published(state, CLOSED)?)
+    }
+}
+
 /// A room, as its own journal says it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Room {
@@ -38,6 +123,11 @@ pub struct Room {
     pub members: Vec<String>,
     /// What each of them hears (ADR-0029 §1).
     pub ears: Ears,
+    /// The one thing it was opened for, where its opener said one.
+    pub purpose: Option<String>,
+    /// Whether it has ended (ADR-0053 §4): a closed room is read to its end
+    /// and then never, takes no post, owes nothing and is chased for nothing.
+    pub closed: bool,
 }
 
 impl Room {
@@ -56,23 +146,62 @@ impl Room {
         Some(Room {
             title: summary.title.clone()?,
             parent: summary.parent.as_ref()?.session.clone(),
-            // A summary says who a room is, never who is in it: the frames
-            // that follow it do.
+            // A summary says who a room is, never who is in it, what it is for
+            // or whether it still stands: the frames that follow it do.
             members: Vec::new(),
             ears: Ears::default(),
+            purpose: None,
+            closed: false,
         })
     }
 
-    /// The same room, with the roster its own journal has. A summary says who
-    /// a room is, never who is in it, so a reader that has only just met one
-    /// fills it in from the snapshot.
+    /// The seats it has: its names, each wearing the ear it now hears with.
+    /// The same roster [`roster_of`] reads off a snapshot, for a caller that
+    /// holds the room rather than the snapshot it came from.
+    pub fn seats(&self) -> Vec<Seat> {
+        self.members
+            .iter()
+            .map(|name| Seat {
+                ear: self.ears.of(name),
+                name: name.clone(),
+            })
+            .collect()
+    }
+
+    /// The same room, as its own journal has it. A summary says who a room is
+    /// and nothing else about it, so a reader that has only just met one fills
+    /// the rest in from the snapshot.
     pub fn seated(&self, state: &SessionState) -> Room {
         Room {
             members: members_of(state),
             ears: ear::ears_of(state),
+            purpose: purpose_of(state),
+            closed: closed_of(state),
             ..self.clone()
         }
     }
+}
+
+/// One of this plugin's kinds in a room's journal, as the snapshot folded it.
+fn published<'a>(state: &'a SessionState, kind: &str) -> Option<&'a Value> {
+    state.extensions.get(crate::PLUGIN)?.get(kind)
+}
+
+/// What a room is for, or nothing for a room whose opener said nothing.
+pub fn purpose_of(state: &SessionState) -> Option<String> {
+    Opened::of_state(state)?.purpose
+}
+
+/// Whether a room has been closed. The frame's presence is the whole of the
+/// answer (ADR-0053 §4), so a payload no build understands still closes it.
+pub fn closed_of(state: &SessionState) -> bool {
+    is_closed(published(state, CLOSED))
+}
+
+/// The same question of one payload, for the fold that sees frames rather than
+/// snapshots.
+pub fn is_closed(payload: Option<&Value>) -> bool {
+    payload.is_some_and(|payload| !payload.is_null())
 }
 
 /// Who is in a room, as the room's own journal has it. Every reader — the
@@ -144,6 +273,25 @@ fn drawn(seats: &[Seat]) -> Value {
     serde_json::to_value(view).unwrap_or_default()
 }
 
+/// The rooms hanging under one session, as the host lists its children.
+/// Everything that asks "which rooms are here" — the listing, the reading at
+/// the head of a turn, the door a verb names one at — asks it here.
+pub async fn under(
+    host: &HostHandle,
+    parent: &SessionId,
+) -> Result<Vec<(SessionId, Room)>, KernelError> {
+    let children = host
+        .sessions(SessionFilter {
+            parent: Some(parent.clone()),
+            ..SessionFilter::default()
+        })
+        .await?;
+    Ok(children
+        .into_iter()
+        .filter_map(|child| Room::of(&child).map(|room| (child.id, room)))
+        .collect())
+}
+
 /// A session as this plugin reads one: its own journal, folded. A session it
 /// cannot read says nothing rather than guessing, which is what every caller
 /// here wants of one.
@@ -181,6 +329,102 @@ mod tests {
         assert_eq!(room.parent, parent);
         assert!(room.members.is_empty(), "a summary says nothing of them");
         assert_eq!(room.ears, Ears::default(), "nor of what they hear");
+        assert_eq!(room.purpose, None, "nor what it is for");
+        assert!(!room.closed, "nor whether it still stands");
+    }
+
+    /// The shape an opening leaves in a journal — a fixture, because it is a
+    /// persisted payload and not a value this process is free to change
+    /// (ADR-0053 §1).
+    #[test]
+    fn an_opening_is_a_purpose_and_the_name_that_opened_it() {
+        let opened = Opened {
+            purpose: Some("settle the storage layout".into()),
+            by: "reviewer".into(),
+        };
+        assert_eq!(
+            opened.payload(),
+            json!({"purpose": "settle the storage layout", "by": "reviewer"})
+        );
+        assert_eq!(
+            Opened::of_payload(&opened.payload()),
+            Some(opened),
+            "and reads back as what it was written from"
+        );
+
+        const WRITTEN: &str = r#"{"purpose":"settle the storage layout","by":"reviewer"}"#;
+        let payload: Value = serde_json::from_str(WRITTEN).expect("an opening payload");
+        assert_eq!(
+            Opened::of_payload(&payload).map(|opened| opened.by),
+            Some("reviewer".to_string())
+        );
+    }
+
+    /// A person's door may give no purpose (ADR-0053 §1), and the name that
+    /// opened it is `parent`.
+    #[test]
+    fn an_opening_without_a_purpose_still_says_who_opened_it() {
+        let opened = Opened {
+            purpose: None,
+            by: crate::name::PARENT.into(),
+        };
+        assert_eq!(opened.payload(), json!({"purpose": null, "by": "parent"}));
+        assert_eq!(Opened::of_payload(&opened.payload()), Some(opened));
+        assert_eq!(
+            Opened::of_payload(&json!({"by": "parent"})),
+            Some(Opened {
+                purpose: None,
+                by: "parent".into()
+            }),
+            "an absent purpose reads as no purpose"
+        );
+        assert_eq!(
+            Opened::of_payload(&json!({"purpose": "x"})),
+            None,
+            "and a payload that names nobody says nothing"
+        );
+    }
+
+    /// The whole of what closing a room means, as one value (ADR-0053 §4).
+    #[test]
+    fn a_closing_is_a_moment_a_name_and_what_was_said_about_it() {
+        let closed = Closed {
+            at: Timestamp::UNIX_EPOCH,
+            by: "parent".into(),
+            why: Some("it shipped".into()),
+        };
+        assert_eq!(
+            closed.payload(),
+            json!({"at": "1970-01-01T00:00:00Z", "by": "parent", "why": "it shipped"})
+        );
+        assert_eq!(Closed::of_payload(&closed.payload()), Some(closed));
+
+        const WRITTEN: &str = r#"{"at":"1970-01-01T00:00:00Z","by":"parent","why":null}"#;
+        let payload: Value = serde_json::from_str(WRITTEN).expect("a closing payload");
+        assert_eq!(
+            Closed::of_payload(&payload),
+            Some(Closed {
+                at: Timestamp::UNIX_EPOCH,
+                by: "parent".into(),
+                why: None,
+            })
+        );
+    }
+
+    /// The frame's presence is the whole of "closed": a payload this build
+    /// cannot read closed the room, and only a null one — which nothing
+    /// publishes — leaves it standing.
+    #[test]
+    fn a_room_is_closed_by_the_frame_and_not_by_what_is_in_it() {
+        assert!(is_closed(Some(&json!({"at": "not a moment"}))));
+        assert!(is_closed(Some(&json!({}))));
+        assert!(!is_closed(None));
+        assert!(!is_closed(Some(&Value::Null)));
+        assert_eq!(
+            Closed::of_payload(&json!({"at": "not a moment", "by": "parent"})),
+            None,
+            "and what it says is still unreadable"
+        );
     }
 
     #[test]
