@@ -20,7 +20,7 @@ use bingo_sdk::{
 use futures::StreamExt;
 use serde_json::json;
 use tempfile::TempDir;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -89,9 +89,13 @@ async fn turn(provider: &OpenAiProvider) -> Result<Vec<ModelEvent>, ProviderErro
 async fn a_refused_request_is_retried_once_with_a_renewed_bearer() {
     let server = MockServer::start().await;
     let directory = tempfile::tempdir().expect("a temporary directory");
+    // Both attempts must carry the same body: the metered one goes out
+    // between `build()` and `execute()`, so what `try_clone` kept is the
+    // bytes and not a stream already spent (ADR-0056 §3).
     Mock::given(method("POST"))
         .and(path("/codex/responses"))
         .and(header("authorization", "Bearer at-stale"))
+        .and(body_string_contains("hello"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({
             "error": { "message": "token expired", "code": "invalid_api_key" }
         })))
@@ -102,6 +106,7 @@ async fn a_refused_request_is_retried_once_with_a_renewed_bearer() {
     Mock::given(method("POST"))
         .and(path("/codex/responses"))
         .and(header("authorization", "Bearer at-renewed"))
+        .and(body_string_contains("hello"))
         .respond_with(
             ResponseTemplate::new(200).set_body_raw(fixture("text.sse"), "text/event-stream"),
         )

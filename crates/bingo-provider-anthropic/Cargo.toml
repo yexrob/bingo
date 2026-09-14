@@ -36,5 +36,6 @@ insta.workspace = true
 # A credential store a test can write to without touching the real one.
 tempfile.workspace = true
 wiremock.workspace = true
-# `tokio::time::pause`, so the 60s idle guard costs a test no wall time.
-tokio = { workspace = true, features = ["test-util"] }
+# `tokio::time::pause`, so a guard on silence costs a test no wall time; `net`
+# for the peers the real-socket tests drive it against (ADR-0056).
+tokio = { workspace = true, features = ["test-util", "net"] }

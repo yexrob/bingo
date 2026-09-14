@@ -7,7 +7,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use bingo_provider_openai::variant::{ORIGINATOR, Variant};
 use bingo_provider_openai::{OpenAiProvider, events};
@@ -332,29 +331,6 @@ async fn a_401_is_an_auth_failure_and_a_503_is_a_retryable_server_error() {
         }
     );
     assert!(unavailable.retryable());
-}
-
-/// A server that accepts the connection and then says nothing must not hang a
-/// headless run. Paused time, so the guard costs the suite no wall clock.
-#[tokio::test(start_paused = true)]
-async fn a_server_that_never_answers_times_out() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(fixture("text.sse"), "text/event-stream")
-                .set_delay(Duration::from_secs(600)),
-        )
-        .mount(&server)
-        .await;
-    assert_eq!(
-        provider(&server)
-            .stream(request(), CancellationToken::new())
-            .await
-            .err(),
-        Some(ProviderError::Timeout)
-    );
 }
 
 #[tokio::test]

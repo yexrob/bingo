@@ -50,7 +50,8 @@ use serde_json::Value;
 
 use crate::credential::Credential;
 use crate::key::ApiKey;
-use crate::stream::IDLE_TIMEOUT;
+use crate::metered::{Clock, meter, quiet};
+use crate::stream::{CONNECT_TIMEOUT, IDLE_TIMEOUT};
 use crate::variant::{ORIGINATOR, Variant};
 
 pub use crate::settings::{CodexConfig, CodexEndpoint, OpenAiConfig, OpenAiEndpoint, Settings};
@@ -145,7 +146,7 @@ impl OpenAiProvider {
         base_url: impl Into<String>,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: http(),
             id: id.into(),
             credential,
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -212,14 +213,16 @@ impl OpenAiProvider {
             .headers(self.headers().await?))
     }
 
-    /// One round trip, with one second chance for a subscription bearer.
+    /// One round trip, with one second chance for a subscription bearer. The
+    /// clock comes back out with the response: the body that follows goes on
+    /// stamping the same one (ADR-0056 §2).
     async fn send(
         &self,
         builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, ProviderError> {
+    ) -> Result<(reqwest::Response, Clock), ProviderError> {
         let again = builder.try_clone();
-        match self.round_trip(builder).await {
-            Err(error) if refused(&error) => self.after_refresh(again, error).await,
+        match self.round_trip(builder, IDLE_TIMEOUT).await {
+            Err(error) if refused(&error) => self.after_refresh(again, error, IDLE_TIMEOUT).await,
             result => result,
         }
     }
@@ -232,7 +235,8 @@ impl OpenAiProvider {
         &self,
         again: Option<reqwest::RequestBuilder>,
         first: ProviderError,
-    ) -> Result<reqwest::Response, ProviderError> {
+        idle: Duration,
+    ) -> Result<(reqwest::Response, Clock), ProviderError> {
         let (Credential::Tokens(source), Some(again)) = (&self.credential, again) else {
             return Err(first);
         };
@@ -240,7 +244,10 @@ impl OpenAiProvider {
             .refreshed()
             .await
             .map_err(|error| credential::failure(source.provider(), error))?;
-        match self.round_trip(again.headers(self.compose(&bearer)?)).await {
+        match self
+            .round_trip(again.headers(self.compose(&bearer)?), idle)
+            .await
+        {
             Err(error) if refused(&error) => Err(ProviderError::Auth {
                 message: credential::sign_in_again(source.provider()),
             }),
@@ -249,36 +256,40 @@ impl OpenAiProvider {
     }
 
     /// A non-success status never leaves this function: every caller above it
-    /// sees a classified `ProviderError` instead. The wait for the response
-    /// carries the same idle guard as the body that follows it, because one
-    /// silence is worth exactly as much as the other.
+    /// sees a classified `ProviderError` instead. The upload and the wait for
+    /// the status line share one guard, and it is a guard on silence: the body
+    /// goes out metered, so a request that is still moving is never cut for
+    /// its size (ADR-0056 §1). What `builder` holds is untouched, which is why
+    /// `try_clone` above still has bytes to replay.
     async fn round_trip(
         &self,
         builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, ProviderError> {
-        let response = tokio::time::timeout(IDLE_TIMEOUT, builder.send())
-            .await
-            .map_err(|_| ProviderError::Timeout)?
-            .map_err(|e| ProviderError::Transport {
-                message: e.to_string(),
-            })?;
+        idle: Duration,
+    ) -> Result<(reqwest::Response, Clock), ProviderError> {
+        let clock = Clock::new();
+        let request = meter(builder, &clock)?;
+        let sent = tokio::select! {
+            biased;
+            sent = self.http.execute(request) => sent,
+            () = quiet(&clock, idle) => return Err(ProviderError::Timeout),
+        };
+        let response = sent.map_err(|e| ProviderError::Transport {
+            message: e.to_string(),
+        })?;
+        // The status line is a byte moving too, so the body that follows is
+        // given its whole idle rather than what the upload left of it.
+        clock.stamp();
         if response.status().is_success() {
-            return Ok(response);
+            return Ok((response, clock));
         }
-        let status = response.status().as_u16();
-        let retry_after = header(&response, "retry-after");
-        let body = response.text().await.unwrap_or_default();
-        Err(error::classify(status, &body, retry_after.as_deref()))
+        Err(refusal(response).await)
     }
 
     async fn json(&self, builder: reqwest::RequestBuilder) -> Result<Value, ProviderError> {
-        self.send(builder)
-            .await?
-            .json()
-            .await
-            .map_err(|e| ProviderError::Stream {
-                message: format!("unreadable response body: {e}"),
-            })
+        let (response, _clock) = self.send(builder).await?;
+        response.json().await.map_err(|e| ProviderError::Stream {
+            message: format!("unreadable response body: {e}"),
+        })
     }
 
     /// The subscription catalogue, or the list M2 recorded when it cannot be
@@ -351,10 +362,14 @@ impl Provider for OpenAiProvider {
         cancel: CancellationToken,
     ) -> Result<ModelStream, ProviderError> {
         let body = request::encode(&request, self.variant);
-        let response = self
+        let (response, clock) = self
             .send(self.post(self.variant.path(), &body).await?)
             .await?;
-        Ok(stream::model_stream(stream::chunks(response), cancel))
+        Ok(stream::model_stream(
+            stream::chunks(response),
+            clock,
+            cancel,
+        ))
     }
 
     async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -458,6 +473,25 @@ fn header(response: &reqwest::Response, name: &str) -> Option<String> {
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
+}
+
+/// A refused response as the error the turn loop's ladder reads.
+async fn refusal(response: reqwest::Response) -> ProviderError {
+    let status = response.status().as_u16();
+    let retry_after = header(&response, "retry-after");
+    let body = response.text().await.unwrap_or_default();
+    error::classify(status, &body, retry_after.as_deref())
+}
+
+/// One client per provider, carrying the only bound on the phase that has
+/// nothing to meter yet: reaching the server (ADR-0056 §1). A builder that
+/// will not build loses that bound, not the provider — the endpoint is still
+/// reachable without it.
+fn http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn settings_schema() -> schemars::Schema {
@@ -983,6 +1017,191 @@ pub(crate) mod tests {
             "Signed in to codex as me@example.com."
         );
         assert_eq!(receipt("codex", None), "Signed in to codex.");
+    }
+
+    // The three phases over a real socket (ADR-0056 §1). Not wiremock: it
+    // reads the whole request before anything answers, which is the one thing
+    // these assertions are about. Every bound below is the peer's own pacing
+    // multiplied out, never a wall clock.
+
+    use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpSocket, TcpStream};
+
+    /// Small enough that the kernel cannot swallow the request whole, so the
+    /// peer's pace is the upload's pace.
+    const PEER_BUFFER: u32 = 64 * 1024;
+
+    /// What the slow peer takes in one go — several frames' worth, so it is
+    /// the peer that paces the clock and not the frame size.
+    const SIP: usize = 256 * 1024;
+
+    /// Bigger than the buffers on either side, so the body is still going out
+    /// while the assertions watch it: 32 sips, and 32 gaps to go with them.
+    const UPLOAD: usize = 8 * 1024 * 1024;
+
+    /// The gap the slow peer leaves between two sips, and the silence a test
+    /// allows. Twenty-five gaps: a machine that stalls for twenty-four of them
+    /// still passes, and the upload still outlasts the silence it is given.
+    const GAP: Duration = Duration::from_millis(20);
+    const IDLE: Duration = Duration::from_millis(500);
+
+    const ANSWER: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}";
+
+    /// A listener on the loopback, and the url that reaches it.
+    fn peer() -> (TcpListener, String) {
+        let socket = TcpSocket::new_v4().expect("a socket");
+        socket
+            .set_recv_buffer_size(PEER_BUFFER)
+            .expect("a small receive buffer");
+        socket
+            .bind("127.0.0.1:0".parse().expect("a loopback address"))
+            .expect("a port");
+        let listener = socket.listen(1).expect("a listener");
+        let address = listener.local_addr().expect("the port it took");
+        (listener, format!("http://{address}"))
+    }
+
+    fn talking_to(url: &str) -> OpenAiProvider {
+        OpenAiProvider::with_endpoint(Some("sk-test".into()), url)
+    }
+
+    fn uploading(provider: &OpenAiProvider, url: &str) -> reqwest::RequestBuilder {
+        provider.http.post(url).body("x".repeat(UPLOAD))
+    }
+
+    /// The request head, one byte at a time so that none of the body is
+    /// swallowed with it.
+    async fn head(socket: &mut TcpStream) -> String {
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(b"\r\n\r\n") && socket.read_exact(&mut byte).await.is_ok() {
+            seen.push(byte[0]);
+        }
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+
+    fn declared_length(head: &str) -> usize {
+        head.to_lowercase()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .map(str::trim)
+                    .map(str::to_string)
+            })
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no content length in {head:?}"))
+    }
+
+    /// Reads the request a sip at a time, `gap` apart, and answers only once
+    /// the whole of it has arrived. Hands back the head it read. The sip is
+    /// exact rather than whatever happens to have landed, so the drain rate is
+    /// the peer's own and not the kernel's.
+    async fn a_trickle(listener: TcpListener, gap: Duration) -> String {
+        let (mut socket, _) = listener.accept().await.expect("a connection");
+        let head = head(&mut socket).await;
+        let mut left = declared_length(&head);
+        let mut sip = vec![0u8; SIP];
+        while left > 0 {
+            tokio::time::sleep(gap).await;
+            let take = SIP.min(left);
+            if socket.read_exact(&mut sip[..take]).await.is_err() {
+                break;
+            }
+            left -= take;
+        }
+        socket.write_all(ANSWER).await.expect("the answer");
+        head
+    }
+
+    /// Takes one mouthful and never reads again, holding the connection open
+    /// so that nothing but the guard can end the request.
+    async fn a_deaf_peer(listener: TcpListener) {
+        let (mut socket, _) = listener.accept().await.expect("a connection");
+        head(&mut socket).await;
+        let mut sip = vec![0u8; SIP];
+        let _ = socket.read(&mut sip).await;
+        std::future::pending::<()>().await;
+    }
+
+    /// Reads everything and answers nothing.
+    async fn a_mute_peer(listener: TcpListener) {
+        let (mut socket, _) = listener.accept().await.expect("a connection");
+        let mut sink = Vec::new();
+        let _ = socket.read_to_end(&mut sink).await;
+    }
+
+    /// The 8.8 MB replay of ADR-0056 in miniature: the peer takes longer than
+    /// the whole idle to read the body, and the request still lands.
+    #[tokio::test]
+    async fn a_slow_upload_is_not_a_silence() {
+        let (listener, url) = peer();
+        let reading = tokio::spawn(a_trickle(listener, GAP));
+        let provider = talking_to(&url);
+        let started = Instant::now();
+        let sent = provider.round_trip(uploading(&provider, &url), IDLE).await;
+        let took = started.elapsed();
+        assert!(
+            sent.is_ok(),
+            "a moving upload is never cut: {:?}",
+            sent.err()
+        );
+        assert!(took > IDLE, "it outlived its own idle: {took:?}");
+        reading.await.expect("the peer");
+    }
+
+    /// A peer that stops reading has gone quiet: the request ends as the
+    /// `Timeout` the turn loop's ladder knows, and not before the idle.
+    #[tokio::test]
+    async fn a_peer_that_stops_reading_ends_the_request() {
+        let (listener, url) = peer();
+        let deaf = tokio::spawn(a_deaf_peer(listener));
+        let provider = talking_to(&url);
+        let started = Instant::now();
+        let sent = provider.round_trip(uploading(&provider, &url), IDLE).await;
+        let took = started.elapsed();
+        assert_eq!(sent.err(), Some(ProviderError::Timeout));
+        assert!(took >= IDLE, "a silence is not one until it has lasted");
+        deaf.abort();
+    }
+
+    /// A server that takes the whole request and then says nothing is the
+    /// silence the guard was always for: a headless run must not hang on it.
+    #[tokio::test]
+    async fn a_server_that_accepts_and_says_nothing_times_out() {
+        let (listener, url) = peer();
+        let mute = tokio::spawn(a_mute_peer(listener));
+        let provider = talking_to(&url);
+        let started = Instant::now();
+        let asking = provider.http.post(url.as_str()).body("hello");
+        assert_eq!(
+            provider.round_trip(asking, IDLE).await.err(),
+            Some(ProviderError::Timeout)
+        );
+        assert!(started.elapsed() >= IDLE);
+        mute.abort();
+    }
+
+    /// An exact size hint is what keeps `Content-Length` on the request; a
+    /// chunked body is a different request, and a relay may refuse it.
+    #[tokio::test]
+    async fn the_request_head_carries_its_length_and_is_never_chunked() {
+        let (listener, url) = peer();
+        let reading = tokio::spawn(a_trickle(listener, Duration::ZERO));
+        let provider = talking_to(&url);
+        provider
+            .round_trip(uploading(&provider, &url), IDLE * 10)
+            .await
+            .expect("the request lands");
+        let head = reading.await.expect("the peer").to_lowercase();
+        assert!(
+            head.contains(&format!("content-length: {UPLOAD}")),
+            "the head declares the whole body: {head}"
+        );
+        assert!(
+            !head.contains("transfer-encoding"),
+            "and chunks nothing: {head}"
+        );
     }
 
     struct NoPrompter;
