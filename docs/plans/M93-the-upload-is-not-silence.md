@@ -74,20 +74,20 @@ dependencies (already in the tree).
 
 ## Exit criteria
 
-- [ ] `Metered`: frames concatenate to the input, ≤64 KiB each, exact size
+- [x] `Metered`: frames concatenate to the input, ≤64 KiB each, exact size
       hint, clock stamped per frame (both crates)
-- [ ] `quiet`: never resolves while the clock moves; resolves `idle` after
+- [x] `quiet`: never resolves while the clock moves; resolves `idle` after
       its last stamp (paused time)
-- [ ] real-socket tests (a)–(d) above green in both crates, each in under
+- [x] real-socket tests (a)–(d) above green in both crates, each in under
       10 s on this machine, none pinning a wall clock tighter than 5× its
       expected duration
-- [ ] `cargo tree -p bingo-provider-openai -e normal | grep -c .` and the
+- [x] `cargo tree -p bingo-provider-openai -e normal | grep -c .` and the
       anthropic twin unchanged but for the two direct edges;
       `scripts/budget.sh` output pasted (expected 335)
-- [ ] the openai `send` still signs in again on a 401 and replays the body
-- [ ] `scripts/tui-smoke.sh` green: its esc-before-first-byte step drives
+- [x] the openai `send` still signs in again on a 401 and replays the body
+- [x] `scripts/tui-smoke.sh` green: its esc-before-first-byte step drives
       the fake provider, not this path, and must not move
-- [ ] fmt, check, clippy (1.96 and `cargo +1.98.1 clippy` with a scratch
+- [x] fmt, check, clippy (1.96 and `cargo +1.98.1 clippy` with a scratch
       `CARGO_TARGET_DIR`), test, discipline, budget, deny all green
 
 ## Non-goals
@@ -112,3 +112,39 @@ dependencies (already in the tree).
 - `reqwest 0.13`'s `Body::wrap` sets `Content-Length` from an exact size
   hint (`async_impl/body.rs` `content_length`); test (c) pins that, so a
   reqwest bump that changes it fails here and not at a relay.
+
+## Verified (2026-09-14, dev `7dcc2321`…`4927b009`)
+
+One `opus-xhigh` worktree cut from `8c9b60b8`; dev did not move, so the
+ff-merged tree is the one every gate ran on:
+
+```
+cargo fmt --all -- --check                                      ok
+cargo clippy --workspace --all-targets --locked -- -D warnings  ok (1.96 and 1.98.1)
+cargo test -p bingo-provider-{openai,anthropic}                   233 passed ×3, --test-threads=2
+cargo test --workspace --locked --no-fail-fast                  4692 passed, 0 failed, 2 ignored (storyboard pair)
+scripts/check_discipline.sh                                     discipline ok
+scripts/budget.sh                                               budget ok (335, unchanged)
+cargo deny check                                                ok
+scripts/tui-smoke.sh                                            tui-smoke ok
+real-socket tests, one at a time: slow upload 0.81 s, deaf peer 0.58 s, mute server 0.58 s, head 0.11 s
+```
+Decided against the letter: the clock reaches the response as one argument
+of `model_stream(chunks, clock, cancel)` and is stamped in
+`Body::pull`, not in `chunks`; `round_trip`/`send` return `(Response,
+Clock)` so one clock crosses request and body (`json()` drops it); the
+status line stamps the clock, since it is a byte moving; anthropic gained
+the same `round_trip(builder, idle)` under its `send`; the wiremock
+`a_server_that_never_answers_times_out` was removed — paused time
+auto-advances past `CONNECT_TIMEOUT` while a real socket connects — and is
+replaced by `a_server_that_accepts_and_says_nothing_times_out` over a real
+socket in both crates; the slow peer drains an exact 256 KiB per 20 ms (the
+clock's grain is one 64 KiB frame; "read whatever landed" failed 2 in 3
+under the full binary) into a 64 KiB receive buffer; the 401 replay test
+now matches on the body; `http()` is the request client only, the
+`TokenSource`'s client stays as it was.
+
+Not verified: the Windows cross-check dies in aws-lc-sys' C build as since
+M86 (nothing here is platform-gated; CI's `windows` job is the look); no live
+endpoint was driven — the Road relay drive against the 406k-token session is
+owed; the status-line stamp has no test of its own.
