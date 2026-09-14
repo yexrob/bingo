@@ -458,6 +458,31 @@ fn a_default_watch_still_says_it_once_and_counts_nothing() {
     );
 }
 
+/// Whether the first completed call of `name` in a print run was an error,
+/// and the text it answered with.
+fn completed(out: &std::process::Output, name: &str) -> (bool, String) {
+    let output = frames_of(out)
+        .into_iter()
+        .find_map(|f| match f.event {
+            Event::ItemCompleted { item } => match item.body {
+                bingo_sdk::ItemBody::ToolCall {
+                    name: called,
+                    output: Some(output),
+                    ..
+                } if called == name => Some(output),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the {name} call completed"));
+    let text = output
+        .parts
+        .iter()
+        .filter_map(bingo_sdk::ContentPart::as_text)
+        .collect();
+    (output.is_error, text)
+}
+
 /// `notify_all` with nothing to watch for is refused before anything runs,
 /// with the wording that says what to add (ADR-0018 §8).
 #[test]
@@ -478,29 +503,44 @@ fn notify_all_with_no_condition_is_refused_and_starts_no_job() {
     );
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
 
-    let refused = frames_of(&out)
-        .into_iter()
-        .find_map(|f| match f.event {
-            Event::ItemCompleted { item } => match item.body {
-                bingo_sdk::ItemBody::ToolCall {
-                    name,
-                    output: Some(output),
-                    ..
-                } if name == "Bash" => Some(output),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("the Bash call completed");
-    assert!(refused.is_error);
-    let text: String = refused
-        .parts
-        .iter()
-        .filter_map(bingo_sdk::ContentPart::as_text)
-        .collect();
+    let (is_error, text) = completed(&out, "Bash");
+    assert!(is_error);
     assert!(text.contains("notify_all watches nothing"), "{text}");
     assert!(text.contains("notify_on"), "{text}");
     assert!(text.contains("notify_regex"), "{text}");
+    assert!(logs(dir.path()).is_empty(), "a refused call started a job");
+}
+
+/// A bare foreground `sleep` is the model waiting for what the harness waits
+/// for on its behalf; it is refused with the turn's end named as the way to
+/// wait, and nothing runs (ADR-0018 §9).
+#[test]
+fn a_bare_foreground_sleep_is_refused_and_starts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Bash","input":{"command":"sleep 30"}}}]},
+            {"steps":[{"text":"I will end my turn instead"}]}
+        ]}"#,
+    );
+    let started = std::time::Instant::now();
+    let out = scripted_run(
+        dir.path(),
+        &script,
+        &["--dangerously-skip-permissions"],
+        "wait for the build",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the sleep ran anyway"
+    );
+
+    let (is_error, text) = completed(&out, "Bash");
+    assert!(is_error);
+    assert!(text.starts_with("`sleep 30`"), "{text}");
+    assert!(text.contains("end your turn"), "{text}");
+    assert!(text.contains("`background: true`"), "{text}");
     assert!(logs(dir.path()).is_empty(), "a refused call started a job");
 }
 
@@ -520,26 +560,8 @@ fn an_id_no_job_has_is_an_error_result_the_model_can_correct() {
         "read a job that is not there",
     );
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    let said = frames_of(&out)
-        .into_iter()
-        .find_map(|f| match f.event {
-            Event::ItemCompleted { item } => match item.body {
-                bingo_sdk::ItemBody::ToolCall {
-                    name,
-                    output: Some(output),
-                    ..
-                } if name == "BashOutput" => Some(output),
-                _ => None,
-            },
-            _ => None,
-        })
-        .expect("the BashOutput call completed");
-    assert!(said.is_error);
-    let text: String = said
-        .parts
-        .iter()
-        .filter_map(bingo_sdk::ContentPart::as_text)
-        .collect();
+    let (is_error, text) = completed(&out, "BashOutput");
+    assert!(is_error);
     assert!(text.contains("no job is called `job_nothing`"), "{text}");
     assert!(
         text.contains("No shell command has been backgrounded"),

@@ -145,7 +145,7 @@ fn a_session_another_process_holds_cannot_be_continued() {
     let home = tempfile::tempdir().unwrap();
     let slow = script(
         r#"{"responses":[
-            {"steps":[{"toolCall":{"name":"Bash","input":{"command":"sleep 4"}}}]},
+            {"steps":[{"toolCall":{"name":"Bash","input":{"command":"echo waiting; sleep 4"}}}]},
             {"steps":[{"text":"Slept."}]}
         ]}"#,
     );

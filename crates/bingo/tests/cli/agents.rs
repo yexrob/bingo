@@ -208,7 +208,7 @@ fn a_finished_background_agent_wakes_the_run_that_spawned_it() {
 /// middle texts absorb the child/parent race for the script's cursor.
 const BACKGROUND_WAKE_BUSY: &str = r#"{"responses":[
     {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"work quietly","background":true}}}]},
-    {"steps":[{"toolCall":{"name":"Bash","input":{"command":"sleep 2"}}}]},
+    {"steps":[{"toolCall":{"name":"Bash","input":{"command":"echo waiting; sleep 2"}}}]},
     {"steps":[{"text":"still the first turn, or the work"}]},
     {"steps":[{"text":"still the first turn, or the work"}]},
     {"steps":[{"text":"heard the agent finish"}]}

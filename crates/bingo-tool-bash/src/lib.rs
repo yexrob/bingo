@@ -28,6 +28,7 @@
 //! and docs/adr/0018-background-commands.md.
 
 mod endless;
+mod idle;
 mod jobs;
 mod kill;
 mod log;
@@ -81,7 +82,8 @@ pub struct BashArgs {
     pub command: String,
     /// Omit or set false to wait when the next action needs output or exit status.
     /// Set true only for servers/watchers or while useful independent work continues;
-    /// it returns a job id, not a completed result. Duration alone is not a reason.
+    /// it returns a job id, not a completed result, and its end wakes you: end
+    /// your turn to wait for it. Duration alone is not a reason.
     pub background: Option<bool>,
     /// How long to let it run, in milliseconds, when the call waits. Defaults
     /// to 120000, and 600000 is the most that will be honoured. A background
@@ -249,9 +251,10 @@ fn started(job: &Job, why: Option<String>) -> String {
         .map(|why| format!(" It was backgrounded although the call did not ask: {why}."))
         .unwrap_or_default();
     format!(
-        "Started `{}` in the background as job {}.{backgrounded} You will be told when it ends, so \
-         there is no reason to poll: `BashOutput` with id \"{}\" reads what it has written when you \
-         want it, and `KillShell` ends it. Its log is {}.",
+        "Started `{}` in the background as job {}.{backgrounded} You will be told when it ends: \
+         ending your turn is how you wait for that, and the notification wakes you, so there is \
+         no reason to poll and nothing to sleep for. `BashOutput` with id \"{}\" reads what it \
+         has written when you want it, and `KillShell` ends it. Its log is {}.",
         jobs::head(&job.command),
         job.id,
         job.id,
@@ -263,8 +266,9 @@ fn started(job: &Job, why: Option<String>) -> String {
 fn promoted(job: &Job) -> String {
     format!(
         "`{}` was moved into the background as job {} while it ran: the same process, carrying on \
-         with no timeout. You will be told when it ends; `BashOutput` with id \"{}\" reads what it \
-         has written so far, and `KillShell` ends it. Its log is {}.",
+         with no timeout. You will be told when it ends, and ending your turn is how you wait for \
+         that; `BashOutput` with id \"{}\" reads what it has written so far, and `KillShell` ends \
+         it. Its log is {}.",
         jobs::head(&job.command),
         job.id,
         job.id,
@@ -289,11 +293,14 @@ fn description() -> String {
          `timeout`. Use `background: true` only for servers/watchers or when useful independent \
          work can continue while it runs. Duration alone is not a reason to background a \
          command.\n\n\
-         Background calls return a job id, not a completed result. If a finite prerequisite is \
-         backgrounded, wait for its completion notification, then read its output and exit \
-         status with `BashOutput` after completion before taking dependent actions or claiming \
-         success. For a long-lived server, wait for its readiness signal, not its exit. \
-         Do not restart it or treat it as completed. `KillShell` ends a job. \
+         Background calls return a job id, not a completed result. Ending your turn is how you \
+         wait for one: its completion opens a new turn and wakes you, and a foreground `sleep` \
+         only holds the person, so a command that is nothing but `sleep` is refused (to be \
+         woken after a delay, run the `sleep` with `background: true`). If a finite \
+         prerequisite is backgrounded, end your turn, then read its output and exit status \
+         with `BashOutput` when the notification comes, before taking dependent actions or \
+         claiming success. For a long-lived server, wait for its readiness signal, not its \
+         exit. Do not restart it or treat it as completed. `KillShell` ends a job. \
          `notify_on` and `notify_regex` have you told the moment a line you care about appears. \
          They tell you once unless `notify_all: true` keeps them watching for the whole job, \
          which tells you again at most once every thirty seconds and counts the lines that \
@@ -360,6 +367,9 @@ impl Tool for BashTool {
         let endless = endless::reason(&args.command);
         if args.background.unwrap_or(false) || endless.is_some() {
             return self.detach(&args.command, conditions, endless, cx).await;
+        }
+        if let Some(reason) = idle::reason(&args.command) {
+            return Ok(ToolOutput::error(reason));
         }
         self.wait_for(&args, conditions, cx).await
     }
@@ -749,6 +759,11 @@ pub(crate) mod tests {
             spec.description.contains("background: true"),
             "the description explains explicit background work"
         );
+        assert!(
+            spec.description.contains("end your turn") && spec.description.contains("wakes you"),
+            "the description says the wait is the turn's end: {}",
+            spec.description
+        );
         assert_eq!(spec.input_schema["type"], "object");
         for field in [
             "command",
@@ -782,7 +797,8 @@ pub(crate) mod tests {
             "useful independent work",
             "Duration alone is not a reason",
             "Do not restart it or treat it as completed",
-            "after completion",
+            "when the notification comes",
+            "nothing but `sleep` is refused",
             "readiness signal, not its exit",
             "backgrounded whatever the call said",
             "a person watching may move",
@@ -796,6 +812,7 @@ pub(crate) mod tests {
             "Omit or set false",
             "output or exit status",
             "independent work",
+            "wakes you",
             "Duration alone",
         ] {
             assert!(background.contains(guidance), "missing {guidance}");
@@ -860,13 +877,51 @@ pub(crate) mod tests {
         assert!(!text(&out).starts_with("$ "), "the command was run anyway");
     }
 
+    /// A bare `sleep` in the foreground is the model waiting for what the
+    /// harness already waits for; the answer says to end the turn instead.
+    /// The same `sleep` in the background is a timer, and starts as a job.
+    #[tokio::test]
+    async fn a_bare_sleep_is_refused_in_the_foreground_and_a_timer_in_the_background() {
+        let (_dir, _kernel, cx) = scratch();
+        let (jobs, _promotions, tool) = tool();
+        let refused = tool
+            .call(serde_json::json!({ "command": "sleep 30" }), &cx)
+            .await
+            .expect("the call answered");
+        assert!(refused.is_error, "{}", text(&refused));
+        assert!(
+            text(&refused).contains("end your turn"),
+            "{}",
+            text(&refused)
+        );
+        assert!(
+            !text(&refused).starts_with("$ "),
+            "the sleep was run anyway"
+        );
+        assert!(jobs.running().is_empty(), "a refusal started a job");
+
+        let timer = tool
+            .call(
+                serde_json::json!({ "command": "sleep 30", "background": true }),
+                &cx,
+            )
+            .await
+            .expect("the call answered");
+        assert!(!timer.is_error, "{}", text(&timer));
+        assert!(
+            text(&timer).contains(&only_job(&jobs).id),
+            "{}",
+            text(&timer)
+        );
+    }
+
     #[tokio::test]
     async fn a_timeout_kills_the_command_and_says_how_long_it_waited() {
         let (_jobs, _promotions, tool) = tool();
         let (_host, cx) = context();
         let out = tool
             .call(
-                serde_json::json!({"command": "sleep 30", "timeout": 200}),
+                serde_json::json!({"command": "echo waiting; sleep 30", "timeout": 200}),
                 &cx,
             )
             .await
@@ -998,6 +1053,11 @@ pub(crate) mod tests {
         assert!(!out.is_error, "{}", text(&out));
         let job = only_job(&jobs);
         assert!(text(&out).contains(&job.id), "{}", text(&out));
+        assert!(
+            text(&out).contains("ending your turn is how you wait"),
+            "{}",
+            text(&out)
+        );
         assert!(text(&out).contains("BashOutput"), "{}", text(&out));
         assert!(text(&out).contains("KillShell"), "{}", text(&out));
         assert!(
