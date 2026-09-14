@@ -95,11 +95,17 @@ pub struct BashArgs {
     /// A regular expression to watch a background job's output for, matched a
     /// line at a time.
     pub notify_regex: Option<String>,
-    /// Keep watching past the first hit, instead of stopping there. You are
-    /// told at most once every thirty seconds; the lines that match in between
-    /// are counted, and the count comes with the next notice. Needs
-    /// `notify_on` or `notify_regex`.
+    /// Keep watching past the first hit, instead of stopping there. Every
+    /// matching line wakes you while lines are sparse; a flood buys a quiet
+    /// window in proportion to its rate, thirty seconds at most, and the
+    /// lines inside it are counted onto the notice the window's end sends.
+    /// Each notice says when it came, how long since the last, and how soon
+    /// the next can. Needs `notify_on` or `notify_regex`.
     pub notify_all: Option<bool>,
+    /// Pin the quiet window of `notify_all`, in milliseconds, when you would
+    /// rather choose it than have it follow the stream: 0 wakes on every
+    /// line, 60000 gives you one notice a minute at most. Needs `notify_all`.
+    pub notify_quiet: Option<u64>,
     /// What the command does, in five to ten words, in active voice.
     pub description: Option<String>,
 }
@@ -302,9 +308,12 @@ fn description() -> String {
          claiming success. For a long-lived server, wait for its readiness signal, not its \
          exit. Do not restart it or treat it as completed. `KillShell` ends a job. \
          `notify_on` and `notify_regex` have you told the moment a line you care about appears. \
-         They tell you once unless `notify_all: true` keeps them watching for the whole job, \
-         which tells you again at most once every thirty seconds and counts the lines that \
-         matched in between. A command that could never finish on its own — `watch`, `tail -f`, \
+         They tell you once unless `notify_all: true` keeps them watching for the whole job: \
+         then every matching line wakes you while lines are sparse, a flood buys a quiet \
+         window in proportion to its rate (thirty seconds at most) and is counted onto the \
+         notice the window's end sends, and each notice says when it came and how soon the \
+         next can. `notify_quiet` (milliseconds) pins that window when you would rather \
+         choose it. A command that could never finish on its own — `watch`, `tail -f`, \
          a loop with no end, a trailing `&` — is backgrounded whatever the call said.\n\n\
          With `background` omitted or false, the call waits for the command to exit, for \
          {default} milliseconds unless `timeout` says otherwise ({max} milliseconds at most); \
@@ -360,6 +369,7 @@ impl Tool for BashTool {
             args.notify_on.clone().unwrap_or_default(),
             args.notify_regex.clone(),
             args.notify_all.unwrap_or(false),
+            args.notify_quiet,
         ) {
             Ok(conditions) => conditions,
             Err(reason) => return Ok(ToolOutput::error(reason)),
@@ -773,6 +783,7 @@ pub(crate) mod tests {
             "notify_on",
             "notify_regex",
             "notify_all",
+            "notify_quiet",
         ] {
             assert!(
                 spec.input_schema["properties"][field].is_object(),
@@ -975,6 +986,29 @@ pub(crate) mod tests {
             .expect("the call answered");
         assert!(out.is_error);
         assert!(text(&out).contains("notify_regex"), "{}", text(&out));
+        assert!(
+            jobs.running_in(&cx.session).is_empty(),
+            "nothing was started"
+        );
+    }
+
+    /// A pinned window on the default watch is refused the same way, naming
+    /// the flag that would give it something to pace (ADR-0018 §8).
+    #[tokio::test]
+    async fn notify_quiet_without_notify_all_is_an_error_result_and_runs_nothing() {
+        let (jobs, _promotions, tool) = tool();
+        let (_host, cx) = context();
+        let out = tool
+            .call(
+                serde_json::json!({"command": "echo hi", "background": true,
+                    "notify_on": ["hi"], "notify_quiet": 5000}),
+                &cx,
+            )
+            .await
+            .expect("the call answered");
+        assert!(out.is_error);
+        assert!(text(&out).contains("notify_quiet"), "{}", text(&out));
+        assert!(text(&out).contains("notify_all"), "{}", text(&out));
         assert!(
             jobs.running_in(&cx.session).is_empty(),
             "nothing was started"

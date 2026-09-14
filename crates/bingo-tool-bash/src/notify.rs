@@ -6,6 +6,8 @@
 //! a message to an agent uses, so `--print`, RPC, the channels and the TUI all
 //! hear it without any of them knowing this plugin exists.
 
+use std::time::Duration;
+
 use bingo_sdk::{Delivery, HostHandle, Input, IntentId, KernelError, Origin, SessionId};
 use regex::Regex;
 
@@ -22,13 +24,22 @@ pub struct Conditions {
     pattern: Option<Regex>,
     /// The conditions outlive their first hit — `notify_all` (ADR-0018 §8).
     ongoing: bool,
+    /// The quiet window the call pinned — `notify_quiet`; none lets the
+    /// window follow the stream.
+    quiet: Option<Duration>,
 }
 
 impl Conditions {
     /// A pattern that does not compile is the caller's mistake, and is worth
     /// refusing the call over: a job that silently never notifies is worse.
-    /// An ongoing watch with nothing to watch for is the same mistake.
-    pub fn new(on: Vec<String>, regex: Option<String>, ongoing: bool) -> Result<Self, String> {
+    /// An ongoing watch with nothing to watch for is the same mistake, and so
+    /// is a pinned window on a watch that fires once.
+    pub fn new(
+        on: Vec<String>,
+        regex: Option<String>,
+        ongoing: bool,
+        quiet_ms: Option<u64>,
+    ) -> Result<Self, String> {
         let pattern = match regex {
             Some(source) => Some(
                 Regex::new(&source).map_err(|e| format!("notify_regex is not a pattern: {e}"))?,
@@ -39,11 +50,20 @@ impl Conditions {
             substrings: on.into_iter().filter(|s| !s.is_empty()).collect(),
             pattern,
             ongoing,
+            quiet: quiet_ms.map(Duration::from_millis),
         };
         if ongoing && !watch.watched() {
             return Err(
                 "notify_all watches nothing on its own: give notify_on a word or \
                         notify_regex a pattern for it to keep watching for."
+                    .into(),
+            );
+        }
+        if watch.quiet.is_some() && !ongoing {
+            return Err(
+                "notify_quiet paces a watch that keeps going, and this one stops at \
+                        its first hit: set notify_all true for the window to apply, or \
+                        drop notify_quiet."
                     .into(),
             );
         }
@@ -57,6 +77,11 @@ impl Conditions {
     /// Whether the conditions go on watching past their first hit.
     pub fn ongoing(&self) -> bool {
         self.ongoing
+    }
+
+    /// The quiet window the call pinned, if it chose one.
+    pub fn quiet(&self) -> Option<Duration> {
+        self.quiet
     }
 
     /// How many lines of `text` answer a condition, and the last that did.
@@ -139,11 +164,85 @@ impl Notice {
     }
 }
 
+/// One wake of a session over a job's output: the notice, and for an ongoing
+/// watch the pace it came at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wake {
+    pub notice: Notice,
+    /// None for the default watch, which fires once and has no next.
+    pub cadence: Option<Cadence>,
+}
+
+impl Wake {
+    /// The default watch's one notice.
+    pub fn once(notice: Notice) -> Self {
+        Self {
+            notice,
+            cadence: None,
+        }
+    }
+
+    /// An ongoing watch's notice, with its pace.
+    pub fn paced(notice: Notice, cadence: Cadence) -> Self {
+        Self {
+            notice,
+            cadence: Some(cadence),
+        }
+    }
+}
+
+/// How an ongoing watch is pacing its wakes: how long since the last one, and
+/// the quiet the next has to wait out (ADR-0018 §8). The model reads the
+/// stream's rate off this instead of guessing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cadence {
+    /// None on the first notice, which has no last one.
+    pub since: Option<Duration>,
+    pub window: Duration,
+}
+
+impl Cadence {
+    /// The clause after the count: when the last notice was.
+    fn since_said(&self) -> String {
+        self.since
+            .map_or_else(String::new, |since| format!(", {} ago", said(since)))
+    }
+
+    /// The sentence that says how soon the next notice can come.
+    fn next_said(&self) -> String {
+        if self.window.is_zero() {
+            "\nThe next matching line wakes you at once.".into()
+        } else {
+            format!(
+                "\nThe next notice comes no sooner than {} after this one.",
+                said(self.window)
+            )
+        }
+    }
+}
+
+/// A duration as a notice says it: milliseconds under a second, whole seconds
+/// under a minute, minutes and seconds past that.
+fn said(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    match secs {
+        0 => format!("{} ms", duration.as_millis()),
+        1..=59 => format!("{secs} s"),
+        _ => format!("{}m {}s", secs / 60, secs % 60),
+    }
+}
+
+/// The clock time a notice stamps itself with, so the model knows when it
+/// came and not only that it did.
+pub fn clock() -> String {
+    jiff::Zoned::now().strftime("%H:%M:%S").to_string()
+}
+
 /// What a job that has ended says to the session that started it. A condition
 /// that only matched in its last breath is carried here rather than sent on
 /// its own, and so is a tally a quiet window was still holding: one ending,
 /// one message.
-pub fn finished(job: &Job, state: State, pending: Option<&Notice>) -> String {
+pub fn finished(job: &Job, state: State, pending: Option<&Notice>, at: &str) -> String {
     let matched = pending
         .map(|notice| {
             format!(
@@ -154,7 +253,7 @@ pub fn finished(job: &Job, state: State, pending: Option<&Notice>) -> String {
         })
         .unwrap_or_default();
     format!(
-        "Background job {} {} after {}.{matched}\n`BashOutput` with id \"{}\" reads what it wrote; its log is {}.",
+        "Background job {} {} at {at}, after {}.{matched}\n`BashOutput` with id \"{}\" reads what it wrote; its log is {}.",
         job.named(),
         state.said(),
         job.age(),
@@ -164,13 +263,27 @@ pub fn finished(job: &Job, state: State, pending: Option<&Notice>) -> String {
 }
 
 /// What a job says when its output answers a condition. It says the job is
-/// still going, so nothing reads this as an ending.
-pub fn matched(job: &Job, notice: &Notice) -> String {
+/// still going, so nothing reads this as an ending; an ongoing watch adds when
+/// the last notice was and how soon the next can come.
+pub fn matched(job: &Job, wake: &Wake, at: &str) -> String {
+    let notice = &wake.notice;
+    let pace = wake.cadence.as_ref();
+    let more = if notice.more == 0 {
+        pace.and_then(|c| c.since)
+            .map(|since| format!("\nThe last notice was {} ago.", said(since)))
+            .unwrap_or_default()
+    } else {
+        format!(
+            "{}{}.",
+            notice.and_more().trim_end_matches('.'),
+            pace.map(Cadence::since_said).unwrap_or_default()
+        )
+    };
+    let next = pace.map(Cadence::next_said).unwrap_or_default();
     format!(
-        "Background job {} is still running and wrote a line you asked to be told about:\n{}{}\n`BashOutput` with id \"{}\" reads on from there.",
+        "Background job {} is still running and at {at} wrote a line you asked to be told about:\n{}{more}{next}\n`BashOutput` with id \"{}\" reads on from there.",
         job.named(),
         notice.line.trim_end(),
-        notice.and_more(),
         job.id,
     )
 }
@@ -207,8 +320,22 @@ mod tests {
             on.iter().map(|s| (*s).to_string()).collect(),
             regex.map(str::to_string),
             false,
+            None,
         )
         .expect("the conditions compile")
+    }
+
+    fn paced(more: usize, since: Option<u64>, window: u64) -> Wake {
+        Wake::paced(
+            Notice {
+                line: "HIT again".into(),
+                more,
+            },
+            Cadence {
+                since: since.map(Duration::from_secs),
+                window: Duration::from_secs(window),
+            },
+        )
     }
 
     fn tally<'a>(count: usize, last: impl Into<Option<&'a str>>) -> Tally<'a> {
@@ -268,17 +395,37 @@ mod tests {
     /// call that comes back corrected (ADR-0018 §8).
     #[test]
     fn an_ongoing_watch_with_nothing_to_watch_for_is_refused() {
-        let refused = Conditions::new(Vec::new(), None, true).expect_err("nothing to watch");
+        let refused = Conditions::new(Vec::new(), None, true, None).expect_err("nothing to watch");
         assert!(refused.contains("notify_all"), "{refused}");
         assert!(refused.contains("notify_on"), "{refused}");
         assert!(refused.contains("notify_regex"), "{refused}");
-        let empty_words =
-            Conditions::new(vec![String::new()], None, true).expect_err("an empty word is none");
+        let empty_words = Conditions::new(vec![String::new()], None, true, None)
+            .expect_err("an empty word is none");
         assert!(empty_words.contains("notify_all"), "{empty_words}");
 
-        let watching = Conditions::new(vec!["HIT".into()], None, true).expect("a word to watch");
+        let watching =
+            Conditions::new(vec!["HIT".into()], None, true, None).expect("a word to watch");
         assert!(watching.ongoing());
-        assert!(Conditions::new(Vec::new(), Some("boom".into()), true).is_ok());
+        assert_eq!(
+            watching.quiet(),
+            None,
+            "unpinned, the window follows the stream"
+        );
+        assert!(Conditions::new(Vec::new(), Some("boom".into()), true, None).is_ok());
+    }
+
+    /// `notify_quiet` paces an ongoing watch and nothing else: on the default
+    /// watch it is refused in words that name the way round (ADR-0018 §8).
+    #[test]
+    fn a_pinned_window_needs_an_ongoing_watch() {
+        let pinned =
+            Conditions::new(vec!["HIT".into()], None, true, Some(5_000)).expect("a pinned watch");
+        assert_eq!(pinned.quiet(), Some(Duration::from_secs(5)));
+
+        let refused = Conditions::new(vec!["HIT".into()], None, false, Some(5_000))
+            .expect_err("a window on a watch that fires once");
+        assert!(refused.contains("notify_quiet"), "{refused}");
+        assert!(refused.contains("notify_all"), "{refused}");
     }
 
     #[test]
@@ -298,7 +445,7 @@ mod tests {
             watch.hit("running 3 tests\ntest result: FAILED. 1 failed\n"),
             Some("test result: FAILED. 1 failed")
         );
-        let bad = Conditions::new(Vec::new(), Some("(unclosed".into()), false);
+        let bad = Conditions::new(Vec::new(), Some("(unclosed".into()), false, None);
         assert!(bad.is_err(), "a pattern that cannot compile is refused");
     }
 
@@ -334,8 +481,9 @@ mod tests {
     #[test]
     fn a_completion_names_the_job_its_state_and_where_to_read_it() {
         let job = job();
-        let text = finished(&job, State::Exited { code: 1 }, None);
+        let text = finished(&job, State::Exited { code: 1 }, None, "16:33:51");
         assert!(text.contains(&job.id), "{text}");
+        assert!(text.contains("at 16:33:51"), "{text}");
         assert!(text.contains("cargo test --workspace"), "{text}");
         assert!(text.contains("exited with code 1"), "{text}");
         assert!(text.contains("BashOutput"), "{text}");
@@ -346,7 +494,12 @@ mod tests {
     /// A condition that only matched as the job ended is one message, not two.
     #[test]
     fn a_condition_matched_at_the_end_rides_the_completion() {
-        let text = finished(&job(), State::Killed, Some(&Notice::of("error[E0308]\n")));
+        let text = finished(
+            &job(),
+            State::Killed,
+            Some(&Notice::of("error[E0308]\n")),
+            "now",
+        );
         assert!(text.contains("It matched: error[E0308]\n"), "{text}");
         assert!(text.contains("killed"), "{text}");
         assert!(!text.contains("since the last notice"), "{text}");
@@ -360,7 +513,7 @@ mod tests {
             line: "error[E0433]: no `Foo`\n".into(),
             more: 12,
         };
-        let text = finished(&job(), State::Exited { code: 101 }, Some(&pending));
+        let text = finished(&job(), State::Exited { code: 101 }, Some(&pending), "now");
         assert!(
             text.contains("It matched: error[E0433]: no `Foo`"),
             "{text}"
@@ -374,39 +527,62 @@ mod tests {
     #[test]
     fn a_condition_hit_says_the_job_is_still_going() {
         let job = job();
-        let text = matched(&job, &Notice::of("error[E0308]: mismatched types\n"));
+        let wake = Wake::once(Notice::of("error[E0308]: mismatched types\n"));
+        let text = matched(&job, &wake, "16:33:51");
         assert!(text.contains("still running"), "{text}");
+        assert!(text.contains("at 16:33:51 wrote"), "{text}");
         assert!(text.contains("error[E0308]"), "{text}");
         assert!(!text.contains("exited"), "{text}");
         assert!(!text.contains("since the last notice"), "{text}");
+        assert!(
+            !text.contains("The next"),
+            "a watch that fires once has no next: {text}"
+        );
     }
 
-    /// The clause an ongoing watch adds, counted rather than listed.
+    /// The clauses an ongoing watch adds: the count, when the last notice
+    /// was, and how soon the next can come — the pace, never a list.
     #[test]
-    fn a_hit_that_follows_a_quiet_window_counts_what_the_window_swallowed() {
+    fn an_ongoing_notice_says_its_count_its_span_and_its_next() {
         let job = job();
-        let one = matched(
-            &job,
-            &Notice {
-                line: "HIT again".into(),
-                more: 1,
-            },
+        let first = matched(&job, &paced(0, None, 0), "now");
+        assert!(
+            !first.contains("last notice"),
+            "a first notice has no last: {first}"
         );
         assert!(
-            one.contains("…and 1 more line matched since the last notice."),
+            first.contains("The next matching line wakes you at once."),
+            "{first}"
+        );
+
+        let one = matched(&job, &paced(1, Some(12), 8), "now");
+        assert!(
+            one.contains("…and 1 more line matched since the last notice, 12 s ago."),
             "{one}"
         );
-        let many = matched(
-            &job,
-            &Notice {
-                line: "HIT again".into(),
-                more: 7,
-            },
+        assert!(
+            one.contains("The next notice comes no sooner than 8 s after this one."),
+            "{one}"
         );
+
+        let many = matched(&job, &paced(7, None, 30), "now");
         assert!(
             many.contains("…and 7 more lines matched since the last notice."),
             "{many}"
         );
         assert!(many.contains("HIT again"), "{many}");
+        assert!(many.contains("no sooner than 30 s"), "{many}");
+
+        let quiet = matched(&job, &paced(0, Some(90), 0), "now");
+        assert!(quiet.contains("The last notice was 1m 30s ago."), "{quiet}");
+        assert!(!quiet.contains("more line"), "{quiet}");
+    }
+
+    #[test]
+    fn a_duration_is_said_the_way_a_person_reads_it() {
+        assert_eq!(said(Duration::from_millis(250)), "250 ms");
+        assert_eq!(said(Duration::from_secs(1)), "1 s");
+        assert_eq!(said(Duration::from_millis(16_400)), "16 s");
+        assert_eq!(said(Duration::from_secs(125)), "2m 5s");
     }
 }

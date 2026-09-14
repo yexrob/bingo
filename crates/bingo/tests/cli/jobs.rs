@@ -356,10 +356,12 @@ fn journal_text(dir: &std::path::Path) -> String {
 /// A job that writes one matching line, waits, then bursts three more and
 /// ends. Both waits are on files the test makes, so every notice lands
 /// between two turns and no scan tick has to win a race for the test to mean
-/// what it says.
+/// what it says. The ongoing watch pins its window (`notify_quiet`) for the
+/// same reason: under the default a tick could land inside the burst and
+/// split it into two wakes, which is the machine's timing, not the test's.
 fn gated(notify_all: bool) -> tempfile::NamedTempFile {
     let all = if notify_all {
-        r#""notify_all":true,"#
+        r#""notify_all":true,"notify_quiet":60000,"#
     } else {
         ""
     };
@@ -394,11 +396,11 @@ fn run_gated(dir: &std::path::Path, script: &tempfile::NamedTempFile) -> Ended {
 /// swallowed, singular and plural alike.
 const SINCE: &str = "matched since the last notice";
 
-/// `notify_all` (ADR-0018 §8): the first hit wakes at once, the three that
-/// follow inside the thirty-second window are only counted, and the count
-/// rides the completion — one line and a number, never a list.
+/// `notify_all` with a pinned window (ADR-0018 §8): the first hit wakes at
+/// once, the three that follow inside the minute are only counted, and the
+/// count rides the completion — one line and a number, never a list.
 #[test]
-fn an_ongoing_watch_wakes_once_and_counts_the_rest_onto_the_end() {
+fn a_pinned_watch_wakes_once_and_counts_the_rest_onto_the_end() {
     let dir = tempfile::tempdir().unwrap();
     let ended = run_gated(dir.path(), &gated(true));
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
@@ -413,6 +415,10 @@ fn an_ongoing_watch_wakes_once_and_counts_the_rest_onto_the_end() {
     assert!(
         journal.contains("wrote a line you asked to be told about"),
         "the first hit never woke the session"
+    );
+    assert!(
+        journal.contains("The next notice comes no sooner than 1m 0s after this one."),
+        "the notice did not say the window it was pinned to"
     );
     assert!(
         journal.contains("It matched: HIT four"),
@@ -431,6 +437,58 @@ fn an_ongoing_watch_wakes_once_and_counts_the_rest_onto_the_end() {
     assert_eq!(
         log_text(dir.path()),
         "warming\nHIT one\nHIT two\nHIT three\nHIT four\n"
+    );
+}
+
+/// Under the default window an ongoing watch is real time: a line that has
+/// the stream to itself wakes the session the moment it is read, and the
+/// next one does too. Each line waits on a file the test makes once the
+/// previous wake's turn is over, so every wake is its own turn.
+#[test]
+fn an_ongoing_watch_on_a_slow_stream_wakes_on_every_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Bash","input":{
+                "command":"while [ ! -f start ]; do sleep 0.05; done; echo HIT one; while [ ! -f go ]; do sleep 0.05; done; echo HIT two; while [ ! -f end ]; do sleep 0.05; done",
+                "background":true,"notify_all":true,"notify_on":["HIT"]}}}]},
+            {"steps":[{"text":"started it"}]},
+            {"steps":[{"text":"heard one"}]},
+            {"steps":[{"text":"heard two"}]},
+            {"steps":[{"text":"heard it finish"}]}
+        ]}"#,
+    );
+    let mut host = Host::start(&mut allowed(dir.path(), &script));
+    host.prompt("watch it and tell me every line");
+    assert_eq!(host.until("result")["result"], "started it");
+    std::fs::write(dir.path().join("start"), "").unwrap();
+    assert_eq!(host.until("result")["result"], "heard one");
+    std::fs::write(dir.path().join("go"), "").unwrap();
+    assert_eq!(host.until("result")["result"], "heard two");
+    std::fs::write(dir.path().join("end"), "").unwrap();
+    assert_eq!(host.until("result")["result"], "heard it finish");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let journal = journal_text(&dir.path().join(".bingo/data"));
+    assert_eq!(
+        journal
+            .matches("wrote a line you asked to be told about")
+            .count(),
+        2,
+        "two lines, two wakes"
+    );
+    assert!(
+        journal.contains("The next matching line wakes you at once."),
+        "a single line buys no quiet"
+    );
+    assert!(
+        !journal.contains(SINCE),
+        "nothing was held, so nothing was counted"
+    );
+    assert!(
+        !journal.contains("It matched:"),
+        "the completion had nothing left to carry"
     );
 }
 

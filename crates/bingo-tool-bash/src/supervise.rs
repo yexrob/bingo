@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::jobs::{Job, Jobs, State};
-use crate::notify::{self, Conditions, Notice};
+use crate::notify::{self, Cadence, Conditions, Notice, Tally, Wake};
 use crate::run::{self, Running};
 use crate::sink::Sink;
 
@@ -32,10 +32,13 @@ const GRACE: Duration = Duration::from_secs(2);
 /// How often a watched job's new output is read for a condition.
 const SCAN: Duration = Duration::from_millis(250);
 
-/// How much quiet one notice of an ongoing watch buys. A pattern that answers
-/// on every line of a busy log must not wake a session on every line, so what
-/// the window swallows becomes a count on the next notice (ADR-0018 §8).
-const QUIET: Duration = Duration::from_secs(30);
+/// How much quiet each line per second buys, once lines arrive faster than
+/// the wakes go out: a stream at one line a second waits two, at fifteen it
+/// waits the cap, and a single line waits nothing (ADR-0018 §8).
+const PACE: Duration = Duration::from_secs(2);
+
+/// The most quiet a stream can buy, however fast it runs.
+const CAP: Duration = Duration::from_secs(30);
 
 /// Everything one job's task needs.
 pub struct Watch {
@@ -71,7 +74,7 @@ async fn supervise(watch: Watch) {
         &host,
         &job,
         &running.sink,
-        notify::finished(&job, state, pending.as_ref()),
+        notify::finished(&job, state, pending.as_ref(), &notify::clock()),
     )
     .await;
 }
@@ -93,8 +96,9 @@ async fn wait_out(
             }
             () = asked.cancelled() => return end_it(child).await,
             () = tokio::time::sleep(SCAN) => {
-                if let Some(notice) = scan.look(&job.log).await {
-                    announce(host, job, sink, notify::matched(job, &notice)).await;
+                if let Some(wake) = scan.look(&job.log).await {
+                    let text = notify::matched(job, &wake, &notify::clock());
+                    announce(host, job, sink, text).await;
                 }
             }
         }
@@ -161,21 +165,108 @@ enum Mode {
     /// The default: one notice, and silence after it. A pattern that matches
     /// every line must not wake a session every line.
     Once { fired: bool },
-    /// `notify_all`: every hit is news, but no more than one notice a quiet
-    /// window; what the window swallows is held as a count for the next one.
-    All {
-        last_wake: Option<Instant>,
-        held: Option<Notice>,
-    },
+    /// `notify_all`: every hit is news, paced by a quiet window that follows
+    /// the stream (ADR-0018 §8).
+    All(Ongoing),
+}
+
+/// How long an ongoing watch keeps quiet after a wake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Quiet {
+    /// Follows the stream: what the last wake observed of its rate.
+    Adaptive(Duration),
+    /// `notify_quiet`: what the call asked for, whatever the stream does.
+    Pinned(Duration),
+}
+
+impl Quiet {
+    fn window(self) -> Duration {
+        match self {
+            Self::Adaptive(window) | Self::Pinned(window) => window,
+        }
+    }
+
+    /// What a wake that carried `lines` after `since` of quiet teaches.
+    fn observe(&mut self, lines: usize, since: Duration) {
+        if let Self::Adaptive(window) = self {
+            *window = next_window(lines, since);
+        }
+    }
+}
+
+/// The quiet a wake buys from the lines it had to fold. One line is not a
+/// rate and buys nothing; past that, each line per second that arrived while
+/// the watch was quiet buys `PACE`, up to `CAP`. A span shorter than a scan
+/// tick is a tick: the lines could not have been read any sooner.
+fn next_window(lines: usize, since: Duration) -> Duration {
+    let extra = u32::try_from(lines.saturating_sub(1)).unwrap_or(u32::MAX);
+    if extra == 0 {
+        return Duration::ZERO;
+    }
+    let seconds = PACE.as_secs_f64() * f64::from(extra) / since.max(SCAN).as_secs_f64();
+    if seconds >= CAP.as_secs_f64() {
+        CAP
+    } else {
+        Duration::from_secs_f64(seconds)
+    }
+}
+
+/// The state of an ongoing watch between two of its wakes.
+struct Ongoing {
+    /// When the watch began, which is what the first wake's span is since.
+    started: Instant,
+    last_wake: Option<Instant>,
+    /// What the quiet window has swallowed so far, folded to a line and a
+    /// count.
+    held: Option<Notice>,
+    quiet: Quiet,
+}
+
+impl Ongoing {
+    fn new(quiet: Quiet) -> Self {
+        Self {
+            started: Instant::now(),
+            last_wake: None,
+            held: None,
+            quiet,
+        }
+    }
+
+    /// What a window of output earns. Anything to say — a fresh hit, or what
+    /// an earlier tick held — goes out once the quiet since the last wake has
+    /// passed, and the first wake waits for nothing; inside the window it is
+    /// held, folded onto what was held before. A wake teaches the window the
+    /// stream's pace.
+    fn tick(&mut self, fresh: &Tally<'_>) -> Option<Wake> {
+        let notice = Notice::folded(self.held.take(), fresh)?;
+        let since = self.last_wake.unwrap_or(self.started).elapsed();
+        if self.last_wake.is_some() && since < self.quiet.window() {
+            self.held = Some(notice);
+            return None;
+        }
+        let since_last = self.last_wake.map(|_| since);
+        self.last_wake = Some(Instant::now());
+        self.quiet.observe(notice.more + 1, since);
+        let cadence = Cadence {
+            since: since_last,
+            window: self.quiet.window(),
+        };
+        Some(Wake::paced(notice, cadence))
+    }
+
+    /// What the job's end still has to say: a count no wake carried.
+    fn remainder(&mut self) -> Option<Notice> {
+        self.held.take()
+    }
 }
 
 impl<'a> Scan<'a> {
     fn new(conditions: &'a Conditions) -> Self {
         let mode = if conditions.ongoing() {
-            Mode::All {
-                last_wake: None,
-                held: None,
-            }
+            let quiet = conditions
+                .quiet()
+                .map_or(Quiet::Adaptive(Duration::ZERO), Quiet::Pinned);
+            Mode::All(Ongoing::new(quiet))
         } else {
             Mode::Once { fired: false }
         };
@@ -187,12 +278,12 @@ impl<'a> Scan<'a> {
     }
 
     /// What the output written since the last look has earned, if anything.
-    async fn look(&mut self, log: &Path) -> Option<Notice> {
+    async fn look(&mut self, log: &Path) -> Option<Wake> {
         let text = self.read(log).await?;
         let conditions = self.conditions;
         match &mut self.mode {
-            Mode::Once { fired } => first(conditions, &text, fired),
-            Mode::All { last_wake, held } => throttled(conditions, &text, last_wake, held),
+            Mode::Once { fired } => first(conditions, &text, fired).map(Wake::once),
+            Mode::All(ongoing) => ongoing.tick(&conditions.tally(&text)),
         }
     }
 
@@ -200,10 +291,10 @@ impl<'a> Scan<'a> {
     /// regardless, so the quiet window holds nothing back — this is the one
     /// thing a count with no hit behind it ever rides (ADR-0018 §8).
     async fn last_look(&mut self, log: &Path) -> Option<Notice> {
-        let last = self.look(log).await;
+        let last = self.look(log).await.map(|wake| wake.notice);
         match &mut self.mode {
             Mode::Once { .. } => last,
-            Mode::All { held, .. } => last.or_else(|| held.take()),
+            Mode::All(ongoing) => last.or_else(|| ongoing.remainder()),
         }
     }
 
@@ -231,26 +322,6 @@ fn first(conditions: &Conditions, text: &str, fired: &mut bool) -> Option<Notice
     Some(Notice::of(hit))
 }
 
-/// The ongoing reading: a hit wakes when the quiet window has passed since the
-/// last notice, and is only counted inside it. Nothing but a hit ever wakes
-/// anything — the window ending on its own flushes no count, because a
-/// suppressed hit is the same pattern matching again (ADR-0018 §8).
-fn throttled(
-    conditions: &Conditions,
-    text: &str,
-    last_wake: &mut Option<Instant>,
-    held: &mut Option<Notice>,
-) -> Option<Notice> {
-    let fresh = conditions.tally(text);
-    let folded = Notice::folded(held.take(), &fresh);
-    if fresh.count == 0 || last_wake.is_some_and(|wake| wake.elapsed() < QUIET) {
-        *held = folded;
-        return None;
-    }
-    *last_wake = Some(Instant::now());
-    folded
-}
-
 /// Bytes of new output one scan reads. A condition on a line further than this
 /// behind waits for the next tick.
 const WINDOW: usize = 64 * 1024;
@@ -269,14 +340,36 @@ mod tests {
     }
 
     fn conditions(on: &[&str]) -> Conditions {
-        Conditions::new(on.iter().map(|s| (*s).to_string()).collect(), None, false)
-            .expect("the conditions compile")
+        Conditions::new(
+            on.iter().map(|s| (*s).to_string()).collect(),
+            None,
+            false,
+            None,
+        )
+        .expect("the conditions compile")
     }
 
     /// The same words, watched for the whole of the job (`notify_all`).
     fn ongoing(on: &[&str]) -> Conditions {
-        Conditions::new(on.iter().map(|s| (*s).to_string()).collect(), None, true)
-            .expect("the conditions compile")
+        Conditions::new(
+            on.iter().map(|s| (*s).to_string()).collect(),
+            None,
+            true,
+            None,
+        )
+        .expect("the conditions compile")
+    }
+
+    /// The same, with the window pinned by the call (`notify_quiet`).
+    fn pinned(on: &[&str], quiet: Duration) -> Conditions {
+        let millis = u64::try_from(quiet.as_millis()).expect("a short window");
+        Conditions::new(
+            on.iter().map(|s| (*s).to_string()).collect(),
+            None,
+            true,
+            Some(millis),
+        )
+        .expect("the conditions compile")
     }
 
     /// A log to write into, and the path a scan reads it back from.
@@ -285,6 +378,10 @@ mod tests {
         let log = Log::create(dir.path(), "job").await.expect("a log");
         let path = log.path().to_path_buf();
         (dir, log, path)
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
     }
 
     #[tokio::test]
@@ -298,7 +395,7 @@ mod tests {
         log.write("test result: FAILED\n").await.expect("written");
         assert_eq!(
             scan.look(&path).await,
-            Some(Notice::of("test result: FAILED"))
+            Some(Wake::once(Notice::of("test result: FAILED")))
         );
         log.write("test result: FAILED again\n").await.expect("w");
         assert_eq!(
@@ -313,45 +410,112 @@ mod tests {
         );
     }
 
-    // ---- the ongoing watch, on a clock the test drives (ADR-0018 §8) ------
+    // ---- the window a stream buys (ADR-0018 §8) ---------------------------
 
-    /// The leading edge: the first hit is news the moment it is read, and the
-    /// hits behind it inside the window are only counted.
+    /// The brick: one line is not a rate; past that, each line per second
+    /// that arrived while the watch was quiet buys two seconds, to a cap.
+    #[test]
+    fn a_wake_buys_quiet_in_proportion_to_the_lines_it_folded() {
+        for (lines, since, want) in [
+            (0, secs(10), Duration::ZERO),
+            (1, Duration::ZERO, Duration::ZERO),
+            (1, secs(600), Duration::ZERO),
+            (2, secs(2), secs(1)),
+            (3, secs(1), secs(4)),
+            (11, secs(10), secs(2)),
+            (2, Duration::ZERO, secs(8)),
+            (2, Duration::from_millis(10), secs(8)),
+            (4, SCAN, secs(24)),
+            (1000, secs(1), CAP),
+            (usize::MAX, secs(1), CAP),
+        ] {
+            assert_eq!(
+                next_window(lines, since),
+                want,
+                "{lines} lines in {since:?}"
+            );
+        }
+    }
+
+    /// A stream that is slower than the window it earns is real time: every
+    /// line wakes the moment it is read, however long the job runs.
     #[tokio::test(start_paused = true)]
-    async fn an_ongoing_watch_wakes_at_once_and_then_holds_the_burst() {
+    async fn a_slow_stream_wakes_on_every_line() {
         let (_dir, mut log, path) = writing().await;
         let watched = ongoing(&["HIT"]);
         let mut scan = Scan::new(&watched);
 
         log.write("warming\nHIT one\n").await.expect("written");
-        assert_eq!(scan.look(&path).await, Some(Notice::of("HIT one")));
+        let first = scan.look(&path).await.expect("the first hit wakes");
+        assert_eq!(first.notice, Notice::of("HIT one"));
+        assert_eq!(
+            first.cadence,
+            Some(Cadence {
+                since: None,
+                window: Duration::ZERO
+            }),
+            "a first notice has no last one, and one line buys no quiet"
+        );
 
-        log.write("HIT two\n").await.expect("written");
-        tokio::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(scan.look(&path).await, None, "inside the window, counted");
-        log.write("HIT three\nHIT four\n").await.expect("written");
-        tokio::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(scan.look(&path).await, None, "a burst is still one wake");
+        for (n, line) in ["HIT two", "HIT three", "HIT four"].iter().enumerate() {
+            tokio::time::advance(secs(10)).await;
+            log.write(&format!("{line}\n")).await.expect("written");
+            let wake = scan.look(&path).await.expect("every line wakes");
+            assert_eq!(wake.notice, Notice::of(line), "line {n}");
+            assert_eq!(
+                wake.cadence,
+                Some(Cadence {
+                    since: Some(secs(10)),
+                    window: Duration::ZERO
+                })
+            );
+        }
     }
 
-    /// No trailing timer: the window running out flushes nothing on its own,
-    /// because a held count is the same pattern that will match again.
+    /// A burst buys quiet: the wake that folded it names the window, the
+    /// lines inside the window are held, and the window's end lets them out
+    /// — a held line never waits for the next hit.
     #[tokio::test(start_paused = true)]
-    async fn the_window_ending_on_its_own_flushes_nothing() {
+    async fn a_burst_buys_quiet_and_the_window_ending_flushes_what_it_held() {
         let (_dir, mut log, path) = writing().await;
         let watched = ongoing(&["HIT"]);
         let mut scan = Scan::new(&watched);
 
-        log.write("HIT one\n").await.expect("written");
-        assert_eq!(scan.look(&path).await, Some(Notice::of("HIT one")));
-        log.write("HIT two\n").await.expect("written");
-        assert_eq!(scan.look(&path).await, None, "held by the window");
-
-        tokio::time::advance(QUIET * 3).await;
+        log.write("HIT one\nHIT two\nHIT three\n").await.expect("w");
+        let burst = scan.look(&path).await.expect("the first look wakes");
         assert_eq!(
-            scan.look(&path).await,
-            None,
-            "the quiet window ending is not news; only a hit is"
+            burst.notice,
+            Notice {
+                line: "HIT three".into(),
+                more: 2
+            }
+        );
+        // Two extra lines in no time at all read as two in one tick: eight
+        // a second, sixteen seconds of quiet.
+        assert_eq!(
+            burst.cadence,
+            Some(Cadence {
+                since: None,
+                window: secs(16)
+            })
+        );
+
+        tokio::time::advance(secs(5)).await;
+        log.write("HIT four\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, None, "inside the window, held");
+        tokio::time::advance(secs(5)).await;
+        assert_eq!(scan.look(&path).await, None, "still inside, nothing new");
+
+        tokio::time::advance(secs(6)).await;
+        let flushed = scan.look(&path).await.expect("the window's end flushes");
+        assert_eq!(flushed.notice, Notice::of("HIT four"));
+        assert_eq!(
+            flushed.cadence,
+            Some(Cadence {
+                since: Some(secs(16)),
+                window: Duration::ZERO
+            }),
+            "one line in sixteen seconds is a slow stream again"
         );
     }
 
@@ -364,45 +528,86 @@ mod tests {
         let mut scan = Scan::new(&watched);
 
         log.write("HIT one\nHIT two\n").await.expect("written");
-        assert_eq!(
-            scan.look(&path).await,
-            Some(Notice {
-                line: "HIT two".into(),
-                more: 1
-            }),
-            "the newest line shows and the older one is the count"
-        );
+        let wake = scan.look(&path).await.expect("a wake");
+        assert_eq!(wake.notice.more, 1);
+        let window = wake.cadence.expect("paced").window;
+        assert_eq!(window, secs(8));
+
         log.write("HIT three\nHIT four\n").await.expect("written");
+        tokio::time::advance(secs(1)).await;
         assert_eq!(scan.look(&path).await, None, "held by the window");
 
-        tokio::time::advance(QUIET).await;
+        tokio::time::advance(window).await;
         log.write("HIT five\n").await.expect("written");
+        let carried = scan.look(&path).await.expect("past the window");
         assert_eq!(
-            scan.look(&path).await,
-            Some(Notice {
+            carried.notice,
+            Notice {
                 line: "HIT five".into(),
                 more: 2
-            })
+            }
+        );
+        let window = carried.cadence.expect("paced").window;
+        assert!(
+            window > Duration::ZERO,
+            "three lines in nine seconds is a rate"
         );
 
-        tokio::time::advance(QUIET).await;
+        tokio::time::advance(window).await;
         log.write("HIT six\n").await.expect("written");
+        let next = scan.look(&path).await.expect("past the window again");
         assert_eq!(
-            scan.look(&path).await,
-            Some(Notice::of("HIT six")),
+            next.notice,
+            Notice::of("HIT six"),
             "the count went with the notice that carried it"
         );
     }
 
-    /// What no hit came back for rides the end of the job, and only that.
+    /// `notify_quiet`: the window is the call's, whatever the stream does —
+    /// a burst is held for the whole of it, and the window's end still
+    /// flushes.
     #[tokio::test(start_paused = true)]
-    async fn what_the_window_held_rides_the_end_of_the_job() {
+    async fn a_pinned_window_holds_a_burst_and_flushes_at_its_end() {
         let (_dir, mut log, path) = writing().await;
-        let watched = ongoing(&["HIT"]);
+        let watched = pinned(&["HIT"], secs(30));
         let mut scan = Scan::new(&watched);
 
         log.write("HIT one\n").await.expect("written");
-        assert_eq!(scan.look(&path).await, Some(Notice::of("HIT one")));
+        let first = scan.look(&path).await.expect("the first hit wakes");
+        assert_eq!(first.cadence.expect("paced").window, secs(30));
+
+        tokio::time::advance(secs(10)).await;
+        log.write("HIT two\nHIT three\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, None, "held by the pinned window");
+        tokio::time::advance(secs(10)).await;
+        log.write("HIT four\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, None, "still held");
+
+        tokio::time::advance(secs(10)).await;
+        let flushed = scan.look(&path).await.expect("the window's end flushes");
+        assert_eq!(
+            flushed.notice,
+            Notice {
+                line: "HIT four".into(),
+                more: 2
+            }
+        );
+        assert_eq!(
+            flushed.cadence.expect("paced").window,
+            secs(30),
+            "a pinned window learns nothing from the stream"
+        );
+    }
+
+    /// What no wake came for rides the end of the job, and only that.
+    #[tokio::test(start_paused = true)]
+    async fn what_the_window_held_rides_the_end_of_the_job() {
+        let (_dir, mut log, path) = writing().await;
+        let watched = pinned(&["HIT"], secs(30));
+        let mut scan = Scan::new(&watched);
+
+        log.write("HIT one\n").await.expect("written");
+        assert!(scan.look(&path).await.is_some(), "the first hit wakes");
         log.write("HIT two\nHIT three\n").await.expect("written");
         assert_eq!(scan.look(&path).await, None, "held by the window");
 
