@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use crate::clock::{self, Now};
 use crate::tree::{self, Scope, Tree, Wants};
 use crate::ui::Ui;
-use crate::{tasks, theme, transcript};
+use crate::{foot, tasks, theme, transcript};
 
 /// How long a turn must have run before it is worth a row of its own (§6).
 const ACTIVITY_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
@@ -57,6 +57,21 @@ pub(crate) fn lines(tree: &Tree, ui: &Ui, width: usize, now: Now) -> Vec<Line<'s
     // (§3): they are not the tail of what was said, they are what is going on.
     if !out.is_empty() {
         out.insert(0, Line::default());
+    }
+    footed(out, ui, width, now)
+}
+
+/// The way back to the foot takes the band's first row while the transcript
+/// is held ([`crate::foot`]): the air when the band has rows, the band's one
+/// row when it has none. Either way the band is as tall as it was, so a
+/// scroll never moves the frame.
+fn footed(mut out: Vec<Line<'static>>, ui: &Ui, width: usize, now: Now) -> Vec<Line<'static>> {
+    let Some(pill) = foot::below(ui, now).and_then(|below| foot::pill(below, width)) else {
+        return out;
+    };
+    match out.first_mut() {
+        Some(air) => *air = pill.line,
+        None => out.push(pill.line),
     }
     out
 }

@@ -20,8 +20,8 @@ use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Listed, Open, Picker, Switcher, Ui};
 use crate::{
-    activity, composer as prompt, dialog, graphics, keys, layers, mentions, pager, panel, rail,
-    rewind, roster, search, select, status, theme, transcript, views, window, wrap,
+    activity, composer as prompt, dialog, foot, graphics, keys, layers, mentions, pager, panel,
+    rail, rewind, roster, search, select, status, theme, transcript, views, window, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -150,6 +150,7 @@ fn render_activity(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now
         Paragraph::new(activity::lines(tree, ui, usize::from(area.width), now)),
         area,
     );
+    ui.painted.borrow_mut().foot = foot::placed(ui, area, now);
 }
 
 /// What floats over the frame, in the order it is stacked: the dropdown and a
@@ -2128,6 +2129,27 @@ mod tests {
         let scrolled = render(&state, &ui, settled);
         assert_ne!(bottom, scrolled, "page up must move the window");
         insta::assert_snapshot!(scrolled);
+    }
+
+    /// The pill takes the band's air, which the frame holds anyway (§3): the
+    /// transcript is the same rows held as following, so a scroll never
+    /// moves the frame (M95).
+    #[test]
+    fn the_foot_row_costs_the_transcript_nothing() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        let following = ui.painted.borrow().regions;
+        crate::input::on_key(
+            &mut ui,
+            &solo(&state),
+            key(crossterm::event::KeyCode::PageUp),
+            now,
+        );
+        let settled = later(now, 100);
+        let screen = render(&state, &ui, settled);
+        assert!(screen.contains("lines below"), "{screen}");
+        assert_eq!(ui.painted.borrow().regions, following);
     }
 
     /// `ctrl+o` only opens further: the fold lifts, then the whole of it takes

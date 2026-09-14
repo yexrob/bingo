@@ -320,3 +320,32 @@ fn no_screen_paints_prose_in_a_colour_of_its_own() {
         });
     }
 }
+
+/// The way back to the foot (M95): the count in the terminal's own ink and
+/// the hint in its dim, both on the raised bar, and the air before it plain.
+#[test]
+fn the_foot_row_is_a_bar_with_the_count_in_text_and_the_hint_in_dim() {
+    crate::theme::with(truecolor(), || {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        let tree = solo(&state);
+        painted(80, 24, &tree, &ui, now);
+        crate::input::on_key(&mut ui, &tree, key(KeyCode::PageUp), now);
+        let settled = later(now, 100);
+        let painted = painted(80, 24, &tree, &ui, settled);
+        let below = crate::foot::below(&ui, settled).expect("held");
+        let count = format!(" ↓ {below} lines below");
+        let hint = " · end or click to follow ";
+        let air = " ".repeat((80 - count.width() - hint.width()) / 2);
+        let bar = crate::theme::raised();
+        assert_row_styled(
+            &painted,
+            "lines below",
+            &[
+                (&air, ratatui::style::Style::default()),
+                (&count, crate::theme::text().patch(bar)),
+                (hint, crate::theme::dim().patch(bar)),
+            ],
+        );
+    });
+}

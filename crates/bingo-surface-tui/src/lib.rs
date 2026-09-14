@@ -63,6 +63,7 @@ mod composer;
 mod dialog;
 mod effect;
 mod fold;
+mod foot;
 mod form;
 mod frame;
 mod graphics;

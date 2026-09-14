@@ -59,6 +59,11 @@ fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect>
         ui.focus = Some(card);
         return Vec::new();
     }
+    // The way back to the foot answers a click as `end` answers a key.
+    if on_foot(ui, mouse) {
+        ui.scroll.end();
+        return Vec::new();
+    }
     // A picture is a thing to click before it is part of a block: a click on
     // one opens it, and a click beside it is the block's (§7).
     if let Some(picture) = picture(ui, mouse) {
@@ -192,6 +197,21 @@ fn picture(ui: &Ui, mouse: MouseEvent) -> Option<crate::graphics::Picture> {
     ui.painted.borrow().picture_at(Position {
         x: mouse.column,
         y: mouse.row,
+    })
+}
+
+/// Whether the pointer is on the pill that leads back to the foot, where this
+/// frame drew one. A layer over the frame has covered it, so while one is up
+/// the click is the layer's.
+fn on_foot(ui: &Ui, mouse: MouseEvent) -> bool {
+    if ui.layer.showing() {
+        return false;
+    }
+    ui.painted.borrow().foot.is_some_and(|area| {
+        area.contains(Position {
+            x: mouse.column,
+            y: mouse.row,
+        })
     })
 }
 

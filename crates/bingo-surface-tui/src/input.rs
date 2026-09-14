@@ -2430,6 +2430,42 @@ mod tests {
         assert_eq!(ui.scroll, crate::scroll::Scroll::Tail);
     }
 
+    /// The way back to the foot (M95) answers a click as `end` answers a
+    /// key, and only on its own cells: the air beside it is still air.
+    #[test]
+    fn a_click_on_the_foot_row_follows_the_tail_again() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        assert!(
+            ui.painted.borrow().foot.is_none(),
+            "following draws no pill"
+        );
+        press(&mut ui, &state, key(KeyCode::PageUp), now);
+        let settled = later(now, 100);
+        render(&state, &ui, settled);
+        let pill = ui
+            .painted
+            .borrow()
+            .foot
+            .expect("a held transcript draws the pill");
+
+        on_mouse(&mut ui, &solo(&state), click(pill.x - 1, pill.y), settled);
+        assert_ne!(
+            ui.scroll,
+            crate::scroll::Scroll::Tail,
+            "the air beside it is air"
+        );
+
+        on_mouse(&mut ui, &solo(&state), click(pill.x + 1, pill.y), settled);
+        assert_eq!(ui.scroll, crate::scroll::Scroll::Tail);
+        render(&state, &ui, settled);
+        assert!(
+            ui.painted.borrow().foot.is_none(),
+            "at the foot the row is air again"
+        );
+    }
+
     #[test]
     fn a_click_in_the_transcript_focuses_the_block_it_landed_on() {
         let state = long_transcript(60);

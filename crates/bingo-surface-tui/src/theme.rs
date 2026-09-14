@@ -1137,6 +1137,7 @@ mod tests {
                     "activity.rs",
                     "composer.rs",
                     "dialog.rs",
+                    "foot.rs",
                     // The question a form is on, and the option under its
                     // cursor: the same weight the dialog's rows wear.
                     "form.rs",
@@ -1179,6 +1180,7 @@ mod tests {
                     "activity.rs",
                     "composer.rs",
                     "dialog.rs",
+                    "foot.rs",
                     // A form's tabs it is not on, the descriptions, and the
                     // preview pane — a mockup is read past, so it is dim.
                     "form.rs",
@@ -1232,6 +1234,8 @@ mod tests {
             (
                 "raised",
                 &[
+                    // The bar the way back to the foot rides on (M95).
+                    "foot.rs",
                     "layers.rs",
                     "rail.rs",
                     "search.rs",

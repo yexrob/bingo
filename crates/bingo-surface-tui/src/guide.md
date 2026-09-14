@@ -32,7 +32,8 @@ where you are, the window used against the whole, and the model.
   `down` on an empty box walks the sessions, the same list `ctrl+g` opens.
 - `ctrl+a/e` — start and end of the line (`home` and `end` too). `alt+b/f` —
   one word. `ctrl+w/u/k` — delete a word, to the line start, to the line end.
-- `pgup/pgdn` — scroll the transcript.
+- `pgup/pgdn` — scroll the transcript. While it is held back, the row under it
+  says `↓ 37 lines below`; `end`, or a click on that row, follows the foot again.
 - `v · drag` — select: from the focused block or the first line on the screen
   with the key, from wherever the press landed with the mouse. `↑↓←→` or the
   drag itself take the far end of the run and the view follows it, so a run

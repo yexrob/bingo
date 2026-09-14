@@ -137,6 +137,9 @@ pub struct Painted {
     /// ([`crate::graphics::placed::cells`]), so it can never say a picture is
     /// somewhere the screen does not (M56).
     pub cells: Vec<Placed>,
+    /// Where this frame drew the way back to the foot ([`crate::foot`]), when
+    /// the transcript was held: what a click there is answered against.
+    pub foot: Option<ratatui::layout::Rect>,
 }
 
 impl Painted {
@@ -145,6 +148,7 @@ impl Painted {
     pub fn begin(&mut self, regions: Regions) {
         self.regions = regions;
         self.cells.clear();
+        self.foot = None;
     }
 
     /// The picture a pointer is on, when it is on one. The cells under it say
