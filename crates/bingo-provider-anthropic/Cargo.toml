@@ -19,6 +19,10 @@ bingo-auth-oauth.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 reqwest.workspace = true
+# The request body goes out metered, so a slow upload reads as movement and
+# not as silence (ADR-0056 §2). Both are already in the tree under `reqwest`.
+bytes.workspace = true
+http-body.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

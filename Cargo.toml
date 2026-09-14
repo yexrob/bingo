@@ -70,6 +70,11 @@ insta = { version = "1.48", features = ["json"] }
 tempfile = "3.27"
 # M1 (docs/plans/M1-provider-tools-gate.md, "Dependencies")
 reqwest = { version = "0.13", features = ["json", "stream"] }
+# M93 (ADR-0056 §2): both HTTP providers send a metered `http_body::Body` over
+# the request bytes, so a moving upload is not read as silence. Both crates
+# already resolve under `reqwest` — the tree gains two edges and no crate.
+bytes = "1.12"
+http-body = "1.1"
 similar = "3.2"
 ignore = "0.4"
 globset = "0.4"

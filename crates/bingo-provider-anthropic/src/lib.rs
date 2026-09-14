@@ -11,6 +11,7 @@ pub mod error;
 pub mod events;
 pub mod instances;
 pub mod key;
+pub mod metered;
 pub mod models;
 pub mod request;
 pub mod settings;
