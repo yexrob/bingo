@@ -22,6 +22,7 @@ impl Command for ThinkCommand {
             &levels(),
             ArgSpec::Words {
                 values: Effort::words().map(str::to_string).collect(),
+                then: None,
             },
             true,
         )

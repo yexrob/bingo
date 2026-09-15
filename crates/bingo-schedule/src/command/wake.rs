@@ -77,6 +77,7 @@ impl Command for WakeCommand {
             hint: "the wake the model set, and `off` to end it".into(),
             args: ArgSpec::Words {
                 values: vec![OFF.into()],
+                then: None,
             },
             // Not read-only, and instant anyway: a person ending a loop must
             // be able to end it while the loop is running, and waiting for
@@ -209,7 +210,8 @@ mod tests {
         assert_eq!(
             spec.args,
             ArgSpec::Words {
-                values: vec![OFF.into()]
+                values: vec![OFF.into()],
+                then: None,
             }
         );
         assert_eq!(spec.family, "schedule");

@@ -43,8 +43,15 @@ pub enum ArgSpec {
     },
     /// One of the words the command lists itself, in the order it offers
     /// them. A surface completes from the list; the kernel carries it.
+    ///
+    /// `then` says what the word after one of `values` is — the name
+    /// `/plugins enable` takes, the server `/mcp reconnect` takes — and is
+    /// absent for a command whose argument ends at the first word, so every
+    /// spec written before it reads the same (ADR-0008 §6a).
     Words {
         values: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        then: Option<Box<ArgSpec>>,
     },
 }
 
@@ -98,14 +105,40 @@ mod tests {
     use serde_json::json;
 
     /// The shape a surface and a plugin both read: the variant is its `kind`,
-    /// the words are `values`, in the command's own order.
+    /// the words are `values`, in the command's own order. A word list that
+    /// says nothing about the word after it writes nothing down, so a spec
+    /// from before `then` and a spec without one are the same bytes.
     #[test]
     fn a_word_list_crosses_the_wire_as_its_kind_and_its_values() {
         let args = ArgSpec::Words {
             values: vec!["off".into(), "low".into()],
+            then: None,
         };
         let wire = serde_json::to_value(&args).expect("serialises");
         assert_eq!(wire, json!({ "kind": "words", "values": ["off", "low"] }));
+        let back: ArgSpec = serde_json::from_value(wire).expect("deserialises");
+        assert_eq!(back, args);
+    }
+
+    /// A verb that takes a name carries the name's own spec inside its own,
+    /// and a reader that has never heard of one reads the words as before.
+    #[test]
+    fn a_verb_carries_the_spec_of_the_word_after_it() {
+        let args = ArgSpec::Words {
+            values: vec!["enable".into()],
+            then: Some(Box::new(ArgSpec::Catalog {
+                source: "plugins".into(),
+            })),
+        };
+        let wire = serde_json::to_value(&args).expect("serialises");
+        assert_eq!(
+            wire,
+            json!({
+                "kind": "words",
+                "values": ["enable"],
+                "then": { "kind": "catalog", "source": "plugins" },
+            })
+        );
         let back: ArgSpec = serde_json::from_value(wire).expect("deserialises");
         assert_eq!(back, args);
     }

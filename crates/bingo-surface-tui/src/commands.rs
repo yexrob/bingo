@@ -200,7 +200,7 @@ fn arguments(
             Some(ids) => ids,
             None => return Vec::new(),
         },
-        ArgSpec::Words { values } => values,
+        ArgSpec::Words { values, .. } => values,
         ArgSpec::None | ArgSpec::Free { .. } => return Vec::new(),
     };
     matching::rank(partial, values, String::as_str)
@@ -337,6 +337,7 @@ mod tests {
             "think",
             ArgSpec::Words {
                 values: ["low", "high", "off"].map(str::to_string).to_vec(),
+                then: None,
             },
         )];
         assert_eq!(labels("/think ", &specs), vec!["low", "high", "off"]);
@@ -355,6 +356,7 @@ mod tests {
             "mcp",
             ArgSpec::Words {
                 values: vec!["login".into(), "logout".into()],
+                then: None,
             },
         )];
         assert_eq!(labels("/mcp lo", &specs), vec!["login", "logout"]);
@@ -369,6 +371,7 @@ mod tests {
             "permission",
             ArgSpec::Words {
                 values: vec!["plan".into()],
+                then: None,
             },
         );
         spec.aliases = vec!["permissions".to_string()];

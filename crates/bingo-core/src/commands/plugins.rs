@@ -33,6 +33,7 @@ impl Command for PluginsCommand {
                 &format!("[{ENABLE}|{DISABLE} <name>]"),
                 ArgSpec::Words {
                     values: vec![ENABLE.into(), DISABLE.into()],
+                    then: None,
                 },
                 true,
             )

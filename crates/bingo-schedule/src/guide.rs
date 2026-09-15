@@ -76,7 +76,7 @@ mod tests {
                     "the page never says /{name}"
                 );
             }
-            if let ArgSpec::Words { values } = &spec.args {
+            if let ArgSpec::Words { values, .. } = &spec.args {
                 for word in values {
                     assert!(
                         page().body.contains(&format!("/{} {word}", spec.name)),

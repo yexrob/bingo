@@ -25,6 +25,7 @@ impl Command for ModelsCommand {
             &format!("[{REFRESH}]"),
             ArgSpec::Words {
                 values: vec![REFRESH.into()],
+                then: None,
             },
             true,
         )

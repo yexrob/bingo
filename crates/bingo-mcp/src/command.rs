@@ -310,6 +310,7 @@ impl Command for McpCommand {
             hint: format!("[{} <server>]", Verb::ALL.map(Verb::as_str).join("|")),
             args: ArgSpec::Words {
                 values: Verb::ALL.map(|verb| verb.as_str().to_string()).to_vec(),
+                then: None,
             },
             // A sign-in takes minutes and asks through the session's dialog,
             // so this command holds the queue as `/login` does (ADR-0012 §5).
@@ -476,7 +477,7 @@ mod tests {
         assert_eq!(spec.name, "mcp");
         assert!(!spec.instant, "a sign-in asks a person and takes minutes");
         assert_eq!(spec.family, "mcp");
-        let ArgSpec::Words { values } = spec.args else {
+        let ArgSpec::Words { values, .. } = spec.args else {
             panic!("a verb is one of the words");
         };
         assert_eq!(values, Verb::ALL.map(|verb| verb.as_str().to_string()));
