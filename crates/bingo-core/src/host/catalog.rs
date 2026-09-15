@@ -25,7 +25,7 @@ pub(super) async fn entries(
         CatalogKind::Providers => providers(resolved),
         CatalogKind::Tools => tools(registry).await,
         CatalogKind::Commands => commands(registry).await,
-        CatalogKind::Plugins => plugins(registry),
+        CatalogKind::Plugins => plugins(registry).await,
     }
 }
 
@@ -146,16 +146,28 @@ async fn commands(registry: &Registry) -> Vec<CatalogEntry> {
         .collect()
 }
 
-fn plugins(registry: &Registry) -> Vec<CatalogEntry> {
-    registry
-        .plugins
+/// What this build registered, then what every source found (ADR-0057 §5):
+/// the name a person completes is the name `/plugins` lists (ADR-0008 §6a).
+async fn plugins(registry: &Registry) -> Vec<CatalogEntry> {
+    crate::plugins::listing(registry)
+        .await
         .iter()
-        .map(|p| CatalogEntry {
-            id: p.id.clone(),
-            label: format!("{} {}", p.id, p.version),
-            meta: json!({ "enabled": p.enabled, "reason": p.reason }),
-        })
+        .map(plugin_entry)
         .collect()
+}
+
+/// One plugin as a client reads it: whether it runs, why not, and which
+/// listing it came from — the row `/plugins` draws, in a catalogue's shape.
+fn plugin_entry(status: &PluginStatus) -> CatalogEntry {
+    CatalogEntry {
+        id: status.id.clone(),
+        label: format!("{} {}", status.id, status.version),
+        meta: json!({
+            "enabled": status.enabled,
+            "reason": status.reason,
+            "from": status.from,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +176,7 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use super::super::registry::Sources;
     use super::*;
 
     /// An endpoint that serves a catalogued family under a name of its own
@@ -371,6 +384,71 @@ mod tests {
         assert_eq!(
             writes.meta["inputSchema"], reads.meta["inputSchema"],
             "every tool is described as fully, whatever it does"
+        );
+    }
+
+    /// A bridge that found a plugin of its own on the machine.
+    struct Found;
+
+    #[async_trait]
+    impl PluginSource for Found {
+        fn id(&self) -> &str {
+            "bridge"
+        }
+
+        async fn plugins(&self) -> Vec<PluginStatus> {
+            vec![PluginStatus {
+                id: "wordcount".into(),
+                version: "0.2.0".into(),
+                enabled: false,
+                reason: Some("switched off in the settings".into()),
+                from: "bridge".into(),
+            }]
+        }
+    }
+
+    fn registered(id: &str) -> PluginStatus {
+        PluginStatus {
+            id: id.into(),
+            version: "1.0.0".into(),
+            enabled: true,
+            reason: None,
+            from: BUILT_IN.into(),
+        }
+    }
+
+    /// ADR-0008 §6a: a person completes the name `/plugins` lists, so the
+    /// catalogue is that same listing — this build's, then every source's,
+    /// in that order.
+    #[tokio::test]
+    async fn the_plugins_catalogue_lists_the_sources_after_the_registry() {
+        let registry = Registry {
+            plugins: vec![registered("bingo.tools.web")],
+            sources: Sources {
+                plugins: vec![Arc::new(Found)],
+                ..Default::default()
+            },
+            ..Registry::default()
+        };
+        let entries = plugins(&registry).await;
+        assert_eq!(
+            entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["bingo.tools.web", "wordcount"]
+        );
+        let web = entry(&entries, "bingo.tools.web");
+        assert_eq!(web.label, "bingo.tools.web 1.0.0");
+        assert_eq!(
+            web.meta,
+            json!({ "enabled": true, "reason": null, "from": BUILT_IN })
+        );
+        assert_eq!(
+            entry(&entries, "wordcount").meta,
+            json!({
+                "enabled": false,
+                "reason": "switched off in the settings",
+                "from": "bridge",
+            }),
+            "a plugin only a source has seen says where it came from"
         );
     }
 

@@ -8,9 +8,10 @@
 
 use std::path::Path;
 
-use bingo_sdk::{Env, PluginManifest};
+use bingo_sdk::{Env, PluginManifest, PluginStatus};
 use serde_json::{Map, Value};
 
+use crate::host::Registry;
 use crate::settings::{self, SettingsError};
 
 /// The kernel key the switches live under: a plugin's name to whether it
@@ -47,6 +48,20 @@ pub fn needed(manifest: &PluginManifest) -> Option<&'static str> {
 /// (ADR-0057 §3): one rule, said in one sentence.
 pub fn ignored(name: &str, why: &str) -> String {
     format!("`{name}` ignores its switch: {why}")
+}
+
+/// Every plugin a person could switch or complete: what this build
+/// registered, then what each source found for itself (ADR-0057 §5).
+///
+/// One listing, because the table `/plugins` draws and the catalogue a
+/// surface completes a name from have to name the same plugins
+/// (ADR-0008 §6a).
+pub async fn listing(registry: &Registry) -> Vec<PluginStatus> {
+    let mut listed = registry.plugins.clone();
+    for source in &registry.sources.plugins {
+        listed.extend(source.plugins().await);
+    }
+    listed
 }
 
 /// The one word a listing writes a plugin's state as, in the terminal and in

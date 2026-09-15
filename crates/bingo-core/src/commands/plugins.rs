@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 
 use crate::host::Host;
-use crate::plugins::state;
+use crate::plugins::{listing, state};
 
 pub(super) struct PluginsCommand {
     pub(super) host: Weak<Host>,
@@ -42,7 +42,7 @@ impl Command for PluginsCommand {
 
     async fn run(&self, args: &str, _cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
         let host = super::host(&self.host)?;
-        let listed = listing(&host).await;
+        let listed = listing(host.registry()).await;
         match parse(args)? {
             None => Ok(CommandOutcome::View {
                 view: table(&listed),
@@ -77,17 +77,6 @@ fn parse(args: &str) -> Result<Option<(&str, bool)>, KernelError> {
         ))),
         None => Ok(Some((name, enabled))),
     }
-}
-
-/// Every plugin a person could switch: what this build registered, then what
-/// each source knows of its own (ADR-0057 §5).
-async fn listing(host: &Host) -> Vec<PluginStatus> {
-    let registry = host.registry();
-    let mut listed = registry.plugins.clone();
-    for source in &registry.sources.plugins {
-        listed.extend(source.plugins().await);
-    }
-    listed
 }
 
 fn table(listed: &[PluginStatus]) -> View {
