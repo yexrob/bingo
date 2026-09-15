@@ -40,3 +40,6 @@ first record; 0036 §2 answered it before it was named).
 - [0054 — The plugin writes its own page](0054-the-plugin-writes-its-own-page.md)
 - [0055 — The context an agent holds is the agent's to measure](0055-the-context-an-agent-holds.md)
 - [0056 — A request is cut for silence, not for size](0056-a-request-is-cut-for-silence.md)
+- [0057 — A plugin is switched, not deleted](0057-a-plugin-is-switched-not-deleted.md)
+- [0058 — Settings are TOML, and the file keeps its comments](0058-the-settings-file-keeps-its-comments.md)
+- [0059 — The agent has a view of its own](0059-the-agent-has-a-view-of-its-own.md)
