@@ -553,13 +553,13 @@ mod tests {
         let case = Case::new();
         std::fs::create_dir_all(case.env().config_dir).expect("the directory");
         std::fs::write(
-            case.env().config_dir.join("settings.json"),
-            r#"{ "channels": { "feishu": { "appId": "cli_public" } } }"#,
+            case.env().config_dir.join("settings.toml"),
+            "[channels.feishu]\nappId = \"cli_public\"\n",
         )
         .expect("settings");
         let said = case.report(&Fake::empty(), false);
         assert!(said.contains("[ok]   settings —"), "{said}");
-        assert!(said.contains("settings.json"), "it names them: {said}");
+        assert!(said.contains("settings.toml"), "it names them: {said}");
         assert!(
             said.contains("[bad]  channels.feishu — no secret"),
             "{said}"
@@ -573,11 +573,8 @@ mod tests {
         let case = Case::new();
         let env = case.env();
         std::fs::create_dir_all(&env.config_dir).expect("the directory");
-        std::fs::write(
-            env.config_dir.join("settings.json"),
-            r#"{ "channels": { "feishu": {} } }"#,
-        )
-        .expect("settings");
+        std::fs::write(env.config_dir.join("settings.toml"), "[channels.feishu]\n")
+            .expect("settings");
         bingo_channels::secret::store(&env, "feishu", "s-do-not-print-me".into())
             .expect("it is written");
         let said = case.report(&Fake::empty(), false);
@@ -592,11 +589,28 @@ mod tests {
         );
     }
 
+    /// ADR-0058 §1: the doctor reads what a start reads, and where no
+    /// `settings.toml` stands the `settings.json` beside it is still the
+    /// layer. Nothing here migrates — a doctor looks, it does not move files.
+    #[test]
+    fn a_settings_json_standing_where_no_toml_does_is_read_and_named() {
+        let case = Case::new();
+        std::fs::create_dir_all(case.env().config_dir).expect("the directory");
+        let json = case.env().config_dir.join("settings.json");
+        std::fs::write(&json, r#"{ "channels": { "loopback": {} } }"#).expect("settings");
+
+        let said = case.report(&Fake::empty(), false);
+        assert!(said.contains("[ok]   settings —"), "{said}");
+        assert!(said.contains("settings.json"), "it names it: {said}");
+        assert!(said.contains("[ok]   channels.loopback"), "{said}");
+        assert!(json.exists(), "a doctor moves nothing");
+    }
+
     #[test]
     fn settings_that_will_not_parse_are_the_first_thing_reported() {
         let case = Case::new();
         std::fs::create_dir_all(case.env().config_dir).expect("the directory");
-        std::fs::write(case.env().config_dir.join("settings.json"), "{ not json")
+        std::fs::write(case.env().config_dir.join("settings.toml"), "channels = ")
             .expect("a broken file");
         let said = case.report(&Fake::empty(), false);
         assert!(said.starts_with("[bad]  settings —"), "{said}");
@@ -630,8 +644,8 @@ mod tests {
         let case = Case::new();
         std::fs::create_dir_all(case.env().config_dir).expect("the directory");
         std::fs::write(
-            case.env().config_dir.join("settings.json"),
-            r#"{ "channels": { "feishu": { "appId": "cli_public" } } }"#,
+            case.env().config_dir.join("settings.toml"),
+            "[channels.feishu]\nappId = \"cli_public\"\n",
         )
         .expect("settings");
         let env = case.env();
@@ -651,8 +665,8 @@ mod tests {
         let case = Case::new();
         std::fs::create_dir_all(case.env().config_dir).expect("the directory");
         std::fs::write(
-            case.env().config_dir.join("settings.json"),
-            r#"{ "channels": { "loopback": {} } }"#,
+            case.env().config_dir.join("settings.toml"),
+            "[channels.loopback]\n",
         )
         .expect("settings");
         let env = case.env();
