@@ -11,13 +11,14 @@ what a person sees in the chat is derived from the same frames a terminal folds.
 Under `channels`, one entry per adapter. Two exist: `feishu`, the first real
 platform, and `loopback`, the in-process one the contract is tested against.
 
-```jsonc
-{
-  "channels": {
-    "feishu": { "appId": "cli_…", "access": { "admins": ["ou_…"] } },
-    "coalesce": { "minChars": 48, "intervalMs": 700 }
-  }
-}
+```toml
+[channels.feishu]
+appId = "cli_…"
+access = { admins = ["ou_…"] }
+
+[channels.coalesce]
+minChars = 48
+intervalMs = 700
 ```
 
 - `channels.feishu.appId` — the app id, which is public. The **secret never

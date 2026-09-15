@@ -16,24 +16,17 @@ One row per agent under `acp.adapters`, by the name a person types. A new agent
 is a new row, never a line of code — which is why no adapter is named in the
 build:
 
-```jsonc
-{
-  "acp": {
-    "adapters": {
-      "claude-acp": {
-        "command": "npx",
-        "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
-        "options": { "mode": "dontAsk" }
-      },
-      "codex-acp": {
-        "command": "npx",
-        "args": ["-y", "@agentclientprotocol/codex-acp"],
-        "env": { "CODEX_APPROVAL_POLICY": "on-request" },
-        "enabled": false
-      }
-    }
-  }
-}
+```toml
+[acp.adapters.claude-acp]
+command = "npx"
+args = ["-y", "@agentclientprotocol/claude-agent-acp"]
+options = { mode = "dontAsk" }
+
+[acp.adapters.codex-acp]
+command = "npx"
+args = ["-y", "@agentclientprotocol/codex-acp"]
+env = { CODEX_APPROVAL_POLICY = "on-request" }
+enabled = false
 ```
 
 - `command`, `args`, `env` — what to run. The environment is added to the one

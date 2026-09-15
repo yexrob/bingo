@@ -1,23 +1,19 @@
 # Hooks
 
-A hook is a shell command bingo runs at a fixed point in a session. The
-settings block is Claude Code's, so a `.claude/settings.json` `hooks` block can
-be pasted in as written:
+A hook is a shell command bingo runs at a fixed point in a session. In a
+`settings.toml` layer, an event is an array of tables:
 
-```jsonc
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [{ "type": "command", "command": "./check.sh", "timeout": 10 }]
-      }
-    ]
-  }
-}
+```toml
+[[hooks.PreToolUse]]
+matcher = "Edit|Write"
+hooks = [{ type = "command", command = "./check.sh", timeout = 10 }]
 ```
 
-`type: "command"` is the only kind served; an `http`, `mcp_tool`, `prompt` or
+The block is Claude Code's, key for key, so a `.claude/settings.json` `hooks`
+block still drops in as written where the layer is a `settings.json`: bingo
+reads JSON layers too, and the fields below are the same in either file.
+
+`type = "command"` is the only kind served; an `http`, `mcp_tool`, `prompt` or
 `agent` hook is refused at startup rather than skipped in silence, and so is an
 event name this plugin does not serve — a hook nobody will run is a rule its
 author believes is enforced. A project's `hooks` add to the person's rather

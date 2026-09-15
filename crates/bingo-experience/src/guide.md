@@ -74,8 +74,9 @@ could not be read. It runs while a turn is busy.
 
 ## Turning it off
 
-```jsonc
-{ "experience": { "enabled": false } }
+```toml
+[experience]
+enabled = false
 ```
 
 `enabled` is true until a project says otherwise. Off, the plugin contributes

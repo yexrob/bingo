@@ -77,6 +77,22 @@ mod tests {
         );
     }
 
+    /// The settings layers are TOML (ADR-0058 §1), so every example a person
+    /// is invited to paste is written in the format the file is. Both
+    /// transports get one: the shapes differ, and a person copies the one
+    /// they are dialling.
+    #[test]
+    fn the_settings_examples_are_toml_and_no_json_is_left() {
+        for fence in ["```json", "```jsonc"] {
+            assert!(!page().body.contains(fence), "the page still shows {fence}");
+        }
+        assert_eq!(
+            page().body.matches("```toml").count(),
+            2,
+            "one example per transport"
+        );
+    }
+
     #[test]
     fn the_page_is_one_line_of_description_and_a_body_worth_reading() {
         assert_eq!(page().name, "mcp");

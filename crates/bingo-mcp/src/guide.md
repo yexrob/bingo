@@ -9,32 +9,22 @@ that turn began, and a server that arrives later is there for the next one.
 
 Under `mcpServers`, one entry per name. A child process:
 
-```jsonc
-{
-  "mcpServers": {
-    "files": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/work"],
-      "env": { "TOKEN": "…" },
-      "cwd": "/work"
-    }
-  }
-}
+```toml
+[mcpServers.files]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/work"]
+env = { TOKEN = "…" }
+cwd = "/work"
 ```
 
 A streamable-HTTP endpoint:
 
-```jsonc
-{
-  "mcpServers": {
-    "docs": {
-      "type": "http",
-      "url": "https://example.com/mcp",
-      "headers": { "Authorization": "Bearer …" },
-      "oauth": { "clientId": "…" }
-    }
-  }
-}
+```toml
+[mcpServers.docs]
+type = "http"
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer …" }
+oauth = { clientId = "…" }
 ```
 
 `type` defaults to `stdio`. A field this plugin does not know, or one that

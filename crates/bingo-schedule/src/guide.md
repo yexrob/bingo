@@ -84,8 +84,9 @@ is there or the budget is gone, say what you found and set no further wake.
 `/wake` shows the person when it comes and what it will say; `/wake off` ends
 it, at any time, including while the turn that set it is still running.
 
-```jsonc
-{ "schedule": { "wakes": false } }
+```toml
+[schedule]
+wakes = false
 ```
 
 turns wakes off: the `Wake` tool is then not offered at all, and the schedules

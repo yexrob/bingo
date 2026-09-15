@@ -57,7 +57,30 @@ mod tests {
     fn the_page_names_the_settings_key_this_plugin_claims() {
         let claim = MANIFEST.config.expect("the plugin claims settings");
         assert!(!claim.keys.is_empty());
-        assert!(page().body.contains("\"hooks\""), "the settings block");
+        assert!(
+            page().body.contains("[[hooks."),
+            "the page never shows the block the way a settings layer spells it"
+        );
+    }
+
+    /// The settings layers are TOML (ADR-0058 §1), so the example a person
+    /// pastes is written in the format the file is. The page still says that
+    /// Claude Code's JSON block drops in unchanged, because a `settings.json`
+    /// layer is read as it always was (ADR-0058 §1) — but it is not what the
+    /// example shows.
+    #[test]
+    fn the_settings_example_is_toml_and_no_json_is_left() {
+        for fence in ["```json", "```jsonc"] {
+            assert!(!page().body.contains(fence), "the page still shows {fence}");
+        }
+        assert!(
+            page().body.contains("```toml"),
+            "the example is still shown"
+        );
+        assert!(
+            page().body.contains(".claude/settings.json"),
+            "the page stopped saying where a pasted block comes from"
+        );
     }
 
     #[test]

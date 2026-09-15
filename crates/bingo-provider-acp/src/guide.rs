@@ -134,6 +134,19 @@ mod tests {
         );
     }
 
+    /// The settings layers are TOML (ADR-0058 §1), so the rows a person is
+    /// invited to paste are written in the format the file is.
+    #[test]
+    fn the_settings_example_is_toml_and_no_json_is_left() {
+        for fence in ["```json", "```jsonc"] {
+            assert!(!page().body.contains(fence), "the page still shows {fence}");
+        }
+        assert!(
+            page().body.contains("```toml"),
+            "the example is still shown"
+        );
+    }
+
     #[test]
     fn the_page_is_one_line_of_description_and_a_body_worth_reading() {
         assert_eq!(page().name, "acp");
