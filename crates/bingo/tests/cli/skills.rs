@@ -164,6 +164,7 @@ fn the_prompt_lists_a_page_for_every_plugin_that_owns_a_noun() {
         "guide-mcp",
         "guide-memory",
         "guide-permissions",
+        "guide-persona",
         "guide-rewind",
         "guide-rooms",
         "guide-schedule",
