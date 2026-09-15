@@ -1164,6 +1164,35 @@ mod tests {
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
+    /// ADR-0008 §6a: the word after a verb is drawn like every other value,
+    /// so `/plugins disable ` shows the plugins rather than an empty menu.
+    #[test]
+    fn the_word_after_a_verb_is_drawn_under_the_verb() {
+        let state = state();
+        let (mut ui, now) = scene();
+        ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
+            name: "plugins".into(),
+            aliases: vec!["modules".into()],
+            hint: "[enable|disable <name>]".into(),
+            args: bingo_sdk::ArgSpec::Words {
+                values: vec!["enable".into(), "disable".into()],
+                then: Some(Box::new(bingo_sdk::ArgSpec::Catalog {
+                    source: "plugins".into(),
+                })),
+            },
+            instant: true,
+            family: "kernel".into(),
+        }];
+        ui.catalogs.values = crate::commands::Catalogues::from([(
+            "plugins".to_string(),
+            ["bingo.tools.web", "bingo.tasks", "wordcount"]
+                .map(str::to_string)
+                .to_vec(),
+        )]);
+        write(&mut ui, &state, "/plugins disable ", now);
+        insta::assert_snapshot!(render(&state, &ui, now));
+    }
+
     #[test]
     fn the_first_ctrl_c_says_how_to_leave() {
         let state = state();
