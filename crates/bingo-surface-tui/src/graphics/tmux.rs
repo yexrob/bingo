@@ -61,9 +61,20 @@ pub enum Passthrough {
     Unknown,
     /// `off`: the envelope is dropped whole, so none is sent.
     Off,
-    /// `on` or `all`: the envelope is carried, and the answers to it have
-    /// further to come than a bare terminal's.
+    /// `on`: the envelope is carried while the pane is on screen and dropped
+    /// while it is not, and the answers to it have further to come than a
+    /// bare terminal's.
     On,
+    /// `all`: carried whether or not the pane is on screen.
+    All,
+}
+
+impl Passthrough {
+    /// Whether the envelope reaches the terminal at all.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn carries(self) -> bool {
+        matches!(self, Passthrough::On | Passthrough::All)
+    }
 }
 
 /// What tmux's answer means. Anything but the words tmux itself prints is no
@@ -77,9 +88,59 @@ pub enum Passthrough {
 pub fn allows(said: &str) -> Passthrough {
     match said.trim() {
         "off" => Passthrough::Off,
-        "on" | "all" => Passthrough::On,
+        "on" => Passthrough::On,
+        "all" => Passthrough::All,
         _ => Passthrough::Unknown,
     }
+}
+
+/// A pane tmux carries the envelope for only while it is on screen is a pane
+/// whose pictures are lost the moment a person looks at another window: the
+/// chunks sent for a frame nobody saw are dropped, never re-sent, and the
+/// store believes the terminal holds what it never got (M49 risk 2). A
+/// transmit is a virtual placement and depends on no position, so delivery
+/// to a hidden pane is exactly what is wanted — this pane, and only this
+/// pane, is raised to `all` (`set -p` dies with the pane and touches no
+/// other). An `off` is left as it is: a passthrough the person turned off is
+/// not this surface's to turn on, and the opening notice names the setting.
+///
+/// The answer is what tmux now carries: `All` when the pane was raised,
+/// what was read when it was not.
+#[cfg(all(unix, not(test)))]
+pub fn reach_hidden(passthrough: Passthrough) -> Passthrough {
+    if passthrough != Passthrough::On {
+        return passthrough;
+    }
+    match raised() {
+        true => Passthrough::All,
+        false => passthrough,
+    }
+}
+
+/// A console that asks no tmux has no pane to raise ([`passthrough`]).
+#[cfg(all(not(unix), not(test)))]
+pub fn reach_hidden(passthrough: Passthrough) -> Passthrough {
+    passthrough
+}
+
+/// Whether `tmux set -p allow-passthrough all` was run and said nothing
+/// against it, inside the window a probe is given ([`ended`]).
+#[cfg(all(unix, not(test)))]
+fn raised() -> bool {
+    let Ok(mut child) = std::process::Command::new("tmux")
+        .args(["set", "-p", "allow-passthrough", "all"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if !ended(&mut child) {
+        let _ = child.kill();
+        return false;
+    }
+    child.wait().is_ok_and(|status| status.success())
 }
 
 /// Ask the tmux this run is inside. `display-message -p` prints one format and
@@ -245,11 +306,15 @@ mod tests {
 
     /// M60 brick 3: the three words tmux prints for the option, and the
     /// silence a tmux too old to know it prints instead — which is not an
-    /// answer, so the probe goes ahead rather than guessing.
+    /// answer, so the probe goes ahead rather than guessing. `on` and `all`
+    /// both carry the envelope; only `all` carries it to a pane off screen,
+    /// so they are read apart.
     #[test]
     fn the_passthrough_is_read_from_what_tmux_says_and_nothing_else() {
         assert_eq!(allows("on\n"), Passthrough::On);
-        assert_eq!(allows("all\n"), Passthrough::On, "`all` carries it too");
+        assert_eq!(allows("all\n"), Passthrough::All);
+        assert!(allows("on").carries() && allows("all").carries());
+        assert!(!allows("off").carries() && !allows("").carries());
         assert_eq!(allows("off\n"), Passthrough::Off);
         assert_eq!(allows(""), Passthrough::Unknown, "an option it never knew");
         assert_eq!(allows("#{allow-passthrough}"), Passthrough::Unknown);

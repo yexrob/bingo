@@ -136,7 +136,7 @@ fn unheard(heard: &Heard) -> Option<&'static str> {
         Passthrough::Off => Some(PASSTHROUGH_OFF),
         // A tmux that did not answer for itself either is a probe that
         // failed, and a failed probe has nothing to tell anybody.
-        Passthrough::On | Passthrough::Unknown => {
+        Passthrough::On | Passthrough::All | Passthrough::Unknown => {
             (!heard.probe.terminals.is_empty()).then_some(PASSTHROUGH_UNHEARD)
         }
     }
@@ -266,7 +266,10 @@ fn asked() -> Option<Heard> {
         std::env::var("TERM").ok().as_deref(),
         std::env::var_os("TMUX").is_some(),
     )?;
-    let passthrough = tmux::passthrough(transport);
+    // Raised before the first picture rather than before the probe: the
+    // probe's answers come back to the active pane either way (M49 risk 1),
+    // and it is the pictures a hidden pane loses.
+    let passthrough = tmux::reach_hidden(tmux::passthrough(transport));
     Some(Heard {
         probe: ask(transport, passthrough),
         transport,
@@ -321,8 +324,8 @@ fn exchange(transport: Transport, passthrough: Passthrough) -> Vec<u8> {
 /// is heard out of the key stream instead ([`late`]).
 #[cfg(all(unix, not(test)))]
 fn window(transport: Transport, passthrough: Passthrough) -> std::time::Duration {
-    match (transport, passthrough) {
-        (Transport::Tmux, Passthrough::On) => crate::theme::PROBE_THROUGH,
+    match transport {
+        Transport::Tmux if passthrough.carries() => crate::theme::PROBE_THROUGH,
         _ => crate::theme::PROBE,
     }
 }
