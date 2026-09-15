@@ -25,6 +25,7 @@ use bingo_experience::ExperiencePlugin;
 use bingo_hooks_shell::ShellHooksPlugin;
 use bingo_mcp::McpPlugin;
 use bingo_permissions::PermissionsPlugin;
+use bingo_persona::PersonaPlugin;
 use bingo_plugin_rpc::PluginRpcPlugin;
 use bingo_provider_acp::AcpPlugin;
 use bingo_provider_anthropic::AnthropicPlugin;
@@ -698,6 +699,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(ShellHooksPlugin),
         Box::new(JsonlStorePlugin::default()),
         Box::new(ContextPlugin),
+        Box::new(PersonaPlugin),
         Box::new(FsPlugin),
         Box::new(BashPlugin::default()),
         Box::new(WebPlugin),

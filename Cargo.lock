@@ -240,6 +240,7 @@ dependencies = [
  "bingo-hooks-shell",
  "bingo-mcp",
  "bingo-permissions",
+ "bingo-persona",
  "bingo-pictures",
  "bingo-plugin-rpc",
  "bingo-provider-acp",
