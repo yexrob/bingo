@@ -5,12 +5,11 @@
 use super::*;
 
 fn user_settings(home: &std::path::Path) -> std::path::PathBuf {
-    home.join(".bingo/settings.json")
+    home.join(".bingo/settings.toml")
 }
 
-fn settings_json(home: &std::path::Path) -> serde_json::Value {
-    let raw = std::fs::read_to_string(user_settings(home)).expect("the user settings");
-    serde_json::from_str(&raw).expect("json")
+fn user_layer(home: &std::path::Path) -> serde_json::Value {
+    super::settings::read(&user_settings(home))
 }
 
 fn mcp(home: &std::path::Path) -> Command {
@@ -39,7 +38,7 @@ fn a_server_is_added_read_back_listed_and_removed() {
 
     // The user layer, and only the user layer.
     assert_eq!(
-        settings_json(home.path())["mcpServers"]["remote"],
+        user_layer(home.path())["mcpServers"]["remote"],
         serde_json::json!({
             "type": "http",
             "url": "https://mcp.example.com/mcp",
@@ -47,7 +46,7 @@ fn a_server_is_added_read_back_listed_and_removed() {
         })
     );
     assert!(
-        !home.path().join(".bingo/settings.local.json").exists(),
+        !home.path().join(".bingo/settings.local.toml").exists(),
         "a project file is never written"
     );
 
@@ -81,11 +80,7 @@ fn a_stdio_server_joins_the_ones_that_are_already_there() {
     std::fs::create_dir_all(home.path().join(".bingo")).unwrap();
     std::fs::write(
         user_settings(home.path()),
-        serde_json::json!({
-            "model": "fake/one",
-            "mcpServers": { "kept": { "command": "true" } },
-        })
-        .to_string(),
+        "model = \"fake/one\"\n\n[mcpServers.kept]\ncommand = \"true\"\n",
     )
     .unwrap();
 
@@ -99,7 +94,7 @@ fn a_stdio_server_joins_the_ones_that_are_already_there() {
         "mcp-files",
     ]));
     assert_eq!(added.status.code(), Some(0), "stderr: {}", stderr(&added));
-    let settings = settings_json(home.path());
+    let settings = user_layer(home.path());
     assert_eq!(
         settings["mcpServers"]["files"],
         serde_json::json!({

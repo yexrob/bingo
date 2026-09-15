@@ -251,8 +251,8 @@ impl Terminal {
         // as it says no to every other outward call.
         std::fs::create_dir_all(home.path().join(".bingo")).unwrap();
         std::fs::write(
-            home.path().join(".bingo/settings.json"),
-            r#"{ "update": { "check": false } }"#,
+            home.path().join(".bingo/settings.toml"),
+            "[update]\ncheck = false\n",
         )
         .unwrap();
 

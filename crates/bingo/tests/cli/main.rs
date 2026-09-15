@@ -716,6 +716,9 @@ fn scripted_run(
 mod home;
 use home::home_env;
 
+#[path = "../support/settings.rs"]
+mod settings;
+
 #[path = "../support/python.rs"]
 mod python;
 

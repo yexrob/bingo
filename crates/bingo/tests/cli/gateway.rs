@@ -478,7 +478,7 @@ fn channels_add_asks_for_both_and_writes_each_where_it_belongs() {
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join(".bingo");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("settings.json"), r#"{ "provider": "openai" }"#).unwrap();
+    std::fs::write(config.join("settings.toml"), "# what answers\nprovider = \"openai\"\n").unwrap();
 
     let mut cmd = bingo();
     let out = typed(
@@ -488,16 +488,19 @@ fn channels_add_asks_for_both_and_writes_each_where_it_belongs() {
     );
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let said = stdout(&out);
-    assert!(said.contains("settings.json"), "{said}");
+    assert!(said.contains("settings.toml"), "{said}");
     assert!(said.contains("auth.json"), "{said}");
     assert!(said.contains("gateway restart"), "{said}");
     assert!(!said.contains("s-added-not-printed"), "no echo: {said}");
 
-    let settings = std::fs::read_to_string(config.join("settings.json")).unwrap();
-    assert!(settings.contains("\"appId\": \"cli_myapp\""), "{settings}");
+    let settings = std::fs::read_to_string(config.join("settings.toml")).unwrap();
+    assert_eq!(
+        super::settings::read(&config.join("settings.toml"))["channels"]["feishu"]["appId"],
+        "cli_myapp"
+    );
     assert!(
-        settings.contains("\"provider\": \"openai\""),
-        "a neighbour survived the round trip: {settings}"
+        settings.starts_with("# what answers\nprovider = \"openai\"\n"),
+        "a neighbour and its comment survived the round trip: {settings}"
     );
     let auth = std::fs::read_to_string(home.path().join(".bingo/data/auth.json")).unwrap();
     assert!(auth.contains("s-added-not-printed"), "{auth}");

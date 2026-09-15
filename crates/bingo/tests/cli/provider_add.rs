@@ -8,11 +8,15 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn settings_file(home: &std::path::Path) -> std::path::PathBuf {
-    home.join(".bingo/settings.json")
+    home.join(".bingo/settings.toml")
 }
 
 fn auth_json(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".bingo/data/auth.json")
+}
+
+fn settings(home: &std::path::Path) -> serde_json::Value {
+    super::settings::read(&settings_file(home))
 }
 
 fn add(home: &std::path::Path) -> Command {
@@ -76,7 +80,7 @@ async fn an_added_provider_is_written_down_and_the_next_run_uses_it() {
         "a settings file is committable; a key is not: {written}"
     );
     assert_eq!(
-        read(&settings_file(home.path()))["openai"]["instances"]["proxy1"],
+        settings(home.path())["openai"]["instances"]["proxy1"],
         serde_json::json!({ "baseUrl": server.uri() })
     );
     assert_eq!(read(&auth_json(home.path()))["proxy1"]["key"], "sk-added");
@@ -133,7 +137,7 @@ fn an_anthropic_instance_needs_neither_an_endpoint_nor_a_key() {
         )
     );
     assert_eq!(
-        read(&settings_file(home.path()))["anthropic"]["instances"]["claude-proxy"],
+        settings(home.path())["anthropic"]["instances"]["claude-proxy"],
         serde_json::json!({})
     );
     assert!(
@@ -142,33 +146,69 @@ fn an_anthropic_instance_needs_neither_an_endpoint_nor_a_key() {
     );
 }
 
-/// The settings file is a person's, and this command will not rewrite one it
-/// cannot read whole: JSONC is read at startup, and a round trip would drop
-/// the comments in it.
+/// ADR-0058 §2, end to end: a `settings.json` an older bingo wrote — comments
+/// and all — crosses on the first run that touches it, says so on stderr, and
+/// the command then writes into the TOML beside what the JSON already held.
+/// The comments do not cross, which is what the `.bak` is for.
 #[test]
-fn a_settings_file_that_is_not_plain_json_is_left_byte_for_byte() {
+fn a_settings_json_left_from_an_older_bingo_crosses_on_the_first_run() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join(".bingo")).unwrap();
+    let json = home.path().join(".bingo/settings.json");
     let before = "// mine\n{ \"openai\": { \"apiKey\": \"sk-mine\" } }\n";
+    std::fs::write(&json, before).unwrap();
+
+    let out = typed(
+        &mut add(home.path()),
+        &["proxy1", "openai", "http://127.0.0.1:8080", ""],
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let err = stderr(&out);
+    assert!(
+        err.contains("[notice] SETTINGS_MIGRATED")
+            && err.contains(&json.display().to_string())
+            && err.contains(&settings_file(home.path()).display().to_string()),
+        "the move is said out loud: {err}"
+    );
+    assert!(!json.exists(), "the JSON moved, it was not copied");
+    let kept = std::fs::read_to_string(home.path().join(".bingo/settings.json.bak")).unwrap();
+    assert_eq!(kept, before, "the comments stayed with the original");
+
+    let now = settings(home.path());
+    assert_eq!(
+        now["openai"]["apiKey"], "sk-mine",
+        "what the JSON said crossed: {now}"
+    );
+    assert_eq!(
+        now["openai"]["instances"]["proxy1"]["baseUrl"],
+        "http://127.0.0.1:8080"
+    );
+}
+
+/// The TOML layer is the one a person annotates now, and a command writes
+/// into it without disturbing a line it was not asked about (ADR-0058 §3).
+#[test]
+fn a_comment_in_the_settings_survives_the_command_that_writes_beside_it() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".bingo")).unwrap();
+    let before = "# the key I use at work\n[openai]\napiKey = \"sk-mine\"\n";
     std::fs::write(settings_file(home.path()), before).unwrap();
 
     let out = typed(
         &mut add(home.path()),
         &["proxy1", "openai", "http://127.0.0.1:8080", ""],
     );
-    assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
-    assert_eq!(stdout(&out), "");
-    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let after = std::fs::read_to_string(settings_file(home.path())).unwrap();
     assert!(
-        err.starts_with("[error] code=INVALID_INPUT")
-            && err.contains("not plain JSON")
-            && err.contains(&settings_file(home.path()).display().to_string()),
-        "{err}"
+        after.starts_with(before),
+        "every line the command was not asked about is where it was: {after}"
     );
     assert_eq!(
-        std::fs::read_to_string(settings_file(home.path())).unwrap(),
-        before,
-        "the file is left exactly as it was"
+        settings(home.path())["openai"]["instances"]["proxy1"]["baseUrl"],
+        "http://127.0.0.1:8080"
     );
 }
 

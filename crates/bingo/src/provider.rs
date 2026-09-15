@@ -307,13 +307,13 @@ mod tests {
     #[test]
     fn a_missing_file_is_an_empty_document_and_a_broken_one_is_an_error() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let path = directory.path().join("settings.json");
+        let path = directory.path().join("settings.toml");
         assert!(read(&path).expect("no file is no settings").is_empty());
         std::fs::write(&path, "  \n").expect("a blank file");
         assert!(read(&path).expect("a blank file is no settings").is_empty());
-        std::fs::write(&path, "// a comment\n{ \"openai\": {} }").expect("a jsonc file");
+        std::fs::write(&path, "# a comment\n[openai\n").expect("a broken file");
         let refused = read(&path).expect_err("a refusal").message;
-        assert!(refused.contains("not plain JSON"), "{refused}");
+        assert!(refused.contains("settings.toml"), "{refused}");
     }
 
     #[test]
@@ -322,10 +322,10 @@ mod tests {
             receipt(
                 "proxy1",
                 Protocol::OpenAi,
-                Path::new("/home/me/.bingo/settings.json"),
+                Path::new("/home/me/.bingo/settings.toml"),
                 Some(Path::new("/home/me/.bingo/data/auth.json")),
             ),
-            "proxy1 is openai.instances.proxy1 in /home/me/.bingo/settings.json.\n\
+            "proxy1 is openai.instances.proxy1 in /home/me/.bingo/settings.toml.\n\
              Its key is in /home/me/.bingo/data/auth.json, never in the settings.\n\
              bingo --provider proxy1"
         );
@@ -333,10 +333,10 @@ mod tests {
             receipt(
                 "proxy1",
                 Protocol::Anthropic,
-                Path::new("/home/me/.bingo/settings.json"),
+                Path::new("/home/me/.bingo/settings.toml"),
                 None,
             ),
-            "proxy1 is anthropic.instances.proxy1 in /home/me/.bingo/settings.json.\n\
+            "proxy1 is anthropic.instances.proxy1 in /home/me/.bingo/settings.toml.\n\
              bingo --provider proxy1"
         );
     }

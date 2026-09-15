@@ -86,3 +86,8 @@ vt100.workspace = true
 # through a spawned `bingo acp-mcp-proxy` to a live listener.
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 async-trait.workspace = true
+# M98 (ADR-0058 §1): the settings layers are TOML, so a black-box test that
+# reads back what a command wrote asks the file, through the format's own
+# reader rather than the kernel's. Test targets only — the shipped tree is
+# unchanged, and `bingo-core` is the one crate that takes this normally.
+toml_edit.workspace = true
