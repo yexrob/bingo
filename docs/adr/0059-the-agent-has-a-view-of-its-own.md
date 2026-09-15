@@ -19,6 +19,7 @@ That is a stance, not a mechanism: one system block. The kernel's identity is de
 - The stance costs every request a few hundred cached characters; a person who wants an agent that only obeys switches the plugin off.
 - No `/persona` command, no file-path knob, no tone settings: a long text goes in a TOML `"""` string, and the first real ask for a file is the ADR that adds it. An unknown field under `persona` is a startup failure, as `experience`'s is, so a typo does not leave the default in force silently.
 - The words are tested for what they reach, not what they say: a black-box run shows the block in the model's request.
+- The plugin writes one page, read as `guide-persona` (ADR-0054 §1, added M101): what the stance is, where the block sits among the system blocks, `persona.text` to replace it or silence it, and `enabledPlugins` to switch the plugin off. The page quotes the line the black-box run matches on, so page and block cannot drift apart without a failure in this crate.
 
 ## Supersedes
 
