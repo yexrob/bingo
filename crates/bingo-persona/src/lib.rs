@@ -81,7 +81,7 @@ impl Plugin for PersonaPlugin {
         let settings: Settings = registrar.config()?;
         let text = settings.persona.text.unwrap_or_else(|| TEXT.to_string());
         registrar.add(Contribution::Context(
-            Arc::new(JudgementContributor::new(text)) as Arc<dyn ContextContributor>
+            Arc::new(JudgementContributor::new(text)) as Arc<dyn ContextContributor>,
         ));
         Ok(())
     }
