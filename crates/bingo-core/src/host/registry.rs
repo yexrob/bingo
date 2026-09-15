@@ -4,13 +4,14 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bingo_sdk::service::{Service, Services};
 use bingo_sdk::*;
 use serde_json::{Map, Value};
 
 use super::HostError;
+use crate::plugins::{self, needed};
 
 /// Everything that arrives after I/O (ADR-0009 §1), one list per kind, each
 /// read where that kind is resolved.
@@ -57,20 +58,28 @@ pub struct Registry {
     /// locked rather than filled once.
     pub services: Services,
     pub plugins: Vec<PluginStatus>,
+    /// What loading found worth telling a person, as `(code, text)`; the host
+    /// says them beside the settings' own (ADR-0057 §3).
+    pub notices: Vec<(String, String)>,
 }
 
 impl Registry {
     /// Load plugins in the order given, standing or disabled by
     /// [`standing`]'s verdict. A disabled plugin is a warning and a status,
     /// never fatal. `slices` holds each plugin's claimed settings, by
-    /// plugin id.
+    /// plugin id; `switched_off` is every name the settings turned off, which
+    /// every registrar is handed as it is built (ADR-0057 §4).
     pub(super) fn load(
         plugins: &[Box<dyn Plugin>],
         slices: &BTreeMap<String, Value>,
         env: &Env,
+        switched_off: &BTreeSet<String>,
     ) -> Result<Self, HostError> {
-        let mut registry = Registry::default();
-        for (plugin, reason) in plugins.iter().zip(standing(plugins)) {
+        let mut registry = Registry {
+            notices: ignored_switches(plugins, switched_off),
+            ..Registry::default()
+        };
+        for (plugin, reason) in plugins.iter().zip(standing(plugins, switched_off)) {
             let manifest = plugin.manifest();
             if let Some(reason) = reason {
                 tracing::warn!(plugin = manifest.id, %reason, "plugin disabled");
@@ -79,7 +88,7 @@ impl Registry {
                     .push(PluginStatus::disabled(manifest, reason));
                 continue;
             }
-            registry.register(plugin.as_ref(), slices, env)?;
+            registry.register(plugin.as_ref(), slices, env, switched_off)?;
             registry.plugins.push(PluginStatus::loaded(manifest));
         }
         Ok(registry)
@@ -91,13 +100,14 @@ impl Registry {
         plugin: &dyn Plugin,
         slices: &BTreeMap<String, Value>,
         env: &Env,
+        switched_off: &BTreeSet<String>,
     ) -> Result<(), HostError> {
         let manifest = plugin.manifest();
         let slice = slices
             .get(manifest.id)
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
-        let mut registrar = Registrar::new(manifest.id, slice, env.clone(), Default::default());
+        let mut registrar = Registrar::new(manifest.id, slice, env.clone(), switched_off.clone());
         plugin
             .register(&mut registrar)
             .map_err(|source| HostError::Register {
@@ -243,14 +253,26 @@ impl Registry {
     }
 }
 
-/// The requirements nobody has provided yet, as a reason to disable.
-/// Why each plugin cannot stand, or `None` for one that can. A requirement is
-/// checked against what the whole composition provides — never against the
-/// accident of the caller's order — and the check runs to a fixpoint, so a
-/// plugin whose provider was itself disabled goes down with it, the reason
-/// naming what went missing.
-fn standing(plugins: &[Box<dyn Plugin>]) -> Vec<Option<String>> {
-    let mut reasons: Vec<Option<String>> = vec![None; plugins.len()];
+/// Why each plugin cannot stand, or `None` for one that can.
+///
+/// A switch goes first: a plugin the settings turned off is down before the
+/// fixpoint runs, so whoever required what it provided cascades in the usual
+/// way, naming the requirement rather than the switch (ADR-0057 §2). Then the
+/// requirements nobody provides, checked against what the whole composition
+/// provides — never against the accident of the caller's order — to a
+/// fixpoint, so a plugin whose provider was itself disabled goes down with
+/// it, the reason naming what went missing.
+///
+/// It is public because the headless `bingo plugins list` says what the next
+/// start will do, which is this verdict on the same composition.
+pub fn standing(
+    plugins: &[Box<dyn Plugin>],
+    switched_off: &BTreeSet<String>,
+) -> Vec<Option<String>> {
+    let mut reasons: Vec<Option<String>> = plugins
+        .iter()
+        .map(|plugin| switched(plugin.manifest(), switched_off))
+        .collect();
     loop {
         let provided: HashSet<&'static str> = plugins
             .iter()
@@ -271,6 +293,33 @@ fn standing(plugins: &[Box<dyn Plugin>]) -> Vec<Option<String>> {
             return reasons;
         }
     }
+}
+
+/// The reason a switch takes this plugin down, or `None`: nobody turned it
+/// off, or it is one the binary cannot run without, which keeps it standing
+/// (ADR-0057 §3).
+fn switched(manifest: &PluginManifest, switched_off: &BTreeSet<String>) -> Option<String> {
+    let off = switched_off.contains(manifest.id) && needed(manifest).is_none();
+    off.then(|| SWITCHED_OFF.to_string())
+}
+
+/// What a plugin that ignored its switch has to say for itself, for the host
+/// to pass on: a person who turned one off and still sees it is owed the
+/// reason (ADR-0057 §3).
+fn ignored_switches(
+    plugins: &[Box<dyn Plugin>],
+    switched_off: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    plugins
+        .iter()
+        .map(|plugin| plugin.manifest())
+        .filter(|manifest| switched_off.contains(manifest.id))
+        .filter_map(|manifest| {
+            let why = needed(manifest)?;
+            let text = format!("`{}` stays on: {why}", manifest.id);
+            Some((plugins::NEEDED.to_string(), text))
+        })
+        .collect()
 }
 
 fn unmet(manifest: &PluginManifest, provided: &HashSet<&'static str>) -> Option<String> {
@@ -333,10 +382,47 @@ mod tests {
         requires: &["service:y"],
         config: None,
     };
+    static STORE: PluginManifest = PluginManifest {
+        id: "test.store",
+        version: "0.0.0",
+        sdk: "^0.1",
+        provides: &["store:memory"],
+        requires: &[],
+        config: None,
+    };
+
+    /// A plugin that contributes something, so a test can see whether it was
+    /// registered at all.
+    struct Contributor(&'static PluginManifest);
+
+    #[async_trait::async_trait]
+    impl Plugin for Contributor {
+        fn manifest(&self) -> &'static PluginManifest {
+            self.0
+        }
+        fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
+            registrar.add(Contribution::Tools(Arc::new(Nothing)));
+            Ok(())
+        }
+    }
 
     fn loaded(plugins: Vec<Box<dyn Plugin>>) -> Registry {
-        Registry::load(&plugins, &BTreeMap::new(), &Env::rooted("/nowhere"))
+        switched(plugins, &[])
+    }
+
+    /// The same load, with the names a person turned off.
+    fn switched(plugins: Vec<Box<dyn Plugin>>, off: &[&str]) -> Registry {
+        let off: BTreeSet<String> = off.iter().map(|n| (*n).to_string()).collect();
+        Registry::load(&plugins, &BTreeMap::new(), &Env::rooted("/nowhere"), &off)
             .expect("nothing here fails to register")
+    }
+
+    fn status<'a>(registry: &'a Registry, id: &str) -> &'a PluginStatus {
+        registry
+            .plugins
+            .iter()
+            .find(|status| status.id == id)
+            .unwrap_or_else(|| panic!("{id} is not in {:?}", registry.plugins))
     }
 
     /// A source of every late kind, answering with nothing — which is never
@@ -500,5 +586,62 @@ mod tests {
             "{:?}",
             leans.reason
         );
+    }
+
+    /// A switch is a verdict like an unmet requirement: the plugin is listed,
+    /// disabled, with the reason — and nothing it would have contributed is
+    /// in the registry, because `register` was never called (ADR-0057 §2).
+    #[test]
+    fn a_plugin_switched_off_is_disabled_with_its_reason_and_registers_nothing() {
+        let registry = switched(vec![Box::new(Contributor(&GIVES))], &["test.gives"]);
+        let gives = status(&registry, "test.gives");
+        assert!(!gives.enabled, "{:?}", registry.plugins);
+        assert_eq!(gives.reason.as_deref(), Some(SWITCHED_OFF));
+        assert_eq!(gives.from, BUILT_IN);
+        assert!(
+            registry.sources.tools.is_empty(),
+            "a plugin that never registered contributed nothing"
+        );
+        assert!(!registry.enabled("test.gives"));
+        assert!(registry.notices.is_empty(), "{:?}", registry.notices);
+    }
+
+    /// Whoever required what the switched-off plugin provided goes down with
+    /// it, naming the requirement rather than the switch: the fixpoint does
+    /// not care why a capability is missing.
+    #[test]
+    fn a_switch_cascades_to_whoever_required_what_it_provided() {
+        let registry = switched(
+            vec![Box::new(Paper(&NEEDS)), Box::new(Paper(&GIVES))],
+            &["test.gives"],
+        );
+        let needs = status(&registry, "test.needs");
+        assert!(!needs.enabled, "{:?}", registry.plugins);
+        assert!(
+            needs
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("service:x"),
+            "{:?}",
+            needs.reason
+        );
+    }
+
+    /// What the binary cannot run without ignores its switch, stays
+    /// registered, and the person who turned it off is told why it is still
+    /// there (ADR-0057 §3).
+    #[test]
+    fn a_store_ignores_its_switch_and_the_notice_names_it() {
+        let registry = switched(vec![Box::new(Contributor(&STORE))], &["test.store"]);
+        assert!(
+            status(&registry, "test.store").enabled,
+            "{:?}",
+            registry.plugins
+        );
+        assert_eq!(registry.sources.tools.len(), 1, "it registered as usual");
+        let (code, text) = registry.notices.first().expect("one notice");
+        assert_eq!(code, crate::plugins::NEEDED);
+        assert!(text.contains("test.store"), "{text}");
     }
 }

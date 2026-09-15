@@ -196,6 +196,75 @@ async fn plugins_load_in_order_and_unmet_requirements_disable_not_crash() {
     );
 }
 
+/// A plugin that counts what the host did to it.
+struct Lifecycle {
+    manifest: &'static PluginManifest,
+    started: Arc<std::sync::atomic::AtomicUsize>,
+    stopped: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Plugin for Lifecycle {
+    fn manifest(&self) -> &'static PluginManifest {
+        self.manifest
+    }
+    fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
+        registrar.tool(Arc::new(EchoTool { read_only: true }));
+        Ok(())
+    }
+    async fn start(&self, _: HostHandle) -> Result<(), PluginError> {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    async fn stop(&self) -> Result<(), PluginError> {
+        self.stopped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// A switch is taken at the load, once: the plugin is listed off, nothing it
+/// would have contributed is registered, and it is neither started nor
+/// stopped — there is nothing running to stop (ADR-0057 §2).
+#[tokio::test]
+async fn a_switched_off_plugin_is_neither_registered_nor_started_nor_stopped() {
+    let counted = |switches: Value| async move {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stopped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plugins: Vec<Box<dyn Plugin>> = vec![
+            TestPlugin::boxed(
+                &PROVIDER,
+                vec![Contribution::Provider(ScriptedProvider::new(vec![]))],
+            ),
+            Box::new(Lifecycle {
+                manifest: &TOOLS,
+                started: started.clone(),
+                stopped: stopped.clone(),
+            }),
+        ];
+        let config = HostConfig::new(env())
+            .with_layer("cli", json!({"model": "m", "enabledPlugins": switches}));
+        let host = Host::build(plugins, config).await.unwrap();
+        let tools = host.registry().tools.len();
+        let enabled = host.registry().enabled("test.tools");
+        host.shutdown().await;
+        let read =
+            |n: &Arc<std::sync::atomic::AtomicUsize>| n.load(std::sync::atomic::Ordering::Relaxed);
+        (enabled, tools, read(&started), read(&stopped))
+    };
+
+    assert_eq!(
+        counted(json!({ "test.tools": true })).await,
+        (true, 1, 1, 1),
+        "a plugin nobody switched off lives as it always did"
+    );
+    assert_eq!(
+        counted(json!({ "test.tools": false })).await,
+        (false, 0, 0, 0)
+    );
+}
+
 #[tokio::test]
 async fn a_second_policy_is_a_conflict() {
     struct P;

@@ -25,7 +25,7 @@ use serde_json::Value;
 use tokio::sync::broadcast;
 
 pub(crate) use refresh::Refreshed;
-pub use registry::Registry;
+pub use registry::{Registry, standing};
 use tool_host::SessionToolHost;
 use unavailable::Unavailable;
 
@@ -170,7 +170,8 @@ impl Host {
             .filter_map(|p| Claim::from_manifest(p.manifest()))
             .collect();
         let settings = settings::merge(&config.layers, &claims)?;
-        let mut registry = Registry::load(&plugins, &settings.plugins, &config.env)?;
+        let switched_off = settings.kernel.switched_off();
+        let mut registry = Registry::load(&plugins, &settings.plugins, &config.env, &switched_off)?;
         let (gateway, _) = broadcast::channel(GATEWAY_CAPACITY);
         let learned = Arc::new(Learned::load(
             config.env.data_dir.join("learned-windows.json"),
@@ -254,17 +255,17 @@ impl Host {
         &self.registry
     }
 
-    /// What startup found worth telling a person: `(code, text)` pairs.
+    /// What startup found worth telling a person: `(code, text)` pairs — a
+    /// setting nobody claimed, and a switch the load could not honour.
     pub fn notices(&self) -> Vec<(String, String)> {
-        self.settings
-            .unknown
-            .iter()
-            .map(|u| {
-                (
-                    "UNKNOWN_SETTING".to_string(),
-                    format!("unknown setting `{}` in {}", u.key, u.source),
-                )
-            })
+        let unknown = self.settings.unknown.iter().map(|u| {
+            (
+                "UNKNOWN_SETTING".to_string(),
+                format!("unknown setting `{}` in {}", u.key, u.source),
+            )
+        });
+        unknown
+            .chain(self.registry.notices.iter().cloned())
             .collect()
     }
 
