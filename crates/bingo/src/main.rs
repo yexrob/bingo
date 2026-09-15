@@ -6,6 +6,7 @@ mod channels;
 mod env;
 mod login;
 mod mcp;
+mod plugins;
 mod provider;
 mod update;
 
@@ -190,6 +191,12 @@ enum Command {
         #[command(subcommand)]
         action: mcp::Action,
     },
+    /// Which plugins the next start will run, and the switch that changes one
+    /// (ADR-0057 §6).
+    Plugins {
+        #[command(subcommand)]
+        action: plugins::Action,
+    },
     /// Listen on the configured IM channels and nothing else (ADR-0016).
     Channels {
         #[command(subcommand)]
@@ -252,6 +259,7 @@ impl Command {
             | Command::Channels { .. }
             | Command::Gateway { .. }
             | Command::Mcp { .. }
+            | Command::Plugins { .. }
             | Command::Provider { .. }
             | Command::Update { .. }
             | Command::AcpMcpProxy => None,
@@ -479,6 +487,7 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
         Some(Command::AcpMcpProxy) => Some(acp_proxy::run().await),
         Some(Command::Provider { .. }) => Some(added_provider(&env).await),
         Some(Command::Mcp { action }) => Some(configured_mcp(cli, &env, cwd, action).await),
+        Some(Command::Plugins { action }) => Some(switched_plugins(cli, &env, cwd, action)),
         // An asked-for update always asks: the daily stamp is the start-up
         // check's discipline, not a person's.
         Some(Command::Update { check }) => Some(update::run(&env, *check).await),
@@ -509,6 +518,21 @@ async fn configured_mcp(
         None => None,
     };
     mcp::run(action, env, cwd, cli.settings.as_deref(), extra).await
+}
+
+/// `bingo plugins …`: which plugins the next start will run (ADR-0057 §6).
+/// It reads the layers a run would and composes the plugins a run would, so
+/// what it lists is what the next session loads.
+fn switched_plugins(
+    cli: &Cli,
+    env: &Env,
+    cwd: &std::path::Path,
+    action: &plugins::Action,
+) -> Result<i32, KernelError> {
+    let layers = settings::load(env, cwd, cli.settings.as_deref())
+        .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?;
+    let composed = plugins(demo_ui(cli, &layers))?;
+    plugins::run(action, env, cwd, &layers, composed)
 }
 
 /// `bingo channels add <adapter>`: app id and secret in one sitting.

@@ -43,6 +43,12 @@ pub fn needed(manifest: &PluginManifest) -> Option<&'static str> {
         })
 }
 
+/// What either face says when the switch a person asked for would be ignored
+/// (ADR-0057 §3): one rule, said in one sentence.
+pub fn ignored(name: &str, why: &str) -> String {
+    format!("`{name}` ignores its switch: {why}")
+}
+
 /// The one word a listing writes a plugin's state as, in the terminal and in
 /// the headless twin alike.
 pub fn state(enabled: bool) -> &'static str {

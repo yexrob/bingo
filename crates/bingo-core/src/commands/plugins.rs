@@ -133,7 +133,7 @@ fn refuse(host: &Host, listed: &[PluginStatus], name: &str) -> Result<(), Kernel
         )));
     }
     match host.needed(name) {
-        Some(why) => Err(invalid(format!("`{name}` ignores its switch: {why}"))),
+        Some(why) => Err(invalid(crate::plugins::ignored(name, why))),
         None => Ok(()),
     }
 }
