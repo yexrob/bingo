@@ -76,11 +76,11 @@ untouched.
 
 ## Exit criteria
 
-- [ ] the block is in the system prompt after the kernel's blocks and before
+- [x] the block is in the system prompt after the kernel's blocks and before
       `context:instructions` (a core `turn/contributors` ordering test or the
       fake provider's request record).
-- [ ] the fake provider matches the phrase in a black-box run.
-- [ ] every gate green; `budget.sh` +1 member and nothing else;
+- [x] the fake provider matches the phrase in a black-box run.
+- [x] every gate green; `budget.sh` +1 member and nothing else;
       `check_discipline.sh` sees the crate as a plugin (sdk only).
 
 ## Non-goals
@@ -95,3 +95,63 @@ untouched.
 - R-order: `-20` sorts before every existing contributor; the test pins it.
 - R-parallel: M97 (`enabledPlugins`) and M98 (`settings.toml`) land beside
   this; the only shared files are `main.rs` (one `push`) and `budget.toml`.
+
+## Verified (2026-09-15)
+
+All three exit criteria ticked. `bingo-persona` is 970 characters of block,
+one contributor, one claimed key; the binary pushes `PersonaPlugin` right
+after `ContextPlugin`.
+
+Where the block sits is black-box, not argued: the request the fake provider
+matches on is the system blocks joined by newlines, so the two seams are one
+needle each — `</env>\n# Judgement` (after the kernel's own two blocks) and
+`left behind.\n# Instructions from ` (before the project's). Both matched.
+The three readings of `persona.text` — unwritten, written, written empty —
+are unit-tested, and a typo under the key fails `register` naming the field
+both in the crate and through the binary.
+
+```
+$ cargo fmt --all -- --check                                    exit 0
+
+$ cargo check --workspace --all-targets --locked
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.09s
+
+$ cargo test --workspace --locked                 4729 passed; 0 failed; 2 ignored
+     Running tests/cli/main.rs
+test persona::a_projects_own_text_replaces_the_stance_entirely ... ok
+test persona::a_typo_under_the_key_stops_the_run_and_names_the_field ... ok
+test persona::the_stance_reaches_the_model_in_the_system_prompt ... ok
+test persona::the_stance_sits_between_the_kernels_blocks_and_the_projects_own ... ok
+test result: ok. 229 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running unittests src/lib.rs (bingo_persona)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/acp_bridge.rs
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ scripts/check_discipline.sh
+dependency direction ok
+kernel names no tool
+cohesion ok
+discipline ok
+
+$ scripts/budget.sh
+dependencies (unique, normal): 336 (max  336)
+warm cargo check -p bingo-core: 0s (max  20s)
+relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
+budget ok
+
+$ cargo check -p bingo-persona --all-targets --locked \
+    --target x86_64-pc-windows-msvc
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.57s
+```
+
+`acp_bridge` did not hang under the parallel run; nothing was skipped. The
+`budget.sh` line `target/debug: 10 GB (soft max 5)` is this worktree's build
+directory and a warning the script never fails on.
+
+Left for the merge: the plugin-switched-off black-box run, which needs M97's
+`enabledPlugins`; and `persona` as a commit scope in `CLAUDE.md`'s list,
+left out so this branch does not conflict with M97/M98 on that line.
