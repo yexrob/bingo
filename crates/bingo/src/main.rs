@@ -360,6 +360,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     check_input(&cli)?;
     let interactive = interactive(&cli);
     let cwd = working_dir(cli.cwd.as_deref())?;
+    migrate_settings(&cwd)?;
     if let Some(code) = before_any_host(&cli, &cwd).await {
         return code;
     }
@@ -421,6 +422,22 @@ fn surface_for(
         Work::Session if interactive => ("tui", surface_options(cli, cwd, env, decided)),
         Work::Session => ("print", surface_options(cli, cwd, env, decided)),
     })
+}
+
+/// The settings this machine keeps are TOML (ADR-0058 §2). A `settings.json`
+/// an older bingo wrote crosses here, before anything reads a layer, and says
+/// on stderr what moved where; a layer that cannot cross — TOML has no `null`
+/// — keeps its JSON and says that instead.
+fn migrate_settings(cwd: &std::path::Path) -> Result<(), KernelError> {
+    for outcome in settings::migrate_all(&environment(cwd), cwd) {
+        let migration =
+            outcome.map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?;
+        if let Some((code, text)) = migration.notice() {
+            let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            eprintln!("{}", notice_report(code, &text, human));
+        }
+    }
+    Ok(())
 }
 
 /// What a built host has to say for itself: a plugin that could not be
