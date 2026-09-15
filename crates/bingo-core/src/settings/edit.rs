@@ -105,7 +105,7 @@ fn set(document: &mut DocumentMut, path: &[String], value: &Value) -> Result<(),
         return Ok(());
     };
     let (table, inline) = descend(document, parents)?;
-    put(table, leaf, item(value, inline)?);
+    put(table, leaf, item(&path.join("."), value, inline)?);
     Ok(())
 }
 
@@ -163,7 +163,11 @@ fn descend<'a>(
         inline = item.is_inline_table();
         table = item
             .as_table_like_mut()
-            .ok_or_else(|| SettingsError::NotAnObject { layer: key.clone() })?;
+            .ok_or_else(|| SettingsError::Type {
+                key: key.clone(),
+                layer: "the settings being written".to_string(),
+                message: "expected a table to write into".to_string(),
+            })?;
     }
     Ok((table, inline))
 }
@@ -178,21 +182,21 @@ fn implicit() -> Item {
 /// One JSON value as the item TOML holds it in. An object becomes a standard
 /// table — `[a.b]`, the shape a person writing settings by hand writes — and
 /// stays inline only where that is the one shape its parent can hold.
-fn item(value: &Value, inline: bool) -> Result<Item, SettingsError> {
-    let built = built(value)?;
+fn item(key: &str, value: &Value, inline: bool) -> Result<Item, SettingsError> {
+    let built = built(key, value)?;
     Ok(match inline {
         true => built,
         false => standard(built),
     })
 }
 
-/// The serialiser writes every object inline, so it is asked for one key and
-/// that key's item is taken.
-fn built(value: &Value) -> Result<Item, SettingsError> {
+/// The serialiser writes a document, and every object in it inline, so it is
+/// asked for one key and that key's item is taken.
+fn built(key: &str, value: &Value) -> Result<Item, SettingsError> {
     const ONE: &str = "one";
     let described = |message: String| SettingsError::Type {
-        key: ONE.to_string(),
-        layer: "the value being written".to_string(),
+        key: key.to_string(),
+        layer: "the settings being written".to_string(),
         message,
     };
     let mut document = toml_edit::ser::to_document(&serde_json::json!({ ONE: value }))

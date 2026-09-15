@@ -304,11 +304,9 @@ fn plain_json(path: &Path, text: &str) -> Result<Map<String, Value>, SettingsErr
 /// Set a layer to this document. A TOML path keeps everything the file says
 /// about itself (ADR-0058 §3); a JSON path is re-encoded as it always was.
 pub fn write(path: &Path, document: &Map<String, Value>) -> Result<(), SettingsError> {
+    migrated(path)?;
     match Format::of(path) {
-        Format::Toml => {
-            migrated(path)?;
-            write_toml(path, document)
-        }
+        Format::Toml => write_toml(path, document),
         Format::Jsonc => write_json(path, document),
     }
 }
