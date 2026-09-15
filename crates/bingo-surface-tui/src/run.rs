@@ -63,6 +63,7 @@ const RECENT: usize = 20;
 const CATALOGUES: &[(&str, CatalogKind)] = &[
     ("models", CatalogKind::Models),
     ("providers", CatalogKind::Providers),
+    ("plugins", CatalogKind::Plugins),
 ];
 /// What a write says while the mailbox of the session in view is still on its
 /// way: it is refused, never held.

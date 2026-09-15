@@ -134,7 +134,8 @@ pub fn suggestions(line: &str, specs: &[CommandSpec], catalogues: &Catalogues) -
 }
 
 /// The ids of each catalogue a command's argument may name, by the source
-/// its `ArgSpec::Catalog` gives (`models`, `providers`), read once at start.
+/// its `ArgSpec::Catalog` gives (`models`, `providers`, `plugins`), read once
+/// at start.
 pub type Catalogues = BTreeMap<String, Vec<String>>;
 
 /// The commands that match, best first: [`crate::matching`]'s order, which is
@@ -177,25 +178,53 @@ fn named(name: &str, spec: &CommandSpec) -> Suggestion {
     }
 }
 
-/// Values for a command whose spec lists them: a catalogue's ids, or the
-/// command's own words. The spec describes the first word of the argument and
-/// nothing after it, so a partial that has moved past that word offers nothing.
+/// Values for a command whose spec lists them: the first word from the spec
+/// itself, the word after a verb from that verb's `then` (ADR-0008 §6a).
 fn arguments(
     name: &str,
     partial: &str,
     specs: &[CommandSpec],
     catalogues: &Catalogues,
 ) -> Vec<Suggestion> {
-    if partial.contains(char::is_whitespace) {
-        return Vec::new();
-    }
     let Some(spec) = specs
         .iter()
         .find(|s| s.name == name || s.aliases.iter().any(|a| a == name))
     else {
         return Vec::new();
     };
-    let values: &[String] = match &spec.args {
+    match partial.split_once(char::is_whitespace) {
+        None => offered(&format!("/{name}"), partial, &spec.args, catalogues),
+        Some((word, rest)) => after(name, word, rest.trim_start(), &spec.args, catalogues),
+    }
+}
+
+/// The word after a verb, from what the verb said follows it. A spec that
+/// says nothing about it, a word the spec does not list, and a third word all
+/// offer nothing: the line has moved past what anyone here can complete.
+fn after(
+    name: &str,
+    word: &str,
+    partial: &str,
+    args: &ArgSpec,
+    catalogues: &Catalogues,
+) -> Vec<Suggestion> {
+    let ArgSpec::Words {
+        values,
+        then: Some(then),
+    } = args
+    else {
+        return Vec::new();
+    };
+    if partial.contains(char::is_whitespace) || !values.iter().any(|value| value == word) {
+        return Vec::new();
+    }
+    offered(&format!("/{name} {word}"), partial, then, catalogues)
+}
+
+/// The rows one `ArgSpec` offers for the partial being typed, each completing
+/// the line `head` has so far.
+fn offered(head: &str, partial: &str, args: &ArgSpec, catalogues: &Catalogues) -> Vec<Suggestion> {
+    let values: &[String] = match args {
         ArgSpec::Catalog { source } => match catalogues.get(source) {
             Some(ids) => ids,
             None => return Vec::new(),
@@ -206,7 +235,7 @@ fn arguments(
     matching::rank(partial, values, String::as_str)
         .into_iter()
         .map(|id| Suggestion {
-            value: format!("/{name} {id}"),
+            value: format!("{head} {id}"),
             label: id.clone(),
             hint: String::new(),
             group: Group::Commands,
@@ -248,6 +277,13 @@ mod tests {
 
     fn labels(line: &str, specs: &[CommandSpec]) -> Vec<String> {
         suggestions(line, specs, &Catalogues::new())
+            .iter()
+            .map(|row| row.label.clone())
+            .collect()
+    }
+
+    fn labels_with(line: &str, specs: &[CommandSpec]) -> Vec<String> {
+        suggestions(line, specs, &installed())
             .iter()
             .map(|row| row.label.clone())
             .collect()
@@ -348,8 +384,8 @@ mod tests {
         );
     }
 
-    /// The spec describes the first word: `/mcp login <server>` lists verbs,
-    /// and a server name is the plugin's to know.
+    /// A spec that says nothing about the word after its verb completes the
+    /// verb and stops there, exactly as it did before `then` existed.
     #[test]
     fn a_second_word_is_not_completed_from_the_first_word_s_list() {
         let specs = vec![spec(
@@ -362,6 +398,108 @@ mod tests {
         assert_eq!(labels("/mcp lo", &specs), vec!["login", "logout"]);
         assert!(labels("/mcp login ", &specs).is_empty());
         assert!(labels("/mcp login lo", &specs).is_empty());
+    }
+
+    /// The verb a command lists, and after it the names its `then` points at
+    /// (ADR-0008 §6a): `/plugins enable ` is the whole listing, and a partial
+    /// narrows it the way every other list in this surface is narrowed.
+    fn plugins() -> Vec<CommandSpec> {
+        vec![spec(
+            "plugins",
+            ArgSpec::Words {
+                values: vec!["enable".into(), "disable".into()],
+                then: Some(Box::new(ArgSpec::Catalog {
+                    source: "plugins".into(),
+                })),
+            },
+        )]
+    }
+
+    fn installed() -> Catalogues {
+        Catalogues::from([(
+            "plugins".to_string(),
+            ["bingo.tools.web", "bingo.tasks", "wordcount"]
+                .map(str::to_string)
+                .to_vec(),
+        )])
+    }
+
+    #[test]
+    fn the_word_after_a_verb_comes_from_the_catalogue_the_verb_named() {
+        let rows = suggestions("/plugins enable bin", &plugins(), &installed());
+        assert_eq!(
+            rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>(),
+            ["bingo.tools.web", "bingo.tasks"],
+            "the two the partial names, in the catalogue's own order"
+        );
+        assert_eq!(
+            rows[0].value, "/plugins enable bingo.tools.web",
+            "the row completes the whole line, verb and all"
+        );
+    }
+
+    /// The exit criterion the user asked for: a verb and a space offers every
+    /// plugin, built-in and external alike.
+    #[test]
+    fn a_verb_and_a_space_offers_every_name_the_catalogue_holds() {
+        assert_eq!(
+            suggestions("/plugins disable ", &plugins(), &installed())
+                .iter()
+                .map(|row| row.value.clone())
+                .collect::<Vec<_>>(),
+            [
+                "/plugins disable bingo.tools.web",
+                "/plugins disable bingo.tasks",
+                "/plugins disable wordcount",
+            ],
+            "the catalogue's own order, nothing typed to narrow it"
+        );
+    }
+
+    #[test]
+    fn a_half_typed_verb_is_still_a_verb_and_a_third_word_is_nobody_s() {
+        assert_eq!(labels_with("/plugins enabl", &plugins()), ["enable"]);
+        assert!(
+            suggestions("/plugins enable wordcount x", &plugins(), &installed()).is_empty(),
+            "a third word is past what any spec describes"
+        );
+        assert!(
+            suggestions("/plugins toggle bin", &plugins(), &installed()).is_empty(),
+            "a word the command does not list says nothing about what follows"
+        );
+    }
+
+    /// A `then` of words needs no catalogue at all: `/mcp` carries the
+    /// servers it was configured with inside its own spec.
+    #[test]
+    fn a_verb_may_name_its_own_words_for_the_word_after_it() {
+        let specs = vec![spec(
+            "mcp",
+            ArgSpec::Words {
+                values: vec!["reconnect".into()],
+                then: Some(Box::new(ArgSpec::Words {
+                    values: vec!["files".into(), "remote".into()],
+                    then: None,
+                })),
+            },
+        )];
+        let rows = suggestions("/mcp reconnect fi", &specs, &Catalogues::new());
+        assert_eq!(
+            rows,
+            vec![Suggestion {
+                value: "/mcp reconnect files".into(),
+                label: "files".into(),
+                hint: String::new(),
+                group: Group::Commands,
+            }]
+        );
+    }
+
+    /// A `then` naming a catalogue nobody fetched offers nothing, as an
+    /// unfetched first word always has.
+    #[test]
+    fn a_catalogue_that_has_not_arrived_yet_offers_nothing() {
+        assert!(suggestions("/plugins enable ", &plugins(), &Catalogues::new()).is_empty());
     }
 
     /// An alias reaches the same list its command does.
