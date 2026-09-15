@@ -166,7 +166,12 @@ mod tests {
     use serde_json::json;
 
     fn registrar(config: serde_json::Value) -> Registrar {
-        Registrar::new("bingo.plugin-rpc", config, bingo_sdk::Env::rooted("/tmp"))
+        Registrar::new(
+            "bingo.plugin-rpc",
+            config,
+            bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
+        )
     }
 
     #[test]

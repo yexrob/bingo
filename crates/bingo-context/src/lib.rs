@@ -95,7 +95,12 @@ mod tests {
     use serde_json::json;
 
     fn contributions(config: serde_json::Value) -> Vec<Contribution> {
-        let mut registrar = Registrar::new("bingo.context", config, Env::rooted("/tmp/home"));
+        let mut registrar = Registrar::new(
+            "bingo.context",
+            config,
+            Env::rooted("/tmp/home"),
+            Default::default(),
+        );
         ContextPlugin.register(&mut registrar).expect("register");
         registrar.into_contributions()
     }

@@ -165,8 +165,12 @@ mod plugin_tests {
 
     #[test]
     fn registering_reads_nothing_and_contributes_what_the_manifest_promises() {
-        let mut registrar =
-            Registrar::new("bingo.tasks", serde_json::Value::Null, Env::rooted("/tmp"));
+        let mut registrar = Registrar::new(
+            "bingo.tasks",
+            serde_json::Value::Null,
+            Env::rooted("/tmp"),
+            Default::default(),
+        );
         TasksPlugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
         assert_eq!(contributions.len(), MANIFEST.provides.len());

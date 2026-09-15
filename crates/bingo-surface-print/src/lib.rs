@@ -1878,6 +1878,7 @@ pub(crate) mod tests {
             "bingo.surface.print",
             serde_json::Value::Null,
             bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
         );
         PrintPlugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();

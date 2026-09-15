@@ -107,7 +107,12 @@ mod tests {
     use serde_json::json;
 
     fn registrar(config: serde_json::Value) -> Registrar {
-        Registrar::new(MANIFEST.id, config, Env::rooted("/tmp/bingo-hooks-test"))
+        Registrar::new(
+            MANIFEST.id,
+            config,
+            Env::rooted("/tmp/bingo-hooks-test"),
+            Default::default(),
+        )
     }
 
     #[test]

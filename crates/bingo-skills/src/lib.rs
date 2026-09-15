@@ -168,6 +168,7 @@ mod plugin_tests {
             "bingo.skills",
             serde_json::Value::Null,
             Env::rooted("/nowhere/at/all"),
+            Default::default(),
         );
         SkillsPlugin::default()
             .register(&mut registrar)

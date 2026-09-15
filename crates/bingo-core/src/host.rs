@@ -25,7 +25,7 @@ use serde_json::Value;
 use tokio::sync::broadcast;
 
 pub(crate) use refresh::Refreshed;
-pub use registry::{PluginStatus, Registry};
+pub use registry::Registry;
 use tool_host::SessionToolHost;
 use unavailable::Unavailable;
 

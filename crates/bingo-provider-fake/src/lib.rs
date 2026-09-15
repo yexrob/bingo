@@ -1398,6 +1398,7 @@ mod tests {
             "bingo.provider.fake",
             Value::Null,
             bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
         );
         plugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();

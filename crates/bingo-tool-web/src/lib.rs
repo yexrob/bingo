@@ -226,6 +226,7 @@ pub(crate) mod tests {
             MANIFEST.id,
             serde_json::json!({}),
             bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
         );
         WebPlugin.register(&mut registrar).expect("register");
         let names: Vec<String> = registrar

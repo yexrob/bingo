@@ -604,6 +604,7 @@ pub(crate) mod tests {
             "bingo.provider.openai",
             settings,
             bingo_sdk::Env::rooted(directory.path()),
+            Default::default(),
         );
         OpenAiPlugin.register(&mut registrar).expect("register");
         registrar.into_contributions()
@@ -652,6 +653,7 @@ pub(crate) mod tests {
                 "bingo.provider.openai",
                 settings,
                 bingo_sdk::Env::rooted(directory.path()),
+                Default::default(),
             );
             OpenAiPlugin
                 .register(&mut registrar)

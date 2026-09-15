@@ -692,6 +692,7 @@ pub(crate) mod tests {
             "bingo.tools.bash",
             Value::Null,
             bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
         );
         let plugin = BashPlugin::default();
         plugin.register(&mut registrar).expect("register");
@@ -1245,6 +1246,7 @@ pub(crate) mod tests {
             "bingo.tools.bash",
             Value::Null,
             bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
         );
         plugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();

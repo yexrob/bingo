@@ -315,6 +315,7 @@ mod tests {
             "bingo.permissions",
             json!({}),
             bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
         );
         PermissionsPlugin
             .register(&mut registrar)

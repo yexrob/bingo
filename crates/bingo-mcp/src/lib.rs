@@ -183,7 +183,12 @@ pub(crate) mod tests {
     }
 
     fn registrar(config: serde_json::Value) -> Registrar {
-        Registrar::new("bingo.mcp", config, bingo_sdk::Env::rooted("/tmp"))
+        Registrar::new(
+            "bingo.mcp",
+            config,
+            bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
+        )
     }
 
     #[test]

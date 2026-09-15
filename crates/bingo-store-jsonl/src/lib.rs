@@ -477,7 +477,12 @@ pub(crate) mod tests {
     fn the_plugin_registers_one_store_under_the_data_directory() {
         let plugin = JsonlStorePlugin::default();
         let env = bingo_sdk::Env::rooted("/home/someone");
-        let mut registrar = Registrar::new("bingo.store.jsonl", serde_json::Value::Null, env);
+        let mut registrar = Registrar::new(
+            "bingo.store.jsonl",
+            serde_json::Value::Null,
+            env,
+            Default::default(),
+        );
         plugin.register(&mut registrar).expect("register");
 
         let contributions = registrar.into_contributions();

@@ -174,6 +174,7 @@ pub(crate) mod tests {
             "bingo.tools.fs",
             serde_json::Value::Null,
             bingo_sdk::Env::rooted("/tmp"),
+            Default::default(),
         );
         FsPlugin.register(&mut registrar).expect("register");
         let names: Vec<String> = registrar

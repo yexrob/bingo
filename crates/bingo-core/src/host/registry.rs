@@ -12,34 +12,6 @@ use serde_json::{Map, Value};
 
 use super::HostError;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PluginStatus {
-    pub id: String,
-    pub version: String,
-    pub enabled: bool,
-    pub reason: Option<String>,
-}
-
-impl PluginStatus {
-    pub(super) fn loaded(manifest: &PluginManifest) -> Self {
-        Self {
-            id: manifest.id.to_string(),
-            version: manifest.version.to_string(),
-            enabled: true,
-            reason: None,
-        }
-    }
-
-    pub(super) fn disabled(manifest: &PluginManifest, reason: String) -> Self {
-        Self {
-            id: manifest.id.to_string(),
-            version: manifest.version.to_string(),
-            enabled: false,
-            reason: Some(reason),
-        }
-    }
-}
-
 /// Everything that arrives after I/O (ADR-0009 §1), one list per kind, each
 /// read where that kind is resolved.
 ///
@@ -61,6 +33,8 @@ pub struct Sources {
     pub compactors: Vec<Arc<dyn CompactorSource>>,
     /// Read wherever the kernel reads its hooks (ADR-0032 §1).
     pub hooks: Vec<Arc<dyn HookSource>>,
+    /// Read where a listing of plugins is drawn (ADR-0057 §5).
+    pub plugins: Vec<Arc<dyn PluginSource>>,
 }
 
 #[derive(Default)]
@@ -123,7 +97,7 @@ impl Registry {
             .get(manifest.id)
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
-        let mut registrar = Registrar::new(manifest.id, slice, env.clone());
+        let mut registrar = Registrar::new(manifest.id, slice, env.clone(), Default::default());
         plugin
             .register(&mut registrar)
             .map_err(|source| HostError::Register {
@@ -183,6 +157,10 @@ impl Registry {
             Contribution::Compactor(compactor) => self.set_compactor(compactor),
             Contribution::Compactors(source) => {
                 self.sources.compactors.push(source);
+                Ok(())
+            }
+            Contribution::Plugins(source) => {
+                self.sources.plugins.push(source);
                 Ok(())
             }
             Contribution::Service { key, value, wire } => {
@@ -425,6 +403,16 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl PluginSource for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        async fn plugins(&self) -> Vec<PluginStatus> {
+            Vec::new()
+        }
+    }
+
     /// Every kind that arrives after I/O lands in the list named for it, and a
     /// second one is welcome: a source holds no slot.
     /// One row of the table: a source to register, and where it must land.
@@ -457,6 +445,10 @@ mod tests {
             (
                 || Contribution::Hooks(Arc::new(Nothing)),
                 |registry| registry.sources.hooks.len(),
+            ),
+            (
+                || Contribution::Plugins(Arc::new(Nothing)),
+                |registry| registry.sources.plugins.len(),
             ),
         ];
         for (contribute, count) in table {

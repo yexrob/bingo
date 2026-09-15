@@ -114,7 +114,12 @@ mod plugin_tests {
     use bingo_sdk::{Env, SessionId, SessionSummary, TurnId};
 
     fn registered(home: &std::path::Path) -> Vec<Contribution> {
-        let mut registrar = Registrar::new(MANIFEST.id, serde_json::Value::Null, Env::rooted(home));
+        let mut registrar = Registrar::new(
+            MANIFEST.id,
+            serde_json::Value::Null,
+            Env::rooted(home),
+            Default::default(),
+        );
         CheckpointsPlugin::default()
             .register(&mut registrar)
             .expect("registering does no i/o");
@@ -165,12 +170,14 @@ mod plugin_tests {
             MANIFEST.id,
             serde_json::Value::Null,
             Env::rooted(home.path()),
+            Default::default(),
         );
         plugin.register(&mut first).expect("the first");
         let mut again = Registrar::new(
             MANIFEST.id,
             serde_json::Value::Null,
             Env::rooted(home.path()),
+            Default::default(),
         );
         assert!(plugin.register(&mut again).is_err());
     }
@@ -265,7 +272,12 @@ mod plugin_tests {
     /// A plugin that registered, with one file kept for each of two sessions.
     fn planted(home: &std::path::Path) -> CheckpointsPlugin {
         let plugin = CheckpointsPlugin::default();
-        let mut registrar = Registrar::new(MANIFEST.id, serde_json::Value::Null, Env::rooted(home));
+        let mut registrar = Registrar::new(
+            MANIFEST.id,
+            serde_json::Value::Null,
+            Env::rooted(home),
+            Default::default(),
+        );
         plugin.register(&mut registrar).expect("register");
         let file = home.join("a.txt");
         std::fs::write(&file, b"x").expect("a file");

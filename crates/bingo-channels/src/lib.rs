@@ -127,7 +127,8 @@ mod plugin_tests {
     use bingo_sdk::{Env, SurfaceKind};
 
     fn contributions(config: serde_json::Value) -> Vec<bingo_sdk::Contribution> {
-        let mut registrar = Registrar::new(MANIFEST.id, config, Env::rooted("/tmp"));
+        let mut registrar =
+            Registrar::new(MANIFEST.id, config, Env::rooted("/tmp"), Default::default());
         ChannelsPlugin.register(&mut registrar).expect("register");
         registrar.into_contributions()
     }

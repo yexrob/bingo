@@ -330,6 +330,7 @@ pub(crate) mod tests {
             "bingo.provider.anthropic",
             settings,
             bingo_sdk::Env::rooted(directory.path()),
+            Default::default(),
         );
         AnthropicPlugin.register(&mut registrar).expect("register");
         registrar
@@ -384,6 +385,7 @@ pub(crate) mod tests {
             "bingo.provider.anthropic",
             json!({ "anthropic": { "instances": { "openai": {} } } }),
             bingo_sdk::Env::rooted(directory.path()),
+            Default::default(),
         );
         let refused = AnthropicPlugin
             .register(&mut registrar)

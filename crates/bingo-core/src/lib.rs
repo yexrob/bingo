@@ -19,7 +19,7 @@ pub mod turn;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-pub use host::{Host, HostConfig, HostError, PluginStatus, Registry};
+pub use host::{Host, HostConfig, HostError, Registry};
 pub use journal::MemoryStore;
 pub use session::{Mailbox, spawn};
 pub use turn::{TurnBudget, TurnConfig};

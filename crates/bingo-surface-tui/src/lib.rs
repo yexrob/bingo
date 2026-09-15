@@ -260,6 +260,7 @@ mod plugin_tests {
             MANIFEST.id,
             serde_json::json!({}),
             Env::rooted(std::env::temp_dir().join("bingo-tui-test")),
+            Default::default(),
         );
         TuiPlugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();

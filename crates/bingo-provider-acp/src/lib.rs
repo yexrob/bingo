@@ -186,6 +186,7 @@ mod tests {
             MANIFEST.id,
             config,
             Env::rooted(std::env::temp_dir().join("bingo-acp-test")),
+            Default::default(),
         )
     }
 

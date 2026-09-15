@@ -200,7 +200,12 @@ mod plugin_tests {
     fn registering_reads_nothing_and_contributes_what_the_manifest_promises() {
         let home = tempfile::tempdir().expect("a temp home");
         // The slice a plugin that claims a key and finds none is handed.
-        let mut registrar = Registrar::new(MANIFEST.id, json!({}), Env::rooted(home.path()));
+        let mut registrar = Registrar::new(
+            MANIFEST.id,
+            json!({}),
+            Env::rooted(home.path()),
+            Default::default(),
+        );
         SchedulePlugin::default()
             .register(&mut registrar)
             .expect("registering does no i/o");
@@ -241,6 +246,7 @@ mod plugin_tests {
             MANIFEST.id,
             json!({"schedule": {"wakes": false}}),
             Env::rooted(home.path()),
+            Default::default(),
         );
         SchedulePlugin::default()
             .register(&mut registrar)
@@ -261,7 +267,7 @@ mod plugin_tests {
         let home = tempfile::tempdir().expect("a temp home");
         let env = Env::rooted(home.path());
         let plugin = SchedulePlugin::default();
-        let mut registrar = Registrar::new(MANIFEST.id, json!({}), env.clone());
+        let mut registrar = Registrar::new(MANIFEST.id, json!({}), env.clone(), Default::default());
         plugin.register(&mut registrar).expect("register");
         plugin
             .start(bingo_sdk::testing::NoHost::handle())

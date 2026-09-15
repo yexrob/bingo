@@ -156,7 +156,12 @@ mod plugin_tests {
 
     /// The slice a plugin is handed when a person has asked for playbooks.
     fn registrar(slice: serde_json::Value) -> Registrar {
-        Registrar::new("bingo.experience", slice, Env::rooted("/nowhere"))
+        Registrar::new(
+            "bingo.experience",
+            slice,
+            Env::rooted("/nowhere"),
+            Default::default(),
+        )
     }
 
     #[test]

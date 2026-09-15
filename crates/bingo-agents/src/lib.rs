@@ -158,7 +158,12 @@ mod plugin_tests {
     use bingo_sdk::Env;
 
     fn registrar() -> Registrar {
-        Registrar::new("bingo.agents", serde_json::Value::Null, Env::rooted("/tmp"))
+        Registrar::new(
+            "bingo.agents",
+            serde_json::Value::Null,
+            Env::rooted("/tmp"),
+            Default::default(),
+        )
     }
 
     #[test]

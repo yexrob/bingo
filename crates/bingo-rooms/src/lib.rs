@@ -175,8 +175,12 @@ mod plugin_tests {
 
     #[test]
     fn registering_reads_nothing_and_contributes_what_the_manifest_promises() {
-        let mut registrar =
-            Registrar::new(PLUGIN, serde_json::Value::Null, Env::rooted("/nowhere"));
+        let mut registrar = Registrar::new(
+            PLUGIN,
+            serde_json::Value::Null,
+            Env::rooted("/nowhere"),
+            Default::default(),
+        );
         RoomsPlugin
             .register(&mut registrar)
             .expect("registration does no I/O");

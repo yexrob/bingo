@@ -2,6 +2,7 @@
 //! `register` that only adds contributions, and `start`/`stop` for I/O.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
@@ -52,6 +53,51 @@ pub enum Merge {
     Accumulate,
     /// Objects merge per key (named providers, MCP servers).
     ByName,
+}
+
+/// Where a plugin in a listing came from: this build itself, as opposed to a
+/// source that found one on the machine (ADR-0057 §5).
+pub const BUILT_IN: &str = "built in";
+
+/// Why a plugin the settings switched off is not standing (ADR-0057 §2). The
+/// kernel says it of a plugin the build ships and a source says it of one it
+/// found for itself, so the sentence is written once.
+pub const SWITCHED_OFF: &str = "switched off in the settings";
+
+/// What one plugin is, for a listing: what it is called, whether it will run,
+/// and why not. It covers a plugin the kernel registered and one only a
+/// [`PluginSource`] has ever seen, so the two draw as one table (ADR-0057 §5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginStatus {
+    pub id: String,
+    pub version: String,
+    pub enabled: bool,
+    /// Why it is not standing; `None` for one that is.
+    pub reason: Option<String>,
+    /// [`BUILT_IN`], or the id of the source that listed it.
+    pub from: String,
+}
+
+impl PluginStatus {
+    /// One this build ships, standing.
+    pub fn loaded(manifest: &PluginManifest) -> Self {
+        Self {
+            id: manifest.id.to_string(),
+            version: manifest.version.to_string(),
+            enabled: true,
+            reason: None,
+            from: BUILT_IN.to_string(),
+        }
+    }
+
+    /// One this build ships that will not run, and why.
+    pub fn disabled(manifest: &PluginManifest, reason: impl Into<String>) -> Self {
+        Self {
+            reason: Some(reason.into()),
+            enabled: false,
+            ..Self::loaded(manifest)
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +180,16 @@ pub trait HookSource: Send + Sync {
     async fn hooks(&self) -> Vec<Arc<dyn Hook>>;
 }
 
+/// Plugins the kernel never registered — an external process a bridge found
+/// on this machine. Read where a listing of plugins is drawn; answering with
+/// nothing before the discovery has happened is never wrong (ADR-0009 §1,
+/// ADR-0057 §5).
+#[async_trait]
+pub trait PluginSource: Send + Sync {
+    fn id(&self) -> &str;
+    async fn plugins(&self) -> Vec<PluginStatus>;
+}
+
 /// What a plugin hands the host. One enum so the in-process path and a future
 /// out-of-process bridge share one representation.
 pub enum Contribution {
@@ -158,6 +214,9 @@ pub enum Contribution {
     Compactor(Arc<dyn Compactor>),
     /// Compaction strategies resolved late, ditto.
     Compactors(Arc<dyn CompactorSource>),
+    /// Plugins of its own this one knows about, for a listing to draw beside
+    /// the ones the kernel registered (ADR-0057 §5).
+    Plugins(Arc<dyn PluginSource>),
     /// A typed value other plugins may look up by key (`service:<key>` in the
     /// manifest), and — when its owner opened one — the wire face that lets a
     /// process call it. Two faces of one live object; without the second the
@@ -187,6 +246,7 @@ impl fmt::Debug for Contribution {
             Contribution::Store(_) => write!(f, "Store"),
             Contribution::Compactor(_) => write!(f, "Compactor"),
             Contribution::Compactors(s) => write!(f, "Compactors({})", s.id()),
+            Contribution::Plugins(s) => write!(f, "Plugins({})", s.id()),
             Contribution::Service { key, .. } => write!(f, "Service({key})"),
         }
     }
@@ -198,15 +258,22 @@ pub struct Registrar {
     plugin_id: String,
     config: Value,
     env: Env,
+    switched_off: BTreeSet<String>,
     contributions: Vec<Contribution>,
 }
 
 impl Registrar {
-    pub fn new(plugin_id: impl Into<String>, config: Value, env: Env) -> Self {
+    pub fn new(
+        plugin_id: impl Into<String>,
+        config: Value,
+        env: Env,
+        switched_off: BTreeSet<String>,
+    ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             config,
             env,
+            switched_off,
             contributions: Vec::new(),
         }
     }
@@ -218,6 +285,14 @@ impl Registrar {
 
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
+    }
+
+    /// Every plugin name the settings switched off, the whole set rather than
+    /// this plugin's own row: a plugin that hosts plugins of its own reads it
+    /// to leave them alone, and one that hosts none ignores it and loses
+    /// nothing (ADR-0057 §4).
+    pub fn switched_off(&self) -> &BTreeSet<String> {
+        &self.switched_off
     }
 
     /// The plugin's claimed configuration slice, already merged and validated.
@@ -243,5 +318,56 @@ impl Registrar {
 
     pub fn into_contributions(self) -> Vec<Contribution> {
         self.contributions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static MANIFEST: PluginManifest = PluginManifest {
+        id: "test.plugin",
+        version: "0.2.0",
+        sdk: "^0.1",
+        provides: &[],
+        requires: &[],
+        config: None,
+    };
+
+    fn registrar(switched_off: BTreeSet<String>) -> Registrar {
+        Registrar::new(
+            MANIFEST.id,
+            Value::Null,
+            Env::rooted("/nowhere"),
+            switched_off,
+        )
+    }
+
+    /// The kernel hands every plugin the whole set, so a plugin that runs
+    /// plugins of its own can read it (ADR-0057 §4).
+    #[test]
+    fn a_registrar_answers_with_the_switches_it_was_built_with() {
+        assert!(registrar(BTreeSet::new()).switched_off().is_empty());
+        let off = BTreeSet::from(["wordcount".to_string(), "bingo.tools.web".to_string()]);
+        let registrar = registrar(off.clone());
+        assert_eq!(registrar.switched_off(), &off);
+    }
+
+    /// A status the kernel makes says the build is where the plugin came from;
+    /// a disabled one keeps its id and version and adds the reason.
+    #[test]
+    fn a_built_in_status_names_the_build_and_carries_its_reason() {
+        let loaded = PluginStatus::loaded(&MANIFEST);
+        assert_eq!(
+            (loaded.id.as_str(), loaded.version.as_str(), loaded.enabled),
+            ("test.plugin", "0.2.0", true)
+        );
+        assert_eq!(loaded.from, BUILT_IN);
+        assert_eq!(loaded.reason, None);
+
+        let disabled = PluginStatus::disabled(&MANIFEST, SWITCHED_OFF);
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.reason.as_deref(), Some(SWITCHED_OFF));
+        assert_eq!(disabled.from, BUILT_IN);
     }
 }
