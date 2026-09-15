@@ -94,3 +94,26 @@ fn a_typo_under_the_key_stops_the_run_and_names_the_field() {
     assert_ne!(out.status.code(), Some(0), "stdout: {}", stdout(&out));
     assert!(stderr(&out).contains("txet"), "{}", stderr(&out));
 }
+
+/// The plugin's off switch is the kernel's (ADR-0059 §1, ADR-0057 §1): with
+/// `enabledPlugins["bingo.persona"] = false` the block is not in the request,
+/// and the only response the script offers is the one that a request still
+/// carrying it cannot take.
+#[test]
+fn switched_off_the_stance_is_not_in_the_prompt() {
+    let project = project(r#"{"enabledPlugins": {"bingo.persona": false}}"#);
+    let script = script(
+        r#"{"responses":[
+            {"when":{"contains":"Never deviate silently"},
+             "steps":[{"error":{"kind":"request","message":"the stance is still here"}}]},
+            {"steps":[{"text":"Quiet."}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--provider", "fake", "--cwd"])
+        .arg(project.path())
+        .arg("hello"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Quiet.\n");
+}

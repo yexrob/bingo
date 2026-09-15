@@ -155,3 +155,4 @@ directory and a warning the script never fails on.
 Left for the merge: the plugin-switched-off black-box run, which needs M97's
 `enabledPlugins`; and `persona` as a commit scope in `CLAUDE.md`'s list,
 left out so this branch does not conflict with M97/M98 on that line.
+- Merged 2026-09-15 after M97: `switched_off_the_stance_is_not_in_the_prompt` added to `tests/cli/persona.rs` — with `enabledPlugins["bingo.persona"] = false` the fake provider's trap on "Never deviate silently" is never taken; `cargo test -p bingo --test cli -- persona:: plugins::` 8 passed.

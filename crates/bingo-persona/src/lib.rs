@@ -95,7 +95,12 @@ mod tests {
     use serde_json::json;
 
     fn registrar(slice: serde_json::Value) -> Registrar {
-        Registrar::new("bingo.persona", slice, Env::rooted("/nowhere"))
+        Registrar::new(
+            "bingo.persona",
+            slice,
+            Env::rooted("/nowhere"),
+            Default::default(),
+        )
     }
 
     /// The words the one contributor would put in a request, if any.
