@@ -9,18 +9,12 @@ description: >-
 
 # bingo
 
-A local coding-agent harness: a minimal kernel with everything else a plugin,
-and one ordered event stream every surface reads as a client. The kernel owns
-the session actor, the journal, the turn state machine, the permission gate and
-the plugin host. Providers, tools, the permission policy, hooks, skills, MCP
-servers, session storage and every surface are plugin crates behind traits in
-`bingo-sdk`.
-
-One consequence is worth knowing: a surface holds no session state. The TUI,
-`--print`, the JSON-RPC server and any other client fold the same frames and
-derive what they draw at render time. What one client sees, another can see.
-
-This page is the map, not the manual: what a plugin owns is on its own page.
+A local coding-agent harness: a minimal kernel, and one ordered event stream
+every surface reads as a client. The kernel owns the session actor, the
+journal, the turn state machine, the permission gate and the plugin host;
+providers, tools, the permission policy, hooks, skills, MCP servers, session
+storage and every surface are plugins behind `bingo-sdk` traits, and no surface
+holds session state. This page is the map; what a plugin owns is on its page.
 
 ## Running it
 
@@ -55,6 +49,10 @@ These are the kernel's and the surface's — every other is a plugin's.
 - `/think minimal|low|medium|high|xhigh|max|off` — reasoning effort.
 - `/compact [instructions]` — summarise the conversation so far and keep going.
 - `/permission [mode]` — read or set this session's permission mode.
+- `/plugins [enable|disable <name>]`, alias `/modules` — a table of every
+  plugin: version, state, why one is off, where it came from. A switch writes
+  `enabledPlugins` in the user layer and is in force at the next start, never
+  mid-session; `bingo plugins list|enable|disable` says the same from a shell.
 - `/status` — cwd, provider and model, mode, context against the window, tokens.
 - `/login <provider> [browser|device|paste]`, `/logout <provider>` — the
   credential of a provider that signs in rather than take a key; `bingo login
@@ -68,20 +66,22 @@ else queues behind it, a skill's `/name` included, because that is a prompt.
 
 ## Settings
 
-JSONC — comments and trailing commas are fine — merged from four layers, lowest
-first: `~/.bingo/settings.json`, `<cwd>/.bingo/settings.json`,
-`<cwd>/.bingo/settings.local.json`, then `--settings <file>` and the flags
-above. An unknown key is reported at startup rather than ignored, and an
-explicit `null` in a higher layer clears what the layers below it set. The
-kernel owns six top-level keys — `provider`, `model`, `thinking`,
-`maxTokens`, `models` (per-model facts, keyed `<provider>/<model>`) and
-`pictures` (`pictures.cacheDays`); every other belongs to the plugin that
-claims it, and is named on that plugin's page.
+TOML, merged from four layers, lowest first: `~/.bingo/settings.toml`,
+`<cwd>/.bingo/settings.toml`, `<cwd>/.bingo/settings.local.toml`, then
+`--settings <file>` and the flags above. A layer that still holds only a
+`settings.json` is read as it always was and converted at the next start: the
+TOML is written beside it, the JSON is kept as `settings.json.bak`, and a
+notice names both. TOML has no `null`, so only a JSON layer can clear what a
+layer below it set. An unknown key is reported at startup rather than ignored.
+The kernel owns seven top-level keys — `provider`, `model`, `thinking`,
+`maxTokens`, `models` (per-model facts, keyed `<provider>/<model>`), `pictures`
+(`pictures.cacheDays`) and `enabledPlugins`; every other belongs to the plugin
+that claims it, and is named on that plugin's page.
 
 ## Where things live
 
-- `~/.bingo/` — `settings.json`, `skills/`, `data/` (sessions, logs, history).
-- `<project>/.bingo/` — `settings.json`, `settings.local.json`, `skills/`:
+- `~/.bingo/` — `settings.toml`, `skills/`, `data/` (sessions, logs, history).
+- `<project>/.bingo/` — `settings.toml`, `settings.local.toml`, `skills/`:
   above the person's for settings, below them for skills.
 - `AGENTS.md`, or `CLAUDE.md` where there is none, in each directory from the
   project root down to the working one: instructions the model is given, the

@@ -75,11 +75,41 @@ mod tests {
             "/model",
             "/compact",
             "/permission",
+            "/plugins",
             "~/.bingo",
         ] {
             assert!(
                 guide.body.contains(subject),
                 "the guide never says {subject}"
+            );
+        }
+    }
+
+    /// The layers are TOML and a JSON one is migrated (ADR-0058 §§1–2), and
+    /// any plugin is switched by one kernel key (ADR-0057 §1). The map is
+    /// where a person is told both; a page that still said `settings.json`
+    /// would send them to a file this build renames.
+    #[test]
+    fn the_guide_names_the_settings_file_the_migration_and_the_switch() {
+        let guide = &skills(&[])[0];
+        for subject in [
+            "settings.toml",
+            "settings.local.toml",
+            "settings.json.bak",
+            "enabledPlugins",
+            "bingo plugins list|enable|disable",
+        ] {
+            assert!(
+                guide.body.contains(subject),
+                "the guide never says {subject}"
+            );
+        }
+        // `settings.json` is named once, as what a migration reads — never as
+        // a layer a person is told to write.
+        for stale in ["~/.bingo/settings.json", ".bingo/settings.local.json"] {
+            assert!(
+                !guide.body.contains(stale),
+                "the map still calls {stale} a layer"
             );
         }
     }
