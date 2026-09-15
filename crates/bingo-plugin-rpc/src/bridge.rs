@@ -84,6 +84,9 @@ struct State {
     /// it published outlives the process, so a respawn publishes nothing and
     /// a refused key is reported once rather than on every attempt.
     published: BTreeSet<String>,
+    /// Why the last attempt failed, for a listing to show long after the
+    /// notice that said it has been drained (ADR-0057 §5).
+    failed: Option<String>,
 }
 
 /// The setting every bridge shares: where the host lives, where a process's
@@ -311,6 +314,19 @@ impl Bridge {
             .collect()
     }
 
+    /// Whether this plugin's process is up, and why it is not when it is not
+    /// — what a listing draws (ADR-0057 §5). It asks the state and nothing
+    /// else: reading a table is not a reason to spawn a process, so unlike
+    /// [`Bridge::ready`] this notices no death and starts no attempt.
+    pub async fn standing(&self) -> (bool, Option<String>) {
+        let state = self.state.lock().await;
+        match &state.live {
+            Some(live) if live.connection.is_alive() => (true, None),
+            Some(_) => (false, Some("the process ended".to_string())),
+            None => (false, state.failed.clone()),
+        }
+    }
+
     /// End the process, and leave nothing that would respawn it.
     pub async fn stop(&self) {
         let mut state = self.state.lock().await;
@@ -384,10 +400,12 @@ impl Bridge {
                 state.live = Some(Arc::new(live));
                 state.failures = 0;
                 state.next_attempt = None;
+                state.failed = None;
             }
             Err(why) => {
                 state.failures += 1;
                 state.next_attempt = Some(Instant::now() + backoff(state.failures));
+                state.failed = Some(why.clone());
                 self.notices.push(Notice::warn(
                     "PLUGIN_UNAVAILABLE",
                     format!("the {} plugin is not running: {why}", self.name),

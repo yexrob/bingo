@@ -1,7 +1,7 @@
 //! A process is allowed to refuse, and allowed to die (ADR-0015 §5): what the
 //! host does with either.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bingo_plugin_rpc::{Manager, log_path};
 use bingo_sdk::{Env, Level, ToolError};
@@ -113,7 +113,7 @@ async fn a_plugin_whose_command_is_gone_is_reported_and_contributes_nothing() {
     let project = tempfile::tempdir().expect("a project");
     // Over a host with nowhere for a notice to land: the drain keeps the line
     // rather than losing it, so it is still on the channel to be read here.
-    let manager = Manager::new(Env::rooted(home.path()), BTreeMap::new());
+    let manager = Manager::new(Env::rooted(home.path()), BTreeMap::new(), BTreeSet::new());
     manager
         .start(project.path(), bingo_sdk::testing::ServiceHost::handle())
         .await;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{
     Command, CommandSource, Compactor, CompactorSource, ContextContributor, ContextSource, Hook,
-    HookSource, Provider, ProviderSource, Tool, ToolSource,
+    HookSource, PluginSource, PluginStatus, Provider, ProviderSource, Tool, ToolSource,
 };
 
 use crate::manager::Manager;
@@ -120,6 +120,30 @@ impl HookSource for PluginHooks {
 
     async fn hooks(&self) -> Vec<Arc<dyn Hook>> {
         self.manager.hooks().await
+    }
+}
+
+/// The plugins themselves: what this machine has installed under `plugins/`,
+/// which the kernel has never seen and only this plugin can name
+/// (ADR-0057 §5).
+pub struct PluginPlugins {
+    manager: Arc<Manager>,
+}
+
+impl PluginPlugins {
+    pub fn new(manager: Arc<Manager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl PluginSource for PluginPlugins {
+    fn id(&self) -> &str {
+        ID
+    }
+
+    async fn plugins(&self) -> Vec<PluginStatus> {
+        self.manager.plugins().await
     }
 }
 

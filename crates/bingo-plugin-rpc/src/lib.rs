@@ -47,7 +47,8 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use bingo_sdk::{
     CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, HookSource,
-    HostHandle, Merge, Plugin, PluginError, PluginManifest, ProviderSource, Registrar, ToolSource,
+    HostHandle, Merge, Plugin, PluginError, PluginManifest, PluginSource, ProviderSource,
+    Registrar, ToolSource,
 };
 
 pub use bridge::{Bridge, Setting};
@@ -63,8 +64,8 @@ pub use manifest::{Entry, Manifest};
 pub use provider::RemoteProvider;
 pub use service::{Hub, RemoteService, ServiceCalls};
 pub use source::{
-    ID, PluginCommands, PluginCompactors, PluginContributors, PluginHooks, PluginProviders,
-    PluginTools,
+    ID, PluginCommands, PluginCompactors, PluginContributors, PluginHooks, PluginPlugins,
+    PluginProviders, PluginTools,
 };
 pub use tool::{PluginTool, tool_name};
 pub use wire::PROTOCOL;
@@ -108,7 +109,13 @@ impl Plugin for PluginRpcPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let settings: Settings = registrar.config()?;
-        let manager = Arc::new(Manager::new(registrar.env().clone(), settings.plugins));
+        // The switches are the kernel's, read here because a plugin process
+        // is this plugin's to spawn or not (ADR-0057 §4).
+        let manager = Arc::new(Manager::new(
+            registrar.env().clone(),
+            settings.plugins,
+            registrar.switched_off().clone(),
+        ));
         registrar.add(Contribution::Tools(
             Arc::new(PluginTools::new(Arc::clone(&manager))) as Arc<dyn ToolSource>,
         ));
@@ -126,6 +133,9 @@ impl Plugin for PluginRpcPlugin {
         ));
         registrar.add(Contribution::Hooks(
             Arc::new(PluginHooks::new(Arc::clone(&manager))) as Arc<dyn HookSource>,
+        ));
+        registrar.add(Contribution::Plugins(
+            Arc::new(PluginPlugins::new(Arc::clone(&manager))) as Arc<dyn PluginSource>,
         ));
         self.manager
             .set(manager)
@@ -202,7 +212,7 @@ mod tests {
             .register(&mut registrar)
             .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 6);
+        assert_eq!(contributions.len(), 7);
         for contribution in &contributions {
             let id = match contribution {
                 Contribution::Tools(source) => source.id(),
@@ -211,6 +221,7 @@ mod tests {
                 Contribution::Compactors(source) => source.id(),
                 Contribution::Providers(source) => source.id(),
                 Contribution::Hooks(source) => source.id(),
+                Contribution::Plugins(source) => source.id(),
                 other => panic!("expected a source, got {other:?}"),
             };
             assert_eq!(id, ID);

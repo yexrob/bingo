@@ -1,7 +1,7 @@
 //! What every test here needs: the example binary, a home with it installed,
 //! a manager started over that home, and the tool host one call is given.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -99,7 +99,11 @@ impl Started {
 pub async fn started_with(plugins: &[(&str, &[&str])]) -> Started {
     let home = installed(plugins);
     let project = tempfile::tempdir().expect("a project");
-    let manager = Arc::new(Manager::new(Env::rooted(home.path()), BTreeMap::new()));
+    let manager = Arc::new(Manager::new(
+        Env::rooted(home.path()),
+        BTreeMap::new(),
+        BTreeSet::new(),
+    ));
     let listener = Arc::new(Listening::new());
     let host = HostHandle(Arc::clone(&listener) as Arc<dyn HostApi>);
     manager.start(project.path(), host.clone()).await;
