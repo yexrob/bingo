@@ -739,6 +739,7 @@ mod mcp;
 mod mentions;
 mod models;
 mod peers;
+mod persona;
 mod prefix;
 mod provider_add;
 mod rooms;
