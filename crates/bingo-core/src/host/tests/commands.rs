@@ -359,9 +359,7 @@ async fn model_is_remembered_in_the_user_settings() {
     let (ack, _) = client.ack("/model m2").await;
     assert_eq!(message(&ack), "model: scripted/m2");
 
-    let written = std::fs::read_to_string(settings::user_path(&env_in(home.path())))
-        .expect("the user settings were written");
-    let document: Value = serde_json::from_str(&written).expect("plain JSON");
+    let document = user_settings(home.path());
     assert_eq!(document["model"], json!("m2"));
     assert_eq!(document["provider"], json!("scripted"));
 
@@ -373,24 +371,21 @@ async fn model_is_remembered_in_the_user_settings() {
 
 /// `/think` outlives the session as `/model` does: the level is written into
 /// the user layer and the next start opens on it (user-reported: "thinking
-/// 没有记住"). `off` is written too — it is a choice, not an absence.
+/// 没有记住"). `off` is written too — it is a choice, not an absence — and in
+/// the lowest layer it is spelled by the key not being there (ADR-0058 §4).
 #[tokio::test]
 async fn thinking_is_remembered_in_the_user_settings() {
     let home = tempfile::tempdir().expect("a home");
     // A model that declares reasoning, so the view can show the level asked.
     let path = settings::user_path(&env_in(home.path()));
     std::fs::create_dir_all(path.parent().expect("a dir")).expect("the dir");
-    std::fs::write(&path, r#"{"models": {"scripted/m": {"reasoning": true}}}"#)
-        .expect("the models");
+    std::fs::write(&path, "[models.\"scripted/m\"]\nreasoning = true\n").expect("the models");
     let host = host_in(home.path(), None).await;
     let mut client = Client::open(&host).await;
 
     let (ack, _) = client.ack("/think xhigh").await;
     assert_eq!(message(&ack), "thinking: xhigh");
-    let written = std::fs::read_to_string(settings::user_path(&env_in(home.path())))
-        .expect("the user settings were written");
-    let document: Value = serde_json::from_str(&written).expect("plain JSON");
-    assert_eq!(document["thinking"], json!("xHigh"));
+    assert_eq!(user_settings(home.path())["thinking"], json!("xHigh"));
 
     let next = host_in(home.path(), None).await;
     let opened = Client::open(&next).await;
@@ -398,10 +393,21 @@ async fn thinking_is_remembered_in_the_user_settings() {
 
     let (ack, _) = client.ack("/think off").await;
     assert_eq!(message(&ack), "thinking: off");
-    let written =
-        std::fs::read_to_string(settings::user_path(&env_in(home.path()))).expect("rewritten");
-    let document: Value = serde_json::from_str(&written).expect("plain JSON");
-    assert_eq!(document["thinking"], Value::Null);
+    let document = user_settings(home.path());
+    assert_eq!(document["thinking"], Value::Null, "the layer says nothing");
+    assert_eq!(
+        document["models"]["scripted/m"]["reasoning"],
+        json!(true),
+        "and everything beside it is where it was"
+    );
+}
+
+/// The user layer as the next start will read it. The layers are TOML
+/// (ADR-0058 §1), and a test that asks what a command wrote asks the file.
+fn user_settings(home: &std::path::Path) -> Value {
+    let path = settings::user_path(&env_in(home));
+    let written = std::fs::read_to_string(&path).expect("the user settings were written");
+    toml_edit::de::from_str(&written).expect("a settings layer")
 }
 
 /// A host reading the settings under `home`. `remembered` is what the user

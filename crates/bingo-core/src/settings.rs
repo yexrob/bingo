@@ -244,10 +244,21 @@ pub fn layer_paths(env: &Env, cwd: &Path) -> [PathBuf; 3] {
 
 /// Set top-level keys in one layer, leaving every neighbour where it is
 /// (ADR-0003 §5: writing settings targets one named layer).
+///
+/// A `null` here is a caller saying *this layer says nothing about this key*
+/// — `/think off` is the one that does — so the key goes rather than being
+/// written as a null. That is the same fact in the layer this writes, which
+/// is always the lowest one: there is nothing under the user layer for a null
+/// to clear. It is also the only fact TOML can hold (ADR-0058 §4); the
+/// tri-state of ADR-0003 §3 stays a thing a person writes by hand in a higher
+/// JSON layer, where it clears what the layers below said.
 pub fn remember(path: &Path, keys: &[(&str, Value)]) -> Result<(), SettingsError> {
     let mut document = read_document(path)?;
     for (key, value) in keys {
-        document.insert((*key).to_string(), value.clone());
+        match value {
+            Value::Null => document.remove(*key),
+            value => document.insert((*key).to_string(), value.clone()),
+        };
     }
     write(path, &document)
 }
@@ -544,6 +555,23 @@ mod tests {
         );
         assert!(dir.path().join("settings.json.bak").exists());
         assert!(!json.exists());
+    }
+
+    /// `/think off` hands `remember` a null, which is it saying this layer has
+    /// nothing to say about the key — and in the lowest layer, which is the
+    /// only one a command writes, that is what an absent key already means.
+    #[test]
+    fn a_null_handed_to_remember_takes_the_key_out_of_the_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        write(&path, "# mine\nmodel = \"m\"\nthinking = \"xHigh\"\n");
+
+        super::remember(&path, &[("thinking", Value::Null)]).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\nmodel = \"m\"\n"
+        );
     }
 
     /// A layer that spells a `null` cannot cross, and a command that would
