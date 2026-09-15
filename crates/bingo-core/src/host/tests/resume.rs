@@ -860,3 +860,132 @@ async fn a_renamed_session_comes_back_under_its_name() {
         "and every list that names it says the same"
     );
 }
+
+static SEATER: PluginManifest = PluginManifest {
+    id: "test.seater",
+    version: "0",
+    sdk: "^0.1",
+    provides: &["hook:seater"],
+    requires: &[],
+    config: None,
+};
+
+/// A start hook that reopens every stored child of the session it starts
+/// in, as the one that seats a project's team does.
+struct Seater;
+
+#[async_trait::async_trait]
+impl Hook for Seater {
+    fn id(&self) -> &str {
+        "seater"
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::Session],
+            tool: None,
+        }
+    }
+    async fn on_session(&self, phase: Phase, cx: &HookContext) {
+        if phase != Phase::Start {
+            return;
+        }
+        let filter = SessionFilter {
+            parent: Some(cx.session.clone()),
+            ..SessionFilter::default()
+        };
+        for child in cx.host.sessions(filter).await.unwrap_or_default() {
+            let selector = SessionSelector::ById { id: child.id };
+            let _ = cx.host.open(selector, who(), OpenOptions::default()).await;
+        }
+    }
+}
+
+/// A team is reopened by a start hook before any client attaches, so the
+/// tree attachment finds the children live, not stored — and a live child is
+/// followed from its head all the same: the close that ended its last
+/// process and the summary that reopened it reach the client in the order
+/// the journal holds them, with everything before the close ahead of them.
+#[tokio::test]
+async fn a_child_a_start_hook_reopens_is_followed_from_its_head() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let host_a = host_on(
+        store.clone(),
+        ScriptedProvider::new(vec![Script::Events(text("one"))]),
+    )
+    .await;
+    let mut root = host_a
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    one_turn(&mut root, "hello").await;
+    let reviewer = born(&host_a, &root.session, "reviewer", Driver::Model).await;
+    host_a.shutdown().await;
+    let stored = store.replay(&reviewer, Seq::ZERO).await.unwrap();
+    let closed_at = stored.last().expect("a journal").seq;
+    assert!(
+        matches!(
+            stored.last().map(|f| &f.event),
+            Some(Event::SessionClosed {
+                reason: CloseReason::Shutdown
+            })
+        ),
+        "the shutdown ended the child's journal"
+    );
+
+    let plugins = vec![
+        TestPlugin::boxed(
+            &PROVIDER,
+            vec![Contribution::Provider(ScriptedProvider::new(vec![]))],
+        ),
+        TestPlugin::boxed(&STORE, vec![Contribution::Store(store.clone())]),
+        TestPlugin::boxed(
+            &SEATER,
+            vec![Contribution::Hook(Arc::new(Seater) as Arc<dyn Hook>)],
+        ),
+    ];
+    let config = HostConfig::new(env()).with_layer("cli", json!({"model": "m"}));
+    let host_b = Host::build(plugins, config).await.unwrap();
+    let mut b = host_b
+        .open(
+            SessionSelector::ById { id: root.session },
+            who(),
+            OpenOptions::with_children(),
+        )
+        .await
+        .unwrap();
+    let mut frames: Vec<Frame> = Vec::new();
+    while let Some(frame) = b.events.next().await {
+        let reopened = frame.session == reviewer && frame.seq > closed_at;
+        frames.push(frame);
+        if reopened {
+            break;
+        }
+    }
+    assert!(
+        host_b.live(&reviewer).is_ok(),
+        "the hook reopened the child"
+    );
+
+    let seen = of(&frames, &reviewer);
+    assert_eq!(seen.first().map(|f| f.seq), Some(Seq(1)), "from its head");
+    assert!(seen.windows(2).all(|w| w[0].seq < w[1].seq));
+    assert!(
+        seen.iter().any(|f| f.seq == closed_at),
+        "the close its journal holds is on the stream"
+    );
+    let head_again = seen.last().expect("the frame that ended the read");
+    assert!(
+        matches!(head_again.event, Event::SessionUpdated { .. }),
+        "the reopened child announces itself again: {:?}",
+        head_again.event
+    );
+    let owned: Vec<Frame> = seen.into_iter().cloned().collect();
+    let folded = session::replayed(&owned).unwrap();
+    assert!(!folded.closed, "the fold reads the child as open again");
+}

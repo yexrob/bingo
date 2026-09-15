@@ -75,10 +75,10 @@ fn spawn_with(
     let mailbox = Mailbox::new(head.id.clone(), tx, finished);
     let config = config(&mailbox);
     let commands = Commands::new(services, mailbox.clone(), config.cwd.clone());
-    let mut state = fold(head.clone(), &journal);
     // A `SessionClosed` in the journal ended the last process's segment, not
-    // the session: it is open again by being here.
-    state.closed = false;
+    // the session: the summary `open` publishes first is what opens it again,
+    // for this fold and for every client's alike.
+    let state = fold(head.clone(), &journal);
     let actor = Actor {
         id: head.id,
         mailbox: mailbox.clone(),

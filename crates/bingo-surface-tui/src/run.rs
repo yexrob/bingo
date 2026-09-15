@@ -515,7 +515,7 @@ impl Run {
                 self.ui.notify(*level, text.clone(), Instant::now())
             }
             Event::IntentAck { intent, outcome } => self.ack(intent, outcome),
-            Event::SessionClosed { .. } => self.closed(&frame.session),
+            Event::SessionClosed { reason } => self.closed(&frame.session, reason),
             _ => {}
         }
         Ok(())
@@ -532,14 +532,21 @@ impl Run {
             .map_err(stdio)
     }
 
-    /// The root closing ends the run; a child closing leaves the tree, and
-    /// the view comes back to the root with it.
-    fn closed(&mut self, session: &SessionId) {
+    /// The root closing ends the run. A child deleted leaves the tree, and
+    /// the view comes back to the root with it; a child closed for any other
+    /// reason is still in the store with everything it said, and stays in
+    /// the tree as a stored session — the close its journal replays is the
+    /// end of the process that wrote it, and the summary that follows it in
+    /// the same stream is the child, open again. Either way its mailbox is
+    /// gone.
+    fn closed(&mut self, session: &SessionId, reason: &CloseReason) {
         if self.session.tree.is_root(session) {
             self.exit = Some(Exit { code: 0 });
             return;
         }
-        self.session.tree.close(session);
+        if matches!(reason, CloseReason::Deleted) {
+            self.session.tree.close(session);
+        }
         self.session.handles.remove(session);
     }
 
@@ -1282,14 +1289,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_child_that_closes_leaves_the_tree_and_the_run_goes_on() {
+    async fn a_child_that_is_deleted_leaves_the_tree_and_the_run_goes_on() {
         let mut harness = Harness::new();
         let frames = vec![
             child_frame(1, announced("reviewer")),
             child_frame(
                 2,
                 Event::SessionClosed {
-                    reason: CloseReason::Client,
+                    reason: CloseReason::Deleted,
                 },
             ),
             frame(
@@ -1305,6 +1312,52 @@ mod tests {
         let screen = harness.recorder.last();
         assert!(screen.contains("still here"), "{screen}");
         assert!(!screen.contains("agent"), "the child is gone: {screen}");
+    }
+
+    /// A resumed tree replays each child's journal, and a journal holds the
+    /// close of every process that ran it. That close is not the child
+    /// leaving: it stays in the tree, its stream goes on with the summary
+    /// that reopened it, and the person who steps into it finds everything
+    /// it said before the close still there.
+    #[tokio::test]
+    async fn a_child_closed_by_a_shutdown_keeps_what_it_said_for_its_reopening() {
+        let mut harness = Harness::new();
+        let (host, _, _) = TestHost::tree(vec![
+            child_frame(1, announced("reviewer")),
+            child_frame(
+                2,
+                Event::ItemCompleted {
+                    item: assistant("itm_2", "reviewed it", ItemStatus::Completed),
+                },
+            ),
+            child_frame(
+                3,
+                Event::SessionClosed {
+                    reason: CloseReason::Shutdown,
+                },
+            ),
+            child_frame(4, announced("reviewer")),
+        ]);
+        let script = vec![
+            ctrl('g'),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            ctrl('d'),
+        ];
+        let ended = drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys(script),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(ended.exit, Exit { code: 0 });
+        let screen = harness.recorder.last();
+        assert!(
+            screen.contains("reviewed it"),
+            "the child's transcript survived its close: {screen}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

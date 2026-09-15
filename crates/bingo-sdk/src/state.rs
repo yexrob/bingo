@@ -268,8 +268,13 @@ impl SessionState {
         self.summary.messages = Some(self.summary.messages.unwrap_or(0) + 1);
     }
 
+    /// Only a running session says what it is, so a summary after a
+    /// `SessionClosed` is a new segment of the journal: the close ended the
+    /// process that wrote it, not the session, and it is open again by
+    /// saying so.
     fn session_updated(&mut self, summary: &SessionSummary) -> Applied {
         self.summary = summary.clone();
+        self.closed = false;
         Applied::Session
     }
 
@@ -529,6 +534,30 @@ mod tests {
             },
         ));
         assert_eq!(st.summary.messages, Some(2));
+    }
+
+    /// The close at the end of a segment is not the end of the session: the
+    /// summary at the head of the next one opens it again, and what it said
+    /// before the close is still what it said.
+    #[test]
+    fn a_session_frame_after_a_close_opens_the_session_again() {
+        let mut st = SessionState::new(summary());
+        st.apply(&frame(
+            1,
+            Event::ItemCompleted {
+                item: user("itm_1", "one"),
+            },
+        ));
+        st.apply(&frame(
+            2,
+            Event::SessionClosed {
+                reason: crate::event::CloseReason::Shutdown,
+            },
+        ));
+        assert!(st.closed);
+        st.apply(&frame(3, Event::SessionUpdated { summary: summary() }));
+        assert!(!st.closed, "a summary comes only from a running session");
+        assert_eq!(st.items.len(), 1, "the close rewrote nothing");
     }
 
     #[test]

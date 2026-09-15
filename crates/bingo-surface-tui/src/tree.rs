@@ -41,12 +41,16 @@ pub enum Status {
 
 impl Status {
     /// What the session is doing, or nothing at all: a `Log` session has no
-    /// model behind it, so there is no work to report (ADR-0011 §1).
+    /// model behind it, so there is no work to report (ADR-0011 §1). One
+    /// whose stream closed is in the store and nowhere else, whatever it was
+    /// doing when its last process ended.
     pub fn of(state: &SessionState) -> Option<Self> {
         if state.summary.driver == Driver::Log {
             return None;
         }
-        if state.busy() {
+        if state.closed {
+            Some(Status::Stored)
+        } else if state.busy() {
             Some(Status::Running)
         } else if state.last_turn.is_some() {
             Some(Status::Done)
@@ -157,7 +161,9 @@ impl Tree {
         self.children.get_mut(session)
     }
 
-    /// A child that closed leaves the tree, and the view with it.
+    /// A child that is gone for good leaves the tree, and the view with it.
+    /// A child that merely closed is not: its state folds the close, and the
+    /// summary that reopens it folds into the same state.
     pub fn close(&mut self, session: &SessionId) {
         self.children.remove(session);
         if self.view.as_ref() == Some(session) {
@@ -376,8 +382,7 @@ pub fn activity(state: &SessionState) -> Option<String> {
         Status::Running => Some(format!("Running{} {spent}", theme::ellipsis())),
         Status::Done => Some(format!("Done ({spent} · {}s)", seconds(state))),
         Status::Idle => Some(format!("Starting{}", theme::ellipsis())),
-        // A row under a transcript is a session this attachment carries;
-        // `Status::of` reads a live state and never answers this.
+        // Not at work: nothing runs it.
         Status::Stored => None,
     }
 }
@@ -755,6 +760,37 @@ mod tests {
         let rows = roster(&tree, &stored);
         assert_eq!(rows.len(), 2, "the root and the child, once each");
         assert_eq!(rows[1].status, Some(Status::Running));
+    }
+
+    /// A child whose stream closed is a stored session until its stream says
+    /// otherwise: the summary that reopens it folds into the same state, so
+    /// nothing it said between the two is lost.
+    #[test]
+    fn a_child_that_closed_is_stored_until_it_is_announced_again() {
+        let mut tree = Tree::new(state());
+        tree.apply(&child_frame(1, announced("reviewer")));
+        tree.apply(&child_frame(
+            2,
+            Event::ItemCompleted {
+                item: assistant("itm_2", "reviewed it", bingo_sdk::ItemStatus::Completed),
+            },
+        ));
+        tree.apply(&child_frame(
+            3,
+            Event::SessionClosed {
+                reason: bingo_sdk::CloseReason::Shutdown,
+            },
+        ));
+        assert_eq!(tree.rows()[1].status, Some(Status::Stored));
+        assert_eq!(activity(tree.state(&child_id()).unwrap()), None);
+        tree.apply(&child_frame(4, announced("reviewer")));
+        let child = tree.state(&child_id()).expect("still in the tree");
+        assert_eq!(Status::of(child), Some(Status::Idle));
+        assert_eq!(
+            child.items.len(),
+            1,
+            "what it said before the close is still there"
+        );
     }
 
     /// Only what hangs under this root, however deep: a listing is every
