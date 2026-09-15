@@ -507,6 +507,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-persona"
+version = "0.6.3"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "jiff",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bingo-pictures"
 version = "0.6.3"
 dependencies = [

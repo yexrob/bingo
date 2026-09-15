@@ -78,6 +78,10 @@
 # `jiff` — moved off the binary's dependency list onto this one, which the
 # binary depends on. The resolved normal tree outside the workspace is
 # unchanged.
-max_dependencies = 335
+# M99 (docs/plans/M99-the-agent-has-a-view-of-its-own.md, ADR-0059) raises
+# 335 → 336 by the one member `bingo-persona`. It brings no crate of its own:
+# the stance is a `&'static str` and the contributor that hands it over, so
+# `bingo-sdk` and `async-trait` — both already in the tree — are all of it.
+max_dependencies = 336
 max_core_check_seconds = 20
 max_target_gb = 5
