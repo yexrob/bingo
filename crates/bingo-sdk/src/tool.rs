@@ -145,6 +145,13 @@ impl Env {
             home,
         }
     }
+
+    /// The user layer of the settings (ADR-0058 §6). Spelled here so that the
+    /// kernel that reads it and a provider that tells a person where to put a
+    /// key name the same file rather than each spelling it for itself.
+    pub fn user_settings(&self) -> PathBuf {
+        self.config_dir.join("settings.toml")
+    }
 }
 
 /// What a tool may reach while it runs: the host, and its own call.

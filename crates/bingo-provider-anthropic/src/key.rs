@@ -241,7 +241,7 @@ mod tests {
         Places {
             variable,
             setting: "anthropic.apiKey".into(),
-            file: Some(PathBuf::from("/home/me/.bingo/settings.json")),
+            file: Some(PathBuf::from("/home/me/.bingo/settings.toml")),
         }
     }
 
@@ -330,7 +330,7 @@ mod tests {
             default.status(),
             AuthStatus::Missing {
                 hint: "No anthropic key: run `/login anthropic` to paste a key, set ANTHROPIC_API_KEY, \
-                       or set anthropic.apiKey in /home/me/.bingo/settings.json."
+                       or set anthropic.apiKey in /home/me/.bingo/settings.toml."
                     .into()
             }
         );

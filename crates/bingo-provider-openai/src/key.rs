@@ -236,7 +236,7 @@ mod tests {
         Places {
             variable,
             setting: "openai.apiKey".into(),
-            file: Some(PathBuf::from("/home/me/.bingo/settings.json")),
+            file: Some(PathBuf::from("/home/me/.bingo/settings.toml")),
         }
     }
 
@@ -325,7 +325,7 @@ mod tests {
             default.status(),
             AuthStatus::Missing {
                 hint: "No openai key: run `/login openai` to paste a key, set OPENAI_API_KEY, \
-                       or set openai.apiKey in /home/me/.bingo/settings.json."
+                       or set openai.apiKey in /home/me/.bingo/settings.toml."
                     .into()
             }
         );

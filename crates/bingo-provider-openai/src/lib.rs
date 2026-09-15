@@ -794,7 +794,7 @@ pub(crate) mod tests {
     #[test]
     fn the_missing_key_hint_names_the_login_the_variable_and_the_settings_file() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let file = directory.path().join(".bingo/settings.json");
+        let file = directory.path().join(".bingo/settings.toml");
         // A machine that exports the variable has a key, and a provider with
         // a key has no hint to read.
         if std::env::var(API_KEY_ENV).is_err() {

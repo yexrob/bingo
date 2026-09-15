@@ -25,7 +25,7 @@ const BUILT_IN: [&str; 4] = ["anthropic", "codex", "fake", "openai"];
 /// Every provider the `anthropic` key names, the default first.
 pub fn providers(settings: Settings, env: &Env) -> Result<Vec<Arc<dyn Provider>>, PluginError> {
     let store = Arc::new(CredentialStore::new(env.data_dir.clone()));
-    let file = env.config_dir.join("settings.json");
+    let file = env.user_settings();
     let mut named = BTreeSet::new();
     let mut providers: Vec<Arc<dyn Provider>> = vec![Arc::new(default_anthropic(
         settings.anthropic.endpoint,
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn an_instance_talks_to_its_own_base_url_or_the_public_one() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let file = directory.path().join("settings.json");
+        let file = directory.path().join("settings.toml");
         let built = |endpoint| keyed("proxy1".into(), endpoint, &file, &store(&directory));
         assert_eq!(
             built(AnthropicEndpoint {
