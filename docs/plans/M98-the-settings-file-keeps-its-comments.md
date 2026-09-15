@@ -89,16 +89,16 @@ key; `Env::user_settings()` spells the user file once.
 
 ## Exit criteria
 
-- [ ] a TOML layer and a JSONC layer with the same content merge identically.
-- [ ] a write into a commented TOML changes one leaf and nothing else.
-- [ ] a `null` is refused by name, on write and on migration.
-- [ ] the first run moves each `settings.json` to `.toml` + `.bak` with one
+- [x] a TOML layer and a JSONC layer with the same content merge identically.
+- [x] a write into a commented TOML changes one leaf and nothing else.
+- [x] a `null` is refused by name, on write and on migration.
+- [x] the first run moves each `settings.json` to `.toml` + `.bak` with one
       notice each; the second run says nothing; a `.bak` already there is
       never overwritten.
-- [ ] `--settings x.json` reads as JSONC and is never migrated.
-- [ ] `cargo check -p bingo-core --all-targets --target x86_64-pc-windows-msvc`
+- [x] `--settings x.json` reads as JSONC and is never migrated.
+- [x] `cargo check -p bingo-core --all-targets --target x86_64-pc-windows-msvc`
       (renames and paths).
-- [ ] every gate green; `budget.sh` at 341; `cargo deny check` clean.
+- [x] every gate green; `budget.sh` at 341; `cargo deny check` clean.
 
 ## Non-goals
 
@@ -116,3 +116,84 @@ key; `Env::user_settings()` spells the user file once.
   inline table that changes stays inline (edit in place).
 - R-parallel: M97 adds a kernel key to `settings.rs`/`merge.rs` and an arm
   to `main.rs` at the same time. Touch only the read/write half here.
+
+## Verified (2026-09-15)
+
+Branch `m98-toml-settings`, off `29552c1f`. Every exit criterion is ticked;
+the gates ran one at a time, none in the background. `merge.rs`,
+`KERNEL_KEYS` and `KernelSettings` are untouched, and every public signature
+in `settings.rs` is unchanged, so M97 and M99 merge over this cleanly.
+
+Where each is covered:
+
+- Both formats one layer — `settings::format::tests::the_same_settings_in_either_language_parse_to_the_same_value`;
+  `settings::tests::a_layer_directory_with_no_toml_reads_the_json_that_stands_there`
+  asserts the TOML layer's value equals the JSON's it replaced.
+- One leaf and nothing else — `settings::edit::tests::{a_comment_above_an_untouched_key_survives,
+  a_nested_leaf_change_leaves_its_siblings_byte_identical, a_removed_keys_comment_goes_with_it}`,
+  and black-box `provider_add::a_comment_in_the_settings_survives_the_command_that_writes_beside_it`.
+  `TableLike::insert` reformats the key it lands on, which would have dropped
+  the comment above a *changed* key; `edit::put` carries the key's decor and
+  the value's across the replacement.
+- A `null` by name — `edit::tests::a_null_names_the_dotted_key_it_was_written_at`,
+  `migrate::tests::a_null_refuses_by_name_and_moves_nothing`,
+  `settings::tests::a_write_into_a_json_layer_that_spells_a_null_is_refused_by_name`.
+- The move, once — `settings::migrate::tests` (five cases) and
+  `provider_add::a_settings_json_left_from_an_older_bingo_crosses_on_the_first_run`,
+  which asserts the `SETTINGS_MIGRATED` line on stderr.
+- `--settings` untouched — `settings::tests::an_explicit_settings_file_is_read_where_it_is_and_never_migrated`.
+
+One case the plan did not settle: `/think off` hands `remember` a top-level
+`null`. That is not the tri-state of ADR-0003 §3 — it is "this layer says
+nothing about this key" — so `remember` removes the key, which is the same
+fact in the user layer, the lowest and the only one a command writes. A
+`null` deeper inside a written document is still the error. Recorded in
+ADR-0058 §4 and ADR-0003 §5.
+
+```
+$ cargo fmt --all -- --check                      # exit 0, no output
+$ cargo check --workspace --all-targets --locked
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.67s
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.56s
+$ cargo test --workspace --locked       # 89 targets, 4743 passed, 0 failed, 2 ignored
+   Running unittests src/lib.rs (.../bingo_core-1fe174c408a04cad)
+test result: ok. 369 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+   Running tests/cli/main.rs (.../cli-37388ab0375bae4a)
+test result: ok. 226 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.63s
+   Running tests/pty/main.rs (.../pty-e8dbc0cad072bfa9)
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.88s
+   Running unittests src/lib.rs (.../bingo_gateway-2fdd90974dedce7f)
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+  (the acp_bridge token test did not hang; nothing was skipped)
+$ cargo check -p bingo-core --all-targets --locked --target x86_64-pc-windows-msvc
+    Checking bingo-core v0.6.3
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.25s
+$ scripts/check_discipline.sh
+dependency direction ok / cohesion ok / kernel names no tool
+  (no new file- or function-length warning: the three `fn` warnings are
+   compact.rs, turn.rs and state.rs, all from before this milestone)
+discipline ok
+$ scripts/budget.sh
+dependencies (unique, normal): 341 (max  341)
+warm cargo check -p bingo-core: 0s (max  20s)
+relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
+budget ok
+$ cargo deny check
+warning[duplicate]: found 2 duplicate entries for crate 'winnow'   # 0.7.15 + 1.0.4, the ADR's warn
+advisories ok, bans ok, licenses ok, sources ok
+```
+
+The +6 was measured by resolving the same tree with and without the crate:
+`cargo tree --workspace -e normal` went 335 → 341, the six being exactly
+`toml_edit`, `serde_spanned`, `toml_datetime`, `toml_parser`, `toml_writer`
+and `winnow`. Nothing else moved.
+
+Two bricks landed differently. `toml_edit::ser::to_document` writes every
+object inline, so `edit::standard` turns a new object into the standard
+tables a person would have written (`[openai.instances.proxy1]`) and gives a
+table holding nothing but tables no header of its own (R-tables). And a TOML
+datetime reads as `toml_edit`'s own one-key object
+(`{"$__toml_private_datetime": "..."}`), pinned by
+`format::tests::a_datetime_reads_as_a_value_rather_than_a_panic` — R-datetime
+answered: a value, not a panic.
