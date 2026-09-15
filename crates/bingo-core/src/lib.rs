@@ -10,6 +10,7 @@ pub mod gate;
 pub mod host;
 pub mod journal;
 pub mod models;
+pub mod plugins;
 pub mod prompt;
 pub mod rewind;
 pub mod session;
