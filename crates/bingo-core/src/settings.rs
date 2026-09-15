@@ -5,7 +5,7 @@
 
 mod merge;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use bingo_sdk::{Effort, Env, Merge, PluginManifest};
@@ -15,8 +15,8 @@ use crate::models::Declared;
 
 pub use merge::merge;
 
-/// The keys the kernel owns. It reads all but the last itself: `pictures` is
-/// read by whoever builds a picture loader ([`picture_cache_days`]), and is a
+/// The keys the kernel owns. It reads all but `pictures` itself, which is
+/// read by whoever builds a picture loader ([`picture_cache_days`]) and is a
 /// kernel key so that no plugin may claim it and nobody who sets it is told it
 /// is unknown (ADR-0003 §2).
 pub const KERNEL_KEYS: &[&str] = &[
@@ -26,6 +26,7 @@ pub const KERNEL_KEYS: &[&str] = &[
     "maxTokens",
     "models",
     "pictures",
+    crate::plugins::KEY,
 ];
 
 /// The one key under `pictures`: the spelling every other kernel key uses, and
@@ -86,6 +87,21 @@ pub struct KernelSettings {
     pub max_tokens: Option<u32>,
     /// Per-model overrides of the catalogue, keyed `<provider>/<model>` (ADR-0004).
     pub models: BTreeMap<String, Declared>,
+    /// Which plugins run, by name: a manifest id for one this build ships, a
+    /// directory name for one a bridge found. Absent is on (ADR-0057 §1).
+    pub enabled_plugins: BTreeMap<String, bool>,
+}
+
+impl KernelSettings {
+    /// The names a layer turned off, which is what the registry and every
+    /// plugin that runs plugins of its own are handed (ADR-0057 §2, §4).
+    pub fn switched_off(&self) -> BTreeSet<String> {
+        self.enabled_plugins
+            .iter()
+            .filter(|(_, on)| !**on)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 /// A top-level key nobody claimed, with the layer that set it.

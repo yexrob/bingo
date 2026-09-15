@@ -230,6 +230,7 @@ fn kernel_settings(
         thinking: typed(merged, layers, "thinking")?,
         max_tokens: typed(merged, layers, "maxTokens")?,
         models: typed(merged, layers, "models")?.unwrap_or_default(),
+        enabled_plugins: typed(merged, layers, crate::plugins::KEY)?.unwrap_or_default(),
     })
 }
 
@@ -314,6 +315,99 @@ mod tests {
             matches!(&err, SettingsError::Type { key, layer, .. } if key == "models" && layer == "project"),
             "{err}"
         );
+    }
+
+    /// The switches are an object, so they merge field by field like any
+    /// other (ADR-0003 §3): a project turns one plugin back on that a person
+    /// turned off, and says nothing about the rest.
+    #[test]
+    fn a_higher_layer_flips_one_plugin_back_on_and_leaves_its_neighbours() {
+        let merged = merge(
+            &[
+                layer(
+                    "user",
+                    json!({"enabledPlugins": {"bingo.tools.web": false, "wordcount": false}}),
+                ),
+                layer("project", json!({"enabledPlugins": {"wordcount": true}})),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            merged.kernel.enabled_plugins,
+            BTreeMap::from([
+                ("bingo.tools.web".to_string(), false),
+                ("wordcount".to_string(), true),
+            ])
+        );
+        assert_eq!(
+            merged.kernel.switched_off(),
+            std::collections::BTreeSet::from(["bingo.tools.web".to_string()]),
+            "only what a layer said `false` about is off"
+        );
+    }
+
+    /// A `null` clears the word below it, here as everywhere else — a whole
+    /// object of switches, or one name in it.
+    #[test]
+    fn a_null_over_a_switch_gives_the_plugin_back() {
+        for higher in [json!(null), json!({ "bingo.tools.web": null })] {
+            let merged = merge(
+                &[
+                    layer(
+                        "user",
+                        json!({"enabledPlugins": {"bingo.tools.web": false}}),
+                    ),
+                    layer("project", json!({ "enabledPlugins": higher.clone() })),
+                ],
+                &[],
+            )
+            .unwrap();
+            assert!(merged.kernel.switched_off().is_empty(), "{higher}");
+        }
+    }
+
+    /// A switch that is not a boolean, and a key that is not an object at
+    /// all, are refused by the layer that wrote them.
+    #[test]
+    fn a_switch_of_the_wrong_type_names_the_layer_that_set_it() {
+        for wrong in [json!({"bingo.tools.web": "off"}), json!(["x"]), json!(3)] {
+            let err = merge(
+                &[
+                    layer("user", json!({"enabledPlugins": {"wordcount": true}})),
+                    layer("project", json!({ "enabledPlugins": wrong.clone() })),
+                ],
+                &[],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, SettingsError::Type { key, layer, .. }
+                    if key == "enabledPlugins" && layer == "project"),
+                "{wrong}: {err}"
+            );
+        }
+    }
+
+    /// The seventh kernel key is the kernel's: no plugin may claim it, and
+    /// nobody who writes it is told it is unknown (ADR-0003 §2).
+    #[test]
+    fn the_switches_are_a_kernel_key_and_never_an_unknown_one() {
+        let merged = merge(
+            &[layer(
+                "user",
+                json!({"enabledPlugins": {"wordcount": false}}),
+            )],
+            &[],
+        )
+        .unwrap();
+        assert!(merged.unknown.is_empty(), "{:?}", merged.unknown);
+
+        let claim = Claim {
+            plugin: "p".into(),
+            keys: vec![("enabledPlugins".into(), Merge::Replace)],
+        };
+        let err = merge(&[], &[claim]).unwrap_err();
+        assert!(matches!(err, SettingsError::Conflict { ref first, .. } if first == "kernel"));
     }
 
     #[test]
