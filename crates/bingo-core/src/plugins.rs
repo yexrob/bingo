@@ -43,6 +43,15 @@ pub fn needed(manifest: &PluginManifest) -> Option<&'static str> {
         })
 }
 
+/// The one word a listing writes a plugin's state as, in the terminal and in
+/// the headless twin alike.
+pub fn state(enabled: bool) -> &'static str {
+    match enabled {
+        true => "on",
+        false => "off",
+    }
+}
+
 /// Write one plugin's switch into the user settings layer, so the next start
 /// opens on it (ADR-0003 §5). Every neighbour in the file stays where it is,
 /// and so does every other plugin's switch.

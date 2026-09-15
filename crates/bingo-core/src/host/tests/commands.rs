@@ -431,6 +431,74 @@ async fn host_in(home: &std::path::Path, remembered: Option<&str>) -> Arc<Host> 
     Host::build(plugins, config).await.expect("a host")
 }
 
+/// The rows of a `View::Table` outcome.
+fn rows(outcome: &IntentOutcome) -> Vec<Vec<String>> {
+    let IntentOutcome::Applied { result } = outcome else {
+        panic!("not a view: {outcome:?}");
+    };
+    let view: View = serde_json::from_value(result["view"].clone()).unwrap();
+    let View::Table { rows, .. } = view else {
+        panic!("a table, got {view:?}");
+    };
+    rows
+}
+
+/// `/plugins` and `/modules` are one table of what will run and what will
+/// not, each disabled plugin carrying the reason the load gave it
+/// (ADR-0057 §6). It is instant, so it answers whether or not a turn runs.
+#[tokio::test]
+async fn plugins_and_modules_draw_one_table_with_every_reason_in_it() {
+    let (host, _) = host_with(vec![]).await;
+    let mut client = Client::open(&host).await;
+
+    let (ack, _) = client.ack("/plugins").await;
+    let drawn = rows(&ack);
+    assert_eq!(
+        drawn.iter().map(|row| row[0].as_str()).collect::<Vec<_>>(),
+        ["test.provider", "test.tools", "test.needy"]
+    );
+    assert_eq!(drawn[0][2], "on");
+    assert_eq!(drawn[2][2], "off");
+    assert_eq!(drawn[2][3], "unmet requirements: service:missing");
+    assert_eq!(drawn[2][4], "built in", "this build shipped it");
+
+    let (alias, _) = client.ack("/modules").await;
+    assert_eq!(rows(&alias), drawn, "one table under either name");
+}
+
+/// `disable` writes the user layer and says when it takes effect; the next
+/// host built on that home opens with the plugin off (ADR-0057 §6).
+#[tokio::test]
+async fn disable_writes_the_user_layer_and_the_next_start_opens_on_it() {
+    let home = tempfile::tempdir().expect("a home");
+    let host = host_in(home.path(), None).await;
+    let mut client = Client::open(&host).await;
+
+    let (ack, _) = client.ack("/plugins disable test.provider").await;
+    assert_eq!(message(&ack), "test.provider is off at the next start.");
+    let written = std::fs::read_to_string(settings::user_path(&env_in(home.path())))
+        .expect("the user settings were written");
+    let document: Value = serde_json::from_str(&written).expect("plain JSON");
+    assert_eq!(
+        document["enabledPlugins"],
+        json!({ "test.provider": false })
+    );
+    assert!(
+        host.registry().enabled("test.provider"),
+        "this session is untouched: a switch is taken at the next start"
+    );
+
+    let (refused, _) = client.ack("/plugins disable test.nobody").await;
+    assert!(
+        matches!(&refused, IntentOutcome::Rejected { error }
+            if error.code == ErrorCode::InvalidInput && error.message.contains("test.nobody")),
+        "{refused:?}"
+    );
+
+    let next = host_in(home.path(), None).await;
+    assert!(!next.registry().enabled("test.provider"));
+}
+
 /// `/rename` is a session saying what it is called: one `SessionUpdated` and
 /// nothing else. Bare, it answers the question instead, and a name too long
 /// for a row is refused before anything is published.

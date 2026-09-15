@@ -269,6 +269,17 @@ impl Host {
             .collect()
     }
 
+    /// Why a plugin this build ships may not be switched off, or `None` for
+    /// one that may (ADR-0057 §3). A name this build does not ship has no
+    /// answer here: a command asks its own listing about that first.
+    pub(crate) fn needed(&self, plugin: &str) -> Option<&'static str> {
+        self.plugins
+            .iter()
+            .map(|p| p.manifest())
+            .find(|manifest| manifest.id == plugin)
+            .and_then(crate::plugins::needed)
+    }
+
     pub fn surface(&self, id: &str) -> Option<Arc<dyn Surface>> {
         self.registry
             .surfaces
