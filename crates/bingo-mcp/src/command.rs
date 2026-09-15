@@ -26,6 +26,16 @@ impl McpCommand {
         Self { manager }
     }
 
+    /// The word after every verb: the servers this build was configured
+    /// with, which the manager already holds, so a person completes one
+    /// without a catalogue kind of its own (ADR-0008 §6a).
+    fn servers(&self) -> ArgSpec {
+        ArgSpec::Words {
+            values: self.manager.names().map(str::to_string).collect(),
+            then: None,
+        }
+    }
+
     async fn table(&self) -> CommandOutcome {
         CommandOutcome::View {
             view: View::Table {
@@ -310,7 +320,7 @@ impl Command for McpCommand {
             hint: format!("[{} <server>]", Verb::ALL.map(Verb::as_str).join("|")),
             args: ArgSpec::Words {
                 values: Verb::ALL.map(|verb| verb.as_str().to_string()).to_vec(),
-                then: None,
+                then: Some(Box::new(self.servers())),
             },
             // A sign-in takes minutes and asks through the session's dialog,
             // so this command holds the queue as `/login` does (ADR-0012 §5).
@@ -477,10 +487,18 @@ mod tests {
         assert_eq!(spec.name, "mcp");
         assert!(!spec.instant, "a sign-in asks a person and takes minutes");
         assert_eq!(spec.family, "mcp");
-        let ArgSpec::Words { values, .. } = spec.args else {
+        let ArgSpec::Words { values, then } = spec.args else {
             panic!("a verb is one of the words");
         };
         assert_eq!(values, Verb::ALL.map(|verb| verb.as_str().to_string()));
+        assert_eq!(
+            then.as_deref(),
+            Some(&ArgSpec::Words {
+                values: Vec::new(),
+                then: None
+            }),
+            "a build with no servers configured offers no name"
+        );
         for verb in Verb::ALL {
             assert!(spec.hint.contains(verb.as_str()), "{verb:?} is not offered");
         }
@@ -503,11 +521,9 @@ mod tests {
         assert!(other.message.contains("no S256"), "{other}");
     }
 
-    /// A server with no sign-in of its own is told so by name rather than
-    /// being sent through a flow that has nowhere to go.
-    #[tokio::test]
-    async fn a_verb_that_signs_in_refuses_a_server_that_signs_in_to_nothing() {
-        let servers = std::collections::BTreeMap::from([(
+    /// One configured server, so a spec and a refusal have a name to hold.
+    fn configured() -> std::collections::BTreeMap<String, crate::config::Server> {
+        std::collections::BTreeMap::from([(
             "files".to_string(),
             crate::config::Server::Stdio {
                 command: "/bin/echo".into(),
@@ -515,9 +531,37 @@ mod tests {
                 env: Default::default(),
                 cwd: None,
             },
-        )]);
+        )])
+    }
+
+    /// ADR-0008 §6a: the word after every verb is a server this build was
+    /// configured with, said in the spec itself rather than in a catalogue.
+    #[test]
+    fn the_word_after_a_verb_is_a_configured_server() {
         let manager = Arc::new(Manager::new(
-            servers,
+            configured(),
+            &[],
+            std::env::temp_dir().join("bingo-mcp-command-names-tests"),
+        ));
+        let spec = McpCommand::new(manager).spec();
+        let ArgSpec::Words { then, .. } = spec.args else {
+            panic!("a verb is one of the words");
+        };
+        assert_eq!(
+            then.as_deref(),
+            Some(&ArgSpec::Words {
+                values: vec!["files".into()],
+                then: None
+            })
+        );
+    }
+
+    /// A server with no sign-in of its own is told so by name rather than
+    /// being sent through a flow that has nowhere to go.
+    #[tokio::test]
+    async fn a_verb_that_signs_in_refuses_a_server_that_signs_in_to_nothing() {
+        let manager = Arc::new(Manager::new(
+            configured(),
             &[],
             std::env::temp_dir().join("bingo-mcp-command-signin-tests"),
         ));

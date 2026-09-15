@@ -22,6 +22,9 @@ pub(super) struct PluginsCommand {
 /// The two words it takes, in the order a surface offers them.
 const ENABLE: &str = "enable";
 const DISABLE: &str = "disable";
+/// The catalogue the name after either word comes from (ADR-0008 §6a): the
+/// listing this command draws, so a person completes what it lists.
+const PLUGINS: &str = "plugins";
 
 #[async_trait]
 impl Command for PluginsCommand {
@@ -33,7 +36,9 @@ impl Command for PluginsCommand {
                 &format!("[{ENABLE}|{DISABLE} <name>]"),
                 ArgSpec::Words {
                     values: vec![ENABLE.into(), DISABLE.into()],
-                    then: None,
+                    then: Some(Box::new(ArgSpec::Catalog {
+                        source: PLUGINS.into(),
+                    })),
                 },
                 true,
             )
@@ -144,6 +149,25 @@ mod tests {
             reason: reason.map(str::to_string),
             from: BUILT_IN.into(),
         }
+    }
+
+    /// ADR-0008 §6a: the verb is one of two words, and the word after it is
+    /// a plugin's name — the catalogue the listing is drawn from.
+    #[test]
+    fn the_spec_says_both_verbs_and_the_catalogue_the_name_comes_from() {
+        let spec = PluginsCommand { host: Weak::new() }.spec();
+        assert_eq!(spec.name, "plugins");
+        assert_eq!(spec.aliases, ["modules"]);
+        let ArgSpec::Words { values, then } = spec.args else {
+            panic!("a verb is one of the words");
+        };
+        assert_eq!(values, [ENABLE, DISABLE]);
+        assert_eq!(
+            then.as_deref(),
+            Some(&ArgSpec::Catalog {
+                source: PLUGINS.into()
+            })
+        );
     }
 
     #[test]
