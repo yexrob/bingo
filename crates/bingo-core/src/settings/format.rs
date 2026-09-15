@@ -48,12 +48,11 @@ pub fn parse(format: Format, path: &Path, text: &str) -> Result<Value, SettingsE
 /// The text as a document — its comments, blank lines and ordering kept — so
 /// that a write can put one leaf back without disturbing any of them.
 pub fn document(path: &Path, text: &str) -> Result<DocumentMut, SettingsError> {
-    text.parse().map_err(|e: toml_edit::TomlError| {
-        SettingsError::Parse {
+    text.parse()
+        .map_err(|e: toml_edit::TomlError| SettingsError::Parse {
             path: path.to_path_buf(),
             message: e.to_string(),
-        }
-    })
+        })
 }
 
 /// What a document says, with nothing of how it was written. A TOML root is a
@@ -88,7 +87,10 @@ mod tests {
     #[test]
     fn the_extension_decides_and_nothing_else_does() {
         assert_eq!(Format::of(Path::new("/a/settings.toml")), Format::Toml);
-        assert_eq!(Format::of(Path::new("/a/settings.local.toml")), Format::Toml);
+        assert_eq!(
+            Format::of(Path::new("/a/settings.local.toml")),
+            Format::Toml
+        );
         assert_eq!(Format::of(Path::new("/a/settings.json")), Format::Jsonc);
         assert_eq!(Format::of(Path::new("/a/notes")), Format::Jsonc);
     }

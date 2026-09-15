@@ -33,7 +33,11 @@ impl Migration {
     pub fn notice(&self) -> Option<(&'static str, String)> {
         match self {
             Migration::Nothing => None,
-            Migration::Done { from, to, kept: false } => Some((
+            Migration::Done {
+                from,
+                to,
+                kept: false,
+            } => Some((
                 "SETTINGS_MIGRATED",
                 format!(
                     "moved {} to {}; the original is {}",
@@ -42,7 +46,11 @@ impl Migration {
                     backup(from).display()
                 ),
             )),
-            Migration::Done { from, to, kept: true } => Some((
+            Migration::Done {
+                from,
+                to,
+                kept: true,
+            } => Some((
                 "SETTINGS_MIGRATED",
                 format!(
                     "wrote {} from {}; {} was already there, so {} is left where it is \
@@ -166,7 +174,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("settings.json"), "{ \"model\": \"m\" }");
         let toml = dir.path().join("settings.toml");
-        assert!(matches!(migrate_one(&toml).unwrap(), Migration::Done { .. }));
+        assert!(matches!(
+            migrate_one(&toml).unwrap(),
+            Migration::Done { .. }
+        ));
         assert_eq!(migrate_one(&toml).unwrap(), Migration::Nothing);
         assert_eq!(migrate_one(&toml).unwrap().notice(), None);
     }
@@ -242,8 +253,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = Env::rooted(dir.path());
         let cwd = dir.path().join("project");
-        write(&env.config_dir.join("settings.json"), "{ \"model\": \"u\" }");
-        write(&cwd.join(".bingo/settings.local.json"), "{ \"model\": \"l\" }");
+        write(
+            &env.config_dir.join("settings.json"),
+            "{ \"model\": \"u\" }",
+        );
+        write(
+            &cwd.join(".bingo/settings.local.json"),
+            "{ \"model\": \"l\" }",
+        );
 
         let crossed: Vec<_> = migrate_all(&env, &cwd)
             .into_iter()

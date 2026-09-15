@@ -478,7 +478,11 @@ fn channels_add_asks_for_both_and_writes_each_where_it_belongs() {
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join(".bingo");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("settings.toml"), "# what answers\nprovider = \"openai\"\n").unwrap();
+    std::fs::write(
+        config.join("settings.toml"),
+        "# what answers\nprovider = \"openai\"\n",
+    )
+    .unwrap();
 
     let mut cmd = bingo();
     let out = typed(

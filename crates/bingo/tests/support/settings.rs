@@ -13,7 +13,6 @@ use std::path::Path;
 /// What one settings file says. It panics where there is no file: a test that
 /// reads a layer back is a test that expected a command to write one.
 pub fn read(path: &Path) -> serde_json::Value {
-    let text =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     toml_edit::de::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }

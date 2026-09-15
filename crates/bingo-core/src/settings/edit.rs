@@ -239,7 +239,10 @@ mod tests {
     fn a_leaf_that_did_not_change_is_not_a_change() {
         assert_eq!(diff(&map(json!({ "a": 1 })), &map(json!({ "a": 1 }))), []);
         assert_eq!(
-            diff(&map(json!({ "a": { "b": 1 } })), &map(json!({ "a": { "b": 1 } }))),
+            diff(
+                &map(json!({ "a": { "b": 1 } })),
+                &map(json!({ "a": { "b": 1 } }))
+            ),
             []
         );
     }
@@ -279,7 +282,8 @@ mod tests {
     /// command writes into.
     #[test]
     fn a_comment_above_an_untouched_key_survives() {
-        let before = "# what answers\nprovider = \"openai\"\n\n# how hard it thinks\nthinking = \"low\"\n";
+        let before =
+            "# what answers\nprovider = \"openai\"\n\n# how hard it thinks\nthinking = \"low\"\n";
         assert_eq!(
             written(before, json!({ "provider": "openai", "thinking": "high" })),
             "# what answers\nprovider = \"openai\"\n\n# how hard it thinks\nthinking = \"high\"\n",

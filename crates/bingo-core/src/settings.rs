@@ -455,7 +455,10 @@ mod tests {
             &env.config_dir.join("settings.toml"),
             "# user\nmodel = \"user\"\n",
         );
-        write(&cwd.join(".bingo/settings.local.toml"), "model = \"local\"\n");
+        write(
+            &cwd.join(".bingo/settings.local.toml"),
+            "model = \"local\"\n",
+        );
         let extra = dir.path().join("extra.json");
         write(&extra, "{\"model\": \"extra\"}");
 
@@ -476,7 +479,10 @@ mod tests {
             &env.config_dir.join("settings.json"),
             "{ // user\n \"model\": \"user\", \"permissions\": { \"allow\": [\"Read\"] } }",
         );
-        write(&cwd.join(".bingo/settings.local.json"), "{ \"model\": \"l\", }");
+        write(
+            &cwd.join(".bingo/settings.local.json"),
+            "{ \"model\": \"l\", }",
+        );
 
         let read = load(&env, &cwd, None).unwrap();
         assert_eq!(read[0].value["model"], json!("user"));
@@ -489,7 +495,10 @@ mod tests {
             "model = \"user\"\n\n[permissions]\nallow = [\"Read\"]\n",
         );
         let now = load(&env, &cwd, None).unwrap();
-        assert_eq!(now[0].value, read[0].value, "the TOML says what the JSON did");
+        assert_eq!(
+            now[0].value, read[0].value,
+            "the TOML says what the JSON did"
+        );
         assert!(now[0].source.ends_with("settings.toml"), "and shadows it");
     }
 
@@ -529,7 +538,9 @@ mod tests {
         assert_eq!(after["provider"], json!("openai"));
         assert_eq!(after["permissions"]["allow"], json!(["Read"]));
         assert!(
-            std::fs::read_to_string(&path).unwrap().contains("# what answers"),
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("# what answers"),
             "the comment a person wrote is still above the key it is about"
         );
     }
@@ -585,7 +596,10 @@ mod tests {
 
         let toml = dir.path().join("settings.toml");
         let refused = super::remember(&toml, &[("model", json!("new"))]).unwrap_err();
-        assert!(refused.to_string().contains("permissions.allow"), "{refused}");
+        assert!(
+            refused.to_string().contains("permissions.allow"),
+            "{refused}"
+        );
         assert_eq!(std::fs::read_to_string(&json).unwrap(), before);
         assert!(!toml.exists(), "and nothing was written over it");
     }
@@ -716,6 +730,9 @@ mod tests {
         write(&env.config_dir.join("settings.toml"), "# nothing yet\n");
         let layers = load(&env, dir.path(), None).unwrap();
         assert_eq!(layers.len(), 1, "a file that exists is a layer");
-        assert!(layers[0].value.is_empty(), "one that happens to say nothing");
+        assert!(
+            layers[0].value.is_empty(),
+            "one that happens to say nothing"
+        );
     }
 }
