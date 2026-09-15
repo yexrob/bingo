@@ -1,9 +1,16 @@
-//! Settings: JSONC layers (user < project < local < command line) merged
+//! Settings: TOML layers (user < project < local < command line) merged
 //! per key by the rule the claiming plugin declared, then sliced — the
 //! kernel keeps its four keys, every plugin gets the keys it claimed, and
 //! whatever nobody claimed is reported by source so a typo is not silent.
+//!
+//! A layer is an object whatever file it came from (ADR-0058 §1): where no
+//! `settings.toml` stands, the `settings.json` an older bingo wrote is read
+//! as it always was, and [`migrate_all`] moves it across once.
 
+mod edit;
+mod format;
 mod merge;
+mod migrate;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -13,7 +20,10 @@ use serde_json::{Map, Value};
 
 use crate::models::Declared;
 
+use format::Format;
+
 pub use merge::merge;
+pub use migrate::{Migration, migrate_all, migrate_one};
 
 /// The keys the kernel owns. It reads all but `pictures` itself, which is
 /// read by whoever builds a picture loader ([`picture_cache_days`]) and is a
@@ -135,8 +145,13 @@ pub enum SettingsError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{layer}: settings must be a JSON object")]
+    #[error("{layer}: settings must be an object")]
     NotAnObject { layer: String },
+    #[error(
+        "settings key {key}: TOML has no null, so a layer written in it cannot \
+         clear what a lower one said; remove the key, or keep this layer as JSON"
+    )]
+    Null { key: String },
     #[error("settings key {key} is claimed by both {first} and {second}")]
     Conflict {
         key: String,
@@ -212,17 +227,18 @@ fn wrong(layer: &Layer, key: &str, message: &str) -> SettingsError {
 }
 
 /// The user layer: the lowest of the three, the one that is about the person
-/// rather than the project, and the only one a command writes back to.
+/// rather than the project, and the only one a command writes back to. The
+/// sdk spells it, so a provider's hint names the same file (ADR-0058 §6).
 pub fn user_path(env: &Env) -> PathBuf {
-    env.config_dir.join("settings.json")
+    env.user_settings()
 }
 
 /// The three on-disk layers, lowest priority first.
 pub fn layer_paths(env: &Env, cwd: &Path) -> [PathBuf; 3] {
     [
         user_path(env),
-        cwd.join(".bingo").join("settings.json"),
-        cwd.join(".bingo").join("settings.local.json"),
+        cwd.join(".bingo").join("settings.toml"),
+        cwd.join(".bingo").join("settings.local.toml"),
     ]
 }
 
@@ -236,25 +252,30 @@ pub fn remember(path: &Path, keys: &[(&str, Value)]) -> Result<(), SettingsError
     write(path, &document)
 }
 
-/// One layer as JSON, in the order it was written (`serde_json/preserve_order`);
-/// a file that is not there is an empty document. This is the read half of a
-/// round trip, so unlike [`read_layer`] it refuses JSONC: rewriting a file
-/// with comments in it would drop them.
+/// One layer as a document, in the order it was written
+/// (`serde_json/preserve_order`); a file that is not there is an empty
+/// document. This is the read half of a round trip, so a JSON layer that is
+/// still standing is migrated first (ADR-0058 §2) — otherwise what is read
+/// back would not be what the write is about to diff against.
+///
+/// A JSON path is still refused when it carries comments: rewriting it would
+/// drop them, and there is no document to put a leaf back into.
 pub fn read_document(path: &Path) -> Result<Map<String, Value>, SettingsError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
-        Err(source) => {
-            return Err(SettingsError::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+    migrated(path)?;
+    let Some(text) = read_text(path)? else {
+        return Ok(Map::new());
     };
     if text.trim().is_empty() {
         return Ok(Map::new());
     }
-    match serde_json::from_str(&text) {
+    match Format::of(path) {
+        Format::Toml => object(path, format::parse(Format::Toml, path, &text)?),
+        Format::Jsonc => plain_json(path, &text),
+    }
+}
+
+fn plain_json(path: &Path, text: &str) -> Result<Map<String, Value>, SettingsError> {
+    match serde_json::from_str(text) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Err(SettingsError::NotAnObject {
             layer: path.display().to_string(),
@@ -269,54 +290,104 @@ pub fn read_document(path: &Path) -> Result<Map<String, Value>, SettingsError> {
     }
 }
 
+/// Set a layer to this document. A TOML path keeps everything the file says
+/// about itself (ADR-0058 §3); a JSON path is re-encoded as it always was.
+pub fn write(path: &Path, document: &Map<String, Value>) -> Result<(), SettingsError> {
+    match Format::of(path) {
+        Format::Toml => {
+            migrated(path)?;
+            write_toml(path, document)
+        }
+        Format::Jsonc => write_json(path, document),
+    }
+}
+
+/// Only the leaves that differ, set in the document the file already is: a
+/// comment, a blank line and an ordering the caller never mentioned are still
+/// exactly where the person who wrote them put them.
+fn write_toml(path: &Path, document: &Map<String, Value>) -> Result<(), SettingsError> {
+    let text = read_text(path)?.unwrap_or_default();
+    let mut edited = format::document(path, &text)?;
+    let standing = object(path, format::value(path, edited.clone())?)?;
+    edit::apply(&mut edited, &edit::diff(&standing, document))?;
+    save(path, &edited.to_string())
+}
+
+fn write_json(path: &Path, document: &Map<String, Value>) -> Result<(), SettingsError> {
+    let json = serde_json::to_string_pretty(document).map_err(|e| SettingsError::Parse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    save(path, &format!("{json}\n"))
+}
+
 /// Through a temporary file and a rename: a settings file a person wrote is
 /// not something to lose half of.
-pub fn write(path: &Path, document: &Map<String, Value>) -> Result<(), SettingsError> {
+fn save(path: &Path, text: &str) -> Result<(), SettingsError> {
     let directory = path.parent().unwrap_or(Path::new("."));
     let failed = |source| SettingsError::Write {
         path: path.to_path_buf(),
         source,
     };
     std::fs::create_dir_all(directory).map_err(failed)?;
-    let json = serde_json::to_string_pretty(document).map_err(|e| SettingsError::Parse {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
     // Named for this write and no other: two processes — or two tests —
     // saving at once must not rename each other's half-written file away.
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = directory.join(format!("settings.json.{}.{n}.tmp", std::process::id()));
-    std::fs::write(&temporary, format!("{json}\n")).map_err(failed)?;
+    let name = path.file_name().unwrap_or(std::ffi::OsStr::new("settings"));
+    let temporary = directory.join(format!(
+        "{}.{}.{n}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    std::fs::write(&temporary, text).map_err(failed)?;
     std::fs::rename(&temporary, path).map_err(failed)
+}
+
+/// The migration this layer still owes, run before it is read or written so
+/// that a write never shadows a JSON layer's keys (ADR-0058 §2). At the start
+/// of a run [`migrate_all`] has already done it and said so; this is what
+/// keeps a command that writes correct on its own.
+fn migrated(path: &Path) -> Result<(), SettingsError> {
+    match migrate_one(path)? {
+        Migration::Refused { key, .. } => Err(SettingsError::Null { key }),
+        Migration::Nothing | Migration::Done { .. } => Ok(()),
+    }
 }
 
 /// Read the on-disk layers plus an optional explicit file, skipping the
 /// ones that do not exist.
 pub fn load(env: &Env, cwd: &Path, extra: Option<&Path>) -> Result<Vec<Layer>, SettingsError> {
     let mut layers = Vec::new();
-    let paths = layer_paths(env, cwd);
-    for path in paths.iter().map(PathBuf::as_path).chain(extra) {
-        if let Some(layer) = read_layer(path)? {
+    for path in layer_paths(env, cwd) {
+        if let Some(layer) = standing_layer(&path)? {
             layers.push(layer);
         }
+    }
+    if let Some(path) = extra
+        && let Some(layer) = read_layer(path)?
+    {
+        layers.push(layer);
     }
     Ok(layers)
 }
 
+/// One of the three layer paths: its TOML, else the JSON that stands where no
+/// TOML does (ADR-0058 §1). A `--settings` file has no sibling — it is the
+/// file the person named, in the format they named it in.
+fn standing_layer(path: &Path) -> Result<Option<Layer>, SettingsError> {
+    match read_layer(path)? {
+        Some(layer) => Ok(Some(layer)),
+        None => read_layer(&format::json_sibling(path)),
+    }
+}
+
 /// One file as a layer; `None` when it does not exist.
 pub fn read_layer(path: &Path) -> Result<Option<Layer>, SettingsError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(SettingsError::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+    let Some(text) = read_text(path)? else {
+        return Ok(None);
     };
-    let value = parse_jsonc(path, &text)?;
+    let value = format::parse(Format::of(path), path, &text)?;
     let source = path.display().to_string();
     match value {
         Value::Object(map) => Ok(Some(Layer::new(source, map))),
@@ -325,13 +396,25 @@ pub fn read_layer(path: &Path) -> Result<Option<Layer>, SettingsError> {
     }
 }
 
-fn parse_jsonc(path: &Path, text: &str) -> Result<Value, SettingsError> {
-    jsonc_parser::parse_to_serde_value(text, &jsonc_parser::ParseOptions::default())
-        .map(|v: Option<Value>| v.unwrap_or(Value::Null))
-        .map_err(|e| SettingsError::Parse {
+/// A file's text, or `None` where there is no file.
+fn read_text(path: &Path) -> Result<Option<String>, SettingsError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(SettingsError::Read {
             path: path.to_path_buf(),
-            message: e.to_string(),
-        })
+            source,
+        }),
+    }
+}
+
+fn object(path: &Path, value: Value) -> Result<Map<String, Value>, SettingsError> {
+    match value {
+        Value::Object(map) => Ok(map),
+        _ => Err(SettingsError::NotAnObject {
+            layer: path.display().to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -358,29 +441,70 @@ mod tests {
         let env = env(dir.path());
         let cwd = dir.path().join("project");
         write(
-            &env.config_dir.join("settings.json"),
-            "{ // user\n \"model\": \"user\" }",
+            &env.config_dir.join("settings.toml"),
+            "# user\nmodel = \"user\"\n",
         );
-        write(
-            &cwd.join(".bingo/settings.local.json"),
-            "{ \"model\": \"local\", }",
-        );
+        write(&cwd.join(".bingo/settings.local.toml"), "model = \"local\"\n");
         let extra = dir.path().join("extra.json");
         write(&extra, "{\"model\": \"extra\"}");
 
         let layers = load(&env, &cwd, Some(&extra)).unwrap();
         let models: Vec<_> = layers.iter().map(|l| l.value["model"].clone()).collect();
         assert_eq!(models, vec![json!("user"), json!("local"), json!("extra")]);
-        assert!(layers[0].source.ends_with("config/settings.json"));
+        assert!(layers[0].source.ends_with("config/settings.toml"));
+    }
+
+    /// ADR-0058 §1: JSON stays a format bingo reads, and the two spellings of
+    /// one layer are the same layer.
+    #[test]
+    fn a_layer_directory_with_no_toml_reads_the_json_that_stands_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        let cwd = dir.path().join("project");
+        write(
+            &env.config_dir.join("settings.json"),
+            "{ // user\n \"model\": \"user\", \"permissions\": { \"allow\": [\"Read\"] } }",
+        );
+        write(&cwd.join(".bingo/settings.local.json"), "{ \"model\": \"l\", }");
+
+        let read = load(&env, &cwd, None).unwrap();
+        assert_eq!(read[0].value["model"], json!("user"));
+        assert_eq!(read[0].value["permissions"]["allow"], json!(["Read"]));
+        assert_eq!(read[1].value["model"], json!("l"));
+
+        // The same layer, written in TOML, is the same layer.
+        write(
+            &env.config_dir.join("settings.toml"),
+            "model = \"user\"\n\n[permissions]\nallow = [\"Read\"]\n",
+        );
+        let now = load(&env, &cwd, None).unwrap();
+        assert_eq!(now[0].value, read[0].value, "the TOML says what the JSON did");
+        assert!(now[0].source.ends_with("settings.toml"), "and shadows it");
+    }
+
+    /// `--settings` is the file a person named, in the format they named it
+    /// in: it is read as JSONC and nothing moves it (ADR-0058 §2).
+    #[test]
+    fn an_explicit_settings_file_is_read_where_it_is_and_never_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        let extra = dir.path().join("mine.json");
+        write(&extra, "{ // mine\n \"model\": \"m\" }");
+
+        let layers = load(&env, dir.path(), Some(&extra)).unwrap();
+        assert_eq!(layers[0].value["model"], json!("m"));
+        assert!(extra.exists(), "still where it was");
+        assert!(!dir.path().join("mine.toml").exists());
+        assert!(!dir.path().join("mine.json.bak").exists());
     }
 
     #[test]
     fn remember_sets_its_keys_and_leaves_every_neighbour_where_it_was() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config").join("settings.json");
+        let path = dir.path().join("config").join("settings.toml");
         write(
             &path,
-            "{\n  \"model\": \"old\",\n  \"permissions\": { \"allow\": [\"Read\"] }\n}",
+            "# what answers\nmodel = \"old\"\n\n[permissions]\nallow = [\"Read\"]\n",
         );
 
         super::remember(
@@ -389,10 +513,53 @@ mod tests {
         )
         .unwrap();
 
-        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let after = read_layer(&path).unwrap().unwrap().value;
         assert_eq!(after["model"], json!("gpt-5"));
         assert_eq!(after["provider"], json!("openai"));
         assert_eq!(after["permissions"]["allow"], json!(["Read"]));
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("# what answers"),
+            "the comment a person wrote is still above the key it is about"
+        );
+    }
+
+    /// The round trip a command makes — read, change one key, write — must
+    /// find the JSON layer before it reads, or the TOML it writes would
+    /// shadow keys it never saw (ADR-0058 §2).
+    #[test]
+    fn a_write_into_a_layer_that_is_still_json_migrates_it_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("settings.json");
+        write(&json, "{ \"model\": \"old\", \"maxTokens\": 8192 }");
+
+        let toml = dir.path().join("settings.toml");
+        super::remember(&toml, &[("model", json!("new"))]).unwrap();
+
+        let after = read_layer(&toml).unwrap().unwrap().value;
+        assert_eq!(after["model"], json!("new"));
+        assert_eq!(
+            after["maxTokens"],
+            json!(8192),
+            "what the JSON said is in the TOML, not shadowed by it"
+        );
+        assert!(dir.path().join("settings.json.bak").exists());
+        assert!(!json.exists());
+    }
+
+    /// A layer that spells a `null` cannot cross, and a command that would
+    /// have written over it says so rather than losing the rest of the file.
+    #[test]
+    fn a_write_into_a_json_layer_that_spells_a_null_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("settings.json");
+        let before = "{ \"model\": \"m\", \"permissions\": { \"allow\": null } }";
+        write(&json, before);
+
+        let toml = dir.path().join("settings.toml");
+        let refused = super::remember(&toml, &[("model", json!("new"))]).unwrap_err();
+        assert!(refused.to_string().contains("permissions.allow"), "{refused}");
+        assert_eq!(std::fs::read_to_string(&json).unwrap(), before);
+        assert!(!toml.exists(), "and nothing was written over it");
     }
 
     #[test]
@@ -506,5 +673,21 @@ mod tests {
         write(&env.config_dir.join("settings.json"), "{ \"model\": ");
         let err = load(&env, dir.path(), None).unwrap_err();
         assert!(matches!(err, SettingsError::Parse { .. }), "{err}");
+    }
+
+    /// A TOML root is a table, so a layer is never anything but an object;
+    /// the only way it is not a layer is that it is not TOML at all.
+    #[test]
+    fn a_toml_layer_that_will_not_parse_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        write(&env.config_dir.join("settings.toml"), "model = ");
+        let err = load(&env, dir.path(), None).unwrap_err();
+        assert!(matches!(err, SettingsError::Parse { .. }), "{err}");
+
+        write(&env.config_dir.join("settings.toml"), "# nothing yet\n");
+        let layers = load(&env, dir.path(), None).unwrap();
+        assert_eq!(layers.len(), 1, "a file that exists is a layer");
+        assert!(layers[0].value.is_empty(), "one that happens to say nothing");
     }
 }
