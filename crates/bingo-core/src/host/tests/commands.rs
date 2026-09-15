@@ -484,7 +484,7 @@ async fn disable_writes_the_user_layer_and_the_next_start_opens_on_it() {
     assert_eq!(message(&ack), "test.provider is off at the next start.");
     let written = std::fs::read_to_string(settings::user_path(&env_in(home.path())))
         .expect("the user settings were written");
-    let document: Value = serde_json::from_str(&written).expect("plain JSON");
+    let document: Value = toml_edit::de::from_str(&written).expect("a settings layer");
     assert_eq!(
         document["enabledPlugins"],
         json!({ "test.provider": false })

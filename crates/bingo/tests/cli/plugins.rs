@@ -5,12 +5,11 @@
 use super::*;
 
 fn user_settings(home: &std::path::Path) -> std::path::PathBuf {
-    home.join(".bingo/settings.json")
+    home.join(".bingo/settings.toml")
 }
 
 fn settings_json(home: &std::path::Path) -> serde_json::Value {
-    let raw = std::fs::read_to_string(user_settings(home)).expect("the user settings");
-    serde_json::from_str(&raw).expect("json")
+    super::settings::read(&user_settings(home))
 }
 
 fn plugins(home: &std::path::Path) -> Command {

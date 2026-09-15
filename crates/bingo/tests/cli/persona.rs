@@ -4,11 +4,11 @@
 
 use super::*;
 
-/// A project that has written its own settings, at `.bingo/settings.json`.
+/// A project that has written its own settings, at `.bingo/settings.toml`.
 fn project(settings: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".bingo")).unwrap();
-    std::fs::write(dir.path().join(".bingo/settings.json"), settings).unwrap();
+    std::fs::write(dir.path().join(".bingo/settings.toml"), settings).unwrap();
     dir
 }
 
@@ -63,7 +63,7 @@ fn the_stance_sits_between_the_kernels_blocks_and_the_projects_own() {
 /// stance can take, and it fails the turn (ADR-0059 §1).
 #[test]
 fn a_projects_own_text_replaces_the_stance_entirely() {
-    let project = project(r#"{"persona": {"text": "You are Bingo the pirate."}}"#);
+    let project = project("[persona]\ntext = \"You are Bingo the pirate.\"\n");
     let script = script(
         r#"{"responses":[
             {"when":{"contains":"Never deviate silently"},
@@ -84,7 +84,7 @@ fn a_projects_own_text_replaces_the_stance_entirely() {
 /// not know, rather than leaving the shipped stance in force silently.
 #[test]
 fn a_typo_under_the_key_stops_the_run_and_names_the_field() {
-    let project = project(r#"{"persona": {"txet": "arr"}}"#);
+    let project = project("[persona]\ntxet = \"arr\"\n");
     let script = script(r#"{"responses":[{"steps":[{"text":"never asked"}]}]}"#);
     let out = run(bingo()
         .env("BINGO_FAKE_SCRIPT", script.path())
@@ -101,7 +101,7 @@ fn a_typo_under_the_key_stops_the_run_and_names_the_field() {
 /// carrying it cannot take.
 #[test]
 fn switched_off_the_stance_is_not_in_the_prompt() {
-    let project = project(r#"{"enabledPlugins": {"bingo.persona": false}}"#);
+    let project = project("[enabledPlugins]\n\"bingo.persona\" = false\n");
     let script = script(
         r#"{"responses":[
             {"when":{"contains":"Never deviate silently"},

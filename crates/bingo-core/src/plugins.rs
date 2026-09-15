@@ -134,12 +134,12 @@ mod tests {
         let env = env(home.path());
         let path = settings::user_path(&env);
         std::fs::create_dir_all(path.parent().expect("a directory")).expect("the directory");
-        std::fs::write(&path, json!({ "model": "m" }).to_string()).expect("the settings");
+        std::fs::write(&path, "model = \"m\"\n").expect("the settings");
 
         switch(&env, "bingo.tools.web", false).expect("the switch is written");
         switch(&env, "wordcount", true).expect("and so is the next one");
 
-        let document = settings::read_document(&path).expect("plain JSON");
+        let document = settings::read_document(&path).expect("a document");
         assert_eq!(document["model"], json!("m"), "a neighbour is untouched");
         assert_eq!(
             document[KEY],
@@ -147,7 +147,7 @@ mod tests {
         );
 
         switch(&env, "bingo.tools.web", true).expect("a switch flips back");
-        let document = settings::read_document(&path).expect("plain JSON");
+        let document = settings::read_document(&path).expect("a document");
         assert_eq!(
             document[KEY],
             json!({ "bingo.tools.web": true, "wordcount": true })
@@ -162,7 +162,7 @@ mod tests {
         let env = env(home.path());
         let path = settings::user_path(&env);
         std::fs::create_dir_all(path.parent().expect("a directory")).expect("the directory");
-        let before = json!({ KEY: ["bingo.tools.web"] }).to_string();
+        let before = format!("{KEY} = [\"bingo.tools.web\"]\n");
         std::fs::write(&path, &before).expect("the settings");
 
         let refused = switch(&env, "bingo.tools.web", false).expect_err("not an object");
