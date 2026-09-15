@@ -8,8 +8,10 @@ better one while investigating, it raises that first and says why, rather
 than going on down the person's line — the person may not have seen what
 the model has. ADR-0059 decides: one plugin, `bingo-persona`, one cacheable
 system block after the kernel's identity and before the project's
-instructions, no settings key (`enabledPlugins` is the switch, ADR-0057),
-and the kernel's identity untouched.
+instructions, one settings key `persona.text` that replaces the block with
+the person's own words (amended 2026-09-15: "人格插件可以配置覆盖人格"),
+`enabledPlugins` as the off switch (ADR-0057), and the kernel's identity
+untouched.
 
 ## Bricks, in build order
 
@@ -40,20 +42,29 @@ and the kernel's identity untouched.
    >   Raise the ones that change the result, the cost, or what is left
    >   afterwards.
 
-   `JudgementContributor`: id `persona:judgement`, `Placement::System { order: ORDER }`
-   with `ORDER = -20`, contributes one `ContextPiece::System(SystemBlock { text: TEXT, cache: true })`.
+   `JudgementContributor { text: String }`: id `persona:judgement`,
+   `Placement::System { order: ORDER }` with `ORDER = -20`, contributes one
+   `ContextPiece::System(SystemBlock { text, cache: true })`, or nothing
+   when the text is empty.
    Tests: the id and the placement; the block is cacheable; the text names
    the four moves (before, decide, never silently, small choices) by a
    phrase each.
-3. `src/lib.rs` — `MANIFEST { id: "bingo.persona", provides: ["context:persona:judgement"], requires: [], config: None }`,
-   `PersonaPlugin` registering the one contributor. Test: the manifest.
+3. `src/lib.rs` — `MANIFEST { id: "bingo.persona", provides: ["context:persona:judgement"], requires: [], config: Some(ConfigClaim { keys: [("persona", Merge::Replace)], schema }) }`;
+   `Settings { persona: Persona { text: Option<String> } }` with
+   `deny_unknown_fields` on `Persona` (the `experience` pattern);
+   `PersonaPlugin` reads the slice and builds `JudgementContributor::new(text)`:
+   `None` → the crate's `TEXT`, `Some(s)` → `s`, `Some("")` → the contributor
+   answers no piece. Tests: the manifest; each of the three readings; a
+   typo under `persona` fails `register` with a message naming the field.
 4. bin `main.rs` — `PersonaPlugin` pushed right after `ContextPlugin`.
 5. Black-box `tests/cli/persona.rs` — a fake-provider script whose response
    `when` matches a phrase of the block ("Never deviate silently"), so the
    run proves the block reached the model's request; and, if M97 has
    landed on `dev` by then, a second run with `enabledPlugins["bingo.persona"] = false`
    in `.bingo/settings.json` whose script matches only when the phrase is
-   absent — else leave that test for the merge.
+   absent — else leave that test for the merge. A third run seeds
+   `persona.text = "You are Bingo the pirate."` and matches that phrase,
+   and its script refuses the request if "Never deviate silently" is there.
 6. `docs/adr/0006-context-budget.md` unchanged: the block is a plugin's, as
    the ADR says plugins' blocks are.
 
@@ -74,7 +85,7 @@ and the kernel's identity untouched.
 
 ## Non-goals
 
-- A `/persona` command, a per-project text, a tone knob.
+- A `/persona` command, a file-path knob, a tone knob; a per-project text is the project layer's `persona.text`.
 - Rewording the kernel's identity block.
 
 ## Risks
