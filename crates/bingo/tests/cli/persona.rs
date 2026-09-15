@@ -29,6 +29,35 @@ fn the_stance_reaches_the_model_in_the_system_prompt() {
     assert_eq!(stdout(&out), "Heard.\n");
 }
 
+/// Where the block sits: after the kernel's own two blocks, before the words
+/// the project left. The request the fake provider matches on is the system
+/// prompt joined by newlines, so each seam is one needle.
+#[test]
+fn the_stance_sits_between_the_kernels_blocks_and_the_projects_own() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("AGENTS.md"), "be brief\n").unwrap();
+    for seam in ["</env>\n# Judgement", "left behind.\n# Instructions from "] {
+        let script = script(
+            &serde_json::json!({"responses":[
+                {"when":{"contains":seam},"steps":[{"text":"Seen."}]}
+            ]})
+            .to_string(),
+        );
+        let out = run(bingo()
+            .env("BINGO_FAKE_SCRIPT", script.path())
+            .args(["--print", "--provider", "fake", "--cwd"])
+            .arg(project.path())
+            .arg("hello"));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "no request carried {seam:?}: {}",
+            stderr(&out)
+        );
+        assert_eq!(stdout(&out), "Seen.\n");
+    }
+}
+
 /// The person's words replace the whole block rather than joining it: the
 /// first response is a trap that only a request still carrying the shipped
 /// stance can take, and it fails the turn (ADR-0059 §1).
