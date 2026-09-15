@@ -83,6 +83,14 @@
 # the stance is a `&'static str` and the contributor that hands it over, and
 # the one claimed key is `serde` and `schemars` as every other plugin's is —
 # all four already in the tree.
-max_dependencies = 336
+# M98 (docs/plans/M98-the-settings-file-keeps-its-comments.md, ADR-0058 §5)
+# raises 336 → 342 by the measured 6: `toml_edit` and the five it pulls —
+# `toml_parser` and `winnow` for the parse, `toml_writer` for the print,
+# `toml_datetime` and `serde_spanned` for the values serde hands back. The
+# settings layers are TOML now and a write into one keeps its comments, which
+# takes a document that is the reader too; the `toml` crate would have bought
+# a second copy of the same parser and was not taken. `winnow` resolves at two
+# majors, which deny.toml warns on and does not refuse.
+max_dependencies = 342
 max_core_check_seconds = 20
 max_target_gb = 5
