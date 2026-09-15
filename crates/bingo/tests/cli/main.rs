@@ -740,6 +740,7 @@ mod mentions;
 mod models;
 mod peers;
 mod persona;
+mod plugins;
 mod prefix;
 mod provider_add;
 mod rooms;
