@@ -29,6 +29,33 @@ fn the_stance_reaches_the_model_in_the_system_prompt() {
     assert_eq!(stdout(&out), "Heard.\n");
 }
 
+/// The plugin has something to say about itself, so it writes a page, and the
+/// page is one line of the prompt's `# Skills` listing (ADR-0054 §§1–2). The
+/// fake provider answers only a request carrying that line: no page, no
+/// answer, no run.
+#[test]
+fn the_page_this_plugin_wrote_is_listed_in_the_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"when":{"contains":"- guide-persona —"},"steps":[{"text":"listed"}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--provider", "fake", "--cwd"])
+        .arg(home.path())
+        .arg("hello")
+        .envs(home_env(home.path())));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "guide-persona is on no line of the prompt: {}",
+        stderr(&out)
+    );
+    assert_eq!(stdout(&out).trim(), "listed");
+}
+
 /// Where the block sits: after the kernel's own two blocks, before the words
 /// the project left. The request the fake provider matches on is the system
 /// prompt joined by newlines, so each seam is one needle.

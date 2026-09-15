@@ -8,7 +8,11 @@
 //! One contributor, one cacheable system block, and one setting: `persona.text`
 //! is the whole block in the person's own words. Turning the stance off
 //! altogether is `enabledPlugins["bingo.persona"] = false` (ADR-0057 §1).
+//!
+//! What it says about itself is [`guide`], read by the model as `guide-persona`
+//! (ADR-0054 §1).
 
+pub mod guide;
 mod judgement;
 
 #[cfg(test)]
@@ -30,7 +34,7 @@ pub(crate) static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.persona",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["context:persona:judgement"],
+    provides: &["context:persona:judgement", "service:bingo.persona.pages"],
     requires: &[],
     // One block, so one key: what it says. Whether it is said at all is the
     // plugin switch's, not a second `enabled` here (ADR-0059 §1).
@@ -41,7 +45,7 @@ pub(crate) static MANIFEST: PluginManifest = PluginManifest {
 };
 
 /// The top-level settings key this plugin claims.
-const SETTING: &str = "persona";
+pub(crate) const SETTING: &str = "persona";
 
 fn schema() -> schemars::Schema {
     schemars::schema_for!(Settings)
@@ -83,6 +87,7 @@ impl Plugin for PersonaPlugin {
         registrar.add(Contribution::Context(
             Arc::new(JudgementContributor::new(text)) as Arc<dyn ContextContributor>,
         ));
+        registrar.add(guide::contribution(registrar));
         Ok(())
     }
 }
@@ -127,7 +132,13 @@ mod tests {
     #[test]
     fn the_manifest_says_what_it_provides_and_claims_one_setting() {
         assert_eq!(MANIFEST.id, "bingo.persona");
-        assert_eq!(MANIFEST.provides, ["context:persona:judgement"]);
+        assert_eq!(
+            MANIFEST.provides,
+            [
+                "context:persona:judgement",
+                &format!("service:{}", bingo_sdk::Pages::key(MANIFEST.id)),
+            ]
+        );
         assert!(MANIFEST.requires.is_empty());
         assert_eq!(
             MANIFEST.config.map(|claim| claim.keys),
@@ -136,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn registering_contributes_the_one_block_the_manifest_promises() {
+    fn registering_contributes_the_block_and_the_page_the_manifest_promises() {
         let mut registrar = registrar(json!({}));
         PersonaPlugin
             .register(&mut registrar)
@@ -144,9 +155,16 @@ mod tests {
         let contributions = registrar.into_contributions();
         assert_eq!(contributions.len(), MANIFEST.provides.len());
         let Contribution::Context(contributor) = &contributions[0] else {
-            panic!("the one contribution is a contributor, got {contributions:?}");
+            panic!("the first contribution is the contributor, got {contributions:?}");
         };
         assert_eq!(contributor.id(), judgement::ID);
+        match &contributions[1] {
+            Contribution::Service { key, wire, .. } => {
+                assert_eq!(key, &bingo_sdk::Pages::key(MANIFEST.id));
+                assert!(wire.is_none(), "a page is read in process");
+            }
+            other => panic!("expected the page service, got {other:?}"),
+        }
     }
 
     /// The three readings of the one key: unwritten, written, and written
