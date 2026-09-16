@@ -64,15 +64,15 @@ this round. ADR-0061.
 
 ## Exit criteria
 
-- [ ] `elide_old_images` unit tests and the proptest pass; the note for
+- [x] `elide_old_images` unit tests and the proptest pass; the note for
       a 2 212 534-byte PNG at `/a/b.png` reads
       `[image elided: image/png 2.2 MB] [picture: /a/b.png]`.
-- [ ] Turn test: request 4 carries the note, requests 2–3 the image,
+- [x] Turn test: request 4 carries the note, requests 2–3 the image,
       `items` the image throughout.
-- [ ] `bingo --print` and the RPC frames are byte-identical for a session
+- [x] `bingo --print` and the RPC frames are byte-identical for a session
       with a picture (nothing user-visible changes; the existing
       black-box picture tests stay green).
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget: no
+- [x] every gate green (fmt, check, clippy, test, discipline, budget: no
       new dependency).
 
 ## Non-goals
@@ -94,3 +94,39 @@ this round. ADR-0061.
   projections compose (vision first), and the age rule finds nothing.
 - R-ACP: an endpoint that holds its own context (ADR-0055) reads only
   what it is newly sent; the projection is harmless there.
+
+## Verified (2026-09-16)
+
+- `cargo fmt --all -- --check`, `cargo check --workspace --all-targets
+  --locked`, `cargo clippy --workspace --all-targets --locked -D warnings`:
+  clean.
+- `cargo test -p bingo-core --locked`: 396 passed, 0 failed (387 before);
+  the 9 new are 7 in `context::elide::images::tests` (one a proptest) and
+  2 in `turn::tests::pictures`.
+- `cargo test --workspace --locked --no-fail-fast`: 4 838 passed, 0 failed,
+  2 ignored, twice in a row. Nothing flaked. The black-box picture tests
+  (`crates/bingo/tests/cli/images.rs`) and the RPC `Image` wire test are
+  among them and were not touched; no live `--print` byte diff was taken
+  beyond them.
+- `scripts/check_discipline.sh`: ok. `scripts/budget.sh`: ok — 342
+  dependencies, the same 342 as before.
+- `cargo check -p bingo-core --all-targets --locked --target
+  x86_64-pc-windows-msvc`: compiles. The note carries a path through
+  `Path::display`, which keeps the string it was given.
+
+Three things came out other than the plan said:
+
+- The counting in the second exit criterion is a round early for a picture
+  a tool returned: that picture first reaches the wire in request 2, so it
+  is whole in requests 2–4 and a note from request 5. A picture pasted at
+  the top of the prompt is whole in requests 1–3 and a note from request 4,
+  which is the criterion as written. Both are pinned as exact vectors in
+  `turn::tests::pictures`.
+- `size` reads the decoded bytes from `Image::decoded_len()` rather than
+  spelling `data.len() * 3 / 4` a second time; it is the same number, and
+  the padding the sdk subtracts is the more exact one. It also rounds
+  before it picks the unit, so 999 999 bytes reads `1.0 MB` and never
+  `1000.0 KB`.
+- The turn tests live in `crates/bingo-core/src/turn/tests/pictures.rs`,
+  beside `budget.rs` and the other test modules: `turn/tests.rs` was at 927
+  non-test lines and the discipline gate fails a file at 1 000.

@@ -44,3 +44,4 @@ first record; 0036 §2 answered it before it was named).
 - [0058 — Settings are TOML, and the file keeps its comments](0058-the-settings-file-keeps-its-comments.md)
 - [0059 — The agent has a view of its own](0059-the-agent-has-a-view-of-its-own.md)
 - [0060 — An agent ends where it began: by whoever started it](0060-an-agent-ends-where-it-began.md)
+- [0061 — The picture the model has seen](0061-the-picture-the-model-has-seen.md)

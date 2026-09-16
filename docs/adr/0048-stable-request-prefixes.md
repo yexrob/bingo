@@ -31,6 +31,9 @@ fold; its context therefore receives that actual request, not a second model fie
    remains private too, so old journals need no rewrite. Raw RPC retains the data.
 4. Normal requests do not elide old tool results. Full compaction retains its
    90% threshold and overflow recovery may still elide results on its retry.
+   *(2026-09-16, ADR-0061: one exception — a picture the model has answered
+   three times leaves the wire on a normal request too, because the megabytes
+   it replays every round cost more than the one prefix miss.)*
 5. OpenAI conversational requests derive `prompt_cache_key` from their session;
    side requests without a session invent no affinity. Explicit caller options
    retain precedence. Cache read, write and ordinary input counts stay disjoint.
