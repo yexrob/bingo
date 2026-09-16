@@ -62,11 +62,11 @@ ADR-0062 §3/§4; no new ADR (a plugin's tool argument, not a boundary).
 
 ## Exit criteria
 
-- [ ] `bytes::words` tests pass in the sdk; `images.rs` has no `size`
+- [x] `bytes::words` tests pass in the sdk; `images.rs` has no `size`
       of its own and its tests still pass.
-- [ ] The five `read.rs` tests above pass; the description names the
+- [x] The five `read.rs` tests above pass; the description names the
       flag and the caps from the constants.
-- [ ] Every gate green (fmt, check, clippy, test, discipline, budget: no
+- [x] Every gate green (fmt, check, clippy, test, discipline, budget: no
       new dependency); `cargo check -p bingo-sdk -p bingo-core
       --all-targets --target x86_64-pc-windows-msvc` compiles
       (`bingo-tool-fs` is under the ADR-0041 local limit).
@@ -89,3 +89,46 @@ ADR-0062 §3/§4; no new ADR (a plugin's tool argument, not a boundary).
 - R-words: the note is a text part inside a tool result; both providers
   already carry mixed image-and-text results (`text_of`, `blocks`), and
   the TUI draws the image and shows the words as today.
+
+## Verified (2026-09-16)
+
+- `cargo fmt --all -- --check`, `cargo check --workspace --all-targets
+  --locked` and `cargo clippy --workspace --all-targets --locked -- -D
+  warnings`: all clean.
+- `cargo test -p bingo-sdk -p bingo-core -p bingo-tool-fs --locked`:
+  86 + 395 + 82 = 563 passed, 0 failed. `bytes::words` is one test of
+  nine boundaries, `images.rs` has no `size` and its notes still read
+  `3.0 KB`, `1.0 KB` and `2.2 MB`.
+- `cargo test --workspace --locked --no-fail-fast` on the committed
+  tree: 4 861 passed, 0 failed, 2 ignored. Two earlier runs each flaked
+  one machine-bound test and neither is this change:
+  `bingo-auth-oauth`'s
+  `redirect::tests::the_named_port_is_taken_when_it_is_free_and_given_up_when_it_is_not`
+  wanted port 1455 and got 1456, a port another test process on this
+  box held (rerun alone: 1 passed); before that, one unnamed test of
+  `-p bingo --test cli` (that target rerun alone: 239 passed). Neither
+  touches a picture or a byte count.
+- `scripts/check_discipline.sh`: `discipline ok` (only the standing
+  plan-length warnings). `scripts/budget.sh`: `budget ok`, 342 unique
+  dependencies (max 342) — unchanged, no new dependency. `cargo check
+  -p bingo-sdk -p bingo-core --all-targets --locked --target
+  x86_64-pc-windows-msvc`: compiles.
+- The words a model actually gets, from a 700×700 noise PNG of
+  1 960 913 bytes: `[shown bounded: image/jpeg 782.4 KB; the file is
+  image/png 2.0 MB. Read it with original: true for the file as it
+  is]`. `original: true` on the same file answers with
+  `Image::from_bytes("image/png", &bytes).at(path)` and no words; on
+  the 6 251 793-byte one it is refused with `image too large:
+  6251793 bytes, the limit is 5242880`.
+- The description reads "bounded to what a model is sent (inside
+  2000×2000 pixels, under 1.0 MB); … `original: true` returns the file
+  as it is, up to 5.2 MB". **5.2 MB, not the plan's "5 MB"**:
+  `Image::MAX_BYTES` is 5 × 1024 × 1024, and the rule that the numbers
+  come from the constants through `bytes::words` outranks the plan's
+  round prose.
+- Six `read.rs` tests rather than the planned five: the plan's "a small
+  PNG is one image part and no words" is the existing
+  `an_image_comes_back_as_an_image_part`, which already reads a 40×30
+  PNG and a 220×220 noise PNG through a helper that fails on a second
+  part; `a_photograph_over_the_wire_cap_is_read_and_bounded` was kept
+  beside the new note test because it is ADR-0062 §4's own case.

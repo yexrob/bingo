@@ -69,4 +69,14 @@ a person hands in and every fetched one passes through `sniffed`,
 - A picture already in a journal is not rewritten; ADR-0061 takes it
   off the wire after three answers as before.
 
-Refs: ADR-0040, ADR-0041, ADR-0052, ADR-0061; Plan: M104
+- *2026-09-16, M105:* §3's "a model that reads the path with a tool
+  gets the file bounded the same way" gains "unless it asks with
+  `original: true`; the result says when it was bounded". A `Read`
+  whose rendering is not the file's own bytes carries one text part
+  after the picture naming the file's type and size, so a model that
+  needs the file knows there is one; `original: true` answers with the
+  file itself and meets only `Image::MAX_BYTES`, the cap §4 left
+  standing. `bingo_sdk::bytes::words` is the one spelling of a byte
+  count those words and ADR-0061's elision note both write.
+
+Refs: ADR-0040, ADR-0041, ADR-0052, ADR-0061; Plans: M104, M105
