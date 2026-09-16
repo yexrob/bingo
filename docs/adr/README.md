@@ -45,3 +45,4 @@ first record; 0036 §2 answered it before it was named).
 - [0059 — The agent has a view of its own](0059-the-agent-has-a-view-of-its-own.md)
 - [0060 — An agent ends where it began: by whoever started it](0060-an-agent-ends-where-it-began.md)
 - [0061 — The picture the model has seen](0061-the-picture-the-model-has-seen.md)
+- [0062 — The picture a model is sent](0062-the-picture-a-model-is-sent.md)

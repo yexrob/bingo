@@ -72,14 +72,14 @@ producers that bypassed them. ADR-0062.
 
 ## Exit criteria
 
-- [ ] `bounded` unit tests pass, including the byte-identical, the
+- [x] `bounded` unit tests pass, including the byte-identical, the
       aspect, the JPEG fallback, the alpha, the idempotence and the
       `TooBig` cases.
-- [ ] The `blender_demo` PNG (`~/tmp/blender_demo/assets/
+- [x] The `blender_demo` PNG (`~/tmp/blender_demo/assets/
       voxel_village_reference.png`, 2 212 534 bytes, 1312×1199) through
       `bounded` is `image/jpeg` under 1 MB; pasted into the plan's
       Verified section with the size.
-- [ ] `Read` on that file returns the bounded picture; a 200 KB PNG
+- [x] `Read` on that file returns the bounded picture; a 200 KB PNG
       returns the file's own bytes.
 - [ ] `scripts/budget.sh` unchanged (no new crate); `check_discipline`
       ok; every gate green; `cargo check -p bingo-pictures -p
@@ -107,3 +107,44 @@ producers that bypassed them. ADR-0062.
   bounded copy. The TUI viewer opens the file.
 - R-gif: an animated GIF loses its frames after the first; the table's
   `image/gif` is kept only when the picture is untouched.
+
+## Verified (2026-09-16)
+
+- `cargo fmt --all -- --check`, `cargo check --workspace --all-targets
+  --locked` and `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`: all clean.
+- `cargo test -p bingo-pictures -p bingo-tool-fs -p bingo-mcp --locked`:
+  257 passed, 0 failed. `cargo test --workspace --locked
+  --no-fail-fast`: 4856 passed, 0 failed, 2 ignored (already so). No
+  flake, first run.
+- `bounded` unit tests: 9, all of the cases above, 1.9 s. The ladder is
+  walked whole through `bounded_within` against a small box and budget:
+  a 12 MP picture in a debug build is seconds, and a test that spends
+  seconds pins the machine it was written on.
+- The `blender_demo` PNG, 2 212 534 bytes of 1312×1199, through
+  `bounded`: **`image/jpeg`, 393 775 bytes** — inside the box already,
+  so no resize, and the first JPEG quality fit. 48 ms in release,
+  1.07 s in debug. `Read` on the same file answers with the same
+  picture (a throwaway `#[ignore]` test, run once and removed); a
+  200 KB PNG comes back as the file's own bytes.
+- `scripts/check_discipline.sh`: `discipline ok`, no new function over
+  60 lines. `scripts/budget.sh`: `budget ok`, 342 unique dependencies
+  (max 342) — unchanged; `Cargo.lock` gains two lines, no package.
+- **Not verified: the Windows cross-check.** `cargo check -p
+  bingo-pictures -p bingo-tool-fs -p bingo-mcp --all-targets --target
+  x86_64-pc-windows-msvc` fails on this machine in `aws-lc-sys`'s build
+  script (`fatal error: 'windows.h' file not found`) — the ADR-0041
+  2026-09-04 note's problem, `reqwest` under `bingo-pictures`. It was
+  already so for `bingo-pictures` and `bingo-mcp`; `bingo-tool-fs`
+  joins them, having compiled for the target before this change. The
+  target is installed and `bingo-sdk` compiles for it; CI's `windows`
+  job is the backstop. Nothing here is platform-shaped: no path,
+  process, signal or clock is touched.
+- Two behaviours changed beyond the plan, both because a door that
+  bounds must decode: a stream-json `image` block whose base64 is not a
+  picture is refused by name at the door, and `Read` on a `.png` no
+  decoder reads says so instead of journaling it. Three tests that
+  handed over `"/9j/"` or `"iVBOR"` now hand over drawn pictures.
+- Left standing, out of scope: `bingo-tool-web`'s `body::render` and
+  `bingo-surface-print`'s `parse_line` call a bounding door from the
+  runtime's own threads, where ADR-0062 would want `spawn_blocking`.

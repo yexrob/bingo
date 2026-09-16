@@ -53,4 +53,14 @@ words, and the journal would hold the bytes and the words apart.
 - A deleted pasted file breaks a tool call that names it, not the
   turn: the journal still has the bytes and the transcript still draws.
 
-Refs: ADR-0040, ADR-0041, ADR-0051; Plan: M87
+- *2026-09-16, M104:* §2's "the bytes are the picture, the path is
+  where the same bytes are" becomes "the file is what was handed over,
+  the data is what the model was shown" (ADR-0062 §3). A picture too
+  large for the wire is journaled as its bounded rendering while
+  `path` still names the file a person or a tool gave, so a click
+  opens the original and a model that reads the path with a tool gets
+  it bounded the same way. The hash that named the file is the
+  original's, which is what a second paste of the same picture must
+  still land on.
+
+Refs: ADR-0040, ADR-0041, ADR-0051; Plans: M87, M104

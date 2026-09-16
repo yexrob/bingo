@@ -76,4 +76,16 @@ the sixel quantiser; `image` alone with ten decoders measures +20.
   the header for the frame that has to measure a picture, `fitted` off
   a thread for the pixels a rectangle of cells holds. No frame decodes.
 
-Refs: ADR-0040, ADR-0001 (library tier), M11e; Plans: M46, M47, M61
+- *2026-09-16, M104:* §2 bounds a size as well as a type. The journal
+  keeps what a provider accepts *and* what it is worth sending: every
+  door — `sniffed`, `accepted`, `load` — answers through
+  `bounded`, a 2000×2000 box and 1 MB of encoded bytes (ADR-0062). A
+  picture already inside both is still the bytes that came in, so §2's
+  pass-through holds wherever it mattered. `bingo-tool-fs` and
+  `bingo-mcp` gain the edge to this crate that ADR-0012 §1 allows, and
+  with it the `reqwest` under it: the local Windows cross-check no
+  longer runs for either, as it already did not for `bingo-pictures`
+  and `bingo-surface-tui` (the 2026-09-04 note above). CI's `windows`
+  job is the backstop for the fs plugin now too.
+
+Refs: ADR-0040, ADR-0001 (library tier), M11e; Plans: M46, M47, M61, M104
