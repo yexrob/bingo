@@ -67,8 +67,10 @@ this round. ADR-0061.
 - [x] `elide_old_images` unit tests and the proptest pass; the note for
       a 2 212 534-byte PNG at `/a/b.png` reads
       `[image elided: image/png 2.2 MB] [picture: /a/b.png]`.
-- [x] Turn test: request 4 carries the note, requests 2–3 the image,
-      `items` the image throughout.
+- [x] Turn test: a picture the model has answered three times is a note
+      on the next request and whole on the three before (a tool's picture:
+      whole in requests 2–4, the note from 5; a pasted one: whole in 1–3,
+      the note from 4); `items` keep the image throughout.
 - [x] `bingo --print` and the RPC frames are byte-identical for a session
       with a picture (nothing user-visible changes; the existing
       black-box picture tests stay green).
