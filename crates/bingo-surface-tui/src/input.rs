@@ -24,7 +24,7 @@ use crate::rail::{self, CardId, Pin};
 use crate::rewind::{self, Rewind};
 use crate::search::Search;
 use crate::tree::Tree;
-use crate::ui::{Open, Pending, Ui};
+use crate::ui::{Menu, Open, Pending, Ui};
 use crate::{panel, permission, views};
 
 mod switcher;
@@ -860,10 +860,16 @@ fn walk_forward(ui: &mut Ui) {
     recall(ui, newer);
 }
 
+/// A recalled line is not typed: the dropdown stays closed over it, so the
+/// next `↑` walks on past a `/…` line and `enter` runs it as it was, and
+/// typing opens the dropdown again as after `esc`.
 fn recall(ui: &mut Ui, recalled: Option<String>) {
     if let Some(text) = recalled {
         ui.composer.set(&text);
-        ui.menu = Default::default();
+        ui.menu = Menu {
+            selected: 0,
+            dismissed: true,
+        };
     }
 }
 
@@ -1665,6 +1671,33 @@ mod tests {
         assert_eq!(ui.composer.text(), "second");
         press(&mut ui, &state(), key(KeyCode::Down), now);
         assert_eq!(ui.composer.text(), "", "and back to the draft");
+    }
+
+    /// A recalled `/…` line is not typed, so the dropdown does not open over
+    /// it and take the arrows: `↑` walks on past it, and `enter` runs it as
+    /// it was rather than completing it to a row.
+    #[test]
+    fn the_walk_goes_on_past_a_recalled_command_and_enter_runs_it() {
+        let (mut ui, now) = scene();
+        line(&mut ui, &state(), "first", now);
+        line(&mut ui, &state(), "/help", now);
+        press(&mut ui, &state(), key(KeyCode::Up), now);
+        assert_eq!(ui.composer.text(), "/help");
+        assert!(ui.menu.dismissed, "the dropdown stays closed over a recall");
+        press(&mut ui, &state(), key(KeyCode::Up), now);
+        assert_eq!(ui.composer.text(), "first", "the walk went on");
+        press(&mut ui, &state(), key(KeyCode::Down), now);
+        assert_eq!(ui.composer.text(), "/help");
+        press(&mut ui, &state(), key(KeyCode::Enter), now);
+        assert_eq!(
+            ui.composer.text(),
+            "",
+            "enter ran the recalled line; a completion would have left it"
+        );
+        assert!(
+            !ui.layer.is(&Open::Help),
+            "and /help toggled its sheet off again, as a run does"
+        );
     }
 
     #[test]
