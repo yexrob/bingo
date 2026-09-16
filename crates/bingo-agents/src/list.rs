@@ -13,15 +13,21 @@ use serde_json::Value;
 
 use crate::names;
 
-/// The columns a roster has, wherever it is shown.
-pub const HEADERS: [&str; 3] = ["agent", "session", "state"];
+/// The columns a roster has, wherever it is shown: what the session's own
+/// summary carries, and nothing counted here (ADR-0060 §4).
+pub const HEADERS: [&str; 6] = ["agent", "session", "state", "model", "messages", "tokens"];
+
+/// The column for a fact the summary has not got: a model never resolved, a
+/// message count never taken.
+const NONE: &str = "-";
 
 const DESCRIPTION: &str = "\
 List the agents you can write to: the ones you started, and — listed apart, \
 under `Beside you` — the ones started alongside you by the same agent. Each \
-row is a name, a session and whether it is working or idle. Use it before \
-writing to one whose name you are unsure of, or to see whether the ones you \
-started are still running.";
+row is a name, a session, whether it is working or idle, the model it runs \
+on, how many messages it has said and the tokens it has spent. Use it \
+before writing to one whose name you are unsure of, to see whether the ones \
+you started are still running, or to see what each has cost.";
 
 /// What the agents the caller did not start are gathered under, in the
 /// listing and in the tree beside it (ADR-0024 §3).
@@ -32,13 +38,23 @@ const BESIDE: &str = "Beside you";
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ListArgs {}
 
-/// One agent as a row: its name, its session and whether it is working.
+/// One agent as a row: its name, its session, whether it is working, and
+/// what the summary says of its model, its messages and its spend.
 pub fn row(child: &SessionSummary) -> Vec<String> {
     vec![
         names::name_of(child).to_string(),
         child.id.to_string(),
         state(child).to_string(),
+        child.model.clone().unwrap_or_else(|| NONE.into()),
+        child.messages.map_or(NONE.into(), |n| n.to_string()),
+        tokens(child).to_string(),
     ]
+}
+
+/// Every token the session has been billed for: what it read, cached or
+/// not, and what it wrote.
+fn tokens(child: &SessionSummary) -> u64 {
+    child.usage.input_total() + child.usage.output_tokens
 }
 
 pub fn rows(children: &[SessionSummary]) -> Vec<Vec<String>> {
@@ -273,6 +289,24 @@ mod tests {
             answered(&fleet, &root).await.display,
             None,
             "the words are the whole answer"
+        );
+    }
+
+    #[test]
+    fn a_row_carries_what_the_summary_carries_and_a_dash_for_what_it_lacks() {
+        let mut child = crate::tests::summary("ses_child", Some("reviewer"), None);
+        assert_eq!(
+            row(&child),
+            ["reviewer", "ses_child", "idle", NONE, NONE, "0"]
+        );
+        child.model = Some("fake-2".into());
+        child.messages = Some(3);
+        child.usage.input_tokens = 100;
+        child.usage.cache_read_tokens = 50;
+        child.usage.output_tokens = 7;
+        assert_eq!(
+            row(&child),
+            ["reviewer", "ses_child", "idle", "fake-2", "3", "157"]
         );
     }
 

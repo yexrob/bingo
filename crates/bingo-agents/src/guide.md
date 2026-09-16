@@ -25,9 +25,12 @@ level) and `tools` staff it, and two words decide what becomes of its answer.
   would wait forever.
 
 A name is one word, no slashes, never `parent` and never starting with `#`; a
-name a sibling holds gets `-2`, `-3`. A child is never offered `SpawnAgent`
-(the depth limit is one) or `AskUserQuestion` (there is nobody to ask); it
-inherits every other tool this session has unless `tools` says otherwise.
+name a sibling holds gets `-2`, `-3` — unless the call says `reopen: true`,
+which hands the prompt to the agent of that name you already started, with
+its memory, under the same three arms; its staffing stays as it was made.
+A child is never offered `SpawnAgent` (the depth limit is one) or
+`AskUserQuestion` (there is nobody to ask); it inherits every other tool
+this session has unless `tools` says otherwise.
 
 ## Working with several
 
@@ -64,7 +67,9 @@ the draft is still in your own bounced call, so repeating it costs nothing.
 
 `ListAgents` names who you can write to: the ones you started, and — under
 `Beside you` — the ones the same agent started alongside you. Each row is an
-`agent`, a `session` and a `state`, `busy` or `idle`.
+`agent`, a `session`, a `state` (`busy` or `idle`), the `model` it runs on,
+the `messages` it has said and the `tokens` it has spent; `-` is a fact the
+session has not got yet.
 
 `ListModels` lists the providers this build has, whether each is signed in,
 and the models it serves with their context window, output cap and whether
@@ -76,6 +81,28 @@ staffing an agent on a `provider` or `model` you are unsure of.
 `SetThinking` moves how hard a session thinks — this one, or a sub-agent named
 with `agent`. It lands on the next turn and never inside the one running now,
 so set your own level before the work you want it for.
+
+## Ending one
+
+An agent ends where it began: by whoever started it. An agent beside you is
+not yours to end.
+
+- `StopAgent` ends the turn an agent of yours is running, every call in
+  flight dropped where it stands, and returns once the turn has ended,
+  saying how. The agent stays, idle and with its memory; a message opens
+  its next turn. One that is already idle is refused: there is nothing to
+  stop. A spawn that was waiting on it hears the cut turn as it would one a
+  person cut with `esc`.
+- `DismissAgent` deletes an idle agent of yours — its session, journal and
+  all — and frees the name. One still working is refused: stop it first, or
+  wait. A room that seated it keeps the name on its roster and skips it; a
+  role `.bingo/team.json` declares is seated afresh, empty, at the next
+  open. It is the one tool here that destroys anything, and the gate asks
+  before it runs. To keep an agent for later, leave it: an idle agent costs
+  nothing.
+
+`/agents stop <name>` and `/agents dismiss <name>` are the person's
+spelling of the same two verbs, for the agents of their own session.
 
 ## What a child is told
 
@@ -105,6 +132,6 @@ role keeps its memory across a resumed root, and creating one opens no turn.
 A `norms` file, or `team-norms.md` beside the team file, is prepended to every
 role's system prompt. The file's `rooms` key belongs to rooms.
 
-`/agents` is the roster of this session, `/team` what the project declared and
-which roles are seated. In the composer, `@name rest` sends that line to the
+`/agents` is the roster of this session (and `/agents stop|dismiss <name>`
+ends one), `/team` what the project declared and which roles are seated. In the composer, `@name rest` sends that line to the
 child of that name instead of to the session it was typed in.

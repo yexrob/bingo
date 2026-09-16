@@ -12,11 +12,11 @@ use bingo_sdk::{
     Activation, Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogEntry,
     CatalogKind, ClientIdentity, CloseReason, CommandContext, Delivery, Driver, Env, ErrorCode,
     Event, Frame, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HookContext, HostApi,
-    HostHandle, Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody,
-    ItemId, ItemStatus, KernelError, OpenOptions, ParentLink, Prompter, Seq, SessionChange,
-    SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec,
-    SessionState, SessionSummary, ToolContext, ToolHost, ToolOutput, TurnId, TurnOrigin,
-    TurnStatus, Usage,
+    HostHandle, Input, IntentId, IntentOutcome, InteractionId, InteractionKind, InterruptReason,
+    InterruptScope, Item, ItemBody, ItemId, ItemStatus, KernelError, OpenOptions, ParentLink,
+    Prompter, Seq, SessionChange, SessionFilter, SessionHandle, SessionId, SessionPort,
+    SessionSelector, SessionSpec, SessionState, SessionSummary, ToolContext, ToolHost, ToolOutput,
+    TurnId, TurnOrigin, TurnStatus, Usage,
 };
 use futures::StreamExt;
 use jiff::Timestamp;
@@ -118,6 +118,9 @@ struct Inner {
     locked: Mutex<Vec<String>>,
     /// The knobs a tool asked the host to move, and whose.
     reconfigured: Mutex<Vec<(SessionId, SessionChange)>>,
+    /// The sessions a tool deleted, and the turns it interrupted.
+    deleted: Mutex<Vec<SessionId>>,
+    interrupted: Mutex<Vec<(SessionId, InterruptScope)>>,
 }
 
 fn locked<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -181,6 +184,14 @@ impl Fleet {
 
     pub(crate) fn reconfigured(&self) -> Vec<(SessionId, SessionChange)> {
         locked(&self.0.reconfigured).clone()
+    }
+
+    pub(crate) fn deleted(&self) -> Vec<SessionId> {
+        locked(&self.0.deleted).clone()
+    }
+
+    pub(crate) fn interrupted(&self) -> Vec<(SessionId, InterruptScope)> {
+        locked(&self.0.interrupted).clone()
     }
 
     /// A key another session already holds, as the kernel reports it.
@@ -371,7 +382,10 @@ impl HostApi for Fleet {
             session: id.clone(),
             snapshot,
             events: self.frames(&id),
-            handle: SessionHandle(Arc::new(Deaf)),
+            handle: SessionHandle(Arc::new(Port {
+                fleet: self.clone(),
+                session: id,
+            })),
         })
     }
 
@@ -379,8 +393,20 @@ impl HostApi for Fleet {
         unreachable!("this plugin closes no session")
     }
 
-    async fn delete(&self, _session: &SessionId) -> Result<(), KernelError> {
-        unreachable!("this plugin deletes no session")
+    /// The session is gone from the list, as the kernel's is; one the fleet
+    /// never had is refused, as the kernel refuses it.
+    async fn delete(&self, session: &SessionId) -> Result<(), KernelError> {
+        let mut sessions = self.sessions();
+        let Some(at) = sessions.iter().position(|l| &l.summary.id == session) else {
+            return Err(KernelError::new(
+                ErrorCode::SessionNotFound,
+                "no such session",
+            ));
+        };
+        sessions.remove(at);
+        drop(sessions);
+        locked(&self.0.deleted).push(session.clone());
+        Ok(())
     }
 
     async fn deliver(
@@ -457,18 +483,22 @@ impl HostApi for Fleet {
     }
 }
 
-/// A handle nothing is written to: this plugin talks to a child through
-/// `deliver`, never through a client port.
-struct Deaf;
+/// A handle nothing is submitted to — this plugin talks to a child through
+/// `deliver` — that writes down the one thing a tool here does through it:
+/// an interrupt, and whose.
+struct Port {
+    fleet: Fleet,
+    session: SessionId,
+}
 
 #[async_trait]
-impl SessionPort for Deaf {
+impl SessionPort for Port {
     fn submit(&self, _intent: IntentId, _input: Input) {
         unreachable!("an agent is never submitted to as a client")
     }
 
-    fn interrupt(&self, _intent: IntentId, _scope: InterruptScope) {
-        unreachable!("this plugin interrupts nothing")
+    fn interrupt(&self, _intent: IntentId, scope: InterruptScope) {
+        locked(&self.fleet.0.interrupted).push((self.session.clone(), scope));
     }
 
     fn answer(
@@ -693,5 +723,26 @@ pub(crate) fn turn_failed(message: &str) -> Event {
             error: KernelError::new(ErrorCode::AuthRequired, message),
         },
         usage: Usage::default(),
+    }
+}
+
+/// A turn cut short, as one an interrupt reached ends.
+pub(crate) fn turn_interrupted() -> Event {
+    Event::TurnCompleted {
+        turn: TurnId::from_raw(TURN),
+        status: TurnStatus::Interrupted {
+            reason: InterruptReason::UserCancel,
+        },
+        usage: Usage::default(),
+    }
+}
+
+/// The kernel's answer to an interrupt that found no turn running.
+pub(crate) fn interrupt_rejected(intent: &IntentId) -> Event {
+    Event::IntentAck {
+        intent: intent.clone(),
+        outcome: IntentOutcome::Rejected {
+            error: KernelError::new(ErrorCode::NotReady, "no turn is running"),
+        },
     }
 }

@@ -145,6 +145,30 @@ pub async fn child(
     named(&children, name).ok_or_else(|| unknown(name, &children, &[]))
 }
 
+/// A child of the caller by name, for a verb only whoever started an agent
+/// may use on it (ADR-0060). A teammate beside the caller answers to the
+/// same address but is not the caller's to end, so its name is refused with
+/// the reason rather than with "nothing is called".
+pub async fn mine(
+    host: &HostHandle,
+    caller: &SessionId,
+    name: &str,
+) -> Result<SessionSummary, KernelError> {
+    let name = addressed(name);
+    let children = children(host, caller).await?;
+    if let Some(child) = named(&children, name) {
+        return Ok(child);
+    }
+    let beside = siblings(host, caller).await?;
+    if named(&beside, name).is_some() {
+        return Err(KernelError::new(
+            ErrorCode::PermissionDenied,
+            format!("{name} is beside you, not yours: the session that started it ends it"),
+        ));
+    }
+    Err(unknown(name, &children, &beside))
+}
+
 /// The caller's teammates: the other model-driven children of the session
 /// that spawned it. A room answers nobody and a caller is not beside itself,
 /// so neither is here; a session with no parent has no teammates at all.
@@ -379,6 +403,31 @@ mod tests {
             Vec::new(),
             "a session with no parent has no teammates"
         );
+    }
+
+    #[tokio::test]
+    async fn mine_is_an_own_child_and_a_teammate_is_refused_with_the_reason() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let builder = fleet.child(&root, "builder");
+        let reviewer = fleet.child(&root, "reviewer");
+        let helper = fleet.child(&builder, "helper");
+        let host = fleet.handle();
+
+        assert_eq!(mine(&host, &builder, "helper").await.unwrap().id, helper);
+        assert_eq!(mine(&host, &builder, "@helper").await.unwrap().id, helper);
+        assert_eq!(mine(&host, &root, "reviewer").await.unwrap().id, reviewer);
+
+        let error = mine(&host, &builder, "reviewer")
+            .await
+            .expect_err("a teammate is not the caller's");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert!(error.message.contains("beside you, not yours"), "{error}");
+
+        let error = mine(&host, &builder, "nobody")
+            .await
+            .expect_err("no such agent");
+        assert!(error.message.contains("you started: helper"), "{error}");
     }
 
     #[tokio::test]

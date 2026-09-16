@@ -4,29 +4,37 @@
 //! a roster is `sessions{parent}`, and `@name` is a submit hook that
 //! redirects.
 //!
-//! Five tools, two hooks, two commands:
+//! Seven tools, two hooks, two commands:
 //!
 //! - `SpawnAgent` mints a child under the calling tool item and delivers the
 //!   prompt. In the foreground it waits for the child's final text; in the
 //!   background it returns the name and leaves a watcher to wake the parent.
+//!   With `reopen` it hands the prompt to the child of that name instead.
 //! - `SendMessage` wakes an agent — a child, a teammate beside the caller, or
 //!   `parent` — or posts into a room's journal, `ListAgents` reads the
 //!   tree, `ListModels` reads the model catalogue,
 //!   `SetThinking` moves how hard this session or a child thinks.
+//! - `StopAgent` ends a child's running turn and `DismissAgent` deletes an
+//!   idle one: an agent ends where it began, by whoever started it
+//!   (ADR-0060).
 //! - `@name rest` in the composer reaches the child of that name.
 //! - A root session opening in a project with a `.bingo/team.json` seats the
 //!   roles it declares, as children of itself.
-//! - `/agents` shows the roster a person needs; `/team` what was declared.
+//! - `/agents` shows the roster a person needs, and `/agents stop|dismiss
+//!   <name>` is the person's spelling of the two verbs; `/team` what was
+//!   declared.
 //! - `agents.team` is the one door onto `.bingo/team.json` for the plugins
 //!   that own its other keys: this plugin parses the file, and nobody else
 //!   knows where it is (ADR-0031).
 //!
-//! Every tool is declared read-only and trusted: none of them reads or writes
-//! anything outside the process, and what a child then does is gated in the
-//! child, against the child's own directory and rules.
+//! Every tool but one is declared read-only and trusted: none of them reads
+//! or writes anything outside the process, and what a child then does is
+//! gated in the child, against the child's own directory and rules. The one
+//! is `DismissAgent`, which deletes a journal on disk and says so.
 
 mod command;
 mod definition;
+mod dismiss;
 pub mod guide;
 mod hook;
 mod layers;
@@ -39,6 +47,7 @@ mod note;
 mod rooms;
 mod serial;
 mod spawn;
+mod stop;
 mod team;
 mod thinking;
 mod watch;
@@ -53,12 +62,14 @@ use bingo_sdk::{
 
 pub use command::AgentsCommand;
 pub use definition::Definition;
+pub use dismiss::DismissAgentTool;
 pub use hook::AtNameHook;
 pub use list::ListAgentsTool;
 pub use message::MessageTool;
 pub use models::ListModelsTool;
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
+pub use stop::StopAgentTool;
 pub use team::{SeatHook, TEAM, TeamCommand, TeamFile};
 pub use thinking::SetThinkingTool;
 
@@ -72,6 +83,8 @@ static MANIFEST: PluginManifest = PluginManifest {
         "tool:ListAgents",
         "tool:ListModels",
         "tool:SetThinking",
+        "tool:StopAgent",
+        "tool:DismissAgent",
         "hook:agents",
         "hook:team",
         "command:agents",
@@ -102,11 +115,12 @@ fn team_file() -> Contribution {
     }
 }
 
-/// What every tool here is. They read the session tree and post into a
-/// queue: nothing outside the process changes, and a child's own calls are
+/// What every tool here is but one. They read the session tree and post into
+/// a queue: nothing outside the process changes, and a child's own calls are
 /// gated in the child, so trusting these traits costs a person nothing.
 /// None is concurrency-safe — a spawn and a message that raced would agree on
-/// neither a name nor an order.
+/// neither a name nor an order. `DismissAgent` starts from these and takes
+/// back `read_only`: it is the one that deletes.
 pub(crate) fn traits() -> ToolTraits {
     ToolTraits {
         read_only: true,
@@ -116,7 +130,7 @@ pub(crate) fn traits() -> ToolTraits {
     }
 }
 
-/// Registers the six tools, the `@name` hook and `/agents`. Nothing here
+/// Registers the seven tools, the two hooks and the two commands. Nothing here
 /// holds the host: a tool reads it from its call, a hook from its context.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentsPlugin;
@@ -133,6 +147,8 @@ impl Plugin for AgentsPlugin {
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListModelsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(SetThinkingTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(StopAgentTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(DismissAgentTool) as Arc<dyn Tool>);
         registrar.add(Contribution::Hook(Arc::new(AtNameHook) as Arc<dyn Hook>));
         registrar.add(Contribution::Hook(
             Arc::new(SeatHook::new(registrar.env().clone())) as Arc<dyn Hook>,
@@ -177,6 +193,8 @@ mod plugin_tests {
                 "tool:ListAgents",
                 "tool:ListModels",
                 "tool:SetThinking",
+                "tool:StopAgent",
+                "tool:DismissAgent",
                 "hook:agents",
                 "hook:team",
                 "command:agents",
@@ -209,7 +227,9 @@ mod plugin_tests {
                 "SendMessage",
                 "ListAgents",
                 "ListModels",
-                "SetThinking"
+                "SetThinking",
+                "StopAgent",
+                "DismissAgent",
             ]
         );
         let hooks: Vec<String> = contributions
@@ -244,9 +264,21 @@ mod plugin_tests {
     }
 
     #[test]
-    fn every_tool_is_read_only_trusted_and_alone() {
+    fn every_tool_is_read_only_trusted_and_alone_but_the_one_that_deletes() {
         let traits = traits();
         assert!(traits.read_only && traits.trusted);
         assert!(!traits.concurrency_safe && !traits.destructive && !traits.edit);
+        let mut registrar = registrar();
+        AgentsPlugin.register(&mut registrar).expect("register");
+        for contribution in registrar.into_contributions() {
+            let Contribution::Tool(tool) = contribution else {
+                continue;
+            };
+            let traits = tool.traits(&serde_json::Value::Null);
+            let deletes = tool.spec().name == "DismissAgent";
+            assert_eq!(traits.destructive, deletes, "{}", tool.spec().name);
+            assert_eq!(traits.read_only, !deletes, "{}", tool.spec().name);
+            assert!(traits.trusted, "{}", tool.spec().name);
+        }
     }
 }

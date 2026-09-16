@@ -11,9 +11,9 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Attachment, CatalogKind, Delivery, Effort, ErrorCode, HostHandle, Input, IntentId, KernelError,
-    OpenOptions, ParentLink, SessionId, SessionSelector, SessionSpec, Subject, Tool, ToolContext,
-    ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
+    Attachment, CatalogKind, Delivery, Driver, Effort, ErrorCode, HostHandle, Input, IntentId,
+    KernelError, OpenOptions, ParentLink, SessionId, SessionSelector, SessionSpec, SessionSummary,
+    Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -84,11 +84,19 @@ pub struct SpawnArgs {
     /// default.
     #[schemars(schema_with = "thinking::maybe_word_schema")]
     pub thinking: Option<String>,
+    /// Hand the prompt to the agent of this name you already started, with
+    /// its memory, instead of starting `name-2`. Its staffing stays as it
+    /// was made. Without such an agent this is an ordinary spawn.
+    pub reopen: Option<bool>,
 }
 
 impl SpawnArgs {
     fn background(&self) -> bool {
         self.background.unwrap_or(true)
+    }
+
+    fn reopen(&self) -> bool {
+        self.reopen.unwrap_or(false)
     }
 
     fn standby(&self) -> bool {
@@ -293,8 +301,16 @@ impl SpawnAgentTool {
         let definitions = library::load(&cx.env, &cx.cwd);
         let definition = pick(args.agent.as_deref(), &definitions).map_err(ToolError::Failed)?;
         let plan = Plan::of(args, definition, host).await.map_err(failed)?;
-        let taken = names::names_of(&names::children(host, &cx.session).await.map_err(failed)?);
-        let (name, attachment) = start(&plan, taken, cx).await.map_err(failed)?;
+        let children = names::children(host, &cx.session).await.map_err(failed)?;
+        let (name, attachment) = match standing(args, &plan, &children) {
+            Some(child) => (
+                names::name_of(&child).to_string(),
+                watch::follow(host, &child.id).await.map_err(failed)?,
+            ),
+            None => start(&plan, names::names_of(&children), cx)
+                .await
+                .map_err(failed)?,
+        };
         let session = attachment.session.clone();
         let prompt = Input::text(args.prompt.clone(), message::origin(None));
         cx.host
@@ -307,6 +323,16 @@ impl SpawnAgentTool {
 
 fn failed(error: KernelError) -> ToolError {
     ToolError::Failed(error.message)
+}
+
+/// The child a `reopen` call means: the caller's own agent of the base
+/// name, when there is one (ADR-0060 §3). A room of that name is not an
+/// agent, and a call that did not ask to reopen means a new one.
+fn standing(args: &SpawnArgs, plan: &Plan, children: &[SessionSummary]) -> Option<SessionSummary> {
+    if !args.reopen() {
+        return None;
+    }
+    names::named(children, &plan.base).filter(|child| child.driver != Driver::Log)
 }
 
 /// The address the caller writes to afterwards, as every spawn hands it back.
@@ -517,6 +543,55 @@ mod tests {
         let text = out.parts[0].as_text().unwrap_or_default();
         assert!(text.contains("reviewer-2"), "{text}");
         assert_eq!(host.spawned()[0].title.as_deref(), Some("reviewer-2"));
+    }
+
+    #[tokio::test]
+    async fn reopen_hands_the_prompt_to_the_standing_child_and_mints_nothing() {
+        let fleet = Fleet::default();
+        fleet.script([assistant("again"), turn_completed()]);
+        let root = fleet.root();
+        let scout = fleet.child(&root, "scout");
+        let host = Recorder::new(&fleet);
+        let out = SpawnAgentTool
+            .call(
+                json!({ "prompt": "look again", "name": "scout", "reopen": true, "background": false }),
+                &tool_context(&root, host.clone()),
+            )
+            .await
+            .expect("a spawn this crate can serve");
+        assert!(!out.is_error, "{out:?}");
+        let text = out.parts[0].as_text().unwrap_or_default();
+        assert!(text.starts_with(&format!("scout ({scout})")), "{text}");
+        assert!(host.spawned().is_empty(), "nothing was minted");
+        assert_eq!(
+            host.delivered()[0].0,
+            scout,
+            "the prompt reached the one that stands"
+        );
+        assert_eq!(
+            fleet.opened(),
+            vec![scout],
+            "followed by id, as a watcher is"
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_without_a_standing_child_is_an_ordinary_spawn() {
+        let fleet = Fleet::default();
+        fleet.script([assistant("hi"), turn_completed()]);
+        let root = fleet.root();
+        fleet.room(&root, "scout");
+        let host = Recorder::new(&fleet);
+        let out = SpawnAgentTool
+            .call(
+                json!({ "prompt": "look", "name": "scout", "reopen": true }),
+                &tool_context(&root, host.clone()),
+            )
+            .await
+            .expect("a spawn this crate can serve");
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(host.spawned().len(), 1, "a room of that name is no agent");
+        assert_eq!(host.spawned()[0].title.as_deref(), Some("scout-2"));
     }
 
     #[tokio::test]
