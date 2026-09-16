@@ -17,7 +17,7 @@ The kernel already has every verb: `interrupt` on an attachment, `HostApi::delet
 
 - `bingo-agents` grows two tools (`stop.rs`, `dismiss.rs`), one field, three columns, and `/agents [stop|dismiss <name>]`; `provides` and the page say so.
 - The crate's "every tool is read-only and trusted" no longer holds: `DismissAgent` is the one exception, and the test that pinned the rule now pins the exception.
-- A deleted child's frames stop; the TUI tree loses the node on `SessionRemoved` as it does when a person deletes a session.
+- A deleted child leaves the TUI's tree two ways, because a deletion reaches a client two ways: a live child's own stream ends in `SessionClosed { Deleted }`, and a child that was only stored — replayed into a resumed tree from its journal — has no stream, so the row leaves on the gateway's `SessionRemoved`, which the TUI had ignored until this record (found 2026-09-16: four dismissed roles stayed `stored` in the switcher).
 - Not decided here: ending a teammate, a budget per spawn, `SetModel`, a wait-with-timeout, and the state words beyond busy/idle. Each is its own record when asked for.
 
 ## Supersedes

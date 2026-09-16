@@ -236,6 +236,7 @@ pub(crate) async fn drive(
             event = next_gateway(&mut gateway) => {
                 match event {
                     Some(GatewayEvent::CatalogChanged { kind }) => run.catalog_changed(kind),
+                    Some(GatewayEvent::SessionRemoved { session }) => run.removed(&session),
                     Some(_) => {}
                     None => gateway = None,
                 }
@@ -549,6 +550,23 @@ impl Run {
             self.session.tree.close(session);
         }
         self.session.handles.remove(session);
+    }
+
+    /// The host says a session is gone from the store. A live child says so
+    /// itself, with a `SessionClosed { Deleted }` on its own stream; one
+    /// that was only stored — replayed into the tree from its journal, or
+    /// listed by the switcher — has no stream to say it on, and this is the
+    /// one word that reaches it (ADR-0060 §2). The root is never removed
+    /// from under its own run.
+    fn removed(&mut self, session: &SessionId) {
+        if self.session.tree.is_root(session) {
+            return;
+        }
+        self.session.tree.close(session);
+        self.session.handles.remove(session);
+        if let Open::Switcher(open) = &mut self.ui.layer.open {
+            open.stored.retain(|stored| &stored.id != session);
+        }
     }
 
     /// The dialog follows the tree's first open interaction, whosever it is.
@@ -1313,6 +1331,40 @@ mod tests {
         let screen = harness.recorder.last();
         assert!(screen.contains("still here"), "{screen}");
         assert!(!screen.contains("agent"), "the child is gone: {screen}");
+    }
+
+    /// A child a resume replayed from the store is in the tree as `stored`,
+    /// and its deletion reaches this run only as the host's word: the row
+    /// leaves on it, as a live child's leaves on its own close.
+    #[test]
+    fn a_stored_child_the_host_removed_leaves_the_tree() {
+        let mut run = idle(Instant::now());
+        run.session
+            .tree
+            .apply(&child_frame(1, announced("runtime-worker")));
+        run.session.tree.apply(&child_frame(
+            2,
+            Event::SessionClosed {
+                reason: CloseReason::Shutdown,
+            },
+        ));
+        assert_eq!(
+            run.session.tree.rows()[1].status,
+            Some(tree::Status::Stored),
+            "replayed, not live"
+        );
+
+        run.removed(&child_id());
+        assert_eq!(run.session.tree.rows().len(), 1, "the root alone");
+        assert!(run.session.tree.state(&child_id()).is_none());
+
+        let root = run.session.tree.root_id().clone();
+        run.removed(&root);
+        assert_eq!(
+            run.session.tree.rows().len(),
+            1,
+            "the root is never removed"
+        );
     }
 
     /// A resumed tree replays each child's journal, and a journal holds the

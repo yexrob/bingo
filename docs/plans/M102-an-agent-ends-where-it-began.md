@@ -109,3 +109,14 @@ ADR-0060.
   `scripts/budget.sh` (ok, no new dependency).
 - The `/agents stop|dismiss` composer path is covered by the command's own
   tests over the fleet double; no tmux drive, the change draws nothing new.
+- Found in the user's first drive (2026-09-16 16:19, root
+  `ses_01M2FBBSK7Y2XM6GG68KN92HH3` resumed on the new build): the four
+  `DismissAgent` calls succeeded and the directories were gone, but the
+  switcher kept the four rows as `stored`. A child a resume replays from
+  the store has no stream to carry `SessionClosed { Deleted }`; the host's
+  `SessionRemoved` was the one word, and the TUI ignored it. Fixed in
+  `run.rs` (`removed`: the tree row, the handle, the switcher's stored
+  list); unit test `a_stored_child_the_host_removed_leaves_the_tree`;
+  ADR-0060 Consequences corrected. The running process needs the rebuilt
+  binary to show it; a fresh `--resume` lists from the store and is clean
+  either way.
