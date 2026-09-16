@@ -635,3 +635,104 @@ fn a_child_has_no_spawn_agent_to_call() {
         "{err}"
     );
 }
+
+// ---- an agent ends where it began (M102, ADR-0060) -------------------------
+
+/// The session a foreground spawn's receipt names: `scout (ses_…) replied:`.
+fn spawned_session(out: &Output) -> bingo_sdk::SessionId {
+    let receipt = tool_output(out, "SpawnAgent");
+    let id = receipt
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c| c == '(' || c == ')'))
+        .find(|word| word.starts_with("ses_"))
+        .unwrap_or_else(|| panic!("no session in {receipt}"));
+    bingo_sdk::SessionId::from_raw(id)
+}
+
+fn session_dir(home: &std::path::Path, session: &bingo_sdk::SessionId) -> std::path::PathBuf {
+    home.join(".bingo/data/sessions").join(session.to_string())
+}
+
+/// One spawn in the foreground, then `verb` on it by name, then a word.
+fn end_script(verb: &str) -> tempfile::NamedTempFile {
+    script(&format!(
+        r#"{{"responses":[
+            {{"steps":[{{"toolCall":{{"name":"SpawnAgent","input":{{"prompt":"look","name":"scout","background":false}}}}}}]}},
+            {{"steps":[{{"text":"looked"}}]}},
+            {{"steps":[{{"toolCall":{{"name":"{verb}","input":{{"agent":"scout"}}}}}}]}},
+            {{"steps":[{{"text":"root done"}}]}}
+        ]}}"#
+    ))
+}
+
+/// `DismissAgent` on an idle child deletes it: the receipt says so, the
+/// journal directory is gone, and the run goes on to its last word.
+#[test]
+fn a_dismissed_agent_s_session_is_deleted_from_the_data_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let out = scripted_run(
+        home.path(),
+        &end_script("DismissAgent"),
+        &["--dangerously-skip-permissions"],
+        "spawn one and let it go",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let scout = spawned_session(&out);
+    let receipt = tool_result(&out, "DismissAgent");
+    assert!(!receipt.is_error, "{receipt:?}");
+    let text = tool_output(&out, "DismissAgent");
+    assert!(text.starts_with("scout dismissed"), "{text}");
+    assert!(text.contains(scout.as_str()), "{text}");
+    assert!(
+        !session_dir(home.path(), &scout).exists(),
+        "the journal went with the session"
+    );
+    assert!(
+        session_dir(home.path(), &frames_of(&out)[0].session).exists(),
+        "the root's own journal stays"
+    );
+    assert_eq!(final_text(&out), "root done");
+}
+
+/// Off a tty and without the bypass, the gate refuses the one destructive
+/// tool of the plugin, and the child stays where it was.
+#[test]
+fn dismissing_is_gated_and_a_refused_dismissal_deletes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let out = scripted_run(
+        home.path(),
+        &end_script("DismissAgent"),
+        &[],
+        "spawn one and try to let it go",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let scout = spawned_session(&out);
+    let receipt = tool_result(&out, "DismissAgent");
+    assert!(receipt.is_error, "{receipt:?}");
+    assert!(
+        session_dir(home.path(), &scout).exists(),
+        "a refused dismissal touches nothing"
+    );
+    assert_eq!(final_text(&out), "root done");
+}
+
+/// `StopAgent` on a child that has answered is an error result the model can
+/// read — there was nothing to stop — and the child is still there.
+#[test]
+fn stopping_an_idle_agent_is_an_error_result_that_says_so() {
+    let home = tempfile::tempdir().unwrap();
+    let out = scripted_run(
+        home.path(),
+        &end_script("StopAgent"),
+        &["--dangerously-skip-permissions"],
+        "spawn one and stop it",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let scout = spawned_session(&out);
+    let receipt = tool_result(&out, "StopAgent");
+    assert!(receipt.is_error, "{receipt:?}");
+    let text = tool_output(&out, "StopAgent");
+    assert!(text.contains("scout is idle"), "{text}");
+    assert!(session_dir(home.path(), &scout).exists());
+    assert_eq!(final_text(&out), "root done");
+}
