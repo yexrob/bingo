@@ -11,6 +11,10 @@
 //! address does not change because a transcript was redrawn or a session
 //! resumed. A path is not cached — the file *is* the cache, and a copy of it
 //! under the data directory would be a second one to keep in step.
+//!
+//! What comes back is the bounded picture (ADR-0062 §2), read on a blocking
+//! thread: the file on disk is what was handed over, and the [`Image`] is
+//! what the model is shown.
 
 use std::path::Path;
 use std::time::Duration;
@@ -32,8 +36,20 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// a fetched one is kept and looked for; `None` for a caller that keeps none.
 pub async fn load(source: &Source, cache: Option<&Cache>) -> Result<Image, PictureError> {
     match source {
-        Source::Path(path) => Ok(sniffed(&read(path)?)?.at(path.as_path())),
-        Source::Url(url) => sniffed(&remote(url, cache).await?),
+        Source::Path(path) => Ok(seen(read(path)?).await?.at(path.as_path())),
+        Source::Url(url) => seen(remote(url, cache).await?).await,
+    }
+}
+
+/// The bytes as the picture a model is sent, off the runtime's own threads: a
+/// decode, a Lanczos3 resize and up to six encodings are hundreds of
+/// milliseconds, and no thread a session answers on may spend them (M61,
+/// ADR-0062). A blocking task that does not finish is read as the picture
+/// being unreadable, which is the only thing left to say about it.
+async fn seen(bytes: Vec<u8>) -> Result<Image, PictureError> {
+    match tokio::task::spawn_blocking(move || sniffed(&bytes)).await {
+        Ok(image) => image,
+        Err(unfinished) => Err(PictureError::Unreadable(std::io::Error::other(unfinished))),
     }
 }
 
@@ -160,6 +176,41 @@ mod tests {
         let image = load(&source, None).await.expect("a picture");
         assert_eq!(image.media_type, "image/png");
         assert_eq!(png_size(&decoded(&image)), Some((8, 5)));
+    }
+
+    /// A file heavier than the wire carries: what is journaled is the picture
+    /// a model is sent, and the file it came from is still named (ADR-0062).
+    #[tokio::test]
+    async fn a_file_over_the_budget_is_read_as_the_picture_a_model_is_sent() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let bytes = crate::testing::noise(600, 600);
+        assert!(bytes.len() > crate::MODEL_BUDGET, "{} bytes", bytes.len());
+        let source = wrote(dir.path(), "shot.png", &bytes);
+        let image = load(&source, None).await.expect("a picture");
+        assert_eq!(image.media_type, "image/jpeg");
+        assert!(image.decoded_len() <= crate::MODEL_BUDGET);
+        assert_eq!(
+            image.path,
+            Some(dir.path().join("shot.png")),
+            "the file is what was handed over"
+        );
+    }
+
+    /// And the same for a picture this machine fetched.
+    #[tokio::test]
+    async fn a_url_over_the_budget_is_fetched_and_bounded() {
+        let server = MockServer::start().await;
+        let source = serving(
+            &server,
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(crate::testing::noise(600, 600)),
+        )
+        .await;
+        let image = load(&source, None).await.expect("a picture");
+        assert_eq!(image.media_type, "image/jpeg");
+        assert!(image.decoded_len() <= crate::MODEL_BUDGET);
+        assert_eq!(image.path, None, "a fetched picture is nowhere on disk");
     }
 
     /// The extension is not the evidence: a `.png` full of prose is refused

@@ -3,16 +3,18 @@
 //! The journal keeps a picture in a type every provider takes (ADR-0041 §2):
 //! ADR-0040's four, and nothing wider. A person's disk and a chat server hold
 //! more than that — a screenshot is a BMP on Windows, a scan is a TIFF — so
-//! the widening happens here, at the edge, once: a type in the table is kept
-//! as it came, anything else a decoder reads is decoded and sent as PNG, and
-//! what nothing reads is refused rather than guessed at.
+//! the widening happens here, at the edge, once, and what nothing reads is
+//! refused rather than guessed at.
+//!
+//! Both doors answer with [`crate::bounded`], so what the journal keeps is
+//! the picture a model is sent and not a byte more (ADR-0062 §2): a type in
+//! the table, inside the box and under the budget, is kept exactly as it
+//! came; everything else is decoded once and encoded down the ladder.
 
+use base64::Engine;
 use bingo_sdk::Image;
 
-use crate::{PictureError, encode};
-
-/// What a widened picture is sent as.
-const PNG: &str = "image/png";
+use crate::{PictureError, bounded};
 
 /// Bytes nobody named: the format is read off the bytes themselves. An
 /// extension and a `Content-Type` are both hearsay — the first is a name a
@@ -22,27 +24,24 @@ pub fn sniffed(bytes: &[u8]) -> Result<Image, PictureError> {
     let media_type = image::guess_format(bytes)
         .map_err(|_| PictureError::NotAPicture)?
         .to_mime_type();
-    match Image::is_known(media_type) {
-        true => Ok(Image::from_bytes(media_type, bytes)?),
-        false => as_png(&encode(bytes)?.bytes),
-    }
+    bounded(media_type, bytes)
 }
 
 /// A picture already in the [`Image`] shape, whose sender named its type — a
-/// stream-json `image` block (ADR-0040 §4). One the table takes is handed
-/// back exactly as it arrived, base64 and all: a host's own bytes are not
-/// re-encoded on their way through.
+/// stream-json `image` block (ADR-0040 §4). One the table takes that is
+/// already inside the bound arrives back byte for byte; a larger one is the
+/// bounded rendering of it, still at the file it named (ADR-0062 §3).
 pub fn accepted(image: Image) -> Result<Image, PictureError> {
-    match Image::is_known(&image.media_type) {
-        true => Ok(image),
-        false => as_png(&crate::to_png(&image)?.bytes),
-    }
+    let seen = bounded(&image.media_type, &payload(&image.data)?)?;
+    Ok(match image.path {
+        Some(path) => seen.at(path),
+        None => seen,
+    })
 }
 
-/// A decoded picture as the `Image` the journal keeps — capped like any
-/// other, because a small TIFF can be a large PNG.
-fn as_png(bytes: &[u8]) -> Result<Image, PictureError> {
-    Ok(Image::from_bytes(PNG, bytes)?)
+/// The bytes behind the base64 a sender handed over.
+fn payload(data: &str) -> Result<Vec<u8>, PictureError> {
+    Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
 }
 
 #[cfg(test)]
@@ -109,6 +108,31 @@ mod tests {
         };
         let image = accepted(wider).expect("a picture");
         assert_eq!(image.media_type, "image/png");
+    }
+
+    /// The bound, through the door bytes nobody named come in by: a picture
+    /// heavier than the wire carries is the rendering of it, not the file.
+    #[test]
+    fn a_picture_over_the_budget_is_sniffed_into_the_bound() {
+        let bytes = crate::testing::noise(600, 600);
+        assert!(bytes.len() > crate::MODEL_BUDGET, "{} bytes", bytes.len());
+        let image = sniffed(&bytes).expect("a picture");
+        assert_eq!(image.media_type, "image/jpeg");
+        assert!(image.decoded_len() <= crate::MODEL_BUDGET);
+    }
+
+    /// And through the door a sender's own `Image` comes in by — where the
+    /// file it named survives the rendering (ADR-0062 §3).
+    #[test]
+    fn a_handed_over_picture_over_the_budget_is_bounded_and_keeps_its_file() {
+        let file = std::path::Path::new("shot.png");
+        let handed = Image::from_bytes("image/png", &crate::testing::noise(600, 600))
+            .expect("within the cap")
+            .at(file);
+        let image = accepted(handed).expect("a picture");
+        assert_eq!(image.media_type, "image/jpeg");
+        assert!(image.decoded_len() <= crate::MODEL_BUDGET);
+        assert_eq!(image.path.as_deref(), Some(file));
     }
 
     #[test]

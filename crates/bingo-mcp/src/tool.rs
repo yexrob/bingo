@@ -118,32 +118,59 @@ fn shape(value: &Value) -> &'static str {
     }
 }
 
-/// The server's content blocks as the model sees them. Text and images pass
-/// through; a block this kernel has no part for reaches the model as the JSON
-/// it was, because content the model can read beats content it cannot.
-pub fn output(result: CallToolResult) -> ToolOutput {
+/// The server's content blocks as the model sees them. Text passes through, a
+/// picture is bounded like every other one a model is sent (ADR-0062 §2), and
+/// a block this kernel has no part for reaches the model as the JSON it was,
+/// because content the model can read beats content it cannot.
+pub async fn output(result: CallToolResult) -> ToolOutput {
+    let mut parts = Vec::with_capacity(result.content.len());
+    for block in &result.content {
+        parts.push(part(block).await);
+    }
     ToolOutput {
-        parts: result.content.iter().map(part).collect(),
+        parts,
         is_error: result.is_error.unwrap_or(false),
         display: None,
     }
 }
 
-fn part(block: &ContentBlock) -> ContentPart {
+async fn part(block: &ContentBlock) -> ContentPart {
     match block {
         ContentBlock::Text(text) => ContentPart::Text {
             text: text.text.clone(),
         },
-        ContentBlock::Image(image) => ContentPart::Image(Image {
-            media_type: image.mime_type.clone(),
-            data: image.data.clone(),
-            path: None,
-        }),
+        ContentBlock::Image(image) => pictured(image).await,
         other => ContentPart::text(
             serde_json::to_string(other)
                 .unwrap_or_else(|_| "[a content block that will not serialize]".to_string()),
         ),
     }
+}
+
+/// A server's picture, bounded. What the server called a picture is a claim
+/// like everything else it says (ADR-0009 §2), so bytes no decoder reads are
+/// refused here in words the model can act on rather than sent on as a
+/// payload the provider would reject.
+async fn pictured(image: &rmcp::model::ImageContent) -> ContentPart {
+    let handed = Image {
+        media_type: image.mime_type.clone(),
+        data: image.data.clone(),
+        path: None,
+    };
+    match bounded(handed).await {
+        Ok(seen) => ContentPart::Image(seen),
+        Err(why) => ContentPart::text(format!("[{} is not a picture: {why}]", image.mime_type)),
+    }
+}
+
+/// The bound, off the runtime's threads: a decode, a resize and up to six
+/// encodings are hundreds of milliseconds, and a session answers on the
+/// thread this call is made from (M61).
+async fn bounded(handed: Image) -> Result<Image, String> {
+    tokio::task::spawn_blocking(move || bingo_pictures::accepted(handed))
+        .await
+        .map_err(|unfinished| unfinished.to_string())?
+        .map_err(|why| why.to_string())
 }
 
 #[async_trait]
@@ -186,7 +213,7 @@ impl Tool for McpTool {
                 return Err(ToolError::Failed(format!("{}: {refused}", self.server)));
             }
         };
-        Ok(output(result))
+        Ok(output(result).await)
     }
 }
 
@@ -233,16 +260,27 @@ mod tests {
         assert_eq!(meta("files")["server"], json!("files"));
     }
 
-    #[test]
-    fn text_and_images_pass_through_and_anything_else_arrives_as_json() {
+    /// A picture a server would answer with, base64 as the protocol carries it.
+    fn served(width: u32, height: u32) -> ImageContent {
+        let bytes = bingo_pictures::testing::png_bytes(width, height);
+        let data = Image::from_bytes("image/png", &bytes)
+            .expect("a picture within the cap")
+            .data;
+        ImageContent::new(data, "image/png")
+    }
+
+    #[tokio::test]
+    async fn text_and_images_pass_through_and_anything_else_arrives_as_json() {
+        let picture = served(4, 4);
         let output = output(result(
             vec![
                 ContentBlock::Text(TextContent::new("hello")),
-                ContentBlock::Image(ImageContent::new("QUJD", "image/png")),
+                ContentBlock::Image(picture.clone()),
                 ContentBlock::audio("QUJD", "audio/wav"),
             ],
             None,
-        ));
+        ))
+        .await;
         assert_eq!(
             output.parts[0],
             ContentPart::Text {
@@ -253,9 +291,10 @@ mod tests {
             output.parts[1],
             ContentPart::Image(Image {
                 media_type: "image/png".into(),
-                data: "QUJD".into(),
+                data: picture.data.clone(),
                 path: None,
-            })
+            }),
+            "a picture inside the bound is the server's own bytes"
         );
         let ContentPart::Text { text } = &output.parts[2] else {
             panic!("an audio block reaches the model as text");
@@ -264,12 +303,36 @@ mod tests {
         assert!(!output.is_error);
     }
 
-    #[test]
-    fn is_error_crosses_the_boundary() {
-        assert!(output(result(Vec::new(), Some(true))).is_error);
-        assert!(!output(result(Vec::new(), Some(false))).is_error);
+    /// A server's picture is bounded like every other (ADR-0062 §2): wider
+    /// than the box, it arrives inside it.
+    #[tokio::test]
+    async fn a_picture_wider_than_the_box_comes_back_inside_it() {
+        let output = output(result(vec![ContentBlock::Image(served(2400, 300))], None)).await;
+        let ContentPart::Image(image) = &output.parts[0] else {
+            panic!("a picture, not {:?}", output.parts[0]);
+        };
+        assert_eq!(bingo_pictures::size(image), Some((2000, 250)));
+    }
+
+    /// What a server called a picture and is not reaches the model in words:
+    /// a payload no provider takes would fail the whole turn instead.
+    #[tokio::test]
+    async fn bytes_a_server_called_a_picture_and_are_not_are_refused_in_words() {
+        let refused = ImageContent::new("QUJD", "image/png");
+        let output = output(result(vec![ContentBlock::Image(refused)], None)).await;
+        let ContentPart::Text { text } = &output.parts[0] else {
+            panic!("words, not {:?}", output.parts[0]);
+        };
+        assert!(text.contains("image/png"), "{text}");
+        assert!(text.contains("not a picture"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn is_error_crosses_the_boundary() {
+        assert!(output(result(Vec::new(), Some(true))).await.is_error);
+        assert!(!output(result(Vec::new(), Some(false))).await.is_error);
         assert!(
-            !output(result(Vec::new(), None)).is_error,
+            !output(result(Vec::new(), None)).await.is_error,
             "a server that says nothing said no error"
         );
     }

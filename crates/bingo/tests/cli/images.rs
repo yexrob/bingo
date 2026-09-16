@@ -5,7 +5,7 @@
 //! own prompt.
 
 use base64::Engine;
-use bingo_pictures::testing::{ImageFormat, drawn, png_bytes};
+use bingo_pictures::testing::{ImageFormat, drawn, noise, png_bytes};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path as at};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -96,6 +96,42 @@ fn an_image_flag_puts_the_picture_beside_the_prompt_in_the_journal() {
     assert_eq!(parts[1]["type"], "image");
     assert_eq!(parts[1]["mediaType"], "image/png");
     assert_eq!(parts[1]["data"], base64(&bytes), "the file's own bytes");
+}
+
+/// A picture too wide and too heavy for the wire: what the journal holds is
+/// the picture the model is sent, inside the box and under the budget
+/// (ADR-0062). The file on disk is untouched.
+#[test]
+fn a_picture_over_the_bound_reaches_the_journal_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = noise(2400, 300);
+    assert!(
+        bytes.len() > bingo_pictures::MODEL_BUDGET,
+        "{}",
+        bytes.len()
+    );
+    let path = shot_of(dir.path(), "big.png", bytes.clone());
+    let out = asked_with(dir.path(), &path.to_string_lossy());
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let parts = first_ask(dir.path());
+    assert_eq!(parts[1]["type"], "image");
+    let image: bingo_sdk::Image = serde_json::from_value(parts[1].clone()).unwrap();
+    assert_eq!(image.media_type, "image/jpeg", "no PNG of noise fits");
+    assert_eq!(
+        bingo_pictures::size(&image),
+        Some((2000, 250)),
+        "inside the box"
+    );
+    assert!(
+        image.decoded_len() <= bingo_pictures::MODEL_BUDGET,
+        "{} bytes reached the journal",
+        image.decoded_len()
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bytes,
+        "the file is untouched"
+    );
 }
 
 /// A format no provider takes is one a person still has: it is decoded on
@@ -204,7 +240,8 @@ fn a_stream_json_user_line_carries_its_image_blocks() {
         "message": { "role": "user", "content": [
             { "type": "text", "text": "and this one" },
             { "type": "image", "source": {
-                "type": "base64", "media_type": "image/jpeg", "data": "/9j/" } }
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64(&drawn(4, 4, ImageFormat::Jpeg)) } }
         ] },
         "parent_tool_use_id": Value::Null,
     }));

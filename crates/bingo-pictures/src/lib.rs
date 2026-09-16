@@ -22,12 +22,19 @@
 //! A PNG passes through untouched — its size is in its header, so nothing is
 //! decoded and nothing is re-encoded. Everything else is decoded once and
 //! written back out as PNG.
+//!
+//! Every picture on its way to a model passes [`bounded`] first (ADR-0062):
+//! one inside [`MODEL_BOX`] pixels and under [`MODEL_BUDGET`] bytes is the
+//! bytes it came as, and a larger one is fitted to the box and encoded down a
+//! ladder until it fits. The three doors above call it, so nothing above this
+//! crate decides how big a picture a model is sent.
 
 use base64::Engine;
 use bingo_sdk::Image;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
 mod accepted;
+mod bounded;
 pub mod cache;
 pub mod file;
 mod load;
@@ -35,6 +42,7 @@ mod pixels;
 mod source;
 
 pub use accepted::{accepted, sniffed};
+pub use bounded::{MODEL_BOX, MODEL_BUDGET, bounded};
 pub use cache::Cache;
 pub use file::keep;
 pub use load::load;
@@ -123,7 +131,7 @@ fn decoded(data: &str) -> Option<Vec<u8>> {
 /// A picture's size out of its header: a PNG's own read here, and every other
 /// format's asked of its own decoder's header reader. Not one pixel is
 /// decoded, which is what lets a frame ask this.
-fn measured(bytes: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn measured(bytes: &[u8]) -> Option<(u32, u32)> {
     if let Some(size) = png_size(bytes) {
         return Some(size);
     }
@@ -160,7 +168,7 @@ pub fn fitted(image: &Image, within: (u32, u32)) -> Result<Png, PictureError> {
     }
 }
 
-fn inside(width: u32, height: u32, within: (u32, u32)) -> bool {
+pub(crate) fn inside(width: u32, height: u32, within: (u32, u32)) -> bool {
     width <= within.0 && height <= within.1
 }
 
@@ -183,7 +191,7 @@ fn shrunk(bytes: &[u8], within: (u32, u32)) -> Result<Png, PictureError> {
 }
 
 /// Decode whatever this is and write it back out as PNG.
-pub(crate) fn encode(bytes: &[u8]) -> Result<Png, PictureError> {
+fn encode(bytes: &[u8]) -> Result<Png, PictureError> {
     encoded(&image::load_from_memory(bytes)?)
 }
 
@@ -216,6 +224,10 @@ pub enum PictureError {
     /// file with a picture's name, a download that stopped early.
     #[error("not a picture: no decoder recognises these bytes")]
     NotAPicture,
+    /// The ladder ran out of rungs (ADR-0062 §1): even a tenth of each side
+    /// would not fit the budget. `bytes` is the fewest it managed.
+    #[error("the picture will not fit: {bytes} bytes at its smallest")]
+    TooBig { bytes: usize },
     #[error("could not be read: {0}")]
     Unreadable(#[from] std::io::Error),
     #[error("could not be fetched: {0}")]

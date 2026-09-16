@@ -16,9 +16,10 @@ use serde_json::Value;
 use crate::output;
 use crate::path::resolve;
 
-/// Beyond this a read is a mistake, not a request; the model gets the size back.
-/// A file cap, not `Image::MAX_BYTES` (decoded picture bytes) — the two bound
-/// different things and happen to differ.
+/// Beyond this a read is a mistake, not a request; the model gets the size
+/// back. It is the only cap a picture meets here (ADR-0062 §4): what the
+/// journal keeps is the bounded rendering, so a photograph this large is read
+/// rather than refused.
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// What the tool tells the model it does. The picture extensions are read off
@@ -62,6 +63,30 @@ impl ReadTool {
         let args: ReadArgs = serde_json::from_value(input.clone()).ok()?;
         Some(resolve(&args.file_path, cwd))
     }
+}
+
+/// The file as the model is shown it: bounded to the one box and budget
+/// (ADR-0062 §2), and knowing the file it is (ADR-0052 §2). The file's own
+/// cap is what refuses a photograph too large to read; what the journal keeps
+/// is the bounded rendering, however heavy the file was.
+///
+/// The bound is a decode, a resize and up to six encodings — hundreds of
+/// milliseconds on a photograph — so it runs off the runtime's threads.
+async fn picture(
+    media_type: &'static str,
+    bytes: Vec<u8>,
+    path: &Path,
+) -> Result<ToolOutput, ToolError> {
+    let shown = path.display().to_string();
+    let seen = tokio::task::spawn_blocking(move || bingo_pictures::bounded(media_type, &bytes))
+        .await
+        .map_err(|e| ToolError::Failed(format!("the picture did not finish: {e}")))?
+        .map_err(|e| ToolError::Failed(format!("{shown}: {e}")))?;
+    Ok(ToolOutput {
+        parts: vec![ContentPart::Image(seen.at(path))],
+        is_error: false,
+        display: None,
+    })
 }
 
 /// `cat -n` layout: the number right-aligned in six columns, then a tab.
@@ -127,14 +152,7 @@ impl Tool for ReadTool {
             .map_err(|e| ToolError::Failed(format!("reading {shown}: {e}")))?;
 
         if let Some(media_type) = Image::media_type_of(&path) {
-            let image = Image::from_bytes(media_type, &bytes)
-                .map_err(|e| ToolError::Failed(e.to_string()))?
-                .at(&path);
-            return Ok(ToolOutput {
-                parts: vec![ContentPart::Image(image)],
-                is_error: false,
-                display: None,
-            });
+            return picture(media_type, bytes, &path).await;
         }
 
         let text = String::from_utf8(bytes)
@@ -284,37 +302,93 @@ mod tests {
         );
     }
 
+    /// The picture the call answers with, or the test's failure.
+    async fn read_picture(dir: &Path, name: &str) -> Image {
+        let out = ReadTool
+            .call(serde_json::json!({ "file_path": name }), &context(dir))
+            .await
+            .expect("read");
+        match out.parts.as_slice() {
+            [ContentPart::Image(image)] => image.clone(),
+            other => panic!("a picture, not {other:?}"),
+        }
+    }
+
+    /// A picture a model can read as it is reaches it as the file's own
+    /// bytes: nothing is re-encoded and nothing is softened. A screenshot of
+    /// two hundred kilobytes is such a picture, not only a tiny one.
     #[tokio::test]
     async fn an_image_comes_back_as_an_image_part() {
         let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("pixel.PNG"), [0x89, b'P', b'N', b'G']).expect("write");
-        let cx = context(dir.path());
-        let out = ReadTool
-            .call(serde_json::json!({ "file_path": "pixel.PNG" }), &cx)
-            .await
-            .expect("read");
-        assert_eq!(
-            out.parts,
-            vec![ContentPart::Image(Image {
-                media_type: "image/png".into(),
-                data: "iVBORw==".into(),
-                path: Some(dir.path().join("pixel.PNG")),
-            })],
-            "and the picture knows the file it is (ADR-0052)"
-        );
+        for bytes in [
+            bingo_pictures::testing::png_bytes(40, 30),
+            bingo_pictures::testing::noise(220, 220),
+        ] {
+            std::fs::write(dir.path().join("pixel.PNG"), &bytes).expect("write");
+            let image = read_picture(dir.path(), "pixel.PNG").await;
+            assert_eq!(
+                image,
+                Image::from_bytes("image/png", &bytes)
+                    .expect("within the cap")
+                    .at(dir.path().join("pixel.PNG")),
+                "{} bytes: and the picture knows the file it is (ADR-0052)",
+                bytes.len()
+            );
+        }
     }
 
+    /// A photograph heavier than the wire carries is read and bounded, not
+    /// refused: the file's cap is the only one it meets (ADR-0062 §4).
     #[tokio::test]
-    async fn an_image_over_the_cap_fails_by_size() {
+    async fn a_photograph_over_the_wire_cap_is_read_and_bounded() {
         let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("big.png"), vec![0u8; Image::MAX_BYTES + 1]).expect("write");
+        let bytes = bingo_pictures::testing::noise(1250, 1250);
+        assert!(bytes.len() > Image::MAX_BYTES, "{} bytes", bytes.len());
+        std::fs::write(dir.path().join("big.png"), &bytes).expect("write");
+        let image = read_picture(dir.path(), "big.png").await;
+        assert!(
+            image.decoded_len() <= bingo_pictures::MODEL_BUDGET,
+            "{} bytes reached the model",
+            image.decoded_len()
+        );
+        assert!(Image::is_known(&image.media_type), "{}", image.media_type);
+        assert_eq!(image.path, Some(dir.path().join("big.png")));
+    }
+
+    /// The file cap still refuses a read that is a mistake rather than a
+    /// request, whatever the file's name says it is.
+    #[tokio::test]
+    async fn a_file_over_the_file_cap_fails_by_size() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("huge.png"),
+            vec![0u8; MAX_BYTES as usize + 1],
+        )
+        .expect("write");
         let cx = context(dir.path());
         let error = ReadTool
-            .call(serde_json::json!({ "file_path": "big.png" }), &cx)
+            .call(serde_json::json!({ "file_path": "huge.png" }), &cx)
             .await
             .err();
         assert!(
-            matches!(&error, Some(ToolError::Failed(m)) if m.starts_with("image too large:")),
+            matches!(&error, Some(ToolError::Failed(m)) if m.starts_with("file too large:")),
+            "got {error:?}"
+        );
+    }
+
+    /// A name is not evidence here either: a `.png` no decoder reads is said
+    /// so, rather than journaled for a provider to refuse.
+    #[tokio::test]
+    async fn a_file_named_a_picture_that_is_not_one_says_so() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("cut.png"), [0x89, b'P', b'N', b'G']).expect("write");
+        let cx = context(dir.path());
+        let error = ReadTool
+            .call(serde_json::json!({ "file_path": "cut.png" }), &cx)
+            .await
+            .err();
+        assert!(
+            matches!(&error, Some(ToolError::Failed(m)) if m.contains("no decoder read this picture")),
             "got {error:?}"
         );
     }

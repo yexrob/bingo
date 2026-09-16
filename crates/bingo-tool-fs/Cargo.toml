@@ -13,6 +13,10 @@ workspace = true
 
 [dependencies]
 bingo-sdk.workspace = true
+# M104: `Read` hands the model a picture, and how big a picture a model is
+# sent is decided in one place (ADR-0062 §2). A library, which any plugin may
+# depend on (ADR-0012 §1).
+bingo-pictures.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -27,4 +31,7 @@ similar.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
+# The pictures a test reads back are drawn by the crate that bounds them, so
+# this crate needs no decoder of its own and no bytes pasted into a source.
+bingo-pictures = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

@@ -325,6 +325,14 @@ mod tests {
         parse_line(line).expect_err("a line this surface refuses").0
     }
 
+    /// A picture a host would write into an `image` block, base64 as the wire
+    /// carries it. It is a picture a decoder reads: a block that is not one is
+    /// refused at this door now (ADR-0062 §2).
+    fn served(width: u32, height: u32, format: bingo_pictures::testing::ImageFormat) -> String {
+        let bytes = bingo_pictures::testing::drawn(width, height, format);
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+    }
+
     // ---- the lines a host writes -----------------------------------------
 
     #[test]
@@ -342,28 +350,45 @@ mod tests {
 
     #[test]
     fn the_text_blocks_are_the_prompt_and_the_image_blocks_its_pictures() {
-        let line = r#"{"type":"user","message":{"role":"user","content":[
-            {"type":"text","text":"look at this"},
-            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}},
-            {"type":"text","text":"and this"}]},"parent_tool_use_id":null}"#;
+        let data = served(4, 2, bingo_pictures::testing::ImageFormat::Png);
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": [
+                { "type": "text", "text": "look at this" },
+                { "type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": data } },
+                { "type": "text", "text": "and this" },
+            ] },
+            "parent_tool_use_id": Value::Null,
+        })
+        .to_string();
         assert_eq!(
-            parse(line),
+            parse(&line),
             Line::User {
                 text: "look at this\nand this".into(),
                 images: vec![Image {
                     media_type: "image/png".into(),
-                    data: "iVBOR".into(),
+                    data,
                     path: None,
                 }],
-            }
+            },
+            "a picture inside the bound is the host's own bytes"
         );
     }
 
     #[test]
     fn a_user_line_that_is_only_a_picture_is_a_prompt() {
-        let line = r#"{"type":"user","message":{"role":"user","content":[
-            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/"}}]}}"#;
-        let Line::User { text, images } = parse(line) else {
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": [
+                { "type": "image", "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": served(4, 2, bingo_pictures::testing::ImageFormat::Jpeg) } }
+            ] },
+        })
+        .to_string();
+        let Line::User { text, images } = parse(&line) else {
             panic!("a prompt");
         };
         assert_eq!(text, "");

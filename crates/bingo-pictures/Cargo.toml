@@ -35,9 +35,12 @@ reqwest.workspace = true
 # The body arrives in chunks so it can be cut at the cap as it comes, rather
 # than read whole and measured after.
 futures.workspace = true
+# M104: the bound is a decode, a resize and up to six encodings, so `load`
+# takes it off the runtime's threads (`spawn_blocking`). Already under
+# `reqwest` above, so the tree gains an edge and no crate.
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 tempfile.workspace = true
 # The remote reads, scripted: a served picture, a 404, a body over the cap.
 wiremock.workspace = true

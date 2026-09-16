@@ -16,6 +16,9 @@ bingo-sdk.workspace = true
 # M85: the OAuth flows, the credential store and the MCP sign-in handle
 # (ADR-0050 §1). A library, which any plugin may depend on (ADR-0012 §1).
 bingo-auth-oauth.workspace = true
+# M104: a server's picture is bounded like every other on its way to a model
+# (ADR-0062 §2). A library, which any plugin may depend on (ADR-0012 §1).
+bingo-pictures.workspace = true
 async-trait.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -36,6 +39,9 @@ reqwest.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
+# The pictures a scripted server answers with are drawn by the crate that
+# bounds them, so this crate needs no decoder of its own.
+bingo-pictures = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 # M85: the authorization server a sign-in is tested against.
