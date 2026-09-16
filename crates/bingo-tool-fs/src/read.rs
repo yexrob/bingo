@@ -1,13 +1,14 @@
 //! `Read`: one file, numbered like `cat -n`, bounded twice — by the line
 //! window the model asks for and by a character cap the tool enforces itself.
-//! Images bypass both and travel as an image part.
+//! Images bypass both and travel as an image part, bounded to what a model is
+//! sent unless the call asks for the file as it is.
 
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use bingo_sdk::{
     ContentPart, Image, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
-    input_schema,
+    bytes::words, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -26,13 +27,18 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// the sdk's table rather than spelled again here: a format added there is in
 /// this sentence the same day.
 fn description() -> String {
+    let (width, height) = bingo_pictures::MODEL_BOX;
     format!(
         "Read a file from the filesystem. Give an absolute path, or one relative to the \
 session's working directory. Text is returned with line numbers, starting at line 1; use \
 `offset` and `limit` to read a window of a long file. A picture ({}) comes back as the \
-picture itself: you see it, and it is placed in the user's transcript beside this call, \
+picture itself, bounded to what a model is sent (inside {width}×{height} pixels, under {}); \
+when that changed it, the result says so and names the file's own size, and `original: true` \
+returns the file as it is, up to {}. It is placed in the user's transcript beside this call, \
 where their surface can draw it. Long results are truncated, and say so on the last line.",
-        extensions()
+        extensions(),
+        words(bingo_pictures::MODEL_BUDGET),
+        words(Image::MAX_BYTES)
     )
 }
 
@@ -52,6 +58,9 @@ pub struct ReadArgs {
     pub offset: Option<usize>,
     /// How many lines to return. Defaults to the rest of the file.
     pub limit: Option<usize>,
+    /// For a picture: `true` returns the file as it is instead of the bounded
+    /// rendering; refused above the journal's cap.
+    pub original: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -68,19 +77,57 @@ impl ReadTool {
 /// The file as the model is shown it: bounded to the one box and budget
 /// (ADR-0062 §2), and knowing the file it is (ADR-0052 §2). The file's own
 /// cap is what refuses a photograph too large to read; what the journal keeps
-/// is the bounded rendering, however heavy the file was.
+/// is the bounded rendering, however heavy the file was — so when the
+/// rendering is not the file, the result says so and where the file is.
 ///
 /// The bound is a decode, a resize and up to six encodings — hundreds of
 /// milliseconds on a photograph — so it runs off the runtime's threads.
-async fn picture(
+async fn bounded(
     media_type: &'static str,
     bytes: Vec<u8>,
     path: &Path,
 ) -> Result<ToolOutput, ToolError> {
     let shown = path.display().to_string();
+    let len = bytes.len();
     let seen = tokio::task::spawn_blocking(move || bingo_pictures::bounded(media_type, &bytes))
         .await
         .map_err(|e| ToolError::Failed(format!("the picture did not finish: {e}")))?
+        .map_err(|e| ToolError::Failed(format!("{shown}: {e}")))?;
+    let remark = rendered(&seen, media_type, len).then(|| note(&seen, media_type, len));
+    let mut parts = vec![ContentPart::Image(seen.at(path))];
+    parts.extend(remark.map(ContentPart::text));
+    Ok(ToolOutput {
+        parts,
+        is_error: false,
+        display: None,
+    })
+}
+
+/// Whether what the model was shown is a rendering rather than the file:
+/// another format, or another count of bytes. A picture that already fitted
+/// the box and the budget came back untouched and needs no words.
+fn rendered(seen: &Image, media_type: &str, len: usize) -> bool {
+    seen.media_type != media_type || seen.decoded_len() != len
+}
+
+/// What the model is told beside a bounded picture: what it is looking at,
+/// what the file is, and the one way to ask for the file itself (ADR-0062 §3).
+fn note(seen: &Image, media_type: &str, len: usize) -> String {
+    format!(
+        "[shown bounded: {} {}; the file is {media_type} {}. \
+Read it with original: true for the file as it is]",
+        seen.media_type,
+        words(seen.decoded_len()),
+        words(len)
+    )
+}
+
+/// The file as it is, because the model asked for it: no box and no budget,
+/// only the cap on what the journal carries, whose error already names the
+/// bytes and the cap.
+fn original(media_type: &'static str, bytes: &[u8], path: &Path) -> Result<ToolOutput, ToolError> {
+    let shown = path.display().to_string();
+    let seen = Image::from_bytes(media_type, bytes)
         .map_err(|e| ToolError::Failed(format!("{shown}: {e}")))?;
     Ok(ToolOutput {
         parts: vec![ContentPart::Image(seen.at(path))],
@@ -152,7 +199,10 @@ impl Tool for ReadTool {
             .map_err(|e| ToolError::Failed(format!("reading {shown}: {e}")))?;
 
         if let Some(media_type) = Image::media_type_of(&path) {
-            return picture(media_type, bytes, &path).await;
+            return match args.original.unwrap_or(false) {
+                true => original(media_type, &bytes, &path),
+                false => bounded(media_type, bytes, &path).await,
+            };
         }
 
         let text = String::from_utf8(bytes)
@@ -197,6 +247,7 @@ mod tests {
         assert_eq!(spec.input_schema["type"], "object");
         assert!(spec.input_schema["properties"]["file_path"].is_object());
         assert!(spec.input_schema["properties"]["limit"].is_object());
+        assert!(spec.input_schema["properties"]["original"].is_object());
         assert!(ReadTool.traits(&Value::Null).read_only);
         assert!(ReadTool.preview(&Value::Null, Path::new("/")).is_none());
         assert!(ReadTool.confirm(&Value::Null).is_none());
@@ -213,6 +264,24 @@ mod tests {
                 ".{ext} is missing from {description}"
             );
         }
+    }
+
+    /// The bound the description promises is the bound the constants hold: a
+    /// box or a budget changed there is changed in this sentence the same day,
+    /// and the flag that undoes it is named where the model reads about it.
+    #[test]
+    fn the_description_names_the_flag_and_the_caps_it_is_bounded_by() {
+        let description = ReadTool.spec().description;
+        let (width, height) = bingo_pictures::MODEL_BOX;
+        for named in [
+            "original: true".to_string(),
+            format!("{width}×{height} pixels"),
+            words(bingo_pictures::MODEL_BUDGET),
+            words(Image::MAX_BYTES),
+        ] {
+            assert!(description.contains(&named), "{named} is missing");
+        }
+        assert!(description.contains("1.0 MB"), "the budget reads 1.0 MB");
     }
 
     #[tokio::test]
@@ -337,6 +406,67 @@ mod tests {
         }
     }
 
+    /// The parts a `Read` answers with, `original` spelled as the model would
+    /// spell it.
+    async fn read_parts(dir: &Path, name: &str, original: bool) -> Vec<ContentPart> {
+        ReadTool
+            .call(
+                serde_json::json!({ "file_path": name, "original": original }),
+                &context(dir),
+            )
+            .await
+            .expect("read")
+            .parts
+    }
+
+    /// A noisy PNG no budget fits: the file a model is handed is not the file
+    /// on disk, so the result says what it is looking at, what the file is,
+    /// and the one way to ask for the file itself (ADR-0062 §3).
+    #[tokio::test]
+    async fn a_bounded_picture_says_what_the_file_is_and_how_to_ask_for_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bytes = bingo_pictures::testing::noise(700, 700);
+        assert!(
+            bytes.len() > bingo_pictures::MODEL_BUDGET && bytes.len() <= Image::MAX_BYTES,
+            "{} bytes: over the budget, under the journal's cap",
+            bytes.len()
+        );
+        std::fs::write(dir.path().join("noisy.png"), &bytes).expect("write");
+        let parts = read_parts(dir.path(), "noisy.png", false).await;
+        let [ContentPart::Image(image), ContentPart::Text { text }] = parts.as_slice() else {
+            panic!("a picture and its words, not {parts:?}");
+        };
+        assert_eq!(image.media_type, "image/jpeg", "the ladder went lossy");
+        assert_eq!(image.path, Some(dir.path().join("noisy.png")));
+        assert_eq!(
+            text,
+            &format!(
+                "[shown bounded: image/jpeg {}; the file is image/png {}. \
+Read it with original: true for the file as it is]",
+                words(image.decoded_len()),
+                words(bytes.len())
+            )
+        );
+    }
+
+    /// `original: true` is the way back to the file: the bytes on disk, the
+    /// type they are, and no words, because nothing was changed to explain.
+    #[tokio::test]
+    async fn original_answers_with_the_file_as_it_is() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bytes = bingo_pictures::testing::noise(700, 700);
+        std::fs::write(dir.path().join("noisy.png"), &bytes).expect("write");
+        let parts = read_parts(dir.path(), "noisy.png", true).await;
+        assert_eq!(
+            parts,
+            vec![ContentPart::Image(
+                Image::from_bytes("image/png", &bytes)
+                    .expect("within the cap")
+                    .at(dir.path().join("noisy.png"))
+            )]
+        );
+    }
+
     /// A photograph heavier than the wire carries is read and bounded, not
     /// refused: the file's cap is the only one it meets (ADR-0062 §4).
     #[tokio::test]
@@ -345,7 +475,10 @@ mod tests {
         let bytes = bingo_pictures::testing::noise(1250, 1250);
         assert!(bytes.len() > Image::MAX_BYTES, "{} bytes", bytes.len());
         std::fs::write(dir.path().join("big.png"), &bytes).expect("write");
-        let image = read_picture(dir.path(), "big.png").await;
+        let parts = read_parts(dir.path(), "big.png", false).await;
+        let [ContentPart::Image(image), ContentPart::Text { .. }] = parts.as_slice() else {
+            panic!("a picture and its words, not {parts:?}");
+        };
         assert!(
             image.decoded_len() <= bingo_pictures::MODEL_BUDGET,
             "{} bytes reached the model",
@@ -353,6 +486,46 @@ mod tests {
         );
         assert!(Image::is_known(&image.media_type), "{}", image.media_type);
         assert_eq!(image.path, Some(dir.path().join("big.png")));
+    }
+
+    /// The way back to the file ends at the journal's own cap: a file the
+    /// wire cannot carry is refused by name, and the bounded rendering the
+    /// same call without the flag returns is the model's other option.
+    #[tokio::test]
+    async fn original_above_the_journals_cap_is_refused_by_size() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bytes = bingo_pictures::testing::noise(1250, 1250);
+        assert!(
+            bytes.len() > Image::MAX_BYTES && bytes.len() as u64 <= MAX_BYTES,
+            "{} bytes: over the journal's cap, under the file cap",
+            bytes.len()
+        );
+        std::fs::write(dir.path().join("big.png"), &bytes).expect("write");
+        let error = ReadTool
+            .call(
+                serde_json::json!({ "file_path": "big.png", "original": true }),
+                &context(dir.path()),
+            )
+            .await
+            .err();
+        let named = format!(
+            "image too large: {} bytes, the limit is {}",
+            bytes.len(),
+            Image::MAX_BYTES
+        );
+        assert!(
+            matches!(&error, Some(ToolError::Failed(m)) if m.ends_with(&named)),
+            "got {error:?}"
+        );
+    }
+
+    /// The flag is a picture's; a text file is read as it always was.
+    #[tokio::test]
+    async fn original_on_a_text_file_reads_the_text() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(dir.path(), "a.txt", "first\nsecond\n");
+        let parts = read_parts(dir.path(), "a.txt", true).await;
+        assert_eq!(parts[0].as_text(), Some("     1\tfirst\n     2\tsecond"));
     }
 
     /// The file cap still refuses a read that is a mistake rather than a

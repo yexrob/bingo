@@ -5,6 +5,7 @@
 //! One frame type crosses kernel → client; two pure reducers derive the
 //! client view and the provider context from the same journal (ADR-0002).
 
+pub mod bytes;
 pub mod command;
 pub mod compactor;
 pub mod contributor;

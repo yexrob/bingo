@@ -3,7 +3,7 @@
 //! result elision beside it — the items, the journal and every surface keep
 //! the picture.
 
-use bingo_sdk::{ContentPart, Image, Message, Role};
+use bingo_sdk::{ContentPart, Image, Message, Role, bytes::words};
 
 /// `messages` with every image the model has answered `rounds_kept` times or
 /// more replaced by [`note`]; `None` when no image is that old, so the common
@@ -83,24 +83,12 @@ pub fn note(image: &Image) -> String {
     let what = format!(
         "[image elided: {} {}]",
         image.media_type,
-        size(image.decoded_len())
+        words(image.decoded_len())
     );
     match image.whereabouts() {
-        Some(words) => format!("{what} {words}"),
+        Some(whereabouts) => format!("{what} {whereabouts}"),
         None => what,
     }
-}
-
-/// Decimal units, one decimal: what a picture costs the wire is bytes, and
-/// bytes are what a download says. Rounded before the unit is chosen, so a
-/// picture just under a megabyte reads `1.0 MB` and never `1000.0 KB`.
-fn size(bytes: usize) -> String {
-    let tenths_of_kb = bytes.saturating_add(50) / 100;
-    if tenths_of_kb < 10_000 {
-        return format!("{}.{} KB", tenths_of_kb / 10, tenths_of_kb % 10);
-    }
-    let tenths_of_mb = bytes.saturating_add(50_000) / 100_000;
-    format!("{}.{} MB", tenths_of_mb / 10, tenths_of_mb % 10)
 }
 
 #[cfg(test)]
@@ -195,21 +183,6 @@ mod tests {
         assert_eq!(
             note(&image),
             "[image elided: image/png 2.2 MB] [picture: /a/b.png]"
-        );
-    }
-
-    #[test]
-    fn the_size_is_decimal_with_one_decimal_place() {
-        assert_eq!(size(0), "0.0 KB");
-        assert_eq!(size(949), "0.9 KB");
-        assert_eq!(size(950), "1.0 KB");
-        assert_eq!(size(999_949), "999.9 KB");
-        assert_eq!(size(999_950), "1.0 MB");
-        assert_eq!(size(1_000_000), "1.0 MB");
-        assert_eq!(size(2_212_534), "2.2 MB");
-        assert!(
-            size(usize::MAX).ends_with(" MB"),
-            "the arithmetic saturates"
         );
     }
 
