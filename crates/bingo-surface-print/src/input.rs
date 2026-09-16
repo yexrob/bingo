@@ -116,12 +116,14 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-/// One line of stdin, as this surface reads it.
-pub(crate) fn parse_line(line: &str) -> Result<Line, ParseError> {
+/// One line of stdin, as this surface reads it. Async because a user line may
+/// carry a picture, and bounding one is a decode this thread may not spend
+/// (ADR-0062).
+pub(crate) async fn parse_line(line: &str) -> Result<Line, ParseError> {
     let value: Value =
         serde_json::from_str(line).map_err(|e| ParseError::new(format!("not JSON: {e}")))?;
     match value.get("type").and_then(Value::as_str) {
-        Some("user") => user(&value),
+        Some("user") => user(&value).await,
         Some("control_request") => control_request(&value),
         Some("control_response") => control_response(&value),
         Some(other) => Err(ParseError::new(format!("unsupported line type `{other}`"))),
@@ -132,7 +134,7 @@ pub(crate) fn parse_line(line: &str) -> Result<Line, ParseError> {
 /// The text and the pictures of a user message. The rest of it — the tool
 /// results a host echoes back, `session_id`, `parent_tool_use_id` — is not a
 /// prompt.
-fn user(value: &Value) -> Result<Line, ParseError> {
+async fn user(value: &Value) -> Result<Line, ParseError> {
     let content = value
         .pointer("/message/content")
         .ok_or_else(|| ParseError::new("a user line with no `message.content`"))?;
@@ -144,10 +146,7 @@ fn user(value: &Value) -> Result<Line, ParseError> {
                 .filter_map(text_block)
                 .collect::<Vec<_>>()
                 .join("\n"),
-            blocks
-                .iter()
-                .filter_map(image_block)
-                .collect::<Result<Vec<_>, _>>()?,
+            pictures(blocks).await?,
         ),
         _ => {
             return Err(ParseError::new(
@@ -161,6 +160,20 @@ fn user(value: &Value) -> Result<Line, ParseError> {
     Ok(Line::User { text, images })
 }
 
+/// The pictures of a user message, in the order they were written. A block
+/// that is not an `image` is not one of them; one that is and will not read
+/// ends the line, because a host that meant to send a picture is owed the
+/// reason rather than a prompt with it missing.
+async fn pictures(blocks: &[Value]) -> Result<Vec<Image>, ParseError> {
+    let mut images = Vec::new();
+    for block in blocks {
+        if let Some(image) = image_block(block).await {
+            images.push(image?);
+        }
+    }
+    Ok(images)
+}
+
 fn text_block(block: &Value) -> Option<&str> {
     (block.get("type").and_then(Value::as_str) == Some("text"))
         .then(|| block.get("text").and_then(Value::as_str))
@@ -172,7 +185,7 @@ fn text_block(block: &Value) -> Option<&str> {
 /// source is a picture this surface cannot carry, and says so. A type the
 /// provider table refuses is transcoded on the way in (ADR-0041 §2), so a
 /// host may hand over what it has and the journal still holds what replays.
-fn image_block(block: &Value) -> Option<Result<Image, ParseError>> {
+async fn image_block(block: &Value) -> Option<Result<Image, ParseError>> {
     if block.get("type").and_then(Value::as_str) != Some("image") {
         return None;
     }
@@ -194,7 +207,8 @@ fn image_block(block: &Value) -> Option<Result<Image, ParseError>> {
         path: None,
     };
     Some(
-        bingo_pictures::accepted(handed)
+        bingo_pictures::taken(handed)
+            .await
             .map_err(|e| ParseError::new(format!("an image block of type {media_type}: {e}"))),
     )
 }
@@ -317,12 +331,15 @@ pub(crate) fn control_error(request_id: &str, message: &str) -> Value {
 mod tests {
     use super::*;
 
-    fn parse(line: &str) -> Line {
-        parse_line(line).expect("a line this surface reads")
+    async fn parse(line: &str) -> Line {
+        parse_line(line).await.expect("a line this surface reads")
     }
 
-    fn error(line: &str) -> String {
-        parse_line(line).expect_err("a line this surface refuses").0
+    async fn error(line: &str) -> String {
+        parse_line(line)
+            .await
+            .expect_err("a line this surface refuses")
+            .0
     }
 
     /// A picture a host would write into an `image` block, base64 as the wire
@@ -335,12 +352,12 @@ mod tests {
 
     // ---- the lines a host writes -----------------------------------------
 
-    #[test]
-    fn a_user_line_with_string_content_is_a_prompt() {
+    #[tokio::test]
+    async fn a_user_line_with_string_content_is_a_prompt() {
         let line = r#"{"type":"user","message":{"role":"user","content":"hello"},
             "parent_tool_use_id":null,"session_id":"ses_1"}"#;
         assert_eq!(
-            parse(line),
+            parse(line).await,
             Line::User {
                 text: "hello".into(),
                 images: Vec::new(),
@@ -348,8 +365,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_text_blocks_are_the_prompt_and_the_image_blocks_its_pictures() {
+    #[tokio::test]
+    async fn the_text_blocks_are_the_prompt_and_the_image_blocks_its_pictures() {
         let data = served(4, 2, bingo_pictures::testing::ImageFormat::Png);
         let line = serde_json::json!({
             "type": "user",
@@ -363,7 +380,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            parse(&line),
+            parse(&line).await,
             Line::User {
                 text: "look at this\nand this".into(),
                 images: vec![Image {
@@ -376,8 +393,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_user_line_that_is_only_a_picture_is_a_prompt() {
+    #[tokio::test]
+    async fn a_user_line_that_is_only_a_picture_is_a_prompt() {
         let line = serde_json::json!({
             "type": "user",
             "message": { "role": "user", "content": [
@@ -388,7 +405,7 @@ mod tests {
             ] },
         })
         .to_string();
-        let Line::User { text, images } = parse(&line) else {
+        let Line::User { text, images } = parse(&line).await else {
             panic!("a prompt");
         };
         assert_eq!(text, "");
@@ -397,8 +414,8 @@ mod tests {
 
     /// A host may hand over what it has; the journal keeps what a provider
     /// takes (ADR-0041 §2), so the transcoding is on the way in.
-    #[test]
-    fn an_image_block_of_a_wider_type_arrives_as_png() {
+    #[tokio::test]
+    async fn an_image_block_of_a_wider_type_arrives_as_png() {
         let bmp = bingo_pictures::testing::drawn(4, 2, bingo_pictures::testing::ImageFormat::Bmp);
         let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bmp);
         let line = serde_json::json!({
@@ -409,66 +426,68 @@ mod tests {
             ] },
         })
         .to_string();
-        let Line::User { images, .. } = parse(&line) else {
+        let Line::User { images, .. } = parse(&line).await else {
             panic!("a prompt");
         };
         assert_eq!(images[0].media_type, "image/png");
     }
 
-    #[test]
-    fn an_image_block_of_a_type_no_decoder_reads_is_said() {
+    #[tokio::test]
+    async fn an_image_block_of_a_type_no_decoder_reads_is_said() {
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"image","source":{"type":"base64","media_type":"image/heic","data":"bm90"}}]}}"#;
         assert!(
-            error(line).starts_with("an image block of type image/heic: "),
-            "{}",
             error(line)
+                .await
+                .starts_with("an image block of type image/heic: "),
+            "{}",
+            error(line).await
         );
     }
 
-    #[test]
-    fn an_image_block_this_surface_cannot_carry_is_said() {
+    #[tokio::test]
+    async fn an_image_block_this_surface_cannot_carry_is_said() {
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"image","source":{"type":"url","url":"https://x/y.png"}}]}}"#;
         assert_eq!(
-            error(line),
+            error(line).await,
             "an image block whose `source.type` is not `base64`"
         );
     }
 
-    #[test]
-    fn a_user_line_with_no_text_is_no_prompt() {
+    #[tokio::test]
+    async fn a_user_line_with_no_text_is_no_prompt() {
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}}"#;
-        assert_eq!(error(line), "a user line with no text to submit");
+        assert_eq!(error(line).await, "a user line with no text to submit");
         let blank = r#"{"type":"user","message":{"role":"user","content":"   "}}"#;
-        assert_eq!(error(blank), "a user line with no text to submit");
+        assert_eq!(error(blank).await, "a user line with no text to submit");
     }
 
-    #[test]
-    fn a_user_line_with_no_content_says_so() {
+    #[tokio::test]
+    async fn a_user_line_with_no_content_says_so() {
         let line = r#"{"type":"user","message":{"role":"user"}}"#;
-        assert_eq!(error(line), "a user line with no `message.content`");
+        assert_eq!(error(line).await, "a user line with no `message.content`");
     }
 
-    #[test]
-    fn an_interrupt_is_a_control_request_with_its_id() {
+    #[tokio::test]
+    async fn an_interrupt_is_a_control_request_with_its_id() {
         let line = r#"{"type":"control_request","request_id":"req_1",
             "request":{"subtype":"interrupt"}}"#;
         assert_eq!(
-            parse(line),
+            parse(line).await,
             Line::Interrupt {
                 request_id: "req_1".into()
             }
         );
     }
 
-    #[test]
-    fn an_unknown_control_request_keeps_its_id_so_it_can_be_refused() {
+    #[tokio::test]
+    async fn an_unknown_control_request_keeps_its_id_so_it_can_be_refused() {
         let line = r#"{"type":"control_request","request_id":"req_2",
             "request":{"subtype":"initialize","hooks":{}}}"#;
         assert_eq!(
-            parse(line),
+            parse(line).await,
             Line::Unsupported {
                 request_id: "req_2".into(),
                 subtype: "initialize".into()
@@ -478,19 +497,19 @@ mod tests {
 
     // ---- the verdicts ----------------------------------------------------
 
-    fn decision(line: &str) -> Decision {
-        match parse(line) {
+    async fn decision(line: &str) -> Decision {
+        match parse(line).await {
             Line::Decision { decision, .. } => decision,
             other => panic!("expected a decision, got {other:?}"),
         }
     }
 
-    #[test]
-    fn an_allow_carries_the_input_the_host_would_run() {
+    #[tokio::test]
+    async fn an_allow_carries_the_input_the_host_would_run() {
         let line = r#"{"type":"control_response","response":{"subtype":"success",
             "request_id":"req_3","response":{"behavior":"allow","updatedInput":{"a":1}}}}"#;
         assert_eq!(
-            parse(line),
+            parse(line).await,
             Line::Decision {
                 request_id: "req_3".into(),
                 decision: Decision::Allow {
@@ -500,32 +519,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_allow_without_an_updated_input_is_still_an_allow() {
+    #[tokio::test]
+    async fn an_allow_without_an_updated_input_is_still_an_allow() {
         let line = r#"{"type":"control_response","response":{"subtype":"success",
             "request_id":"req_3","response":{"behavior":"allow"}}}"#;
         assert_eq!(
-            decision(line),
+            decision(line).await,
             Decision::Allow {
                 updated_input: None
             }
         );
     }
 
-    #[test]
-    fn a_deny_carries_the_message_the_model_will_read() {
+    #[tokio::test]
+    async fn a_deny_carries_the_message_the_model_will_read() {
         let line = r#"{"type":"control_response","response":{"subtype":"success",
             "request_id":"req_4","response":{"behavior":"deny","message":"not that file"}}}"#;
         assert_eq!(
-            decision(line),
+            decision(line).await,
             Decision::Deny {
                 message: Some("not that file".into())
             }
         );
     }
 
-    #[test]
-    fn everything_that_is_not_an_allow_is_a_denial() {
+    #[tokio::test]
+    async fn everything_that_is_not_an_allow_is_a_denial() {
         let cases = [
             r#"{"type":"control_response","response":{"subtype":"error",
                 "request_id":"r","error":"the callback raised"}}"#,
@@ -537,7 +556,7 @@ mod tests {
         ];
         for line in cases {
             assert!(
-                matches!(decision(line), Decision::Deny { .. }),
+                matches!(decision(line).await, Decision::Deny { .. }),
                 "allowed by: {line}"
             );
         }
@@ -545,25 +564,25 @@ mod tests {
 
     // ---- the junk --------------------------------------------------------
 
-    #[test]
-    fn junk_is_an_error_a_person_can_read_and_never_a_panic() {
-        assert!(error("").starts_with("not JSON:"));
-        assert!(error("{oh no").starts_with("not JSON:"));
-        assert!(error("[1,2,3]").starts_with("a line with no `type`"));
+    #[tokio::test]
+    async fn junk_is_an_error_a_person_can_read_and_never_a_panic() {
+        assert!(error("").await.starts_with("not JSON:"));
+        assert!(error("{oh no").await.starts_with("not JSON:"));
+        assert!(error("[1,2,3]").await.starts_with("a line with no `type`"));
         assert_eq!(
-            error(r#"{"type":"result"}"#),
+            error(r#"{"type":"result"}"#).await,
             "unsupported line type `result`"
         );
         assert_eq!(
-            error(r#"{"type":"control_request","request":{"subtype":"interrupt"}}"#),
+            error(r#"{"type":"control_request","request":{"subtype":"interrupt"}}"#).await,
             "a control request with no `request_id`"
         );
         assert_eq!(
-            error(r#"{"type":"control_request","request_id":"r","request":{}}"#),
+            error(r#"{"type":"control_request","request_id":"r","request":{}}"#).await,
             "a control request with no `request.subtype`"
         );
         assert_eq!(
-            error(r#"{"type":"control_response","response":{"request_id":"r"}}"#),
+            error(r#"{"type":"control_response","response":{"request_id":"r"}}"#).await,
             "a control response with no `response.subtype`"
         );
     }

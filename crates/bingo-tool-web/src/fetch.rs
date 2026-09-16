@@ -77,7 +77,8 @@ impl WebFetchTool {
         let response = self.get(url).await?;
         let content_type = content_type(&response);
         let bytes = read_capped(response).await?;
-        match body::render(&content_type, &bytes, url.as_str())
+        match body::render(&content_type, bytes, url.as_str())
+            .await
             .map_err(|e| ToolError::Failed(e.to_string()))?
         {
             Content::Page(markdown) => Ok(ToolOutput::text(self.kept(url, &markdown))),

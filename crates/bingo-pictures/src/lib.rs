@@ -27,7 +27,9 @@
 //! one inside [`MODEL_BOX`] pixels and under [`MODEL_BUDGET`] bytes is the
 //! bytes it came as, and a larger one is fitted to the box and encoded down a
 //! ladder until it fits. The three doors above call it, so nothing above this
-//! crate decides how big a picture a model is sent.
+//! crate decides how big a picture a model is sent — and because the bound is
+//! a decode, a caller on an async runtime enters by [`load`], [`seen`] or
+//! [`taken`], which are those doors on a blocking thread.
 
 use base64::Engine;
 use bingo_sdk::Image;
@@ -45,7 +47,7 @@ pub use accepted::{accepted, sniffed};
 pub use bounded::{MODEL_BOX, MODEL_BUDGET, bounded};
 pub use cache::Cache;
 pub use file::keep;
-pub use load::load;
+pub use load::{load, seen, taken};
 pub use pixels::{Pixels, pixels};
 pub use source::{Source, names_a_picture};
 

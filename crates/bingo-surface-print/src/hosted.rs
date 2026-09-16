@@ -60,7 +60,7 @@ impl Attached<'_> {
                     None => return self.ended(),
                 },
                 line = lines.recv(), if open => match line {
-                    Some(line) => self.take(&line, &mut host)?,
+                    Some(line) => self.take(&line, &mut host).await?,
                     None => open = false,
                 },
             }
@@ -92,12 +92,12 @@ impl Attached<'_> {
 
     /// One line the host wrote. A line this surface cannot read is a
     /// diagnostic, never the end of the run.
-    fn take(&mut self, line: &str, host: &mut Hosted) -> Result<(), KernelError> {
+    async fn take(&mut self, line: &str, host: &mut Hosted) -> Result<(), KernelError> {
         if line.trim().is_empty() {
             return Ok(());
         }
         let human = self.human();
-        match input::parse_line(line) {
+        match input::parse_line(line).await {
             Ok(parsed) => host.take(parsed, &self.handle, &mut *self.out, &mut *self.err),
             Err(e) => {
                 let report = notice_report("INPUT_LINE_IGNORED", &e.to_string(), human);

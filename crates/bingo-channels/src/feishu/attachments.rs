@@ -3,8 +3,9 @@
 //! Parsing hands over keys; this is where they become bytes. A picture
 //! becomes the one `Image` the journal keeps, its type read off the bytes
 //! because a chat carries whatever phones and screenshot keys produce and a
-//! BMP goes as PNG (ADR-0041 §2) — and it lands on disk under the message
-//! that carried it first, so the model can hand the file on (ADR-0052).
+//! BMP goes as PNG (ADR-0041 §2), at the size a model is sent (ADR-0062) —
+//! and it lands on disk under the message that carried it first, so the model
+//! can hand the file on (ADR-0052).
 //! Everything else lands there too and becomes a path in the words: the
 //! model reads it with the fs tool it already has, and no kernel type has to
 //! learn what a document is.
@@ -91,7 +92,9 @@ pub fn resource_path(resource: &Resource, kind: &str) -> String {
 /// type, so the file a model hands on is the picture it was shown.
 async fn picture(api: &Api, dir: &Path, resource: &Resource) -> Result<Image, String> {
     let binary = fetched(api, resource).await?;
-    let image = bingo_pictures::sniffed(&binary.bytes).map_err(|e| e.to_string())?;
+    let image = bingo_pictures::seen(binary.bytes)
+        .await
+        .map_err(|e| e.to_string())?;
     let path = bingo_pictures::keep(&dir.join(&resource.message), &image)
         .map_err(|error| error.to_string())?;
     Ok(image.at(path))

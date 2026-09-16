@@ -12,9 +12,12 @@
 //! resumed. A path is not cached — the file *is* the cache, and a copy of it
 //! under the data directory would be a second one to keep in step.
 //!
-//! What comes back is the bounded picture (ADR-0062 §2), read on a blocking
-//! thread: the file on disk is what was handed over, and the [`Image`] is
-//! what the model is shown.
+//! Three ways in, all of them async and none of them on a thread a session
+//! answers on: [`load`] from a source, [`seen`] from bytes a caller already
+//! holds, [`taken`] from the [`Image`] a wire line carried. What comes back
+//! is the bounded picture (ADR-0062 §2) — the file on disk is what was handed
+//! over, and the `Image` is what the model is shown — and the bound is a
+//! decode, so every caller on the runtime enters through one of these.
 
 use std::path::Path;
 use std::time::Duration;
@@ -22,7 +25,7 @@ use std::time::Duration;
 use bingo_sdk::{Image, ImageError};
 use futures::StreamExt;
 
-use crate::accepted::sniffed;
+use crate::accepted::{accepted, sniffed};
 use crate::cache::Cache;
 use crate::{PictureError, Source};
 
@@ -41,13 +44,29 @@ pub async fn load(source: &Source, cache: Option<&Cache>) -> Result<Image, Pictu
     }
 }
 
-/// The bytes as the picture a model is sent, off the runtime's own threads: a
-/// decode, a Lanczos3 resize and up to six encodings are hundreds of
-/// milliseconds, and no thread a session answers on may spend them (M61,
-/// ADR-0062). A blocking task that does not finish is read as the picture
-/// being unreadable, which is the only thing left to say about it.
-async fn seen(bytes: Vec<u8>) -> Result<Image, PictureError> {
-    match tokio::task::spawn_blocking(move || sniffed(&bytes)).await {
+/// Bytes a caller already holds, as the picture a model is sent: [`sniffed`]
+/// on a blocking thread.
+pub async fn seen(bytes: Vec<u8>) -> Result<Image, PictureError> {
+    off_thread(move || sniffed(&bytes)).await
+}
+
+/// A picture whose sender named its own type, as the model is sent it:
+/// [`accepted`] on a blocking thread, for a caller holding the [`Image`] a
+/// wire line already carried.
+pub async fn taken(image: Image) -> Result<Image, PictureError> {
+    off_thread(move || accepted(image)).await
+}
+
+/// One bounding, off the runtime's own threads: a decode, a Lanczos3 resize
+/// and up to six encodings are hundreds of milliseconds, and no thread a
+/// session answers on may spend them (M61, ADR-0062). A blocking task that
+/// does not finish is read as the picture being unreadable, which is the only
+/// thing left to say about it.
+async fn off_thread<Bound>(bound: Bound) -> Result<Image, PictureError>
+where
+    Bound: FnOnce() -> Result<Image, PictureError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(bound).await {
         Ok(image) => image,
         Err(unfinished) => Err(PictureError::Unreadable(std::io::Error::other(unfinished))),
     }

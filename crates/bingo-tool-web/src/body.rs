@@ -27,13 +27,19 @@ pub(crate) enum Content {
     Picture(Image),
 }
 
-/// The content a body of this media type reaches the model as.
-pub(crate) fn render(content_type: &str, bytes: &[u8], url: &str) -> Result<Content, Unreadable> {
+/// The content a body of this media type reaches the model as. The bytes are
+/// taken by value: a picture's are handed straight to the bounding door,
+/// which reads them on a thread of its own.
+pub(crate) async fn render(
+    content_type: &str,
+    bytes: Vec<u8>,
+    url: &str,
+) -> Result<Content, Unreadable> {
     let media_type = media_type(content_type);
     match classify(&media_type) {
-        Some(Kind::Html) => Ok(Content::Page(readable::markdown(&text(bytes), url)?)),
-        Some(Kind::Text) => Ok(Content::Page(text(bytes))),
-        Some(Kind::Picture) => Ok(Content::Picture(picture::seen(bytes)?)),
+        Some(Kind::Html) => Ok(Content::Page(readable::markdown(&text(&bytes), url)?)),
+        Some(Kind::Text) => Ok(Content::Page(text(&bytes))),
+        Some(Kind::Picture) => Ok(Content::Picture(picture::seen(bytes).await?)),
         None => Err(Unreadable::ContentType(media_type)),
     }
 }
@@ -88,22 +94,22 @@ mod tests {
     const HTML: &[u8] = b"<h1>Title</h1><p>Body</p>";
 
     /// The page a body of this type reads as, or the test's failure.
-    fn page(content_type: &str, body: &[u8]) -> String {
-        match render(content_type, body, "https://example.com/") {
+    async fn page(content_type: &str, body: &[u8]) -> String {
+        match render(content_type, body.to_vec(), "https://example.com/").await {
             Ok(Content::Page(text)) => text,
             other => panic!("{content_type}: expected a page, got {other:?}"),
         }
     }
 
-    #[test]
-    fn html_reaches_the_model_as_markdown() {
-        let out = page("text/html; charset=utf-8", HTML);
+    #[tokio::test]
+    async fn html_reaches_the_model_as_markdown() {
+        let out = page("text/html; charset=utf-8", HTML).await;
         assert!(out.contains("# Title"), "got {out}");
         assert!(!out.contains("<h1>"), "got {out}");
     }
 
-    #[test]
-    fn text_and_json_come_back_as_they_are() {
+    #[tokio::test]
+    async fn text_and_json_come_back_as_they_are() {
         for content_type in [
             "text/plain",
             "text/markdown; charset=utf-8",
@@ -111,19 +117,19 @@ mod tests {
             "application/vnd.api+json",
             "application/xml",
         ] {
-            assert_eq!(page(content_type, b"{\"a\": 1}"), "{\"a\": 1}");
+            assert_eq!(page(content_type, b"{\"a\": 1}").await, "{\"a\": 1}");
         }
     }
 
-    #[test]
-    fn a_body_of_no_stated_type_is_read_as_text() {
-        assert_eq!(page("", b"plain words"), "plain words");
+    #[tokio::test]
+    async fn a_body_of_no_stated_type_is_read_as_text() {
+        assert_eq!(page("", b"plain words").await, "plain words");
     }
 
-    #[test]
-    fn a_picture_comes_back_as_the_picture() {
+    #[tokio::test]
+    async fn a_picture_comes_back_as_the_picture() {
         let bytes = png_bytes(3, 2);
-        match render("image/png", &bytes, "https://example.com/shot.png") {
+        match render("image/png", bytes.clone(), "https://example.com/shot.png").await {
             Ok(Content::Picture(image)) => {
                 assert_eq!(image.media_type, "image/png");
                 assert_eq!(
@@ -138,24 +144,31 @@ mod tests {
     /// The header is a claim and the bytes are the evidence, in both
     /// directions: a page served as a PNG is refused, and an SVG — text no
     /// decoder reads — never reaches the decoder at all.
-    #[test]
-    fn what_is_served_as_a_picture_is_read_as_one_only_if_it_is_one() {
+    #[tokio::test]
+    async fn what_is_served_as_a_picture_is_read_as_one_only_if_it_is_one() {
         let error = render(
             "image/png",
-            b"<!doctype html><html></html>",
+            b"<!doctype html><html></html>".to_vec(),
             "https://e.com/",
         )
+        .await
         .err();
         assert!(
             matches!(&error, Some(Unreadable::NotAPicture(_))),
             "got {error:?}"
         );
-        assert_eq!(page("image/svg+xml", b"<svg/>"), "<svg/>");
+        assert_eq!(page("image/svg+xml", b"<svg/>").await, "<svg/>");
     }
 
-    #[test]
-    fn anything_else_is_refused_by_name() {
-        let error = render("application/pdf", b"%PDF-1.7", "https://example.com/").err();
+    #[tokio::test]
+    async fn anything_else_is_refused_by_name() {
+        let error = render(
+            "application/pdf",
+            b"%PDF-1.7".to_vec(),
+            "https://example.com/",
+        )
+        .await
+        .err();
         assert!(
             matches!(&error, Some(Unreadable::ContentType(t)) if t == "application/pdf"),
             "got {error:?}"

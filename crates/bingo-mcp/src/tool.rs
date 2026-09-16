@@ -147,30 +147,21 @@ async fn part(block: &ContentBlock) -> ContentPart {
     }
 }
 
-/// A server's picture, bounded. What the server called a picture is a claim
-/// like everything else it says (ADR-0009 §2), so bytes no decoder reads are
-/// refused here in words the model can act on rather than sent on as a
-/// payload the provider would reject.
+/// A server's picture, bounded — through the crate's own async door, so the
+/// decode is off the thread this call is answered on (M61). What the server
+/// called a picture is a claim like everything else it says (ADR-0009 §2), so
+/// bytes no decoder reads are refused here in words the model can act on
+/// rather than sent on as a payload the provider would reject.
 async fn pictured(image: &rmcp::model::ImageContent) -> ContentPart {
     let handed = Image {
         media_type: image.mime_type.clone(),
         data: image.data.clone(),
         path: None,
     };
-    match bounded(handed).await {
+    match bingo_pictures::taken(handed).await {
         Ok(seen) => ContentPart::Image(seen),
         Err(why) => ContentPart::text(format!("[{} is not a picture: {why}]", image.mime_type)),
     }
-}
-
-/// The bound, off the runtime's threads: a decode, a resize and up to six
-/// encodings are hundreds of milliseconds, and a session answers on the
-/// thread this call is made from (M61).
-async fn bounded(handed: Image) -> Result<Image, String> {
-    tokio::task::spawn_blocking(move || bingo_pictures::accepted(handed))
-        .await
-        .map_err(|unfinished| unfinished.to_string())?
-        .map_err(|why| why.to_string())
 }
 
 #[async_trait]

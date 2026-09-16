@@ -110,41 +110,41 @@ producers that bypassed them. ADR-0062.
 
 ## Verified (2026-09-16)
 
-- `cargo fmt --all -- --check`, `cargo check --workspace --all-targets
-  --locked` and `cargo clippy --workspace --all-targets --locked
-  -- -D warnings`: all clean.
+- `cargo fmt`, `cargo check` and `cargo clippy -- -D warnings`, each
+  over the workspace and all targets, `--locked`: all clean.
 - `cargo test -p bingo-pictures -p bingo-tool-fs -p bingo-mcp --locked`:
   257 passed, 0 failed. `cargo test --workspace --locked
-  --no-fail-fast`: 4856 passed, 0 failed, 2 ignored (already so). No
-  flake, first run.
-- `bounded` unit tests: 9, all of the cases above, 1.9 s. The ladder is
-  walked whole through `bounded_within` against a small box and budget:
-  a 12 MP picture in a debug build is seconds, and a test that spends
-  seconds pins the machine it was written on.
+  --no-fail-fast`: 4856 passed, 0 failed, 2 ignored. No flake.
+- `bounded` unit tests: 9, all of the cases above, 1.9 s — the ladder
+  walked whole through `bounded_within` against a small box and budget,
+  because a 12 MP picture in a debug build is seconds and a test that
+  spends seconds pins the machine it was written on.
 - The `blender_demo` PNG, 2 212 534 bytes of 1312×1199, through
   `bounded`: **`image/jpeg`, 393 775 bytes** — inside the box already,
-  so no resize, and the first JPEG quality fit. 48 ms in release,
-  1.07 s in debug. `Read` on the same file answers with the same
-  picture (a throwaway `#[ignore]` test, run once and removed); a
-  200 KB PNG comes back as the file's own bytes.
+  so no resize, and the first JPEG quality fit; 48 ms in release,
+  1.07 s in debug. `Read` on it answers with the same picture (a
+  throwaway `#[ignore]` test, run once and removed); a 200 KB PNG
+  comes back as the file's own bytes.
 - `scripts/check_discipline.sh`: `discipline ok`, no new function over
   60 lines. `scripts/budget.sh`: `budget ok`, 342 unique dependencies
-  (max 342) — unchanged; `Cargo.lock` gains two lines, no package.
+  (max 342) — unchanged, `Cargo.lock` gaining lines and no package.
 - **Not verified: the Windows cross-check.** `cargo check -p
   bingo-pictures -p bingo-tool-fs -p bingo-mcp --all-targets --target
-  x86_64-pc-windows-msvc` fails on this machine in `aws-lc-sys`'s build
-  script (`fatal error: 'windows.h' file not found`) — the ADR-0041
-  2026-09-04 note's problem, `reqwest` under `bingo-pictures`. It was
-  already so for `bingo-pictures` and `bingo-mcp`; `bingo-tool-fs`
-  joins them, having compiled for the target before this change. The
-  target is installed and `bingo-sdk` compiles for it; CI's `windows`
-  job is the backstop. Nothing here is platform-shaped: no path,
-  process, signal or clock is touched.
+  x86_64-pc-windows-msvc` fails in `aws-lc-sys`'s build script (`fatal
+  error: 'windows.h' file not found`) — the ADR-0041 2026-09-04 note's
+  problem, `reqwest` under `bingo-pictures`. Already so for
+  `bingo-pictures` and `bingo-mcp`; `bingo-tool-fs` joins them. CI's
+  `windows` job is the backstop, and nothing here is platform-shaped.
 - Two behaviours changed beyond the plan, both because a door that
   bounds must decode: a stream-json `image` block whose base64 is not a
-  picture is refused by name at the door, and `Read` on a `.png` no
-  decoder reads says so instead of journaling it. Three tests that
-  handed over `"/9j/"` or `"iVBOR"` now hand over drawn pictures.
-- Left standing, out of scope: `bingo-tool-web`'s `body::render` and
-  `bingo-surface-print`'s `parse_line` call a bounding door from the
-  runtime's own threads, where ADR-0062 would want `spawn_blocking`.
+  picture, and `Read` on a `.png` no decoder reads, are now refused by
+  name. Three tests that handed over `"/9j/"` or `"iVBOR"` now hand
+  over drawn pictures.
+- *Follow-up, same day:* every caller of a bounding door is now off the
+  runtime's threads. `bingo_pictures::seen(bytes)` and `taken(image)` —
+  `sniffed` and `accepted` on a blocking thread — are public beside
+  `load`, and `bingo-tool-web`'s `body::render`, the Feishu attachment
+  fetch, `--print`'s `parse_line` and the MCP bridge all go through
+  them; the first and third became async to do it. `bingo-tool-fs`
+  keeps its own `spawn_blocking`: it knows the media type from the path
+  and calls `bounded`, not a sniffing door.
