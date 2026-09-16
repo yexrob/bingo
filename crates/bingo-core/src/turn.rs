@@ -484,7 +484,8 @@ impl Turn<'_> {
         let mut system = self.cfg.system.clone();
         system.extend(extra_system);
         let full = self.without_images(ContextView::fold_items(&self.items));
-        let messages = self.elide_after_overflow(full);
+        let recent = self.without_old_images(full);
+        let messages = self.elide_after_overflow(recent);
         let usage = self.measure(&system, &messages);
         let request = ModelRequest {
             model: self.model.id.clone(),
@@ -554,6 +555,13 @@ impl Turn<'_> {
         }
         vision::project_images_out(&messages, &vision::omitted_note(&self.model.id))
             .unwrap_or(messages)
+    }
+
+    /// A picture the model has already answered is a note on the wire
+    /// (ADR-0061 §1): the items keep it, so a surface still draws it and the
+    /// model can read the file again when it wants the picture back.
+    fn without_old_images(&self, messages: Vec<Message>) -> Vec<Message> {
+        elide::images::elide_old_images(&messages, budget::IMAGE_ROUNDS_KEPT).unwrap_or(messages)
     }
 
     /// Bill the round to the turn, and say where the context stands after it.

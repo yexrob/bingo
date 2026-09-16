@@ -357,6 +357,15 @@ pub fn capabilities() -> ModelCapabilities {
     }
 }
 
+/// The same scripted model with eyes, for a test that watches a picture age
+/// (ADR-0061): vision is the one capability it turns on.
+pub fn seeing() -> ModelCapabilities {
+    ModelCapabilities {
+        images: true,
+        ..capabilities()
+    }
+}
+
 pub fn summary(id: &str) -> SessionSummary {
     let ts = jiff::Timestamp::from_second(0).unwrap();
     SessionSummary {

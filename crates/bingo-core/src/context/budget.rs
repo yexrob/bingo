@@ -12,6 +12,10 @@ pub const RECOUNT_ROUNDS: u32 = 5;
 pub const KEEP_RECENT_AFTER_OVERFLOW: usize = 4;
 /// A result shorter than this is not worth eliding.
 pub const ELIDE_MIN_CHARS: usize = 1_000;
+/// Answers a picture stays on the wire for (ADR-0061 §1, §3). Three, because
+/// a model that asked for a picture has said what it saw within a round or
+/// two, and every round after that pays its megabytes again.
+pub const IMAGE_ROUNDS_KEPT: usize = 3;
 
 /// The lines for one model, all from the effective window: what is left for
 /// input once the output budget is reserved.

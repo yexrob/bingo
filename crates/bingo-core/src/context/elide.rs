@@ -2,6 +2,8 @@
 //! changes. A projection over messages — the items and the journal keep
 //! every byte.
 
+pub mod images;
+
 use bingo_sdk::{ContentPart, Message};
 
 /// `messages` with every tool result older than the last `keep_recent` and
