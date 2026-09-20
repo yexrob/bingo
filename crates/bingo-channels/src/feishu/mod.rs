@@ -26,7 +26,7 @@ pub mod token;
 pub mod upload;
 pub mod ws;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -35,8 +35,8 @@ use bingo_sdk::CancellationToken;
 use serde_json::{Value, json};
 
 use crate::adapter::{
-    Acknowledge, Buttons, ChannelAdapter, Edit, Files, Inbox, Mark, Mode, Outcome, Outgoing,
-    Threads,
+    Acknowledge, Buttons, ChannelAdapter, ChannelCommand, Edit, Files, Inbox, Mark, Mode, Outcome,
+    Outgoing, Threads,
 };
 use crate::conversation::{Conversation, Posted};
 use crate::error::ChannelError;
@@ -74,6 +74,8 @@ pub struct Config {
     pub base: String,
     /// Where an attachment a message carried lands (ADR-0051 §2).
     pub attachments: PathBuf,
+    /// Commands this adapter maps to controls owned by another surface.
+    pub command_mappings: BTreeMap<String, String>,
 }
 
 pub struct Feishu {
@@ -90,6 +92,7 @@ pub struct Feishu {
     /// Which chat each thing we posted went to, so its queue can be found
     /// again from an edit that carries only the handle.
     chats: Mutex<HashMap<String, String>>,
+    command_mappings: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for Feishu {
@@ -102,6 +105,7 @@ impl Feishu {
     pub const ID: &'static str = "feishu";
 
     pub fn new(config: Config) -> Self {
+        let command_mappings = with_default_command_mappings(config.command_mappings);
         Self {
             api: Api::new(config.base, &config.app_id, &config.app_secret),
             app_secret: config.app_secret,
@@ -118,6 +122,7 @@ impl Feishu {
             me: Mutex::new(String::new()),
             sequences: Mutex::new(HashMap::new()),
             chats: Mutex::new(HashMap::new()),
+            command_mappings,
         }
     }
 
@@ -331,6 +336,21 @@ impl ChannelAdapter for Feishu {
         self.api.app_id().to_string()
     }
 
+    fn command(&self, text: &str) -> Option<ChannelCommand> {
+        let source = command_name(text)?;
+        let target = self.command_mappings.get(&source)?;
+        match target
+            .trim()
+            .trim_start_matches('/')
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "clear" => Some(ChannelCommand::NewSession),
+            "esc" | "escape" | "stop" => Some(ChannelCommand::Stop),
+            _ => None,
+        }
+    }
+
     async fn run(&self, inbox: Inbox, cancel: CancellationToken) -> Result<(), ChannelError> {
         // A credential that is missing is refused here rather than at
         // registration: an unconfigured chat must not stop `bingo --print`.
@@ -392,6 +412,28 @@ impl ChannelAdapter for Feishu {
     fn acknowledge(&self) -> Option<&dyn Acknowledge> {
         Some(self)
     }
+}
+
+fn with_default_command_mappings(configured: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut mappings = BTreeMap::from([
+        ("/new".to_string(), "/clear".to_string()),
+        ("/stop".to_string(), "esc".to_string()),
+    ]);
+    for (source, target) in configured {
+        if let Some(source) = command_name(&source) {
+            mappings.insert(source, target);
+        }
+    }
+    mappings
+}
+
+fn command_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    let name = text.strip_prefix('/').unwrap_or(text);
+    if name.is_empty() || name.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(format!("/{name}"))
 }
 
 #[async_trait]

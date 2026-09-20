@@ -96,6 +96,10 @@ pub struct FeishuChannel {
     /// Who may speak to this bot here (ADR-0051 §4).
     #[serde(default)]
     pub access: Access,
+    /// Platform commands mapped to terminal controls, such as `/new` to
+    /// `/clear` and `/stop` to `esc`.
+    #[serde(default)]
+    pub command_mappings: BTreeMap<String, String>,
 }
 
 /// Where an attachment a Feishu message carried lands, under the data
@@ -129,6 +133,7 @@ impl FeishuChannel {
                 .join(crate::lock::DIRECTORY)
                 .join(Feishu::ID)
                 .join(ATTACHMENTS),
+            command_mappings: self.command_mappings.clone(),
         }
     }
 }

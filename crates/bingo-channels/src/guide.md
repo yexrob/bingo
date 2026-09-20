@@ -27,6 +27,9 @@ intervalMs = 700
   also come from `BINGO_FEISHU_APP_ID`.
 - `base` (`channels.feishu.base`) — where the API lives, for a tenant that is
   not on the default host.
+- `commandMappings` (`channels.feishu.commandMappings`) — a map from a Feishu
+  command to a terminal control. It defaults to `/new` → `/clear` and `/stop`
+  → `esc`; add another source command by mapping it to `/clear` or `esc`.
 - `coalesce` — how often a streaming answer is redrawn: `minChars`
   (48) new characters worth a redraw, `intervalMs` (700) the longest anyone
   waits to see something new.

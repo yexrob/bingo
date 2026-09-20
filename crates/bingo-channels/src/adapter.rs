@@ -86,6 +86,13 @@ pub enum Mode {
     Stream,
 }
 
+/// A control gesture a platform may map from its own command vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelCommand {
+    NewSession,
+    Stop,
+}
+
 #[async_trait]
 pub trait ChannelAdapter: Send + Sync {
     /// The first segment of every session key this adapter's chats mint.
@@ -105,6 +112,11 @@ pub trait ChannelAdapter: Send + Sync {
     /// `edit()` may replace, if this adapter has an `edit()` at all.
     async fn send(&self, to: &Conversation, text: &str, mode: Mode)
     -> Result<Posted, ChannelError>;
+
+    /// Interpret a platform command without sending it to the session.
+    fn command(&self, _text: &str) -> Option<ChannelCommand> {
+        None
+    }
 
     fn edit(&self) -> Option<&dyn Edit> {
         None

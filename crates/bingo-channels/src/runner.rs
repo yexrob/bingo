@@ -17,7 +17,7 @@ use bingo_sdk::{
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::adapter::{ChannelAdapter, Incoming, Mark, Mode, Outcome};
+use crate::adapter::{ChannelAdapter, ChannelCommand, Incoming, Mark, Mode, Outcome};
 use crate::conversation::{Conversation, Posted};
 use crate::deliver::{Deliverer, Op};
 use crate::directory::{Directory, Seat};
@@ -37,9 +37,11 @@ struct Asked {
 }
 
 pub struct Runner {
+    host: HostHandle,
     adapter: Arc<dyn ChannelAdapter>,
     conversation: Conversation,
     key: String,
+    cwd: std::path::PathBuf,
     root: SessionId,
     /// One reducer per session in the tree, the root's from the snapshot.
     states: BTreeMap<SessionId, SessionState>,
@@ -73,7 +75,7 @@ impl Runner {
         inbound: mpsc::Receiver<Incoming>,
     ) -> Result<Self, KernelError> {
         let key = format!("{}/{}", adapter.id(), conversation.path());
-        let attachment = attach(host, &key, cwd).await?;
+        let attachment = attach(host, &key, cwd.clone()).await?;
         let Attachment {
             session,
             snapshot,
@@ -90,9 +92,11 @@ impl Runner {
             },
         );
         Ok(Self {
+            host: host.clone(),
             adapter,
             conversation,
             root: session.clone(),
+            cwd,
             states: BTreeMap::from([(session, snapshot)]),
             events,
             handle,
@@ -418,6 +422,11 @@ impl Runner {
     /// A reply that answers the open question is that answer; anything else
     /// is the next thing to work on.
     async fn said(&mut self, principal: &str, text: String, images: Vec<Image>) {
+        match self.adapter.command(&text) {
+            Some(ChannelCommand::NewSession) => return self.new_session().await,
+            Some(ChannelCommand::Stop) => return self.stop().await,
+            None => {}
+        }
         match self.answering(&text) {
             Some((id, answer)) => self.settles(id, answer).await,
             None => {
@@ -437,6 +446,74 @@ impl Runner {
                 self.acknowledge().await;
             }
         }
+    }
+
+    async fn stop(&mut self) {
+        self.handle
+            .interrupt(IntentId::mint(), bingo_sdk::InterruptScope::Head);
+        if let Err(error) = self.say("任务已停止。").await {
+            tracing::warn!(%error, key = %self.key, "the stop notice could not be sent");
+        }
+        self.ended(false).await;
+    }
+
+    async fn new_session(&mut self) {
+        let attachment = match fresh_session(self.host.clone(), self.key.clone(), self.cwd.clone())
+            .await
+        {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                tracing::warn!(%error, key = %self.key, "the new session could not open");
+                if let Err(error) = self.post("新会话开启失败。").await {
+                    tracing::warn!(%error, key = %self.key, "the new-session failure notice could not be sent");
+                }
+                return;
+            }
+        };
+        self.stop_current_turn().await;
+        self.replace_attachment(attachment);
+        if let Err(error) = self.post("新会话已开启。").await {
+            tracing::warn!(%error, key = %self.key, "the new-session notice could not be sent");
+        }
+    }
+
+    async fn stop_current_turn(&mut self) {
+        let busy = self.states.get(&self.root).is_some_and(SessionState::busy);
+        if !busy && self.streaming.is_none() && self.working.is_none() {
+            return;
+        }
+        self.handle
+            .interrupt(IntentId::mint(), bingo_sdk::InterruptScope::Head);
+        if let Err(error) = self.say("任务已停止。").await {
+            tracing::warn!(%error, key = %self.key, "the old-turn notice could not be sent");
+        }
+        self.ended(false).await;
+    }
+
+    fn replace_attachment(&mut self, attachment: Attachment) {
+        let old_root = self.root.clone();
+        let Attachment {
+            session,
+            snapshot,
+            events,
+            handle,
+        } = attachment;
+        self.directory.leave(&old_root);
+        self.directory.sit(
+            session.clone(),
+            Seat {
+                adapter: Arc::clone(&self.adapter),
+                conversation: self.conversation.clone(),
+                parent: None,
+            },
+        );
+        self.root = session.clone();
+        self.states = BTreeMap::from([(session, snapshot)]);
+        self.events = events;
+        self.handle = handle;
+        self.streaming = None;
+        self.working = None;
+        self.asked.clear();
     }
 
     fn answering(&self, text: &str) -> Option<(InteractionId, Answer)> {
@@ -486,6 +563,27 @@ impl Runner {
         self.handle
             .answer(IntentId::mint(), id, answer, Activation::Pointer);
     }
+}
+
+async fn fresh_session(
+    host: HostHandle,
+    name: String,
+    cwd: std::path::PathBuf,
+) -> Result<Attachment, KernelError> {
+    host.open(
+        SessionSelector::Create {
+            spec: SessionSpec {
+                cwd,
+                ..SessionSpec::default()
+            },
+        },
+        ClientIdentity {
+            name,
+            surface: SURFACE_ID.into(),
+        },
+        OpenOptions::with_children(),
+    )
+    .await
 }
 
 /// Post to the chat: under the message that started this where the platform

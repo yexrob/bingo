@@ -40,6 +40,10 @@ A local coding-agent harness in Rust: a minimal kernel, everything else a plugin
 
 Conventional Commits, imperative, subject ≤60 characters, English, no literary titles. Scopes are crate short names: `sdk core provider-fake provider-anthropic provider-openai provider-acp tool-fs tool-bash tool-web print rpc tui permissions hooks store context persona skills mcp agents teams rooms tasks demo-ui experience plugin-rpc schedule acp channels bin ci docs adr`. Body only when it carries information; footers `Refs: ADR-0002`, `Plan: M0`.
 
+## Pull requests
+
+Target `dev` by default. Use `main` only when a change explicitly needs the release branch.
+
 ## Forbidden
 
 `unsafe`; `unwrap`/`expect` outside tests; a surface holding session state; a plugin importing another plugin or the kernel; a second representation of an existing fact; a feature noun in the kernel.
