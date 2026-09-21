@@ -7,8 +7,6 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 
 use crate::host::Host;
-use crate::models;
-use crate::turn::ModelChoice;
 
 pub(super) struct ThinkCommand {
     pub(super) host: Weak<Host>,
@@ -31,23 +29,18 @@ impl Command for ThinkCommand {
     async fn run(&self, args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
         let host = super::host(&self.host)?;
         match args.trim() {
-            "" => report(&host, cx).await,
+            "" => report(&host, cx),
             wanted => set(&host, cx, wanted).await,
         }
     }
 }
 
-/// Bare `/think`: the level as it stands, what the model does with it, and how
-/// to say one.
-async fn report(host: &Arc<Host>, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
+/// Bare `/think`: the level as it stands and how to say one.
+fn report(host: &Host, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
     let level = host.session_thinking(&cx.session)?;
     Ok(CommandOutcome::View {
         view: View::Text {
-            text: format!(
-                "{}\nusage: /think {}",
-                said(level, running_on(host, cx).await.as_ref()),
-                levels()
-            ),
+            text: format!("{}\nusage: /think {}", said(level), levels()),
         },
     })
 }
@@ -66,7 +59,7 @@ async fn set(
     })?;
     host.reconfigure(&cx.session, SessionChange::Thinking(level))
         .await?;
-    let mut message = said(level, running_on(host, cx).await.as_ref());
+    let mut message = said(level);
     if let Some(refused) = super::remember(host, &[("thinking", serde_json::json!(level))]) {
         message.push('\n');
         message.push_str(&refused);
@@ -76,29 +69,8 @@ async fn set(
     })
 }
 
-/// The model the session's next turn would run on, where one can be resolved.
-/// It is read to tell the truth about the level and for nothing else, so a
-/// session that cannot answer — a log session, a provider that is not signed
-/// in — reports the level alone rather than refusing to report at all.
-async fn running_on(host: &Arc<Host>, cx: &CommandContext) -> Option<ModelChoice> {
-    host.session_model(&cx.session).await.ok().flatten()
-}
-
-/// What the level means. A model that does not declare reasoning is sent no
-/// reasoning parameter at all — `ModelChoice::reasoning` is `None` however
-/// high the level — so the level alone would read as a promise no turn keeps.
-/// The level is still kept, and takes effect the moment `/model` moves to a
-/// model that reasons.
-fn said(level: Option<Effort>, on: Option<&ModelChoice>) -> String {
-    let set = format!("thinking: {}", Effort::word(level));
-    let Some(choice) = on.filter(|choice| level.is_some() && choice.reasoning.is_none()) else {
-        return set;
-    };
-    let key = models::declared::key(choice.provider.id(), &choice.id);
-    format!(
-        "{set} — but {key} does not declare reasoning, so no turn asks for \
-         it; models.\"{key}\".reasoning = true in settings says otherwise"
-    )
+fn said(level: Option<Effort>) -> String {
+    format!("thinking: {}", Effort::word(level))
 }
 
 /// The ladder as a person says it, from the sdk's one list of words.

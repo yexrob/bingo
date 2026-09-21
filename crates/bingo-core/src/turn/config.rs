@@ -42,7 +42,7 @@ pub struct ModelChoice {
     pub id: String,
     pub capabilities: ModelCapabilities,
     pub max_tokens: u32,
-    /// Only set when the model reasons: the wire parameter would 400 otherwise.
+    /// The requested level, independent of model metadata; `None` omits it.
     pub reasoning: Option<Effort>,
     /// Where an overflow's lesson about the window goes.
     pub learned: Arc<Learned>,

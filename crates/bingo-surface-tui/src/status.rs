@@ -200,9 +200,8 @@ fn answering(state: &SessionState) -> Option<String> {
     })
 }
 
-/// The reasoning effort the next turn will ask for. A model that does not
-/// reason is sent none, and the kernel publishes none, so the slot says
-/// nothing rather than a level no request carries.
+/// The reasoning effort the next turn will ask for; `off` publishes no
+/// level, so the slot says nothing.
 fn effort(state: &SessionState) -> Option<String> {
     let level = state.config.kernel.get("thinking")?.clone();
     serde_json::from_value::<Effort>(level)

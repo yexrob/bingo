@@ -461,6 +461,7 @@ pub struct ModelCapabilities {
     pub max_output: u64,
     #[serde(default)]
     pub images: bool,
+    // Informational model metadata, not a gate on the requested effort.
     #[serde(default)]
     pub reasoning: bool,
     #[serde(default)]

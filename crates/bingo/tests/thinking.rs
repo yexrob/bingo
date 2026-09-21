@@ -90,9 +90,8 @@ async fn a_child_spawned_at_a_level_asks_for_it_from_its_first_turn() {
     );
 }
 
-/// A kernel with the fake provider and the sub-agents plugin, on a model
-/// declared to reason at `high`: without the declaration every level is
-/// filtered out of every request (ADR-0004) and this would prove nothing.
+/// A kernel with the fake provider and the sub-agents plugin. The model is
+/// absent from the catalogue; no declaration is needed to send its level.
 async fn host_on(home: &std::path::Path, provider: Arc<FakeProvider>) -> Arc<Host> {
     let plugins: Vec<Box<dyn Plugin>> =
         vec![Box::new(FakePlugin::new(provider)), Box::new(AgentsPlugin)];
@@ -102,7 +101,6 @@ async fn host_on(home: &std::path::Path, provider: Arc<FakeProvider>) -> Arc<Hos
             "provider": "fake",
             "model": "fake-1",
             "thinking": "high",
-            "models": { "fake/fake-1": { "reasoning": true } },
         }),
     );
     Host::build(plugins, config).await.unwrap()

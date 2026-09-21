@@ -12,8 +12,8 @@ static CONTEXT: PluginManifest = PluginManifest {
     config: None,
 };
 
-/// A host whose two scripted models are declared to reason, so `/think`
-/// has something to switch.
+/// Two scripted models with opposite reasoning metadata: the requested
+/// level must reach either one.
 async fn host_for(
     scripts: Vec<Script>,
     compactor: Option<Arc<dyn Compactor>>,
@@ -35,7 +35,7 @@ async fn host_for(
             "model": "m",
             "models": {
                 "scripted/m": { "reasoning": true },
-                "scripted/m2": { "reasoning": true },
+                "scripted/m2": { "reasoning": false },
             }
         }),
     );
@@ -182,40 +182,30 @@ fn shown(outcome: &IntentOutcome) -> String {
     }
 }
 
-/// `/think` on a model that does not declare reasoning: the level is stored
-/// and no turn asks for it, so the reply says both and names the settings key
-/// that would say otherwise. The level is kept, so `/model` is all it takes.
+/// The catalogue is not a gate: every level reaches an unknown model, and
+/// `off` alone omits it. The acknowledgement, view and request must agree.
 #[tokio::test]
-async fn think_owns_up_when_the_model_will_not_reason_and_keeps_the_level() {
-    let (host, provider) = host_for(vec![Script::Events(text("hi"))], None).await;
+async fn think_reaches_an_unknown_model_at_every_level_and_off_omits_it() {
+    let scripts = Effort::words()
+        .map(|_| Script::Events(text("hi")))
+        .collect();
+    let (host, provider) = host_for(scripts, None).await;
     let mut client = Client::open(&host).await;
     let (ack, _) = client.ack("/model plain").await;
     assert_eq!(message(&ack), "model: scripted/plain");
 
-    let caveat = "thinking: high — but scripted/plain does not declare reasoning, so no turn \
-                  asks for it; models.\"scripted/plain\".reasoning = true in settings says \
-                  otherwise";
-    let (ack, _) = client.ack("/think high").await;
-    assert_eq!(message(&ack), caveat);
-    assert_eq!(
-        client.state.config.kernel,
-        json!({ "thinking": null }),
-        "the config view already said what the turn would ask for; the ack did not"
-    );
-    let (ack, _) = client.ack("/think").await;
-    assert!(shown(&ack).starts_with(caveat), "bare /think says the same");
+    for (index, word) in Effort::words().enumerate() {
+        let level = Effort::spoken(word).expect("a level");
+        let (ack, _) = client.ack(&format!("/think {word}")).await;
+        assert_eq!(message(&ack), format!("thinking: {word}"));
+        assert_eq!(client.state.config.kernel, json!({ "thinking": level }));
+        let (ack, _) = client.ack("/think").await;
+        assert!(shown(&ack).starts_with(&format!("thinking: {word}\nusage:")));
 
-    // A model that reasons: the same level, no caveat, and the turn asks.
-    client.ack("/model m2").await;
-    let (ack, _) = client.ack("/think").await;
-    assert!(
-        shown(&ack).starts_with("thinking: high\nusage:"),
-        "the level survived the switch: {}",
-        shown(&ack)
-    );
-    client.ack("hello").await;
-    client.until_turn_completed().await;
-    assert_eq!(provider.requests()[0].reasoning, Some(Effort::High));
+        client.ack("hello").await;
+        client.until_turn_completed().await;
+        assert_eq!(provider.requests()[index].reasoning, level);
+    }
 }
 
 #[tokio::test]

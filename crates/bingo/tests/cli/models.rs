@@ -189,3 +189,159 @@ fn a_model_flag_is_not_remembered() {
         std::fs::read_to_string(&settings).unwrap_or_default()
     );
 }
+
+const THINKING_SETTINGS: &str = r#"# Keep the user's settings and model notes.
+provider = "fake"
+model = "new-model"
+thinking = "low"
+maxTokens = 1024
+
+# An unrelated model must not be rewritten.
+[models."fake/other-model"]
+reasoning = true # Independently declared capability.
+contextWindow = 64000
+images = true
+"#;
+
+const NON_REASONING_MODEL: &str = r#"
+# Capability metadata is not permission to ask for effort.
+[models."fake/new-model"]
+reasoning = false # Keep the user's declaration.
+contextWindow = 32000
+maxOutput = 2048
+images = false
+"#;
+
+fn thinking_home(metadata: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".bingo")).unwrap();
+    std::fs::create_dir(home.path().join("project")).unwrap();
+    std::fs::write(
+        home.path().join(".bingo/settings.toml"),
+        format!("{THINKING_SETTINGS}{metadata}"),
+    )
+    .unwrap();
+    home
+}
+
+fn thinking_command(home: &std::path::Path, format: &str, prompt: &str) -> Output {
+    let script = script(r#"{"responses":[]}"#);
+    run_within(
+        bingo()
+            .envs(home_env(home))
+            .env("BINGO_FAKE_SCRIPT", script.path())
+            .args(["--print", "--output-format", format, "--cwd"])
+            .arg(home.join("project"))
+            .arg(prompt),
+        PATIENCE,
+    )
+}
+
+fn thinking_text(home: &std::path::Path, prompt: &str) -> String {
+    let out = thinking_command(home, "text", prompt);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    stdout(&out)
+}
+
+/// A model absent from the snapshot still receives the configured effort.
+/// `/think` remembers effort, not a fabricated capability declaration.
+#[test]
+fn thinking_on_an_unknown_model_is_effective_and_remembered() {
+    let home = thinking_home("");
+    let path = home.path().join(".bingo/settings.toml");
+    assert_eq!(
+        thinking_text(home.path(), "/model"),
+        "model: fake/new-model\nthinking: low\nusage: /model [<provider>/]<model>\n"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), THINKING_SETTINGS);
+    assert_eq!(
+        thinking_text(home.path(), "/think high"),
+        "thinking: high\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        THINKING_SETTINGS.replace("thinking = \"low\"", "thinking = \"high\"")
+    );
+    let saved = super::settings::read(&path);
+    assert_eq!(saved["thinking"], "high");
+    assert!(saved["models"].get("fake/new-model").is_none());
+    assert_eq!(
+        thinking_text(home.path(), "/model"),
+        "model: fake/new-model\nthinking: high\nusage: /model [<provider>/]<model>\n"
+    );
+    assert_eq!(
+        thinking_text(home.path(), "/think"),
+        "thinking: high\nusage: /think <minimal|low|medium|high|xhigh|max|off>\n"
+    );
+}
+
+/// Every line remains a frame, even when changing effort on a model whose
+/// metadata explicitly says it does not reason. The metadata is untouched.
+#[test]
+fn thinking_ignores_false_capability_metadata_without_rewriting_it() {
+    let home = thinking_home(NON_REASONING_MODEL);
+    let out = thinking_command(home.path(), "json", "/think xhigh");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    let frames = frames_of(&out);
+    let applied = frames.iter().find_map(|frame| match &frame.event {
+        Event::IntentAck {
+            outcome: bingo_sdk::IntentOutcome::Applied { result },
+            ..
+        } => Some(result),
+        _ => None,
+    });
+    assert_eq!(
+        applied.expect("the command is applied")["message"],
+        "thinking: xhigh"
+    );
+    let path = home.path().join(".bingo/settings.toml");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        format!("{THINKING_SETTINGS}{NON_REASONING_MODEL}")
+            .replace("thinking = \"low\"", "thinking = \"xHigh\"")
+    );
+    let saved = super::settings::read(&path);
+    assert_eq!(saved["thinking"], "xHigh");
+    assert_eq!(saved["models"]["fake/new-model"]["reasoning"], false);
+    assert_eq!(
+        thinking_text(home.path(), "/model"),
+        "model: fake/new-model\nthinking: xhigh\nusage: /model [<provider>/]<model>\n"
+    );
+}
+
+#[test]
+fn thinking_off_and_invalid_levels_preserve_model_overrides() {
+    let reasoning_model = NON_REASONING_MODEL.replace("reasoning = false", "reasoning = true");
+    for metadata in ["", NON_REASONING_MODEL, reasoning_model.as_str()] {
+        let home = thinking_home(metadata);
+        let path = home.path().join(".bingo/settings.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        let invalid = thinking_command(home.path(), "text", "/think maximum");
+        assert_eq!(invalid.status.code(), Some(1));
+        assert_eq!(stdout(&invalid), "");
+        assert_eq!(
+            stderr(&invalid),
+            "[error] code=INVALID_INPUT msg=unknown thinking level: maximum\n"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(thinking_text(home.path(), "/think off"), "thinking: off\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original.replace("thinking = \"low\"\n", "")
+        );
+        assert_eq!(
+            super::settings::read(&path)["thinking"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            thinking_text(home.path(), "/model"),
+            "model: fake/new-model\nusage: /model [<provider>/]<model>\n"
+        );
+        assert_eq!(
+            thinking_text(home.path(), "/think"),
+            "thinking: off\nusage: /think <minimal|low|medium|high|xhigh|max|off>\n"
+        );
+    }
+}

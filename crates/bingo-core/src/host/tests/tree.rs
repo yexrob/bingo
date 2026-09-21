@@ -365,9 +365,7 @@ async fn a_child_inherits_the_model_and_effort_its_parent_stands_on() {
     );
 }
 
-/// A host whose scripted model declares reasoning, and a settings level for
-/// a root to stand on: without the declaration the level is filtered out of
-/// every request and this would prove nothing (ADR-0004).
+/// An uncatalogued model and a settings level for a root to stand on.
 async fn thinking_host(scripts: Vec<Script>) -> (Arc<Host>, Arc<ScriptedProvider>) {
     let provider = ScriptedProvider::new(scripts);
     let plugins = vec![TestPlugin::boxed(
@@ -379,7 +377,6 @@ async fn thinking_host(scripts: Vec<Script>) -> (Arc<Host>, Arc<ScriptedProvider
         json!({
             "model": "m",
             "thinking": "high",
-            "models": { "scripted/m": { "reasoning": true } },
         }),
     );
     (Host::build(plugins, config).await.unwrap(), provider)

@@ -46,7 +46,8 @@ These are the kernel's and the surface's — every other is a plugin's.
 
 - `/model [<provider>/]<model>` — what the next turn runs on. There is no
   `/provider`: `anthropic/claude-x` names both.
-- `/think minimal|low|medium|high|xhigh|max|off` — reasoning effort.
+- `/think minimal|low|medium|high|xhigh|max|off` — saved effort for any model;
+  `off` omits the parameter, leaving the server's default in place.
 - `/compact [instructions]` — summarise the conversation so far and keep going.
 - `/permission [mode]` — read or set this session's permission mode.
 - `/plugins [enable|disable <name>]`, alias `/modules` — a table of every

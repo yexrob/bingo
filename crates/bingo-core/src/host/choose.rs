@@ -72,9 +72,8 @@ impl Host {
         }
     }
 
-    /// The spec holds the level too (ADR-0047 §1), resolved at open: a level
-    /// no model reasons at reaches no request, and that is what the turn
-    /// asks for.
+    /// The spec holds the level too (ADR-0047 §1), resolved at open. Model
+    /// metadata never vetoes it: only `off` omits the reasoning parameter.
     pub(super) async fn choose_model(
         &self,
         spec: &SessionSpec,
@@ -85,7 +84,7 @@ impl Host {
         let capabilities = self.resolve_model(provider.as_ref(), &model);
         Ok(ModelChoice {
             max_tokens: models::max_tokens(&capabilities, self.settings.kernel.max_tokens),
-            reasoning: spec.thinking.flatten().filter(|_| capabilities.reasoning),
+            reasoning: spec.thinking.flatten(),
             learned: self.learned.clone(),
             provider,
             id: model,

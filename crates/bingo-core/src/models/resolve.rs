@@ -9,9 +9,9 @@ use super::declared::Declared;
 /// less: enough for a large file, not so much that it eats the window.
 pub const DEFAULT_MAX_TOKENS: u32 = 32_000;
 
-/// A model nobody knows: closed on what a wrong guess would 400 on (output,
-/// reasoning), open on what the server corrects (window) or a person sees
-/// (images).
+/// A model nobody knows: conservative on output, open on what the server
+/// corrects (window) or a person sees (images). Reasoning metadata remains
+/// unknown; it does not gate the requested effort.
 const UNKNOWN: ModelFacts = ModelFacts {
     context_window: 200_000,
     max_output: 8_192,
@@ -84,7 +84,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_model_fails_closed_on_output_and_reasoning() {
+    fn an_unknown_model_has_conservative_output_and_no_reasoning_metadata() {
         let caps = resolve(None, None, None, endpoint(true));
         assert_eq!(caps.context_window, 200_000);
         assert_eq!(caps.max_output, 8_192);
