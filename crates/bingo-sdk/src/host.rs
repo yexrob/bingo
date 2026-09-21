@@ -74,10 +74,14 @@ fn read_thinking<'de, D: serde::Deserializer<'de>>(
     Option::<Effort>::deserialize(deserializer).map(Some)
 }
 
-/// What may be changed about a running session between turns (ADR-0047 §3).
+/// What may be changed about a running session between turns (ADR-0047 §3),
+/// including the routing key a surface may rebind.
 /// It lands on the next turn: the running one keeps the config it started on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionChange {
+    /// What routing key names this session, or no key when another session
+    /// takes the conversation's route.
+    Key(Option<String>),
     Model {
         /// Stays as it was when absent.
         provider: Option<String>,
@@ -508,8 +512,9 @@ pub trait HostApi: Send + Sync {
     }
 
     /// Move one of a session's knobs (ADR-0047 §3): the model it runs on,
-    /// how hard it thinks, what it is called. The host re-resolves the model
-    /// and hands the actor the config its next turn runs on.
+    /// how hard it thinks, what it is called, or which routing key names it.
+    /// The host re-resolves the model when needed and hands the actor the
+    /// config its next turn runs on.
     ///
     /// It answers nothing. What the next turn will actually ask for is read
     /// back — a level a model does not reason at reaches no request — and

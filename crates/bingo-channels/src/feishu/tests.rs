@@ -169,6 +169,8 @@ fn terminal_controls_have_feishu_command_defaults() {
     });
     assert_eq!(feishu.command("/new"), Some(ChannelCommand::NewSession));
     assert_eq!(feishu.command("/stop"), Some(ChannelCommand::Stop));
+    assert_eq!(feishu.command("new"), None);
+    assert_eq!(feishu.command("stop"), None);
     assert_eq!(feishu.command("/new now"), None);
 }
 
@@ -186,6 +188,8 @@ fn terminal_controls_can_be_extended_from_feishu_settings() {
     });
     assert_eq!(feishu.command("/fresh"), Some(ChannelCommand::NewSession));
     assert_eq!(feishu.command("/halt"), Some(ChannelCommand::Stop));
+    assert_eq!(feishu.command("fresh"), None);
+    assert_eq!(feishu.command("halt"), None);
 }
 
 #[tokio::test]

@@ -10,9 +10,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bingo_sdk::{
-    Activation, Answer, Applied, Attachment, ClientIdentity, Delivery, ErrorCode, Event, Frame,
-    FrameStream, HostHandle, Image, Input, IntentId, InteractionId, KernelError, OpenOptions,
-    Origin, SessionHandle, SessionId, SessionSelector, SessionSpec, SessionState,
+    Activation, Answer, Applied, Attachment, CancelReason, ClientIdentity, Delivery, ErrorCode,
+    Event, Frame, FrameStream, HostHandle, Image, Input, IntentId, InteractionId, KernelError,
+    OpenOptions, Origin, SessionChange, SessionHandle, SessionId, SessionSelector, SessionSpec,
+    SessionState,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -23,7 +24,7 @@ use crate::deliver::{Deliverer, Op};
 use crate::directory::{Directory, Seat};
 use crate::error::ChannelError;
 use crate::gate::Gate;
-use crate::question::{Question, Settled};
+use crate::question::{Question, Settled, withdrawn};
 
 /// The surface id, and the `Origin.surface` of everything a chat submits.
 pub const SURFACE_ID: &str = "channels";
@@ -451,26 +452,49 @@ impl Runner {
     async fn stop(&mut self) {
         self.handle
             .interrupt(IntentId::mint(), bingo_sdk::InterruptScope::Head);
-        if let Err(error) = self.say("任务已停止。").await {
+        if let Err(error) = self.post("任务已停止。").await {
             tracing::warn!(%error, key = %self.key, "the stop notice could not be sent");
         }
         self.ended(false).await;
     }
 
     async fn new_session(&mut self) {
+        self.stop_current_turn().await;
+        if let Err(error) = self
+            .host
+            .reconfigure(&self.root, SessionChange::Key(None))
+            .await
+        {
+            tracing::warn!(%error, key = %self.key, "the old session could not release its route");
+            if let Err(error) = self.post("新会话开启失败。").await {
+                tracing::warn!(%error, key = %self.key, "the new-session failure notice could not be sent");
+            }
+            return;
+        }
+        self.retire_asked().await;
         let attachment = match fresh_session(self.host.clone(), self.key.clone(), self.cwd.clone())
             .await
         {
             Ok(attachment) => attachment,
             Err(error) => {
                 tracing::warn!(%error, key = %self.key, "the new session could not open");
+                if let Err(restore) = self
+                    .host
+                    .reconfigure(&self.root, SessionChange::Key(Some(self.key.clone())))
+                    .await
+                {
+                    tracing::warn!(
+                        %restore,
+                        key = %self.key,
+                        "the old session route could not be restored"
+                    );
+                }
                 if let Err(error) = self.post("新会话开启失败。").await {
                     tracing::warn!(%error, key = %self.key, "the new-session failure notice could not be sent");
                 }
                 return;
             }
         };
-        self.stop_current_turn().await;
         self.replace_attachment(attachment);
         if let Err(error) = self.post("新会话已开启。").await {
             tracing::warn!(%error, key = %self.key, "the new-session notice could not be sent");
@@ -488,6 +512,16 @@ impl Runner {
             tracing::warn!(%error, key = %self.key, "the old-turn notice could not be sent");
         }
         self.ended(false).await;
+    }
+
+    async fn retire_asked(&mut self) {
+        let ids: Vec<_> = self.asked.keys().cloned().collect();
+        let outcome = withdrawn(&CancelReason::Superseded);
+        for id in ids {
+            if let Err(error) = self.settle(&id, &outcome).await {
+                tracing::warn!(%error, key = %self.key, "the old question could not be retired");
+            }
+        }
     }
 
     fn replace_attachment(&mut self, attachment: Attachment) {
@@ -574,6 +608,7 @@ async fn fresh_session(
         SessionSelector::Create {
             spec: SessionSpec {
                 cwd,
+                key: Some(name.clone()),
                 ..SessionSpec::default()
             },
         },

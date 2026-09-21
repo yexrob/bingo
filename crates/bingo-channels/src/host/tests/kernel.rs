@@ -14,8 +14,8 @@ use bingo_sdk::{
     Activation, Answer, Attachment, Catalog, CatalogEntry, CatalogKind, ClientIdentity,
     CloseReason, Delivery, Env, ErrorCode, Event, Frame, FrameStream, GatewayStream, HistoryChunk,
     HistoryPage, HostApi, HostHandle, Input, IntentId, InteractionId, InterruptScope, KernelError,
-    OpenOptions, Seq, SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector,
-    SessionSpec, SessionState, SessionSummary, SurfaceOptions,
+    OpenOptions, Seq, SessionChange, SessionFilter, SessionHandle, SessionId, SessionPort,
+    SessionSelector, SessionSpec, SessionState, SessionSummary, SurfaceOptions,
 };
 use tokio::sync::mpsc;
 
@@ -29,7 +29,7 @@ fn locked<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// both be looking at it, which is what the two-surface race needs.
 #[derive(Debug, Default)]
 pub struct TestSession {
-    key: String,
+    key: Mutex<String>,
     seq: AtomicU64,
     watchers: Mutex<Vec<mpsc::UnboundedSender<Frame>>>,
     submitted: Mutex<Vec<Input>>,
@@ -37,6 +37,14 @@ pub struct TestSession {
 }
 
 impl TestSession {
+    fn key(&self) -> String {
+        locked(&self.key).clone()
+    }
+
+    fn set_key(&self, key: Option<String>) {
+        *locked(&self.key) = key.unwrap_or_default();
+    }
+
     fn attach(&self) -> FrameStream {
         let (publisher, frames) = mpsc::unbounded_channel();
         locked(&self.watchers).push(publisher);
@@ -130,14 +138,14 @@ impl TestHost {
     pub fn session(&self, key: &str) -> Option<Arc<TestSession>> {
         locked(&self.sessions)
             .iter()
-            .find(|session| session.key == key)
+            .find(|session| session.key() == key)
             .cloned()
     }
 
     pub fn keys(&self) -> Vec<String> {
         locked(&self.sessions)
             .iter()
-            .map(|session| session.key.clone())
+            .map(|session| session.key())
             .collect()
     }
 
@@ -147,7 +155,7 @@ impl TestHost {
 
     fn attachment(&self, session: Arc<TestSession>) -> Attachment {
         let mut summary = fixtures::summary();
-        summary.key = Some(session.key.clone());
+        summary.key = (!session.key().is_empty()).then(|| session.key());
         Attachment {
             session: SessionId::from_raw(fixtures::SESSION),
             snapshot: SessionState::new(summary),
@@ -180,7 +188,7 @@ impl HostApi for TestHost {
                 spec: SessionSpec { key: Some(key), .. },
             } => {
                 let session = Arc::new(TestSession {
-                    key,
+                    key: Mutex::new(key),
                     ..TestSession::default()
                 });
                 locked(&self.sessions).push(Arc::clone(&session));
@@ -191,6 +199,19 @@ impl HostApi for TestHost {
     }
 
     async fn close(&self, _session: &SessionId, _reason: CloseReason) -> Result<(), KernelError> {
+        Ok(())
+    }
+
+    async fn reconfigure(
+        &self,
+        _session: &SessionId,
+        change: SessionChange,
+    ) -> Result<(), KernelError> {
+        if let SessionChange::Key(key) = change
+            && let Some(session) = locked(&self.sessions).first()
+        {
+            session.set_key(key);
+        }
         Ok(())
     }
 

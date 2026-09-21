@@ -420,6 +420,51 @@ async fn open_create_runs_a_turn_and_the_session_is_findable_afterwards() {
 }
 
 #[tokio::test]
+async fn a_session_can_release_its_route_for_a_fresh_session() {
+    let (host, _) = host_with(vec![]).await;
+    let old = host
+        .open(
+            SessionSelector::Create {
+                spec: SessionSpec {
+                    key: Some("host/chat".into()),
+                    ..spec("/work")
+                },
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    host.reconfigure(&old.session, SessionChange::Key(None))
+        .await
+        .unwrap();
+
+    let fresh = host
+        .open(
+            SessionSelector::Create {
+                spec: SessionSpec {
+                    key: Some("host/chat".into()),
+                    ..spec("/work")
+                },
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(old.session, fresh.session);
+    assert_eq!(
+        host.session_summary(&fresh.session)
+            .await
+            .unwrap()
+            .key
+            .as_deref(),
+        Some("host/chat")
+    );
+}
+
+#[tokio::test]
 async fn sub_sessions_are_sessions_with_a_parent_and_a_depth_limit() {
     let (host, _) = host_with(vec![]).await;
     let root = host

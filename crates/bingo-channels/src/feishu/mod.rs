@@ -420,7 +420,7 @@ fn with_default_command_mappings(configured: BTreeMap<String, String>) -> BTreeM
         ("/stop".to_string(), "esc".to_string()),
     ]);
     for (source, target) in configured {
-        if let Some(source) = command_name(&source) {
+        if let Some(source) = configured_command_name(&source) {
             mappings.insert(source, target);
         }
     }
@@ -428,6 +428,15 @@ fn with_default_command_mappings(configured: BTreeMap<String, String>) -> BTreeM
 }
 
 fn command_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    let name = text.strip_prefix('/')?;
+    if name.is_empty() || name.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(format!("/{name}"))
+}
+
+fn configured_command_name(text: &str) -> Option<String> {
     let text = text.trim();
     let name = text.strip_prefix('/').unwrap_or(text);
     if name.is_empty() || name.chars().any(char::is_whitespace) {
