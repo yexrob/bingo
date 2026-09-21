@@ -428,6 +428,7 @@ version = "0.6.3"
 dependencies = [
  "bingo-channels",
  "bingo-core",
+ "bingo-schedule",
  "bingo-sdk",
  "clap",
  "jiff",

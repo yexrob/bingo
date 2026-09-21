@@ -26,6 +26,9 @@ bingo-core.workspace = true
 # Which channel is configured and what it would sign with. The preflight is
 # the adapter's own question, so the adapter answers it (ADR-0020 §2, §5).
 bingo-channels.workspace = true
+# M106: diagnose the scheduler's persistent OS lock through its own protocol;
+# never duplicate its marker or offer to unlink a live lock inode.
+bingo-schedule.workspace = true
 # The verbs are a `Subcommand` the binary flattens into its own command line.
 clap.workspace = true
 # `run` waits on a signal; `start` and `stop` wait on a pid.

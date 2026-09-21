@@ -306,21 +306,34 @@ fn a_stale_pidfile_is_reported_dead_and_doctor_fix_clears_it() {
     gateway.verb(&["stop"]);
 }
 
-/// ADR-0020 §4: TERM stops the surfaces, runs `Plugin::stop`, and the claims
-/// go back. The proof is on disk — both files gone, not merely a process gone.
+/// ADR-0020 §4: stopping releases the schedule's OS lease but keeps its inode;
+/// channel claims and the gateway pidfile still disappear.
 #[test]
 fn stopping_gives_back_the_schedule_runner_claim_and_the_pidfile() {
     let gateway = Gateway::new();
     gateway.schedule("aaaa1111", "nothing that needs a provider");
     gateway.start();
 
-    let held = until("the gateway took the schedule runner", || {
-        std::fs::read_to_string(gateway.runner_lock()).ok()
+    until("the gateway took the schedule runner", || {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(gateway.runner_lock())
+            .ok()?;
+        match file.try_lock() {
+            Err(std::fs::TryLockError::WouldBlock) => Some(()),
+            Ok(()) => None,
+            Err(error) => panic!("cannot probe the runner lock: {error}"),
+        }
     });
-    assert_eq!(
-        held.trim().parse::<u32>().ok(),
-        gateway.pid(),
-        "the claim names the resident process"
+    let channel_claims: Vec<_> = std::fs::read_dir(gateway.data().join("channels"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "lock"))
+        .collect();
+    assert!(
+        !channel_claims.is_empty(),
+        "the loopback channel has a claim"
     );
 
     let stopped = stdout(&gateway.verb(&["stop"]));
@@ -328,10 +341,14 @@ fn stopping_gives_back_the_schedule_runner_claim_and_the_pidfile() {
         stopped.contains("gave back its pidfile and its locks"),
         "{stopped}"
     );
-    assert!(
-        !gateway.runner_lock().exists(),
-        "the schedule runner claim was given back, not orphaned"
-    );
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(gateway.runner_lock())
+        .expect("the permanent schedule lease remains");
+    file.try_lock()
+        .expect("shutdown released the schedule lease");
+    assert!(channel_claims.iter().all(|path| !path.exists()));
     assert!(!gateway.pidfile().exists());
 }
 

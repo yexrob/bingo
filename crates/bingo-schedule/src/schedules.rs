@@ -7,14 +7,16 @@
 //! and every surface reads the same one.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use bingo_sdk::{CancellationToken, HostHandle};
 use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 use crate::lock::{self, Claim};
 use crate::runner::Runner;
 use crate::store::Store;
+use crate::supervisor::Supervisor;
 use crate::wakes::{self, Wakes};
 
 #[derive(Debug)]
@@ -22,8 +24,9 @@ pub struct Schedules {
     store: Arc<Store>,
     changed: Arc<Notify>,
     trouble: Arc<Mutex<Option<String>>>,
-    /// Held from `start` to `stop`; `None` in a process that came second.
-    claim: Mutex<Option<Claim>>,
+    /// The running task owns the claim; this reference cannot prolong it.
+    claim: Arc<Mutex<Weak<Claim>>>,
+    running: Mutex<Option<JoinHandle<()>>>,
     /// The wakes standing on this process's sessions (ADR-0019 §8). Every
     /// process delivers its own, claim or no claim.
     wakes: Arc<Wakes>,
@@ -36,7 +39,8 @@ impl Schedules {
             store: Arc::new(Store::new(data_dir)),
             changed: Arc::new(Notify::new()),
             trouble: Arc::new(Mutex::new(None)),
-            claim: Mutex::new(None),
+            claim: Arc::new(Mutex::new(Weak::new())),
+            running: Mutex::new(None),
             wakes: Arc::default(),
             cancel: CancellationToken::new(),
         }
@@ -66,7 +70,11 @@ impl Schedules {
 
     /// Whether schedules fire in this process.
     pub fn held(&self) -> bool {
-        self.claim().is_some()
+        self.claim
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .strong_count()
+            > 0
     }
 
     /// The one line every surface shows about who runs these schedules.
@@ -80,92 +88,55 @@ impl Schedules {
         self.changed.notify_one();
     }
 
-    /// Deliver this process's wakes whatever else is true; then take the
-    /// store's claim and run the loop behind it, or leave the schedules
-    /// dormant and say who has them (ADR-0019 §5).
+    /// Every process delivers its own wakes. One runs the schedules; the
+    /// others keep trying so an owner that leaves needs no manual successor.
     pub fn start(self: &Arc<Self>, host: HostHandle) {
-        tokio::spawn(wakes::run(
-            Arc::clone(&self.wakes),
-            host.clone(),
-            self.cancel.clone(),
-        ));
-        match Claim::take(self.store.dir()) {
-            Ok(claim) => {
-                *self.claim() = Some(claim);
-                tokio::spawn(
-                    Runner::new(
-                        Arc::clone(&self.store),
-                        host,
-                        Arc::clone(&self.changed),
-                        Arc::clone(&self.trouble),
-                        self.cancel.clone(),
-                    )
-                    .run(),
-                );
-            }
-            Err(dormant) => tracing::info!("schedules are {dormant}"),
+        let mut running = self.running.lock().unwrap_or_else(|held| held.into_inner());
+        if running.is_some() || self.cancel.is_cancelled() {
+            return;
+        }
+        let supervisor = self.supervisor(host.clone());
+        let claim = supervisor.acquire();
+        let wakes = Arc::clone(&self.wakes);
+        let cancel = self.cancel.clone();
+        *running = Some(tokio::spawn(async move {
+            tokio::join!(supervisor.run(claim), wakes::run(wakes, host, cancel));
+        }));
+    }
+
+    fn supervisor(&self, host: HostHandle) -> Supervisor {
+        Supervisor {
+            dir: self.store.dir().to_path_buf(),
+            held: Arc::clone(&self.claim),
+            trouble: Arc::clone(&self.trouble),
+            changed: Arc::clone(&self.changed),
+            cancel: self.cancel.clone(),
+            runner: Runner::new(
+                Arc::clone(&self.store),
+                host,
+                Arc::clone(&self.changed),
+                Arc::clone(&self.trouble),
+                self.cancel.clone(),
+            ),
         }
     }
 
-    /// Stop firing and give the claim back, in that order: a store nobody
-    /// runs must not look like one somebody does.
-    pub fn stop(&self) {
+    /// Cancellation asks the loop to end; joining proves it has ended and
+    /// given back its claim, including any dispatch already in flight.
+    pub async fn stop(&self) {
         self.cancel.cancel();
-        self.claim().take();
-    }
-
-    fn claim(&self) -> std::sync::MutexGuard<'_, Option<Claim>> {
-        self.claim.lock().unwrap_or_else(|held| held.into_inner())
+        let running = self
+            .running
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take();
+        if let Some(running) = running
+            && let Err(error) = running.await
+        {
+            tracing::warn!(%error, "the scheduler task ended unexpectedly");
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bingo_sdk::testing::NoHost;
-
-    fn schedules(home: &tempfile::TempDir) -> Arc<Schedules> {
-        Arc::new(Schedules::new(home.path()))
-    }
-
-    #[test]
-    fn a_process_that_has_not_started_holds_nothing() {
-        let home = tempfile::tempdir().expect("a temp home");
-        let schedules = schedules(&home);
-        assert!(!schedules.held());
-        assert_eq!(schedules.holder(), "dormant — no runner holds this store");
-        assert_eq!(schedules.store().dir(), home.path().join("schedules"));
-    }
-
-    #[tokio::test]
-    async fn the_first_process_holds_the_store_and_the_second_is_dormant() {
-        let home = tempfile::tempdir().expect("a temp home");
-        let first = schedules(&home);
-        first.start(NoHost::handle());
-        assert!(first.held());
-        assert_eq!(first.holder(), "held by this process");
-
-        let second = schedules(&home);
-        second.start(NoHost::handle());
-        assert!(!second.held(), "one runner per store (ADR-0019 §5)");
-        let dormant = second.holder();
-        assert!(dormant.starts_with("dormant — held by pid "), "{dormant}");
-        assert!(dormant.contains("runner.lock"), "{dormant}");
-
-        first.stop();
-        assert!(!first.held(), "the claim is given back");
-        assert_eq!(second.holder(), "dormant — no runner holds this store");
-    }
-
-    #[tokio::test]
-    async fn a_process_that_stopped_lets_the_next_one_take_the_store() {
-        let home = tempfile::tempdir().expect("a temp home");
-        let first = schedules(&home);
-        first.start(NoHost::handle());
-        first.stop();
-        let second = schedules(&home);
-        second.start(NoHost::handle());
-        assert!(second.held());
-        second.stop();
-    }
-}
+mod tests;

@@ -111,9 +111,27 @@ impl ToolHost for Silent {
 pub(crate) struct Listening {
     delivered: Mutex<Vec<(SessionId, Input, Delivery)>>,
     extended: Mutex<Vec<(SessionId, String, String, Value)>>,
+    block_open: std::sync::atomic::AtomicBool,
+    opened: tokio::sync::Notify,
+    proceed: tokio::sync::Notify,
 }
 
 impl Listening {
+    pub(crate) fn hold_opens(&self) {
+        self.block_open
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn wait_for_open(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.opened.notified())
+            .await
+            .expect("the dispatch reaches open");
+    }
+
+    pub(crate) fn release_opens(&self) {
+        self.proceed.notify_one();
+    }
+
     pub(crate) fn delivered(&self) -> Vec<(SessionId, Input, Delivery)> {
         self.delivered
             .lock()
@@ -144,6 +162,10 @@ impl HostApi for Listening {
         who: bingo_sdk::ClientIdentity,
         options: bingo_sdk::OpenOptions,
     ) -> Result<bingo_sdk::Attachment, KernelError> {
+        if self.block_open.load(std::sync::atomic::Ordering::SeqCst) {
+            self.opened.notify_one();
+            self.proceed.notified().await;
+        }
         NoHost.open(selector, who, options).await
     }
 

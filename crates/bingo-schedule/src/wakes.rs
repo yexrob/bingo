@@ -84,12 +84,16 @@ pub fn until(next: Option<Timestamp>, now: Timestamp) -> Duration {
 /// Deliver each wake as its moment comes, sleep to the next, and start
 /// again — until the plugin stops.
 pub async fn run(wakes: Arc<Wakes>, host: HostHandle, cancel: CancellationToken) {
-    loop {
+    while !cancel.is_cancelled() {
         for (session, wake) in wakes.due(Timestamp::now()) {
+            if cancel.is_cancelled() {
+                return;
+            }
             deliver(&host, &session, wake).await;
         }
         let waited = until(wakes.next(), Timestamp::now());
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => return,
             _ = tokio::time::sleep(waited) => {}
             _ = wakes.changed.notified() => {}
@@ -203,6 +207,17 @@ mod tests {
             )],
             "the pending wake is taken back before the note lands"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_loop_does_not_start_a_due_delivery() {
+        let fixture = Fixture::new();
+        let wakes = Arc::new(Wakes::default());
+        wakes.set(&session("ses_due"), wake(0));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        run(wakes, fixture.handle(), cancel).await;
+        assert!(fixture.host.delivered().is_empty());
     }
 
     /// The loop itself, on a real clock: a wake set for now is delivered

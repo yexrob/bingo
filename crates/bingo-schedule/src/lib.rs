@@ -13,7 +13,7 @@
 //!   09:00`, `once at <RFC3339>`, and the next fire after a given moment.
 //! - [`entry`] — one schedule, and the session key it fires on.
 //! - [`store`] — the directory, rebuilt on every read.
-//! - [`lock`] — one runner per store, the channels plugin's claim.
+//! - [`lock`] — one runner per store, held by an OS file lock.
 //! - [`runner`] — the timer loop, and the pure pass that decides it.
 //! - [`schedules`] — what this process has: the store, the claim, the bell.
 //! - [`wake`] and [`wakes`] — the model's own `once` on its own session:
@@ -34,6 +34,7 @@ pub mod runner;
 pub mod schedules;
 pub mod spec;
 pub mod store;
+mod supervisor;
 pub mod tools;
 pub mod wake;
 pub mod wakes;
@@ -117,8 +118,8 @@ fn on() -> bool {
     true
 }
 
-/// Registers the three tools and `/schedule`, and runs the timer loop if
-/// this process is the one that took the store's claim.
+/// Registers the tools and commands, and runs the timer loop while this
+/// process holds the store's OS lock, waiting to take over otherwise.
 #[derive(Debug, Default)]
 pub struct SchedulePlugin {
     /// Built in `register`, where the environment is; used by `start` and
@@ -156,9 +157,8 @@ impl Plugin for SchedulePlugin {
             .map_err(|_| PluginError::Failed("the schedules plugin registered twice".into()))
     }
 
-    /// Take the store's claim and run the loop behind it; a process that
-    /// came second leaves the schedules dormant and says who has them
-    /// (ADR-0019 §5). Neither is a reason to refuse to start.
+    /// Run behind the store's OS lock, or stand by and retry acquisition
+    /// without preventing the rest of this process from starting.
     async fn start(&self, host: HostHandle) -> Result<(), PluginError> {
         if let Some(schedules) = self.schedules.get() {
             schedules.start(host);
@@ -168,7 +168,7 @@ impl Plugin for SchedulePlugin {
 
     async fn stop(&self) -> Result<(), PluginError> {
         if let Some(schedules) = self.schedules.get() {
-            schedules.stop();
+            schedules.stop().await;
         }
         Ok(())
     }
@@ -276,7 +276,8 @@ mod plugin_tests {
         let lock = env.data_dir.join("schedules").join("runner.lock");
         assert!(lock.is_file(), "the claim is taken");
         plugin.stop().await.expect("stop");
-        assert!(!lock.exists(), "the claim is given back");
+        assert!(lock.is_file(), "the lock inode is permanent");
+        Claim::take(lock.parent().expect("the store")).expect("the claim is given back");
     }
 
     /// The one setting: what a person turns off, and what a typo does.

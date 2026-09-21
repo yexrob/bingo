@@ -85,7 +85,7 @@ mod tests {
         let fixture = Fixture::new();
         let said = text(&list(&fixture).await);
         assert!(said.contains("no schedules yet"), "{said}");
-        assert!(said.contains("schedules: dormant"), "{said}");
+        assert!(said.contains("schedules: standby"), "{said}");
     }
 
     #[tokio::test]

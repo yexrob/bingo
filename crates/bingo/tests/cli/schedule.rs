@@ -1,7 +1,7 @@
 //! Schedules through the binary (ADR-0019, plan M16 brick 12): the file a
 //! creation writes, a real turn on `schedule/<id>`, one fire for an entry
-//! that is overdue however long it was overdue, a second process that runs
-//! with them dormant, and `/schedule` under `--print`.
+//! that is overdue however long it was overdue, automatic runner takeover,
+//! and `/schedule` under `--print`.
 //!
 //! Every one of these runs against a temporary HOME: the store lives under
 //! `$HOME/.bingo/data/schedules`, and a test that leaked would write into
@@ -68,15 +68,17 @@ fn only_entry(home: &Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// The pid in the runner's claim, if a process holds it. Written by
-/// `bingo-schedule`'s `Claim` when the timer loop starts, so a test that sees
-/// its own process's pid there knows that process is looking at the store.
-fn held_by(home: &Path) -> Option<u32> {
-    std::fs::read_to_string(schedules(home).join("runner.lock"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+fn runner_is_locked(home: &Path) -> Option<()> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(schedules(home).join("runner.lock"))
+        .ok()?;
+    match file.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => Some(()),
+        Ok(()) => None,
+        Err(error) => panic!("cannot probe the runner lock: {error}"),
+    }
 }
 
 /// The journal of the session a schedule fires on, once there is one.
@@ -126,21 +128,50 @@ impl Running {
             .spawn()
             .expect("the binary runs");
         let stdin = child.stdin.take();
-        Self { child, stdin }
+        let mut running = Self { child, stdin };
+        running.ready();
+        running
     }
 
-    /// What this process writes into the runner's claim when it takes it,
-    /// which is how a test knows the store is this one's and not the last
-    /// one's.
-    fn pid(&self) -> u32 {
-        self.child.id()
+    fn ready(&mut self) {
+        use std::io::{BufRead, BufReader};
+
+        let stdout = self.child.stdout.take().expect("piped stdout");
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        writeln!(
+            self.stdin.as_mut().expect("open stdin"),
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"client":{{"name":"schedule-test","surface":"test"}},"protocol":1}}}}"#
+        )
+        .unwrap();
+        let line = receive
+            .recv_timeout(PATIENCE)
+            .expect("serve answers initialize before the deadline")
+            .expect("read RPC response");
+        let response: serde_json::Value = serde_json::from_str(&line).expect("RPC stdout is JSON");
+        assert_eq!(response["id"], 1, "{response}");
+        assert_eq!(response["result"]["protocol"], 1, "{response}");
+    }
+
+    fn kill(mut self) {
+        self.child.kill().expect("kill the runner without cleanup");
+        self.wait_for_exit();
     }
 
     /// Close stdin and wait: the surface ends, the host shuts down, and the
-    /// plugins give their claims back. A killed process would leave the
-    /// store looking held.
+    /// plugins give their claims back.
     fn stop(mut self) {
         drop(self.stdin.take());
+        self.wait_for_exit();
+    }
+
+    fn wait_for_exit(&mut self) {
         let started = Instant::now();
         while started.elapsed() < PATIENCE {
             if self.child.try_wait().expect("wait").is_some() {
@@ -294,7 +325,7 @@ fn an_overdue_schedule_fires_once_however_long_it_was_overdue() {
     // clock: until it does it has not looked at the store at all, and a fixed
     // wait would be a guess at how long this box takes to boot a bingo.
     until("the restart took the runner's claim", || {
-        held_by(home.path()).filter(|pid| *pid == second.pid())
+        runner_is_locked(home.path())
     });
     // A negative: no wait can prove a fire will never come, only that none
     // came. Short and fixed on purpose — it is a window after the runner is
@@ -368,56 +399,7 @@ fn a_schedule_fires_under_the_permission_mode_its_entry_names() {
     running.stop();
 }
 
-#[test]
-fn a_second_process_runs_with_the_schedules_dormant_and_says_who_has_them() {
-    let home = tempfile::tempdir().unwrap();
-    write_entry(
-        home.path(),
-        "dddd4444",
-        "every 2h",
-        "not this process's job",
-        Timestamp::now(),
-        None,
-    );
-    let script = script(r#"{"responses":[]}"#);
-    let holder = Running::start(home.path(), &script);
-    let lock = until("the first process took the store", || {
-        std::fs::read_to_string(schedules(home.path()).join("runner.lock")).ok()
-    });
-    assert_eq!(
-        lock.trim().parse::<u32>().ok(),
-        Some(holder.child.id()),
-        "the claim names the process that took it"
-    );
-
-    let out = run_within(
-        bingo()
-            .env("BINGO_FAKE_SCRIPT", script.path())
-            .envs(home_env(home.path()))
-            .args(["--print", "--cwd"])
-            .arg(home.path())
-            .arg("/schedule"),
-        PATIENCE,
-    );
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    let answer = stdout(&out);
-    assert!(
-        answer.contains(&format!(
-            "schedules: dormant — held by pid {}",
-            holder.child.id()
-        )),
-        "the second process says who has them: {answer}"
-    );
-    assert!(
-        answer.contains("remove it if no bingo is running"),
-        "and what to do about it: {answer}"
-    );
-    assert!(
-        answer.contains("dddd4444"),
-        "a dormant process still reads the store: {answer}"
-    );
-    holder.stop();
-}
+mod ownership;
 
 // ---- the wake the model sets (ADR-0019 §8) ------------------------------
 

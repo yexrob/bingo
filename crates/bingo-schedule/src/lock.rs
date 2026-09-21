@@ -1,37 +1,63 @@
-//! One runner per store (ADR-0019 §5).
+//! One runner per store, held by the OS rather than a process-id sentinel.
 //!
-//! Two bingo processes over one store would each fire every schedule, and
-//! nobody would see two turns and know why. So the timer loop starts only
-//! behind this claim, and a process that cannot take it runs with schedules
-//! dormant and says who has them — the channels plugin's credential lock,
-//! for the same reason and in the same shape.
-//!
-//! A claim is proof that a process took the store, not proof that it still
-//! runs: a bingo that was killed leaves its file behind, and the line below
-//! is what tells a person to remove it.
+//! The published inode is permanent: unlinking it would let another runner
+//! lock a replacement while the first still owns the original. Its immutable
+//! nonnumeric marker also keeps older gateway doctors from removing it.
 
-use std::io::Write;
+mod publish;
+
+use std::fs::{File, TryLockError};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 const LOCK: &str = "runner.lock";
 
-/// The store's runner, held for as long as the value lives.
+/// The on-disk protocol marker, not evidence that any runner is alive.
+pub const MARKER: &str = "bingo-schedule-runner-v1\n";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimError {
+    #[error("another runner holds {}", path.display())]
+    WouldBlock { path: PathBuf },
+    #[error(
+        "legacy or unrecognized runner lock ({}); stop all bingo processes sharing this store, run one `bingo gateway doctor --fix` for a dead PID sentinel, then restart; otherwise inspect the file before removing it",
+        path.display()
+    )]
+    Legacy { path: PathBuf },
+    #[error("{}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+impl ClaimError {
+    fn io(path: &Path, source: io::Error) -> Self {
+        Self::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Closing this file releases ownership, including after a process crash.
 #[derive(Debug)]
 pub struct Claim {
     path: PathBuf,
+    _file: File,
 }
 
 impl Claim {
-    /// Take the runner's claim, or say who holds it.
-    pub fn take(dir: &Path) -> Result<Self, String> {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    /// Take the OS lock only on a recognized modern inode. Older binaries do
+    /// not honor OS locks, so their sentinels must never be adopted in place.
+    pub fn take(dir: &Path) -> Result<Self, ClaimError> {
+        std::fs::create_dir_all(dir).map_err(|e| ClaimError::io(dir, e))?;
         let path = dir.join(LOCK);
-        let mut file = std::fs::File::create_new(&path).map_err(|_| holder(dir, false))?;
-        // The pid is not read back to decide anything — a lock file is proof
-        // of a claim, not of a process — but it is what a person needs to
-        // check before removing it.
-        let _ = write!(file, "{}", std::process::id());
-        Ok(Self { path })
+        let mut file = publish::open(&path).map_err(|e| ClaimError::io(&path, e))?;
+        acquire(&file, &path)?;
+        recognize(&mut file, &path)?;
+        Ok(Self { path, _file: file })
     }
 
     pub fn path(&self) -> &Path {
@@ -39,89 +65,64 @@ impl Claim {
     }
 }
 
-impl Drop for Claim {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+fn recognize(file: &mut File, path: &Path) -> Result<(), ClaimError> {
+    let mut bytes = Vec::new();
+    file.take(MARKER.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ClaimError::io(path, e))?;
+    match bytes == MARKER.as_bytes() {
+        true => Ok(()),
+        false => Err(ClaimError::Legacy {
+            path: path.to_path_buf(),
+        }),
     }
 }
 
-/// The one line that says whether schedules fire here, written once and read
-/// by `/schedule`, by every tool's receipt and by the runner's own notice.
+fn acquire(file: &File, path: &Path) -> Result<(), ClaimError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(ClaimError::WouldBlock {
+            path: path.to_path_buf(),
+        }),
+        Err(TryLockError::Error(error)) => Err(ClaimError::io(path, error)),
+    }
+}
+
+/// Inspect ownership without creating, changing or unlinking anything.
+/// `true` means an OS lock is held; `false` means missing or unlocked.
+/// An unlocked file is briefly locked, then closed before this returns.
+pub fn probe(dir: &Path) -> Result<bool, ClaimError> {
+    let path = dir.join(LOCK);
+    let mut file = match File::options().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(ClaimError::io(&path, e)),
+    };
+    match acquire(&file, &path) {
+        Ok(()) => {
+            recognize(&mut file, &path)?;
+            Ok(false)
+        }
+        Err(ClaimError::WouldBlock { .. }) => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
+/// The same ownership line for commands, tools and runner notices.
 pub fn holder(dir: &Path, held: bool) -> String {
     if held {
         return "held by this process".into();
     }
-    let path = dir.join(LOCK);
-    match std::fs::read_to_string(&path) {
-        Ok(pid) => format!(
-            "dormant — held by pid {} ({}); remove it if no bingo is running",
-            pid.trim(),
-            path.display()
+    match probe(dir) {
+        Ok(true) => format!(
+            "standby — another runner holds this store ({})",
+            dir.join(LOCK).display()
         ),
-        Err(_) => "dormant — no runner holds this store".into(),
+        Ok(false) => "standby — no runner holds this store; waiting to take over".into(),
+        Err(error @ ClaimError::Legacy { .. }) => format!("standby — {error}"),
+        Err(error) => format!("standby — cannot inspect the runner lock: {error}"),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn dir() -> tempfile::TempDir {
-        tempfile::tempdir().expect("a temporary directory")
-    }
-
-    #[test]
-    fn the_second_claim_on_one_store_is_refused_with_the_pid_that_has_it() {
-        let home = dir();
-        let first = Claim::take(home.path()).expect("the first claim");
-        let refusal = Claim::take(home.path()).expect_err("the second is dormant");
-        assert!(
-            refusal.contains(&format!("pid {}", std::process::id())),
-            "{refusal}"
-        );
-        assert!(
-            refusal.contains(&first.path().display().to_string()),
-            "{refusal}"
-        );
-        assert!(
-            refusal.contains("remove it if no bingo is running"),
-            "{refusal}"
-        );
-    }
-
-    #[test]
-    fn a_claim_is_given_back_when_it_is_dropped() {
-        let home = dir();
-        let path = {
-            let claim = Claim::take(home.path()).expect("a claim");
-            claim.path().to_path_buf()
-        };
-        assert!(!path.exists());
-        Claim::take(home.path()).expect("the next process may have it");
-    }
-
-    #[test]
-    fn the_claim_lands_beside_the_entries_and_is_not_one() {
-        let home = dir();
-        let claim = Claim::take(home.path()).expect("a claim");
-        assert_eq!(claim.path().parent(), Some(home.path()));
-        assert_eq!(claim.path().file_name().expect("a name"), "runner.lock");
-    }
-
-    #[test]
-    fn the_holder_line_says_this_process_a_pid_or_nobody() {
-        let home = dir();
-        assert_eq!(holder(home.path(), true), "held by this process");
-        assert_eq!(
-            holder(home.path(), false),
-            "dormant — no runner holds this store"
-        );
-        let _claim = Claim::take(home.path()).expect("a claim");
-        assert!(holder(home.path(), false).starts_with("dormant — held by pid "));
-        assert_eq!(
-            holder(home.path(), true),
-            "held by this process",
-            "a process that holds it does not read the file to find out"
-        );
-    }
-}
+mod tests;

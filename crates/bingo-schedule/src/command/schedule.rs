@@ -72,7 +72,7 @@ mod tests {
         let fixture = Fixture::new();
         assert_eq!(
             view(&fixture).await.fold(),
-            "no schedules yet\nschedules: dormant — no runner holds this store"
+            "no schedules yet\nschedules: standby — no runner holds this store; waiting to take over"
         );
     }
 
@@ -94,7 +94,7 @@ mod tests {
         assert!(rows[0].starts_with("id · spec · next fire"), "{folded}");
         assert!(rows[1].starts_with("aaaa1111 · every 30m · "), "{folded}");
         assert!(rows[2].starts_with("bbbb2222 · every 30m · "), "{folded}");
-        assert!(rows[3].starts_with("schedules: dormant"), "{folded}");
+        assert!(rows[3].starts_with("schedules: standby"), "{folded}");
     }
 
     #[test]

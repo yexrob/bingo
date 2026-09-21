@@ -49,11 +49,26 @@ is spent by firing and leaves the entry disabled.
 
 ### Who runs them
 
-One runner per store, claimed by `runner.lock` in the schedule directory. A
-second process over the same store leaves the schedules dormant and names the
-pid holding them rather than firing everything twice. The claim is proof a
-process took the store, not proof it still runs: a bingo that was killed leaves
-the file behind for a person to remove.
+One runner per store, holding an OS file lock on `runner.lock` in the schedule
+directory. The file is permanent, not a PID sentinel: **never remove or replace
+it while modern bingo processes are running**. Exiting, even after a crash,
+releases the OS lock. Other processes stand by and retry once a second, so an
+already-running process takes over without a restart. Shutdown waits for any
+dispatch in flight before releasing ownership.
+
+The holder line distinguishes this process, another runner, an unowned store,
+and a storage error. It does not infer ownership from a PID. A free modern lock
+file needs no cleanup, and `bingo gateway doctor --fix` leaves it alone.
+
+An older PID-only, empty, or unrecognized `runner.lock` is a migration barrier,
+not permission to start a second scheduler. Stop **all** bingo processes sharing
+this store, run a single `bingo gateway doctor --fix` to remove a dead PID
+sentinel, then start the upgraded binaries. Do not run concurrent repair commands:
+an older doctor may still have a cached decision to delete the old path. Inspect
+other legacy files before removing them once. Modern files carry a nonnumeric
+version marker, so an older doctor reading one will not mistake it for a dead PID
+sentinel. A downgrade likewise requires stopping every modern runner before
+removing its marker; never mix the old and new lock protocols.
 
 `/schedule` (`/schedules`) is the same table for a person, with that holder
 line under it and any file that could not be read named.

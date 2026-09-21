@@ -236,49 +236,69 @@ fn running(record: &pidfile::Record) -> Row {
     )
 }
 
-/// Every claim under the data dir, checked against the process that took it.
-///
-/// A lock is found by its shape — a `*.lock` file whose whole content is the
-/// pid that took it — and not by name. That is why this needs no plugin's
-/// private constants, and why a plugin that adds a claim tomorrow is already
-/// covered.
+/// Persistent OS locks are probed through their owner's protocol. Legacy
+/// PID sentinels keep their existing diagnosis and one-time cleanup path.
 fn lock_checks(patient: &Patient<'_>, probe: &dyn Probe) -> Vec<Row> {
-    let mut rows = Vec::new();
-    for path in locks(patient.paths.data_dir()) {
-        let name = relative(&path, patient.paths.data_dir());
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(pid) = text.trim().parse::<u32>() else {
-            rows.push(Row::new(
-                name,
-                Verdict::Warn,
-                format!(
-                    "{} holds no pid; nothing can say whether it is live",
-                    path.display()
-                ),
-            ));
-            continue;
-        };
-        rows.push(match probe.alive(pid) {
-            true => Row::new(
-                name,
-                Verdict::Ok,
-                format!("held by pid {pid}, which is running"),
-            ),
-            false => Row::new(
-                name,
-                Verdict::Bad,
-                format!(
-                    "held by pid {pid}, which is gone. Whatever it was guarding \
-                     is dormant until this file goes ({})",
-                    path.display()
-                ),
-            )
-            .fixing(path),
-        });
+    let root = patient.paths.data_dir();
+    locks(root)
+        .into_iter()
+        .filter_map(|path| lock_check(root, path, probe))
+        .collect()
+}
+
+fn lock_check(root: &Path, path: PathBuf, probe: &dyn Probe) -> Option<Row> {
+    let name = relative(&path, root);
+    if let Some(row) = schedule_lock(root, &path, &name) {
+        return Some(row);
     }
-    rows
+    let text = std::fs::read_to_string(&path).ok()?;
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return Some(Row::new(
+            name,
+            Verdict::Warn,
+            format!(
+                "{} holds no pid; nothing can say whether it is live",
+                path.display()
+            ),
+        ));
+    };
+    Some(match probe.alive(pid) {
+        true => Row::new(
+            name,
+            Verdict::Ok,
+            format!("held by pid {pid}, which is running"),
+        ),
+        false => Row::new(
+            name,
+            Verdict::Bad,
+            format!(
+                "held by pid {pid}, which is gone. Whatever it was guarding \
+                 is dormant until this file goes ({})",
+                path.display()
+            ),
+        )
+        .fixing(path),
+    })
+}
+
+fn schedule_lock(root: &Path, path: &Path, name: &str) -> Option<Row> {
+    let directory = root.join("schedules");
+    if path != directory.join("runner.lock") {
+        return None;
+    }
+    let (verdict, say) = match bingo_schedule::lock::probe(&directory) {
+        Ok(true) => (
+            Verdict::Ok,
+            "scheduler OS lock is held; never remove this file".into(),
+        ),
+        Ok(false) => (
+            Verdict::Ok,
+            "scheduler OS lock is free; this permanent file is not a stale claim".into(),
+        ),
+        Err(bingo_schedule::lock::ClaimError::Legacy { .. }) => return None,
+        Err(error) => (Verdict::Bad, error.to_string()),
+    };
+    Some(Row::new(name, verdict, say))
 }
 
 /// Every `*.lock` under `dir`, to a fixed depth, in a fixed order.

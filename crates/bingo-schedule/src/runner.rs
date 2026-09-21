@@ -106,9 +106,10 @@ impl Runner {
     /// Fire what is due, sleep to the next one, and start again — until the
     /// plugin stops.
     pub async fn run(self) {
-        loop {
+        while !self.cancel.is_cancelled() {
             let waited = self.tick().await;
             tokio::select! {
+                biased;
                 _ = self.cancel.cancelled() => return,
                 _ = tokio::time::sleep(waited) => {}
                 _ = self.changed.notified() => {}
@@ -129,6 +130,9 @@ impl Runner {
         let now = Zoned::now();
         let pass = pass(&shelf.entries, &now);
         for entry in &pass.due {
+            if self.cancel.is_cancelled() {
+                return Duration::ZERO;
+            }
             self.fire(entry, &now).await;
         }
         match pass.due.is_empty() {

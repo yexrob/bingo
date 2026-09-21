@@ -158,7 +158,7 @@ mod tests {
     fn every_entry_is_a_row_and_the_holder_is_the_line_under_them() {
         let shown = children(view(
             &shelf(vec![entry()]),
-            "dormant — held by pid 42",
+            "standby — another runner holds this store",
             None,
             &TimeZone::UTC,
         ));
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(
             shown[1],
             View::Text {
-                text: "schedules: dormant — held by pid 42".into()
+                text: "schedules: standby — another runner holds this store".into()
             }
         );
     }

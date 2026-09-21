@@ -203,7 +203,9 @@ mod tests {
         let said = text(&create(&fixture, nightly()).await);
         assert!(said.contains("daily at 09:00"), "{said}");
         assert!(
-            said.contains("Schedules here are dormant — no runner holds this store."),
+            said.contains(
+                "Schedules here are standby — no runner holds this store; waiting to take over."
+            ),
             "{said}"
         );
     }

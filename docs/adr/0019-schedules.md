@@ -27,6 +27,32 @@ Neither the old project nor this one can defer or repeat work: no "run this ever
 - Restart behaviour is honest: entries persist, in-flight turns do not; the next process picks the store up through the lock.
 - A wake costs no new mechanism and no new dependency: one value the plugin holds, one loop beside the runner, and the delivery §3 already made. It does cost the plugin its first settings key (`schedule.wakes`) and the store its first entries a person did not write — which is why they are the one thing on the status line the model set in motion.
 
+## Amendment — 2026-09-21 (M106)
+
+Section 5 now uses an OS exclusive lock on a **permanent** `runner.lock`
+inode, not file existence. The fixed `bingo-schedule-runner-v1` marker is
+published complete via a same-directory staging file and atomic hard link;
+it is never rewritten or removed on ownership changes. `File::try_lock`
+provides the Unix and Windows mechanism without a new external dependency.
+The task owns the open file, and crashes release it through the OS.
+
+Other processes stand by and retry once a second. A successful takeover
+scans overdue entries immediately. Shutdown cancels and joins the timer and
+wake loops: a dispatch already in flight finishes before its claim drops,
+and cancellation never begins the next dispatch. Holder wording reports
+this process, another runner, no owner, or an actual storage failure.
+
+Legacy numeric, empty, and unknown sentinels fail closed: all processes
+sharing the store must stop before one repair invocation removes the sentinel,
+then upgraded processes may restart. Concurrent legacy repairs are unsafe:
+a doctor may have cached a deletion before a new inode is published. Mixing
+the protocols is not safe. The nonnumeric marker prevents an old gateway doctor from deleting
+a modern lock; the new doctor uses the schedule plugin's read-only OS probe
+and never offers to unlink a modern inode, even when it is free. The gateway
+is a composition, so it may depend on the scheduler for this protocol.
+External deletion of a held inode remains outside the locking contract.
+Neither schedule timing nor spent-occurrence delivery policy changes here.
+
 ## Supersedes
 
 —
