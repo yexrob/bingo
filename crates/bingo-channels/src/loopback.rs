@@ -19,8 +19,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
 use crate::adapter::{
-    Acknowledge, Buttons, ChannelAdapter, Edit, Files, Inbox, Incoming, Mark, Mode, Outcome,
-    Outgoing, Threads, Typing,
+    Acknowledge, Buttons, ChannelAdapter, ChannelCommand, Edit, Files, Inbox, Incoming, Mark, Mode,
+    Outcome, Outgoing, Threads, Typing,
 };
 use crate::conversation::{Conversation, Posted};
 use crate::error::ChannelError;
@@ -377,6 +377,14 @@ impl ChannelAdapter for Loopback {
 
     fn credential(&self) -> String {
         self.config.peer.clone().unwrap_or_else(|| "offline".into())
+    }
+
+    fn command(&self, text: &str) -> Option<ChannelCommand> {
+        match text.trim() {
+            "/new" => Some(ChannelCommand::NewSession),
+            "/stop" => Some(ChannelCommand::Stop),
+            _ => None,
+        }
     }
 
     async fn run(&self, inbox: Inbox, cancel: CancellationToken) -> Result<(), ChannelError> {

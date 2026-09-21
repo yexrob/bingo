@@ -492,6 +492,127 @@ async fn a_question_becomes_buttons_and_a_click_answers_it() {
     assert_eq!(answered.2, Activation::Pointer, "a button is a pointer");
 }
 
+#[tokio::test]
+async fn a_new_session_retires_open_questions_before_switching() {
+    let chat = Chat::open();
+    chat.say(hello("oc_1")).await;
+    let old = chat.session("loopback/oc_1").await;
+    asks(&old).await;
+    let records = chat.records(1).await;
+    let Record::Ask { id, question, .. } = &records[0] else {
+        panic!("expected an open question, got {records:?}");
+    };
+    let old_card = id.clone();
+    let old_question = question.id.clone();
+
+    chat.say(said(Conversation::direct("oc_1"), "/new", true))
+        .await;
+    chat.until(|| {
+        chat.loopback.records().into_iter().find(|record| {
+            matches!(
+                record,
+                Record::Settle { at, outcome }
+                    if at == &old_card && outcome == "withdrawn: another question replaced it"
+            )
+        })
+    })
+    .await;
+
+    assert!(
+        chat.host.keys().contains(&"loopback/oc_1".to_string()),
+        "the fresh session owns the route: {:?}",
+        chat.host.keys()
+    );
+    assert!(
+        chat.host.keys().contains(&String::new()),
+        "the old session keeps its history without the route: {:?}",
+        chat.host.keys()
+    );
+
+    chat.say(Incoming::Click {
+        conversation: Conversation::direct("oc_1"),
+        principal: "ou_person".into(),
+        question: old_question,
+        choice: "1".into(),
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        old.answers().is_empty(),
+        "the retired question cannot answer the old session: {:?}",
+        old.answers()
+    );
+}
+
+#[tokio::test]
+async fn stopping_keeps_the_streamed_answer_and_posts_a_notice_separately() {
+    let chat = Chat::open();
+    chat.say(hello("oc_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    session.publish(Event::TurnStarted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        inputs: Vec::new(),
+        origin: bingo_sdk::TurnOrigin::Submit,
+    });
+    session.publish(Event::ItemCompleted {
+        item: fixtures::assistant("itm_1", "The answer so far.", ItemStatus::Completed),
+    });
+    let records = chat.records(2).await;
+    assert!(
+        records.iter().any(
+            |record| matches!(record, Record::Replace { text, .. } if text == "The answer so far.")
+        ),
+        "the answer should already be streaming: {records:?}"
+    );
+
+    chat.say(said(Conversation::direct("oc_1"), "/stop", true))
+        .await;
+    let records = chat.until(|| {
+        let records = chat.loopback.records();
+        records
+            .iter()
+            .any(|record| matches!(record, Record::Send { text, mode: Mode::Once, .. } if text == "任务已停止。"))
+            .then_some(records)
+    })
+    .await;
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record, Record::Finish { text, .. } if text == "任务已停止。")),
+        "stopping must not overwrite the streamed answer: {records:?}"
+    );
+
+    session.publish(Event::TurnCompleted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        status: TurnStatus::Interrupted {
+            reason: bingo_sdk::InterruptReason::UserCancel,
+        },
+        usage: Usage::default(),
+    });
+    let records = chat.until(|| {
+        let records = chat.loopback.records();
+        records
+            .iter()
+            .any(|record| matches!(record, Record::Finish { text, .. } if text == "The answer so far."))
+            .then_some(records)
+    })
+    .await;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::Finish { text, .. } if text == "The answer so far."))
+            .count(),
+        1,
+        "the interrupted answer is finalized once: {records:?}"
+    );
+    assert!(
+        !records.iter().any(
+            |record| matches!(record, Record::Send { text, mode: Mode::Once, .. } if text == "The answer so far.")
+        ),
+        "the completed answer must not be posted a second time: {records:?}"
+    );
+}
+
 /// A chat has no card that walks tabs, so a set of questions is asked one
 /// message at a time and answered once, at the last of them (M53). The message
 /// just answered says what it was answered with and loses its buttons.

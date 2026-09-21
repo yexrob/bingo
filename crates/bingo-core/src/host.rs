@@ -140,6 +140,7 @@ impl Live {
 /// A knob moved, written into the spec that holds it.
 fn apply(change: SessionChange, spec: &mut SessionSpec) {
     match change {
+        SessionChange::Key(key) => spec.key = key,
         SessionChange::Model { provider, model } => {
             if provider.is_some() {
                 spec.provider = provider;
@@ -431,8 +432,20 @@ impl Host {
 
     /// A routing key names one live session at a time.
     fn check_key_free(&self, key: Option<&str>) -> Result<(), KernelError> {
+        self.check_key_free_except(key, None)
+    }
+
+    fn check_key_free_except(
+        &self,
+        key: Option<&str>,
+        except: Option<&SessionId>,
+    ) -> Result<(), KernelError> {
         let Some(key) = key else { return Ok(()) };
-        if self.lock().values().any(|l| l.key.as_deref() == Some(key)) {
+        if self
+            .lock()
+            .iter()
+            .any(|(id, l)| except != Some(id) && l.key.as_deref() == Some(key))
+        {
             return Err(KernelError::new(
                 ErrorCode::SessionLocked,
                 format!("session key {key} is in use"),
@@ -818,34 +831,38 @@ impl HostApi for Host {
             .await
     }
 
-    /// Re-choose the model for a live session and hand the actor the config
-    /// its next turn runs on (ADR-0008 §4, ADR-0047 §3). The spec is the one
-    /// holder of what was moved, so the change is written there and read
-    /// back from there.
+    /// Reconfigure a live session and hand the actor the config its next turn
+    /// runs on (ADR-0008 §4, ADR-0047 §3). The spec is the one holder of what
+    /// was moved, so the change is written there and read back from there.
     async fn reconfigure(
         &self,
         session: &SessionId,
         change: SessionChange,
     ) -> Result<(), KernelError> {
         let live = self.live(session)?;
-        if live.spec.driver == Driver::Log {
+        if !matches!(change, SessionChange::Key(_)) && live.spec.driver == Driver::Log {
             return Err(KernelError::new(
                 ErrorCode::InvalidInput,
                 "a log session has no model",
             ));
         }
+        if let SessionChange::Key(key) = &change {
+            self.check_key_free_except(key.as_deref(), Some(session))?;
+        }
         let mut spec = live.spec.clone();
         apply(change, &mut spec);
-        let choice = self.choose_model(&spec).await?;
+        let choice = self.model_for(&spec).await?;
         // The spec is what the session was asked to be, the actor's summary
         // what it has become: a rename is the one thing here the spec knows
         // first, and a name the actor minted is one the spec never had.
         let mut summary = live.mailbox.summary().await?;
+        summary.key = spec.key.clone();
         summary.title = spec.title.clone().or(summary.title);
-        let summary = turn::runs_on(summary, Some(&choice));
-        let config = Arc::new(self.turn_config(&spec, &summary, Some(choice), &live.mailbox));
+        let summary = turn::runs_on(summary, choice.as_ref());
+        let config = Arc::new(self.turn_config(&spec, &summary, choice, &live.mailbox));
         if let Some(entry) = self.lock().get_mut(session) {
             entry.spec = spec;
+            entry.key = entry.spec.key.clone();
         }
         live.mailbox.reconfigure(config);
         Ok(())

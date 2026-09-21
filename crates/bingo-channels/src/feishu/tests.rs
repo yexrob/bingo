@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use serde_json::json;
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use super::*;
+use crate::adapter::{ChannelAdapter, ChannelCommand};
 use crate::conversation::Conversation;
 use crate::question::Choice;
 use bingo_sdk::{Answer, InteractionId};
@@ -32,6 +35,7 @@ async fn feishu(server: &MockServer) -> Feishu {
         app_secret: "secret".into(),
         base: server.uri(),
         attachments: std::path::PathBuf::from("/nonexistent-bingo-feishu-attachments"),
+        command_mappings: BTreeMap::new(),
     })
 }
 
@@ -137,6 +141,7 @@ async fn a_channel_with_no_credential_refuses_before_it_dials() {
         app_secret: String::new(),
         base: "http://127.0.0.1:1".into(),
         attachments: std::path::PathBuf::from("/nonexistent-bingo-feishu-attachments"),
+        command_mappings: BTreeMap::new(),
     });
     let (post, _arrivals) = tokio::sync::mpsc::channel(1);
     let error = bare
@@ -151,6 +156,40 @@ async fn a_channel_with_no_credential_refuses_before_it_dials() {
         error.to_string().contains("BINGO_FEISHU_APP_SECRET"),
         "{error}"
     );
+}
+
+#[test]
+fn terminal_controls_have_feishu_command_defaults() {
+    let feishu = Feishu::new(Config {
+        app_id: "cli_a".into(),
+        app_secret: "secret".into(),
+        base: "http://127.0.0.1:1".into(),
+        attachments: std::path::PathBuf::from("/nonexistent-bingo-feishu-attachments"),
+        command_mappings: BTreeMap::new(),
+    });
+    assert_eq!(feishu.command("/new"), Some(ChannelCommand::NewSession));
+    assert_eq!(feishu.command("/stop"), Some(ChannelCommand::Stop));
+    assert_eq!(feishu.command("new"), None);
+    assert_eq!(feishu.command("stop"), None);
+    assert_eq!(feishu.command("/new now"), None);
+}
+
+#[test]
+fn terminal_controls_can_be_extended_from_feishu_settings() {
+    let feishu = Feishu::new(Config {
+        app_id: "cli_a".into(),
+        app_secret: "secret".into(),
+        base: "http://127.0.0.1:1".into(),
+        attachments: std::path::PathBuf::from("/nonexistent-bingo-feishu-attachments"),
+        command_mappings: BTreeMap::from([
+            ("/fresh".into(), "/clear".into()),
+            ("halt".into(), "escape".into()),
+        ]),
+    });
+    assert_eq!(feishu.command("/fresh"), Some(ChannelCommand::NewSession));
+    assert_eq!(feishu.command("/halt"), Some(ChannelCommand::Stop));
+    assert_eq!(feishu.command("fresh"), None);
+    assert_eq!(feishu.command("halt"), None);
 }
 
 #[tokio::test]
