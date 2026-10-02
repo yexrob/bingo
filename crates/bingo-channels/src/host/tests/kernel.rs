@@ -32,7 +32,7 @@ pub struct TestSession {
     key: Mutex<String>,
     seq: AtomicU64,
     watchers: Mutex<Vec<mpsc::UnboundedSender<Frame>>>,
-    submitted: Mutex<Vec<Input>>,
+    submitted: Mutex<Vec<(IntentId, Input)>>,
     answers: Mutex<Vec<(InteractionId, Answer, Activation)>>,
 }
 
@@ -60,10 +60,17 @@ impl TestSession {
         locked(&self.watchers).retain(|watcher| watcher.send(frame.clone()).is_ok());
     }
 
+    pub fn intents(&self) -> Vec<IntentId> {
+        locked(&self.submitted)
+            .iter()
+            .map(|(intent, _)| intent.clone())
+            .collect()
+    }
+
     pub fn prompts(&self) -> Vec<String> {
         locked(&self.submitted)
             .iter()
-            .filter_map(|input| match input {
+            .filter_map(|(_, input)| match input {
                 Input::Text { text, .. } => Some(text.clone()),
                 Input::Action { .. } => None,
             })
@@ -73,7 +80,7 @@ impl TestSession {
     pub fn origins(&self) -> Vec<bingo_sdk::Origin> {
         locked(&self.submitted)
             .iter()
-            .filter_map(|input| match input {
+            .filter_map(|(_, input)| match input {
                 Input::Text { origin, .. } => Some(origin.clone()),
                 Input::Action { .. } => None,
             })
@@ -84,7 +91,7 @@ impl TestSession {
     pub fn pictures(&self) -> Vec<Vec<bingo_sdk::Image>> {
         locked(&self.submitted)
             .iter()
-            .filter_map(|input| match input {
+            .filter_map(|(_, input)| match input {
                 Input::Text { images, .. } => Some(images.clone()),
                 Input::Action { .. } => None,
             })
@@ -98,8 +105,8 @@ impl TestSession {
 
 #[async_trait]
 impl SessionPort for TestSession {
-    fn submit(&self, _intent: IntentId, input: Input) {
-        locked(&self.submitted).push(input);
+    fn submit(&self, intent: IntentId, input: Input) {
+        locked(&self.submitted).push((intent, input));
     }
 
     fn interrupt(&self, _intent: IntentId, _scope: InterruptScope) {}

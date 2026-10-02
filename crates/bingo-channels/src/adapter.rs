@@ -7,7 +7,7 @@
 //! adapter set that declares its capabilities as flags.
 
 use async_trait::async_trait;
-use bingo_sdk::{CancellationToken, Image, InteractionId};
+use bingo_sdk::{CancellationToken, Image, InteractionId, SessionState};
 use tokio::sync::mpsc;
 
 use crate::conversation::{Conversation, Posted};
@@ -116,6 +116,11 @@ pub trait ChannelAdapter: Send + Sync {
     /// Interpret a platform command without sending it to the session.
     fn command(&self, _text: &str) -> Option<ChannelCommand> {
         None
+    }
+
+    /// Decorate the final answer, using only facts in the folded session.
+    fn final_answer(&self, text: &str, _state: &SessionState) -> String {
+        text.to_string()
     }
 
     fn edit(&self) -> Option<&dyn Edit> {

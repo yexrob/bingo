@@ -12,13 +12,15 @@
 
 use std::time::Instant;
 
+use serde_json::Value;
+
 use bingo_sdk::{
-    Answer, Event, Frame, Interaction, InteractionId, InteractionKind, ItemBody, Level, ResolvedBy,
-    SessionState, TurnId, TurnStatus,
+    Answer, Event, Frame, IntentId, IntentOutcome, Interaction, InteractionId, InteractionKind,
+    ItemBody, Level, ResolvedBy, SessionState, TurnId, TurnStatus, View,
 };
 
 use crate::gate::Gate;
-use crate::limits::Limits;
+use crate::limits::{Dialect, Limits};
 use crate::question::{Question, ladder, withdrawn};
 
 /// What a conversation is asked to do next.
@@ -35,6 +37,10 @@ pub enum Op {
     },
     /// A line beside the answer: a failure, an interruption, a notice.
     Status { text: String },
+    /// A result that stands on its own — a command's answer, not a turn's.
+    /// Shown the way an answer is where the platform has a card for one, and
+    /// as a message where it has not.
+    Card { text: String },
     /// A question this conversation showed is settled, wherever from.
     Resolved {
         question: InteractionId,
@@ -108,6 +114,10 @@ pub struct Deliverer {
     streaming: Option<Streaming>,
     /// The questions this conversation showed and nobody has settled.
     asked: Vec<Question>,
+    /// Writes this chat made that the kernel has not answered yet, so a
+    /// command's result is posted here and a result earned elsewhere is not
+    /// (ADR-0016: the ack carries the intent that caused it).
+    pending: Vec<IntentId>,
 }
 
 impl std::fmt::Debug for Deliverer {
@@ -130,7 +140,19 @@ impl Deliverer {
             delivered: String::new(),
             streaming: None,
             asked: Vec::new(),
+            pending: Vec::new(),
         }
+    }
+
+    /// Remember a write this chat made, so its outcome is reported here. One
+    /// entry per submission, cleared by its terminal ack; the cap is only
+    /// for the ack that never comes, which must not grow without bound.
+    pub fn expecting(&mut self, intent: IntentId) {
+        const REMEMBERED: usize = 64;
+        if self.pending.len() >= REMEMBERED {
+            self.pending.remove(0);
+        }
+        self.pending.push(intent);
     }
 
     /// One frame, already folded into `state` by the caller. For a frame from
@@ -150,9 +172,63 @@ impl Deliverer {
                 self.close(id, withdrawn(reason)).into_iter().collect()
             }
             Event::TurnCompleted { status, .. } => self.completed(state, status),
+            Event::IntentAck { intent, outcome } => self.acknowledged(intent, outcome),
             Event::Notice { level, text, .. } if *level != Level::Info => vec![self.status(text)],
             _ => Vec::new(),
         }
+    }
+
+    /// The kernel answered a write. Only what this chat asked for is reported:
+    /// a submitted prompt's `TurnStarted` is already the turn being shown, and
+    /// a `Queued` line waits its turn. A command's result is news, and so is a
+    /// refusal — an unknown command answers nothing else, so dropping the
+    /// refusal would leave whoever typed it with silence.
+    fn acknowledged(&mut self, intent: &IntentId, outcome: &IntentOutcome) -> Vec<Op> {
+        let Some(at) = self.pending.iter().position(|pending| pending == intent) else {
+            return Vec::new();
+        };
+        // Queued commands answer again under the same intent when they run.
+        if matches!(outcome, IntentOutcome::Queued { .. }) {
+            return Vec::new();
+        }
+        self.pending.remove(at);
+        match outcome {
+            IntentOutcome::Applied { result } => self.applied(result),
+            IntentOutcome::Rejected { error } => vec![Op::Card {
+                text: self.laid_out(&error.message),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// What a command said, in the words this chat can carry: its message,
+    /// then its view — folded by the sdk, which is the one degrade an IM
+    /// channel is meant to show (ADR-0013). A chat that draws markdown gets
+    /// the sdk's markdown walk instead, because a table a platform renders is
+    /// a table and the same table in ` · ` is a paragraph (ADR-0016 §6).
+    fn applied(&self, result: &Value) -> Vec<Op> {
+        let message = result.get("message").and_then(Value::as_str);
+        let view = result
+            .get("view")
+            .and_then(|view| serde_json::from_value::<View>(view.clone()).ok())
+            .map(|view| match self.limits.dialect {
+                Dialect::Markdown => view.fold_markdown(),
+                Dialect::Plain => view.fold(),
+            });
+        let said = [message.map(str::to_string), view]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            // A blank line between the two: a markdown block — a table, a
+            // list — is not a block while a paragraph runs into it.
+            .join("\n\n");
+        (!said.is_empty())
+            .then(|| Op::Card {
+                text: self.laid_out(&said),
+            })
+            .into_iter()
+            .collect()
     }
 
     /// The timer fired: whatever was held back, now.
@@ -183,6 +259,7 @@ impl Deliverer {
         self.delivered.clear();
         self.streaming = None;
         self.asked.clear();
+        self.pending.clear();
     }
 
     /// When `tick` is worth calling.

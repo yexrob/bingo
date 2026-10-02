@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use bingo_sdk::{
-    Answer, CancelReason, ErrorCode, Event, InteractionId, KernelError, Level, ResolvedBy,
-    TurnStatus,
+    Answer, CancelReason, ErrorCode, Event, IntentId, IntentOutcome, InteractionId, KernelError,
+    Level, ResolvedBy, TurnStatus,
 };
 
 use super::*;
@@ -509,4 +509,290 @@ fn the_timer_is_only_armed_while_something_is_held() {
     assert!(chat.deliverer.due().is_some());
     chat.wait(600);
     assert!(chat.deliverer.due().is_none());
+}
+
+/// A command's own result is posted here; a prompt's ack is not a result, and
+/// a result earned by a write from somewhere else is not this chat's news.
+#[test]
+fn a_command_result_is_posted_for_this_chats_own_write() {
+    let mut chat = Chat::new();
+    let mine = IntentId::mint();
+    chat.deliverer.expecting(mine.clone());
+
+    assert_eq!(
+        chat.feed(frame(
+            1,
+            Event::IntentAck {
+                intent: mine,
+                outcome: IntentOutcome::Applied {
+                    result: serde_json::json!({ "message": "nothing is remembered yet" }),
+                },
+            },
+        )),
+        [Op::Card {
+            text: "nothing is remembered yet".into()
+        }]
+    );
+}
+
+#[test]
+fn a_write_this_chat_never_made_is_not_reported_here() {
+    let mut chat = Chat::new();
+    assert_eq!(
+        chat.feed(frame(
+            1,
+            Event::IntentAck {
+                intent: IntentId::mint(),
+                outcome: IntentOutcome::Applied {
+                    result: serde_json::json!({ "message": "somebody else's business" }),
+                },
+            },
+        )),
+        [],
+        "another surface's command is not this chat's to show"
+    );
+}
+
+#[test]
+fn a_prompts_own_ack_says_nothing_because_the_turn_says_it() {
+    let mut chat = Chat::new();
+    let mine = IntentId::mint();
+    chat.deliverer.expecting(mine.clone());
+    assert_eq!(
+        chat.feed(frame(
+            1,
+            Event::IntentAck {
+                intent: mine.clone(),
+                outcome: IntentOutcome::TurnStarted {
+                    turn: TurnId::from_raw(TURN),
+                },
+            },
+        )),
+        [],
+        "a submitted prompt is already being shown"
+    );
+    assert_eq!(
+        chat.feed(frame(
+            2,
+            Event::IntentAck {
+                intent: mine,
+                outcome: IntentOutcome::Applied {
+                    result: serde_json::json!({ "message": "too late" }),
+                },
+            },
+        )),
+        [],
+        "the intent is spent, so a second ack for it says nothing"
+    );
+}
+
+/// A command that answers with a view: an IM channel shows the fold the sdk
+/// ships for exactly this (ADR-0013), not the node.
+#[test]
+fn a_command_view_is_folded_into_the_words_a_chat_can_carry() {
+    let mut chat = Chat::new();
+    let mine = IntentId::mint();
+    chat.deliverer.expecting(mine.clone());
+    assert_eq!(
+        chat.feed(frame(
+            1,
+            Event::IntentAck {
+                intent: mine,
+                outcome: IntentOutcome::Applied {
+                    result: serde_json::json!({
+                        "view": {
+                            "kind": "keyValue",
+                            "rows": [["model", "fake-1"], ["mode", "default"]],
+                        },
+                    }),
+                },
+            },
+        )),
+        [Op::Card {
+            text: "model: fake-1
+mode: default"
+                .into()
+        }]
+    );
+}
+
+#[test]
+fn a_queued_command_keeps_ownership_until_its_terminal_ack() {
+    for outcome in [
+        IntentOutcome::Applied {
+            result: serde_json::json!({"message": "enabled files; dialling it"}),
+        },
+        IntentOutcome::Rejected {
+            error: KernelError::new(ErrorCode::InvalidInput, "no mcp server named files"),
+        },
+    ] {
+        let mut chat = Chat::new();
+        let intent = IntentId::mint();
+        chat.deliverer.expecting(intent.clone());
+        assert!(
+            chat.feed(frame(
+                1,
+                Event::IntentAck {
+                    intent: intent.clone(),
+                    outcome: IntentOutcome::Queued { position: 1 },
+                }
+            ))
+            .is_empty()
+        );
+        let terminal = Event::IntentAck { intent, outcome };
+        assert!(matches!(
+            chat.feed(frame(2, terminal.clone())).as_slice(),
+            [Op::Card { .. }]
+        ));
+        assert!(
+            chat.feed(frame(3, terminal)).is_empty(),
+            "only a terminal ack spends ownership"
+        );
+    }
+}
+
+#[test]
+fn command_results_obey_the_platform_length_and_dialect() {
+    let raw = format!("```text\n{}\n```", "é𝄞".repeat(50));
+    for dialect in [Dialect::Plain, Dialect::Markdown] {
+        for encoding in [Encoding::Chars, Encoding::Utf8Bytes, Encoding::Utf16Units] {
+            let limits = Limits {
+                max_text: (40, encoding),
+                dialect,
+                ..limits()
+            };
+            let expected = limits.clip(&dialect.render(&raw)).into_owned();
+            for outcome in [
+                IntentOutcome::Applied {
+                    result: serde_json::json!({"message": raw}),
+                },
+                IntentOutcome::Applied {
+                    result: serde_json::json!({"view": {"kind": "markdown", "text": raw}}),
+                },
+                IntentOutcome::Rejected {
+                    error: KernelError::new(ErrorCode::InvalidInput, &raw),
+                },
+            ] {
+                let mut chat = Chat::with(limits.clone(), gate());
+                let intent = IntentId::mint();
+                chat.deliverer.expecting(intent.clone());
+                let ops = chat.feed(frame(1, Event::IntentAck { intent, outcome }));
+                let [Op::Card { text, .. }] = ops.as_slice() else {
+                    panic!("expected a card: {ops:?}")
+                };
+                assert_eq!(text, &expected);
+                assert!(encoding.measure(text) <= 40);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_large_memory_table_fits_the_feishu_budget() {
+    let limits = Limits {
+        max_text: (20_000, Encoding::Utf8Bytes),
+        ..limits()
+    };
+    let mut chat = Chat::with(limits, gate());
+    let intent = IntentId::mint();
+    chat.deliverer.expecting(intent.clone());
+    let rows: Vec<_> = (0..300)
+        .map(|n| {
+            vec![
+                "user".to_string(),
+                format!("memory-{n}"),
+                "user".to_string(),
+                "A long but ordinary description of a remembered preference.".to_string(),
+            ]
+        })
+        .collect();
+    let result = serde_json::json!({"view": {"kind": "table", "headers": ["scope", "name", "type", "description"], "rows": rows}});
+    let ops = chat.feed(frame(
+        1,
+        Event::IntentAck {
+            intent,
+            outcome: IntentOutcome::Applied { result },
+        },
+    ));
+    let [Op::Card { text, .. }] = ops.as_slice() else {
+        panic!("expected a card: {ops:?}")
+    };
+    assert!(text.len() <= 20_000);
+    assert!(text.ends_with('…'));
+}
+
+/// A command's view of a table, said to a chat that draws markdown and to one
+/// that does not. `/memory` and `/mcp` both answer with one, and a card is
+/// where a person sees a table rather than a row of cells wedged between
+/// middle dots.
+#[test]
+fn a_view_table_is_a_table_to_a_chat_that_draws_markdown() {
+    let result = serde_json::json!({
+        "view": {
+            "kind": "table",
+            "headers": ["scope", "name"],
+            "rows": [["user", "type"]],
+        },
+    });
+    let said = |chat: &mut Chat| {
+        let mine = IntentId::mint();
+        chat.deliverer.expecting(mine.clone());
+        chat.feed(frame(
+            1,
+            Event::IntentAck {
+                intent: mine,
+                outcome: IntentOutcome::Applied {
+                    result: result.clone(),
+                },
+            },
+        ))
+    };
+    assert_eq!(
+        said(&mut Chat::new()),
+        [Op::Card {
+            text: "| scope | name |\n| --- | --- |\n| user | type |".into()
+        }],
+        "a chat that draws markdown gets the markdown table"
+    );
+    let plain = Limits {
+        dialect: Dialect::Plain,
+        ..limits()
+    };
+    assert_eq!(
+        said(&mut Chat::with(plain, gate())),
+        [Op::Card {
+            text: "scope · name\nuser · type".into()
+        }],
+        "a chat with no markdown keeps the one-line-per-row fold"
+    );
+}
+
+/// A result that is both a sentence and a view: the view is a block of its
+/// own, so the sentence does not run into it.
+#[test]
+fn a_message_and_a_view_are_two_blocks() {
+    let mut chat = Chat::new();
+    let mine = IntentId::mint();
+    chat.deliverer.expecting(mine.clone());
+    assert_eq!(
+        chat.feed(frame(
+            1,
+            Event::IntentAck {
+                intent: mine,
+                outcome: IntentOutcome::Applied {
+                    result: serde_json::json!({
+                        "message": "2 memories",
+                        "view": {
+                            "kind": "table",
+                            "headers": ["scope", "name"],
+                            "rows": [["user", "type"]],
+                        },
+                    }),
+                },
+            },
+        )),
+        [Op::Card {
+            text: "2 memories\n\n| scope | name |\n| --- | --- |\n| user | type |".into()
+        }]
+    );
 }
