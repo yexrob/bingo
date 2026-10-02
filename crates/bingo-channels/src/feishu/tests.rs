@@ -652,3 +652,231 @@ async fn an_upload_that_keeps_no_key_is_a_refusal() {
         .expect_err("a refusal");
     assert!(error.to_string().contains("file_key"), "{error}");
 }
+
+/// The platform closes streaming mode on its own clock, and a write into a
+/// card that has closed is not a lost answer: the stream is opened again and
+/// the text goes in, so a long turn stays in its card.
+#[tokio::test]
+async fn a_card_the_platform_closed_is_opened_again_rather_than_abandoned() {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    ok(&server, "POST", CARDS, json!({ "card_id": "ctp_1" })).await;
+    ok(&server, "POST", MESSAGES, json!({ "message_id": "om_1" })).await;
+    let element = format!("{CARDS}/ctp_1/elements/{}/content", card::ANSWER);
+    let settings = format!("{CARDS}/ctp_1/settings");
+    ok(&server, "PATCH", &settings, json!({})).await;
+    Mock::given(method("PUT"))
+        .and(path(&element))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 300_309, "msg": "streaming mode is closed",
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(&element))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "code": 0 })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let posted = feishu
+        .send(&Conversation::direct("oc_1"), "", Mode::Stream)
+        .await
+        .expect("a card");
+    feishu
+        .edit()
+        .expect("an editor")
+        .replace(&posted, "Two tests failed.")
+        .await
+        .expect("the stream is renewed, not abandoned");
+
+    assert_eq!(
+        bodies(&server, &settings).await[0]["settings"],
+        json!(r#"{"config":{"streaming_mode":true}}"#),
+        "the clock is restarted by enabling streaming again"
+    );
+    assert_eq!(
+        bodies(&server, &element).await.len(),
+        2,
+        "the refused write is made again once the card is open"
+    );
+}
+
+/// Ten minutes run from the last time streaming was *enabled*, not from the
+/// last write, so a long busy turn is renewed before the platform closes it.
+#[tokio::test]
+async fn a_card_that_has_streamed_a_while_is_renewed_before_it_closes() {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    ok(&server, "POST", CARDS, json!({ "card_id": "ctp_1" })).await;
+    ok(&server, "POST", MESSAGES, json!({ "message_id": "om_1" })).await;
+    let element = format!("{CARDS}/ctp_1/elements/{}/content", card::ANSWER);
+    let settings = format!("{CARDS}/ctp_1/settings");
+    ok(&server, "PUT", &element, json!({})).await;
+    ok(&server, "PATCH", &settings, json!({})).await;
+
+    let posted = feishu
+        .send(&Conversation::direct("oc_1"), "", Mode::Stream)
+        .await
+        .expect("a card");
+    // The clock this adapter keeps is the one the platform runs on: wind it
+    // back instead of waiting eight minutes.
+    locked(&feishu.streaming_since).insert("ctp_1".to_string(), Instant::now() - STREAMING_RENEWED);
+    feishu
+        .edit()
+        .expect("an editor")
+        .replace(&posted, "still going")
+        .await
+        .expect("a write");
+
+    assert_eq!(
+        bodies(&server, &settings).await[0]["settings"],
+        json!(r#"{"config":{"streaming_mode":true}}"#),
+        "renewed before the platform gets the chance to close it"
+    );
+}
+
+/// The ten-minute close is its own code, and it is not the one an explicit
+/// close uses. Measured against the real API: a card left streaming for ten
+/// minutes and fifty seconds answers `200850 card streaming timeout`, where a
+/// closed one answers `300309 streaming mode is closed`. Both are recovered
+/// from the same way, so missing either loses the stream to a plain message.
+#[tokio::test]
+async fn a_card_that_timed_out_is_opened_again_too() {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    ok(&server, "POST", CARDS, json!({ "card_id": "ctp_1" })).await;
+    ok(&server, "POST", MESSAGES, json!({ "message_id": "om_1" })).await;
+    let element = format!("{CARDS}/ctp_1/elements/{}/content", card::ANSWER);
+    let settings = format!("{CARDS}/ctp_1/settings");
+    ok(&server, "PATCH", &settings, json!({})).await;
+    Mock::given(method("PUT"))
+        .and(path(&element))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 200_850, "msg": "ErrMsg: card streaming timeout; ",
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(&element))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "code": 0 })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let posted = feishu
+        .send(&Conversation::direct("oc_1"), "", Mode::Stream)
+        .await
+        .expect("a card");
+    feishu
+        .edit()
+        .expect("an editor")
+        .replace(&posted, "still going")
+        .await
+        .expect("a timeout is renewed, not treated as a failure");
+
+    assert_eq!(
+        bodies(&server, &settings).await[0]["settings"],
+        json!(r#"{"config":{"streaming_mode":true}}"#),
+        "the clock is restarted after a timeout"
+    );
+}
+
+async fn finish_recovers(code: i64) {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    ok(&server, "POST", CARDS, json!({ "card_id": "ctp_1" })).await;
+    ok(&server, "POST", MESSAGES, json!({ "message_id": "om_1" })).await;
+    let element = format!("{CARDS}/ctp_1/elements/{}/content", card::ANSWER);
+    let settings = format!("{CARDS}/ctp_1/settings");
+    ok(&server, "PATCH", &settings, json!({})).await;
+    Mock::given(method("PUT"))
+        .and(path(&element))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": code, "msg": "card streaming timeout or closed",
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(&element))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "code": 0 })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let posted = feishu
+        .send(&Conversation::direct("oc_1"), "", Mode::Stream)
+        .await
+        .expect("a card");
+    feishu
+        .edit()
+        .expect("an editor")
+        .finish(&posted, "Completed after a long-running tool.")
+        .await
+        .expect("the final write recovers too");
+    let writes = bodies(&server, &element).await;
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[1]["content"], "Completed after a long-running tool.");
+    let settings = bodies(&server, &settings).await;
+    assert_eq!(settings.len(), 2, "renew before finishing");
+    assert_eq!(
+        settings[0]["settings"],
+        json!(r#"{"config":{"streaming_mode":true}}"#)
+    );
+    assert_eq!(
+        settings[1]["settings"],
+        json!(r#"{"config":{"streaming_mode":false}}"#)
+    );
+    assert!(settings[0]["sequence"].as_u64().unwrap() < writes[1]["sequence"].as_u64().unwrap());
+    assert!(writes[1]["sequence"].as_u64().unwrap() < settings[1]["sequence"].as_u64().unwrap());
+}
+
+#[tokio::test]
+async fn finishing_recovers_a_streaming_timeout() {
+    finish_recovers(200_850).await;
+}
+
+#[tokio::test]
+async fn finishing_recovers_a_closed_stream() {
+    finish_recovers(300_309).await;
+}
+
+#[tokio::test]
+async fn finishing_renews_an_old_card_before_its_last_write() {
+    let server = MockServer::start().await;
+    let feishu = feishu(&server).await;
+    ok(&server, "POST", CARDS, json!({ "card_id": "ctp_1" })).await;
+    ok(&server, "POST", MESSAGES, json!({ "message_id": "om_1" })).await;
+    let element = format!("{CARDS}/ctp_1/elements/{}/content", card::ANSWER);
+    let settings = format!("{CARDS}/ctp_1/settings");
+    ok(&server, "PUT", &element, json!({})).await;
+    ok(&server, "PATCH", &settings, json!({})).await;
+    let posted = feishu
+        .send(&Conversation::direct("oc_1"), "", Mode::Stream)
+        .await
+        .expect("a card");
+    locked(&feishu.streaming_since).insert("ctp_1".to_string(), Instant::now() - STREAMING_RENEWED);
+    feishu
+        .edit()
+        .expect("an editor")
+        .finish(&posted, "Done.")
+        .await
+        .expect("a final write");
+    let settings = bodies(&server, &settings).await;
+    assert_eq!(settings.len(), 2);
+    assert_eq!(
+        settings[0]["settings"],
+        json!(r#"{"config":{"streaming_mode":true}}"#)
+    );
+    assert_eq!(
+        settings[1]["settings"],
+        json!(r#"{"config":{"streaming_mode":false}}"#)
+    );
+    let writes = bodies(&server, &element).await;
+    assert!(settings[0]["sequence"].as_u64().unwrap() < writes[0]["sequence"].as_u64().unwrap());
+}

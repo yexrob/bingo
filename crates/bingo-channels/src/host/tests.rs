@@ -19,6 +19,47 @@ use crate::loopback::{self, Loopback, Record};
 use kernel::{TestHost, TestSession};
 pub use kernel::{nowhere, options};
 
+#[tokio::test]
+async fn a_command_card_fallback_keeps_the_platform_budget_and_dialect() {
+    let limits = crate::Limits {
+        max_text: (40, crate::Encoding::Utf8Bytes),
+        dialect: crate::Dialect::Plain,
+        ..loopback::Config::default().limits
+    };
+    let chat = Chat::with(loopback::Config {
+        limits: limits.clone(),
+        ..loopback::Config::default()
+    });
+    chat.loopback.refuse_once("finish");
+    chat.say(said(Conversation::direct("oc_1"), "/memory", true))
+        .await;
+    let session = chat.session("loopback/oc_1").await;
+    let intent = chat.until(|| session.intents().first().cloned()).await;
+    let raw = format!("```text\n{}\n```", "remember this preference ".repeat(30));
+    let expected = limits.clip(&limits.dialect.render(&raw)).into_owned();
+    session.publish(Event::IntentAck {
+        intent,
+        outcome: bingo_sdk::IntentOutcome::Applied {
+            result: serde_json::json!({"message": raw}),
+        },
+    });
+    chat.until(|| {
+        chat.loopback.records().into_iter().find(|record| {
+            matches!(record,
+                Record::Send { text, mode: Mode::Once, .. } if text == &expected
+            )
+        })
+    })
+    .await;
+    for record in chat.loopback.records() {
+        if let Record::Send { text, .. } | Record::Finish { text, .. } = record {
+            assert_eq!(text, expected);
+            assert!(text.len() <= 40);
+            assert!(!text.contains("```"));
+        }
+    }
+}
+
 // ---- the fixture ---------------------------------------------------------
 
 /// The surface running against the double, with one loopback to speak into.

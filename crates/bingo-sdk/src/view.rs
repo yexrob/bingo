@@ -194,15 +194,22 @@ impl View {
     /// The degrade: what `--print`, an IM channel and a surface that cannot
     /// draw a node show instead.
     pub fn fold(&self) -> String {
+        self.drawn(Table::Joined)
+    }
+
+    /// The same walk, for a surface that draws markdown — a card. Only the
+    /// table differs: cells joined with ` · ` are not a table to anything that
+    /// can draw one, so they are written as the markdown table it draws.
+    pub fn fold_markdown(&self) -> String {
+        self.drawn(Table::Markdown)
+    }
+
+    fn drawn(&self, table: Table) -> String {
         match self {
             View::Text { text } | View::Markdown { text } | View::Code { text, .. } => text.clone(),
             View::Diff { unified } => unified.clone(),
             View::List { items } => lines(items.iter().map(|item| format!("- {item}"))),
-            View::Table { headers, rows } => lines(
-                std::iter::once(headers)
-                    .chain(rows)
-                    .map(|row| row.join(" · ")),
-            ),
+            View::Table { headers, rows } => table.draw(headers, rows),
             View::KeyValue { rows } => lines(rows.iter().map(|(k, v)| format!("{k}: {v}"))),
             View::Progress {
                 value,
@@ -211,10 +218,14 @@ impl View {
             } => progress(*value, *total, label.as_deref()),
             View::Badge { text, .. } => format!("[{text}]"),
             View::Tree { nodes } => lines(nodes.iter().flat_map(|node| node.fold(0))),
-            View::Stack { children } | View::Columns { children } => {
-                lines(children.iter().map(View::fold))
+            View::Stack { children } | View::Columns { children } => children
+                .iter()
+                .map(|child| child.drawn(table))
+                .collect::<Vec<_>>()
+                .join(table.between()),
+            View::Panel { title, child } => {
+                format!("{title}{}{}", table.between(), child.drawn(table))
             }
-            View::Panel { title, child } => format!("{title}\n{}", child.fold()),
             View::Actions { items } => items
                 .iter()
                 .map(|item| format!("[{}]", item.label))
@@ -225,6 +236,68 @@ impl View {
             View::Custom { fold, .. } => fold.clone(),
         }
     }
+}
+
+/// How a table is written: one line per row, or the markdown a surface with a
+/// renderer draws it from. The two differ in one thing only — the separator
+/// between cells, which is what makes a table a table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Table {
+    Joined,
+    Markdown,
+}
+
+impl Table {
+    /// What goes between two nodes of a stack, a columns node or a panel. A
+    /// markdown table is not one while a line of prose runs into it — the
+    /// prose would be read as another row — so each block gets air of its own.
+    fn between(self) -> &'static str {
+        match self {
+            Table::Joined => "\n",
+            Table::Markdown => "\n\n",
+        }
+    }
+
+    fn draw(self, headers: &[String], rows: &[Vec<String>]) -> String {
+        match self {
+            Table::Joined => lines(
+                std::iter::once(headers)
+                    .chain(rows.iter().map(Vec::as_slice))
+                    .map(|row| row.join(" · ")),
+            ),
+            Table::Markdown => self.markdown(headers, rows),
+        }
+    }
+
+    /// A header row, the rule under it, then the rows. A table with no header
+    /// at all has no columns to rule, so it folds to nothing.
+    fn markdown(self, headers: &[String], rows: &[Vec<String>]) -> String {
+        if headers.is_empty() {
+            return String::new();
+        }
+        let rule = vec!["---".to_string(); headers.len()];
+        lines(
+            std::iter::once(headers)
+                .chain(std::iter::once(rule.as_slice()))
+                .chain(rows.iter().map(Vec::as_slice))
+                .map(markdown_row),
+        )
+    }
+}
+
+/// One row. A cell carrying the column separator or a line break would break
+/// the table it sits in, so each is written as the markdown that stands for it.
+fn markdown_row(cells: &[String]) -> String {
+    let cells: Vec<String> = cells
+        .iter()
+        .map(|cell| {
+            cell.replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .replace('|', "\\|")
+                .replace('\n', "<br>")
+        })
+        .collect();
+    format!("| {} |", cells.join(" | "))
 }
 
 impl TreeNode {
@@ -399,6 +472,102 @@ mod tests {
         for (view, fold) in every_node() {
             assert_eq!(view.fold(), fold, "{view:?}");
         }
+    }
+
+    fn a_table() -> View {
+        View::Table {
+            headers: vec!["name".into(), "state".into()],
+            rows: vec![
+                vec!["reviewer".into(), "running".into()],
+                vec!["scout".into(), "idle".into()],
+            ],
+        }
+    }
+
+    /// The one node the two walks differ on: what a markdown surface draws a
+    /// table from is not what ` · ` spells.
+    #[test]
+    fn a_table_is_a_table_to_a_surface_that_draws_markdown() {
+        assert_eq!(
+            a_table().fold_markdown(),
+            "| name | state |\n| --- | --- |\n| reviewer | running |\n| scout | idle |"
+        );
+        assert_eq!(
+            a_table().fold(),
+            "name · state\nreviewer · running\nscout · idle"
+        );
+    }
+
+    /// A header row with nothing under it is still a table: the header is what
+    /// says which emptiness this is, and a surface that draws one draws it.
+    #[test]
+    fn a_table_with_no_rows_keeps_its_header() {
+        let empty = View::Table {
+            headers: vec!["server".into(), "status".into()],
+            rows: Vec::new(),
+        };
+        assert_eq!(empty.fold_markdown(), "| server | status |\n| --- | --- |");
+    }
+
+    /// A cell carrying the separator or a line break would make one row into
+    /// two, so each is written as the markdown that stands for it.
+    #[test]
+    fn a_cell_that_would_break_its_row_is_written_as_markdown() {
+        let awkward = View::Table {
+            headers: vec!["a".into()],
+            rows: vec![vec!["x | y".into()], vec!["x\ny".into()]],
+        };
+        assert_eq!(
+            awkward.fold_markdown(),
+            "| a |\n| --- |\n| x \\| y |\n| x<br>y |"
+        );
+    }
+
+    #[test]
+    fn every_line_ending_stays_inside_its_table_cell() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let table = View::Table {
+                headers: vec![format!("tool{ending}name"), "description".into()],
+                rows: vec![vec!["Read".into(), format!("first{ending}second")]],
+            };
+            assert_eq!(
+                table.fold_markdown(),
+                "| tool<br>name | description |\n| --- | --- |\n| Read | first<br>second |"
+            );
+        }
+    }
+
+    /// The walk is the whole view, not the top of it: a table inside a stack
+    /// or a panel is drawn by the same rule as one on its own.
+    #[test]
+    fn a_table_inside_another_node_is_drawn_by_the_same_rule() {
+        let nested = View::Panel {
+            title: "memories".into(),
+            child: Box::new(a_table()),
+        };
+        assert_eq!(
+            nested.fold_markdown(),
+            "memories\n\n| name | state |\n| --- | --- |\n| reviewer | running |\n| scout | idle |"
+        );
+        assert_eq!(
+            nested.fold(),
+            "memories\nname · state\nreviewer · running\nscout · idle",
+            "the joined walk is unchanged: nothing there needs a blank line"
+        );
+        let stacked = View::Stack {
+            children: vec![
+                View::Text {
+                    text: "schedules: standby".into(),
+                },
+                a_table(),
+            ],
+        };
+        assert_eq!(
+            stacked.fold_markdown(),
+            "schedules: standby\n\n| name | state |\n| --- | --- |\n\
+             | reviewer | running |\n| scout | idle |",
+            "prose then a table: without the blank line the prose is another row"
+        );
     }
 
     /// The other half of the fence: a word this sdk has no name for degrades

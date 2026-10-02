@@ -261,6 +261,79 @@ async fn a_permission_is_buttons_and_a_click_answers_it() {
     assert!(!after.is_empty());
 }
 
+async fn queued_intent(attachment: &mut bingo_sdk::Attachment) -> IntentId {
+    tokio::time::timeout(LIMIT, async {
+        while let Some(frame) = attachment.events.next().await {
+            attachment.snapshot.apply(&frame);
+            if let bingo_sdk::Event::IntentAck {
+                intent,
+                outcome: bingo_sdk::IntentOutcome::Queued { .. },
+            } = frame.event
+            {
+                return intent;
+            }
+        }
+        panic!("the stream ended before the command queued");
+    })
+    .await
+    .expect("the command queues while a permission waits")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_command_returns_its_result_to_the_chat() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let mut server = Server::spawn_with(
+        WRITES_A_FILE,
+        &["--channels", &format!("loopback={address}")],
+    );
+    let mut peer = Peer::accept(&listener).await;
+    let kernel = ready(&mut server).await;
+    peer.chats("oc_1", "write it").await;
+    let ops = peer.until(|op| is(op, "ask")).await;
+    let asked = ops.last().expect("the permission question");
+    let mut attachment = kernel
+        .open(
+            SessionSelector::ByKey {
+                key: "loopback/oc_1".into(),
+            },
+            support::who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    peer.chats("oc_1", "/mcp").await;
+    let intent = queued_intent(&mut attachment).await;
+    peer.say(json!({
+        "kind": "click", "chat": "oc_1", "principal": "u_1",
+        "question": asked["question"], "choice": "1",
+    }))
+    .await;
+    assert!(matches!(
+        support::ack_for(&mut attachment, &intent).await,
+        bingo_sdk::IntentOutcome::Applied { .. }
+    ));
+    let ops = peer
+        .until(|op| {
+            is(op, "finish")
+                && op["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("| server | status | tools | auth |"))
+        })
+        .await;
+    let result = ops.last().expect("the command result reaches the chat");
+    assert_eq!(
+        result["text"],
+        json!("| server | status | tools | auth |\n| --- | --- | --- | --- |")
+    );
+    kernel.shutdown().await.unwrap();
+    let exit = tokio::time::timeout(LIMIT, server.child.wait())
+        .await
+        .expect("the server exits after shutdown")
+        .unwrap();
+    assert!(exit.success());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn without_buttons_the_numbered_rung_is_drawn_and_a_reply_answers_it() {
     let mut chat = Chat::open(

@@ -30,6 +30,7 @@ pub mod ws;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bingo_sdk::{CancellationToken, SessionState};
@@ -56,6 +57,27 @@ const IMAGES: &str = "/open-apis/im/v1/images";
 const FILES: &str = "/open-apis/im/v1/files";
 const REACTIONS: &str = "reactions";
 const CARDS: &str = "/open-apis/cardkit/v1/cards";
+
+/// The platform closes a card's streaming mode ten minutes after it was last
+/// *enabled* — the clock does not care whether the card is being written to,
+/// so a long turn has its card closed under it however chatty it is. A write
+/// into a card that has closed is refused with this code, and enabling
+/// streaming again restarts the clock.
+/// <https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/streaming-updates-openapi-overview>
+const STREAM_CLOSED: i64 = 300_309;
+
+/// The platform closed the card's streaming mode on its own ten-minute clock.
+/// Measured, not guessed: a write into a card left streaming for ten minutes
+/// and fifty seconds is refused with this code, while an explicitly closed one
+/// answers [`STREAM_CLOSED`] instead. Both mean the same thing here — the
+/// stream ended underneath this side — and both are answered by enabling
+/// streaming again.
+const STREAM_TIMED_OUT: i64 = 200_850;
+
+/// How long a card may stream before this side restarts the platform's clock.
+/// A margin under the ten minutes, so the renewal lands before the close does
+/// rather than racing it.
+const STREAMING_RENEWED: Duration = Duration::from_secs(8 * 60);
 
 /// A card is capped at 30 KB serialised, and JSON escaping is not free, so the
 /// text this surface will put in one stops short of it.
@@ -90,6 +112,9 @@ pub struct Feishu {
     /// The next `sequence` for each streaming card. Strictly increasing per
     /// card and never rewound, not even after a failed update.
     sequences: Mutex<HashMap<String, u64>>,
+    /// When streaming mode was last enabled on each card. The platform's own
+    /// clock runs from that moment, so this is what says when to restart it.
+    streaming_since: Mutex<HashMap<String, Instant>>,
     /// Which chat each thing we posted went to, so its queue can be found
     /// again from an edit that carries only the handle.
     chats: Mutex<HashMap<String, String>>,
@@ -122,6 +147,7 @@ impl Feishu {
             queue: Queue::default(),
             me: Mutex::new(String::new()),
             sequences: Mutex::new(HashMap::new()),
+            streaming_since: Mutex::new(HashMap::new()),
             chats: Mutex::new(HashMap::new()),
             command_mappings,
         }
@@ -194,6 +220,7 @@ impl Feishu {
             None => self.post(to, "interactive", content).await?,
         };
         self.remember(&card_id, &to.chat);
+        locked(&self.streaming_since).insert(card_id.clone(), Instant::now());
         Ok(Handle::Card(card_id))
     }
 
@@ -217,10 +244,42 @@ impl Feishu {
 
     /// Write the whole text into a streaming card. The platform diffs it, so
     /// a partial update would replace rather than extend (ADR-0016 §6).
+    ///
+    /// A card that has been streaming for long enough is renewed first: the
+    /// platform closes streaming mode on its own clock, and a write into a
+    /// closed card is refused. Renewing is what keeps a long answer in its
+    /// card instead of falling out of one as a plain message.
     async fn write(&self, card_id: &str, text: &str) -> Result<(), ChannelError> {
         if let Some(chat) = self.chat_of(card_id) {
             self.queue.turn(&chat).await;
         }
+        if self.streaming_is_stale(card_id) {
+            tracing::debug!(card = %card_id, "restarting the streaming clock");
+            self.streaming(card_id, true).await?;
+        }
+        match self.fill(card_id, text).await {
+            // The card closed between the two calls above, or before this
+            // side had written anything at all: open it again and let the
+            // text through, rather than losing the stream over the clock.
+            Err(error) if refused_as_closed(&error) => {
+                tracing::debug!(card = %card_id, %error, "the stream had closed; renewing it");
+                self.streaming(card_id, true).await?;
+                self.fill(card_id, text).await
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Whether this card has been streaming long enough that the platform is
+    /// about to close it on its own.
+    fn streaming_is_stale(&self, card_id: &str) -> bool {
+        locked(&self.streaming_since)
+            .get(card_id)
+            .is_some_and(|since| since.elapsed() >= STREAMING_RENEWED)
+    }
+
+    /// The text itself: the whole of it, under the next sequence.
+    async fn fill(&self, card_id: &str, text: &str) -> Result<(), ChannelError> {
         let sequence = self.sequence(card_id);
         let path = format!("{CARDS}/{card_id}/elements/{}/content", card::ANSWER);
         let body = json!({
@@ -229,6 +288,32 @@ impl Feishu {
             "uuid": format!("{card_id}-{sequence}"),
         });
         self.spend(self.api.put(&path, body).await)
+    }
+
+    /// Turn streaming mode on or off for a card. On is a renewal — the
+    /// platform's ten-minute clock runs from the last time it was enabled —
+    /// and off is what closes the stream and re-opens the card to callbacks.
+    async fn streaming(&self, card_id: &str, on: bool) -> Result<(), ChannelError> {
+        if on {
+            locked(&self.streaming_since).insert(card_id.to_string(), Instant::now());
+        } else {
+            locked(&self.streaming_since).remove(card_id);
+        }
+        let sequence = self.sequence(card_id);
+        // `settings` is a JSON *string*, not an object: the endpoint answers
+        // an object with 9499 and the card never closes, which costs the
+        // whole answer a second time as a plain message.
+        // <https://open.feishu.cn/document/cardkit-v1/card/settings>
+        let body = json!({
+            "settings": json!({ "config": { "streaming_mode": on } }).to_string(),
+            "sequence": sequence,
+            "uuid": format!("{card_id}-{sequence}"),
+        });
+        self.spend(
+            self.api
+                .patch(&format!("{CARDS}/{card_id}/settings"), body)
+                .await,
+        )
     }
 
     /// Post under the message that started this where there is one, and as a
@@ -466,21 +551,7 @@ impl Edit for Feishu {
             return Err(ChannelError::Unsupported("editing a plain message"));
         };
         self.write(&card_id, text).await?;
-        let sequence = self.sequence(&card_id);
-        // `settings` is a JSON *string*, not an object: the endpoint answers
-        // an object with 9499 and the card never closes, which costs the
-        // whole answer a second time as a plain message.
-        // <https://open.feishu.cn/document/cardkit-v1/card/settings>
-        let body = json!({
-            "settings": json!({ "config": { "streaming_mode": false } }).to_string(),
-            "sequence": sequence,
-            "uuid": format!("{card_id}-{sequence}"),
-        });
-        self.spend(
-            self.api
-                .patch(&format!("{CARDS}/{card_id}/settings"), body)
-                .await,
-        )
+        self.streaming(&card_id, false).await
     }
 }
 
@@ -599,6 +670,18 @@ fn reactable(at: &Posted) -> Result<String, ChannelError> {
         Some(Handle::Message(id)) => Ok(id),
         _ => Err(ChannelError::Unsupported("reacting to a card")),
     }
+}
+
+/// Whether a refusal is the platform saying the card's stream has ended —
+/// timed out on its own clock or closed outright. Either way it is a thing to
+/// open again rather than a thing that failed.
+fn refused_as_closed(error: &ChannelError) -> bool {
+    matches!(
+        error,
+        ChannelError::Platform(text)
+            if text.contains(&format!("feishu {STREAM_CLOSED}"))
+                || text.contains(&format!("feishu {STREAM_TIMED_OUT}"))
+    )
 }
 
 #[cfg(test)]
