@@ -28,10 +28,14 @@ Set work to happen later, or over and over: `every 30m`, `daily at 09:00` \
 (the machine's own clock), `once at 2026-09-01T09:00:00-07:00`. When it \
 fires, `text` is delivered as a turn on a session of the schedule's own — a \
 prompt, or a `/command` line — and everything it does lands in that \
-session's transcript. Nobody is watching it, so write a `text` that stands \
-on its own and needs no answer from anyone. Schedules fire only while a \
-bingo process is running; there is no daemon. The person sees the entry \
-this would write before it is written.";
+session's transcript. That session is not this conversation: nothing a fire \
+says or does comes back here, and a person who wants the answer reads that \
+transcript. To hand work to a later turn of *this* conversation instead — a \
+reminder that arrives where the person already is — use `Wake`. Nobody is \
+watching a fire, so write a `text` that stands on its own and needs no \
+answer from anyone. Schedules fire only while a bingo process is running; \
+there is no daemon. The person sees the entry this would write before it is \
+written.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
