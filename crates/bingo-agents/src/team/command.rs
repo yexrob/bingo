@@ -2,13 +2,11 @@
 
 use async_trait::async_trait;
 use bingo_collab::lifecycle::Lifecycle;
-use bingo_sdk::{
-    ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, KernelError, SessionSummary,
-    View,
-};
+use bingo_sdk::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, KernelError, View};
+use bingo_services::agents_control::TeamRow;
 
-use crate::team::file::{self, Role};
-use crate::{list, names};
+use crate::list;
+use crate::team::file;
 
 /// The columns a team has: what was declared, and what is running.
 pub const HEADERS: [&str; 4] = ["role", "agent", "session", "state"];
@@ -37,7 +35,7 @@ impl Command for TeamCommand {
     }
 
     async fn run(&self, _args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
-        let Some(team) = file::of(&cx.cwd)? else {
+        let Some(roles) = super::roster::read(&cx.host, &cx.cwd, &cx.session).await? else {
             return Ok(CommandOutcome::View {
                 view: View::text(format!(
                     "This project seats no team; {} would name its roles.",
@@ -45,27 +43,20 @@ impl Command for TeamCommand {
                 )),
             });
         };
-        let seated = names::children(&cx.host, &cx.session).await?;
         Ok(CommandOutcome::View {
             view: View::Table {
                 headers: HEADERS.map(str::to_string).to_vec(),
-                rows: rows(&team.roles, &seated),
+                rows: roles.iter().map(row).collect(),
             },
         })
     }
 }
 
-fn rows(roles: &[Role], seated: &[SessionSummary]) -> Vec<Vec<String>> {
-    roles
-        .iter()
-        .map(|role| row(role, names::named(seated, &role.name).as_ref()))
-        .collect()
-}
-
 /// A role as a row: what it was declared as, and the session seating it here.
-fn row(role: &Role, seated: Option<&SessionSummary>) -> Vec<String> {
+fn row(role: &TeamRow) -> Vec<String> {
+    let seated = role.summary.as_ref();
     vec![
-        role.name.clone(),
+        role.role.clone(),
         role.agent.clone().unwrap_or_else(|| NO_DEFINITION.into()),
         seated.map(|s| s.id.to_string()).unwrap_or_default(),
         seated

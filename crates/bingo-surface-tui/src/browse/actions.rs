@@ -18,7 +18,7 @@ pub fn result(ui: &mut Ui, tree: &Tree, action: &Action, vouched: bool, now: Now
             return vec![];
         }
         ui.focus.close(now.instant);
-        if !vouched && crate::commands::privileged(&ui.catalogs.commands, line) {
+        if !vouched && crate::commands::privileged(&ui.catalogs.specs(), line) {
             ui.notify(Level::Warn, crate::commands::unvouched(line), now.instant);
             return vec![];
         }

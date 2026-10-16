@@ -18,11 +18,12 @@ pub(super) fn render(
     if area.height == 0 {
         return;
     }
+    let commands = ui.catalogs.specs();
     let rows = crate::transcript::Rows::of(
         state,
         usize::from(area.width),
         &ui.folds,
-        &ui.catalogs.commands,
+        &commands,
         &frame.measurements,
         &ui.linked,
         now,

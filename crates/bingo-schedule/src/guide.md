@@ -131,8 +131,9 @@ idempotent — it checks and reports, it does not start the work again. A check
 that fails goes back to diagnosis, not to a shorter interval. When the evidence
 is there or the budget is gone, say what you found and set no further wake.
 
-`/wake` shows the person when it comes and what it will say; `/wake off` ends
-it, at any time, including while the turn that set it is still running.
+The terminal `/schedule` panel includes the pending wake; `/wake` selects it.
+Text clients keep the wake time and note. `/wake off` ends it at any time,
+including while the turn that set it is still running.
 
 ```toml
 [schedule]

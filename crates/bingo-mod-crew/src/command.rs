@@ -7,8 +7,17 @@ impl Command for Open {
         CommandSpec {
             name: "crew".into(),
             aliases: vec![],
-            hint: "agents, rooms and tasks in one panel".into(),
-            args: ArgSpec::None,
+            hint: "agents, rooms, tasks and team in one panel".into(),
+            args: ArgSpec::Words {
+                values: crate::state::Tab::ALL
+                    .into_iter()
+                    .map(|tab| tab.label().into())
+                    .collect(),
+                labels: Default::default(),
+                then: None,
+                alone: vec![],
+                person: vec![],
+            },
             instant: true,
             family: "terminal".into(),
             hidden: false,
@@ -16,25 +25,49 @@ impl Command for Open {
             keys: vec!["ctrl+n".into()],
         }
     }
-    async fn run(&self, _: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
-        self.0
-            .lock()
-            .map_err(crate::error)?
-            .insert(cx.session.clone(), Default::default());
-        cx.host
-            .signal(&cx.session, crate::ID, crate::REQUEST, slot())
-            .await?;
-        cx.host
-            .invalidate(&cx.session, vec![crate::REQUEST.into()])
-            .await?;
-        Ok(CommandOutcome::Surface {
-            action: Action {
-                name: "Pane".into(),
-                args: json!({"plugin":crate::ID,"id":crate::REQUEST}),
-            },
-            fallback: Some("Use /agents, /rooms and /tasks for the plain tables.".into()),
-        })
+    async fn run(&self, args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
+        let tab = if args.trim().is_empty() {
+            crate::state::Tab::default()
+        } else {
+            crate::state::Tab::parse(args.trim())
+                .ok_or_else(|| crate::error("Use /crew [agents|rooms|tasks|team]."))?
+        };
+        open(
+            &self.0,
+            &cx.host,
+            &cx.session,
+            tab,
+            Some("Use /agents, /room, /tasks and /team for the plain tables.".into()),
+        )
+        .await
     }
+}
+
+pub async fn open(
+    shared: &crate::Shared,
+    host: &HostHandle,
+    session: &SessionId,
+    tab: crate::state::Tab,
+    fallback: Option<String>,
+) -> Result<CommandOutcome, KernelError> {
+    shared.lock().map_err(crate::error)?.insert(
+        session.clone(),
+        crate::state::Panel {
+            tab,
+            ..Default::default()
+        },
+    );
+    host.signal(session, crate::ID, crate::REQUEST, slot())
+        .await?;
+    host.invalidate(session, vec![crate::REQUEST.into()])
+        .await?;
+    Ok(CommandOutcome::Surface {
+        action: Action {
+            name: "Pane".into(),
+            args: json!({"plugin":crate::ID,"id":crate::REQUEST}),
+        },
+        fallback,
+    })
 }
 pub fn slot() -> Value {
     let mut size = slot::PaneSize::from_rows(18);

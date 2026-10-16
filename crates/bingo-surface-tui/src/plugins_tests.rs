@@ -235,7 +235,7 @@ fn a_long_load_error_is_cut_inside_the_card() {
 #[test]
 fn a_trust_line_nobody_vouched_for_is_refused() {
     let (mut ui, now) = scene();
-    ui.catalogs.commands = guarded();
+    ui.catalogs.commands = crate::commands::entries(guarded());
     let tree = solo(&state());
     crate::plugins::open(&mut ui, PluginsOpen::Plugins, now);
     let id = crate::plugins::request(&ui).unwrap().to_string();

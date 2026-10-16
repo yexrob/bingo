@@ -1,6 +1,6 @@
-use crate::{Confirmation, ID, REQUEST, Shared};
+use crate::{Confirmation, ID, REQUEST, Shared, rows};
 use bingo_sdk::*;
-use bingo_services::schedule::{Listing, Row};
+use bingo_services::schedule::{Listing, Pending, Row};
 use serde_json::{Value, json};
 pub(crate) struct Drawing(pub Shared);
 #[async_trait::async_trait]
@@ -22,29 +22,23 @@ impl Interceptor for Drawing {
         _: Next<'_, Value, Value>,
     ) -> Result<Value, KernelError> {
         let request: render::RenderRequest = serde_json::from_value(value).map_err(crate::error)?;
-        let listing = crate::listing(&cx.host).await?;
+        let (listing, wake) = crate::listing(&cx.host, &cx.session).await?;
+        let rows = rows::rows(&listing, wake.as_ref());
         let mut shared = self.0.lock().map_err(crate::error)?;
         let cursor = shared.entry(cx.session.clone()).or_default();
         cursor.seen = Some(std::time::Instant::now());
-        let at = listing
-            .entries
-            .iter()
-            .position(|r| r.id == cursor.selected)
-            .unwrap_or(0);
-        cursor.selected = listing
-            .entries
-            .get(at)
-            .map(|r| r.id.clone())
-            .unwrap_or_default();
+        let at = rows::selected(&rows, cursor.selected.as_ref());
+        cursor.selected = rows.get(at).map(rows::Row::selection);
         if cursor
             .confirming
             .as_ref()
-            .is_some_and(|r| listing.entries.get(at) != Some(r.row()))
+            .is_some_and(|r| rows.get(at).and_then(rows::Row::schedule) != Some(r.row()))
         {
             cursor.confirming = None;
         }
-        serde_json::to_value(tree(
+        serde_json::to_value(tree_with_wake(
             &listing,
+            wake.as_ref(),
             at,
             cursor.confirming.as_ref(),
             request.viewport.columns,
@@ -62,13 +56,27 @@ pub fn tree(
     height: u16,
     now: jiff::Timestamp,
 ) -> View {
+    tree_with_wake(listing, None, selected, confirming, width, height, now)
+}
+
+pub fn tree_with_wake(
+    listing: &Listing,
+    wake: Option<&Pending>,
+    selected: usize,
+    confirming: Option<&Confirmation>,
+    width: u16,
+    height: u16,
+    now: jiff::Timestamp,
+) -> View {
+    let rows = rows::rows(listing, wake);
+    let selected_row = rows.get(selected);
     let mut children = vec![line(
         format!(" schedules · {}", holder(&listing.holder)),
         false,
     )];
     let (body, armed) = match confirming {
         Some(Confirmation::Confirm(row)) => crate::whole::body(row, width, height),
-        _ => (entries(listing, selected, height, now), true),
+        _ => (entries(&rows, selected, height, now), true),
     };
     children.extend(body);
     if let Some(trouble) = &listing.trouble {
@@ -78,45 +86,50 @@ pub fn tree(
         });
     }
     children.push(line("─".repeat(usize::from(width)), true));
-    children.push(line(
-        footer(listing.entries.get(selected), confirming, armed),
-        true,
-    ));
+    children.push(line(footer(selected_row, confirming, armed), true));
     // A confirmation not shown whole is not offered to ⏎.
     let confirming = confirming.filter(|_| armed);
     View::Box {
         children,
         layout: Box::new(view::BoxStyle {
-            hints: Some(
-                if confirming.is_some() {
-                    component::SiteHints::new([
-                        component::KeyPair::new("⏎", "yes"),
-                        component::KeyPair::new("esc", "cancel"),
-                    ])
-                } else {
-                    component::SiteHints::new([
-                        component::KeyPair::new("↑↓", "pick"),
-                        component::KeyPair::new("space", "pause/enable"),
-                        component::KeyPair::new("r", "run"),
-                        component::KeyPair::new("c", "confirm"),
-                        component::KeyPair::new("d", "forget"),
-                        component::KeyPair::new("→", "session"),
-                        component::KeyPair::new("esc", "close"),
-                    ])
-                }
-                .composer("/schedule", ""),
-            ),
+            hints: Some(hints(selected_row, confirming.is_some()).composer("/schedule", "")),
             on_key: Some(Action {
                 name: format!("{ID}:ui"),
-                args: json!({"handler":REQUEST,"event":"press","row":listing.entries.get(selected),"confirming":confirming}),
+                args: json!({"handler":REQUEST,"event":"press","row":selected_row,"confirming":confirming}),
             }),
             ..Default::default()
         }),
     }
 }
+fn hints(selected: Option<&rows::Row>, confirming: bool) -> component::SiteHints {
+    use component::KeyPair;
+    if confirming {
+        return component::SiteHints::new([
+            KeyPair::new("⏎", "yes"),
+            KeyPair::new("esc", "cancel"),
+        ]);
+    }
+    if matches!(selected, Some(rows::Row::Wake(_))) {
+        return component::SiteHints::new([
+            KeyPair::new("↑↓", "pick"),
+            KeyPair::new("d", "end wake"),
+            KeyPair::new("esc", "close"),
+        ]);
+    }
+    component::SiteHints::new([
+        KeyPair::new("↑↓", "pick"),
+        KeyPair::new("space", "pause/enable"),
+        KeyPair::new("r", "run"),
+        KeyPair::new("c", "confirm"),
+        KeyPair::new("d", "forget"),
+        KeyPair::new("→", "session"),
+        KeyPair::new("esc", "close"),
+    ])
+}
+
 /// The rows that fit, scrolled to keep the selection in view.
-fn entries(listing: &Listing, selected: usize, height: u16, now: jiff::Timestamp) -> Vec<View> {
-    if listing.entries.is_empty() {
+fn entries(rows: &[rows::Row], selected: usize, height: u16, now: jiff::Timestamp) -> Vec<View> {
+    if rows.is_empty() {
         return vec![line(
             " no schedules yet · /schedule add every 2h -- check".into(),
             true,
@@ -125,17 +138,37 @@ fn entries(listing: &Listing, selected: usize, height: u16, now: jiff::Timestamp
     let room = usize::from(height.saturating_sub(5)).max(1);
     let start = selected
         .saturating_sub(room / 2)
-        .min(listing.entries.len().saturating_sub(room));
-    listing
-        .entries
-        .iter()
+        .min(rows.len().saturating_sub(room));
+    rows.iter()
         .enumerate()
         .skip(start)
         .take(room)
         .map(|(index, row)| entry(row, index == selected, now))
         .collect()
 }
-fn entry(row: &Row, selected: bool, now: jiff::Timestamp) -> View {
+fn entry(row: &rows::Row, selected: bool, now: jiff::Timestamp) -> View {
+    match row {
+        rows::Row::Schedule(row) => schedule(row, selected, now),
+        rows::Row::Wake(wake) => line(
+            format!(
+                "{}wake  {}  {}{}",
+                if selected { "❯ " } else { "  " },
+                wake.at
+                    .parse()
+                    .map(|at| bingo_sdk::until(now, at))
+                    .unwrap_or_else(|_| "—".into()),
+                bingo_services::schedule::visible(&wake.note)
+                    .split('\n')
+                    .next()
+                    .unwrap_or_default(),
+                more(&wake.note),
+            ),
+            false,
+        ),
+    }
+}
+
+fn schedule(row: &Row, selected: bool, now: jiff::Timestamp) -> View {
     line(
         format!(
             "{}{}  {}  {}  {}  {}  {}{}",
@@ -162,7 +195,7 @@ fn more(text: &str) -> String {
         lines => format!("  (+{} lines)", lines - 1),
     }
 }
-fn footer(selected: Option<&Row>, confirming: Option<&Confirmation>, armed: bool) -> String {
+fn footer(selected: Option<&rows::Row>, confirming: Option<&Confirmation>, armed: bool) -> String {
     if let Some(confirmation) = confirming {
         let row = confirmation.row();
         if matches!(confirmation, Confirmation::Confirm(_)) {
@@ -179,7 +212,11 @@ fn footer(selected: Option<&Row>, confirming: Option<&Confirmation>, armed: bool
             more(&row.text)
         );
     }
+    if matches!(selected, Some(rows::Row::Wake(_))) {
+        return " pending wake on this session".into();
+    }
     selected
+        .and_then(rows::Row::schedule)
         .map(|row| {
             format!(
                 " mode: {} · session: {}",
@@ -231,3 +268,7 @@ pub(crate) fn line(text: String, dim: bool) -> View {
         },
     }
 }
+
+#[cfg(test)]
+#[path = "draw_tests.rs"]
+mod tests;

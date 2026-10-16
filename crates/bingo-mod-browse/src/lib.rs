@@ -3,6 +3,7 @@ mod draw;
 mod guide;
 mod handler;
 pub mod keys;
+mod opening;
 pub mod sheet;
 use bingo_sdk::*;
 use std::{
@@ -46,10 +47,19 @@ impl Plugin for Browse {
     }
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let shared = Shared::default();
+        registrar.add(Contribution::CommandFold(CommandFold {
+            into: "browse".into(),
+            names: vec!["rewind".into()],
+        }));
         registrar.add(Contribution::Command(Arc::new(handler::Open)));
         registrar.add(Contribution::Command(Arc::new(handler::Handler(
             shared.clone(),
         ))));
+        registrar.add(Contribution::Interceptor {
+            placement: plugin::Placement::Builtin,
+            external: None,
+            link: Arc::new(opening::Opening),
+        });
         registrar.add(Contribution::Interceptor {
             placement: plugin::Placement::Builtin,
             external: None,

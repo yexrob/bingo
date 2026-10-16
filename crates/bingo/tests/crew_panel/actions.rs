@@ -23,7 +23,7 @@ async fn prefill(
     assert!(receipt["result"].get("surface").is_none());
 }
 
-async fn finish(host: &bingo_surface_rpc::RemoteKernel, server: &mut Server) {
+pub(super) async fn finish(host: &bingo_surface_rpc::RemoteKernel, server: &mut Server) {
     host.shutdown().await.unwrap();
     assert!(
         tokio::time::timeout(LIMIT, server.child.wait())

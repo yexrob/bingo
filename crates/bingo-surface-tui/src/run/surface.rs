@@ -35,7 +35,13 @@ pub(super) fn receipt(run: &mut Run, result: &Value) {
 pub(super) fn action(run: &mut Run, action: bingo_sdk::Action) {
     let now = run.detection.now();
     match action.name.as_str() {
-        "Browse" => crate::browse::open(&mut run.ui, &run.session.tree, None, false, now),
+        "Browse" => crate::browse::open(
+            &mut run.ui,
+            &run.session.tree,
+            None,
+            action.args["confirm"].as_bool().unwrap_or(false),
+            now,
+        ),
         "Composer" => {
             if let Ok(fill) = serde_json::from_value(action.args) {
                 crate::composer::fill::fill(&mut run.ui, fill, now);
@@ -133,6 +139,24 @@ mod tests {
         test_support::*,
     };
     use std::sync::Arc;
+    #[tokio::test]
+    async fn a_browse_action_preserves_the_requested_rewind_sheet() {
+        let now = still(scene().1);
+        let mut run = super::super::tests::idle(now.instant);
+        for confirm in [false, true] {
+            action(
+                &mut run,
+                bingo_sdk::Action {
+                    name: "Browse".into(),
+                    args: serde_json::json!({"confirm":confirm}),
+                },
+            );
+            assert!(
+                matches!(run.ui.focus.open(), crate::ui::Open::Browse(open) if open.confirm == confirm)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn changing_mode_does_not_leave_a_stale_notice() {
         let now = still(scene().1);

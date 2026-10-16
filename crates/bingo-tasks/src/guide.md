@@ -49,9 +49,10 @@ session's own list — a board's is never in the prompt, because a list nobody
 asked for in every request is a tax. So a task you put on a board is one you
 must go and read.
 
-## `/tasks`
+## Crew tasks
 
-The same list as a table for the person: `id`, `status`, `subject`, `owner`.
+In the terminal, `/crew tasks` opens the task board; bare `/tasks` opens the
+same tab. Text clients and terminals with the crew mod disabled keep the table: `id`, `status`, `subject`, `owner`.
 `/tasks in #room` shows a room's board instead. It runs while a turn is busy.
 
 ## A room's board

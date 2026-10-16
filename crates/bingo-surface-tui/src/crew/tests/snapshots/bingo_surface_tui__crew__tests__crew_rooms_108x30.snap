@@ -30,5 +30,5 @@ expression: screen
 "                                                                                                            "
 "────────────────────────────────────────────────────────────────────────────────────────────────────────────"
 " ▍ /crew                                                                                                    "
-"                                  ] switch · ↑↓ pick · p purpose · a seat · u unseat · c close · esc close  "
+"                         ] switch · ↑↓ pick · ⏎ open · p purpose · a seat · u unseat · c close · esc close  "
 " ⏵⏵ default   ◆ solo   ▱▱▱▱▱▱▱▱ ? / ?                                                               fake-1  "

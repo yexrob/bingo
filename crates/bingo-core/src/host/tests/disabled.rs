@@ -152,6 +152,7 @@ async fn booting_off_keeps_declared_registration_and_dispatch_order() {
     assert_eq!(
         host.registry
             .commands
+            .entries
             .iter()
             .filter(|command| !command.plugin.is_empty())
             .map(|command| command.plugin.as_str())

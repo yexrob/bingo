@@ -15,6 +15,7 @@ pub(crate) fn taken(registry: &Registry, name: &str) -> Option<String> {
             .any(|link| link.plugin == name || link.interceptor.id() == name)
         || registry
             .commands
+            .entries
             .iter()
             .any(|command| command.spec().name == handler);
     builtin.then(|| format!("the name {name} belongs to a built-in"))

@@ -39,6 +39,10 @@ impl Plugin for Plugins {
     }
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let state = Shared::default();
+        registrar.add(Contribution::CommandFold(CommandFold {
+            into: "plugins".into(),
+            names: vec!["mcp".into()],
+        }));
         registrar.add(Contribution::Command(Arc::new(keys::Handler(
             state.clone(),
         ))));

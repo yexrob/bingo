@@ -336,3 +336,35 @@ async fn reject_changed_confirmation(
     entry["text"] = original;
     std::fs::write(path, serde_json::to_vec(entry).unwrap()).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bare_wake_selects_its_panel_row_and_d_ends_only_the_wake() {
+    let mut server = Server::spawn(
+        r#"{"responses":[{"steps":[{"toolCall":{"name":"Wake","input":{"after":"4m","note":"check CI"}}}]},{"steps":[{"text":"waiting"}]}]}"#,
+    );
+    let host = ready(&mut server).await;
+    let mut a = host
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
+    command(&mut a, "/schedule add every 2h -- keep this schedule").await;
+    a.handle.submit(
+        IntentId::mint(),
+        Input::text("set a wake", Origin::surface("tui")),
+    );
+    support::until_completed(&mut a).await;
+    let opened = command(&mut a, "/wake").await;
+    assert_eq!(opened["surface"]["name"], "Pane", "{opened}");
+    let tree = host.render(&a.session, request()).await.unwrap();
+    assert!(tree.fold().contains("❯ wake"), "{tree:?}");
+    assert!(tree.fold().contains("check CI"), "{tree:?}");
+    assert!(tree.fold().contains("keep this schedule"), "{tree:?}");
+    let cancel = press(&host, &mut a, "d").await;
+    assert_eq!(cancel, json!({"run":"/wake off"}));
+    let ended = command(&mut a, cancel["run"].as_str().unwrap()).await;
+    assert!(ended["surface"].is_null(), "{ended}");
+    let tree = host.render(&a.session, request()).await.unwrap();
+    assert!(!tree.fold().contains("check CI"), "{tree:?}");
+    assert!(tree.fold().contains("keep this schedule"), "{tree:?}");
+    stop(&host, &mut server).await;
+}

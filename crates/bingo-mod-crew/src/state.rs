@@ -7,13 +7,21 @@ pub enum Tab {
     Agents,
     Rooms,
     Tasks,
+    Team,
 }
 impl Tab {
+    pub const ALL: [Self; 4] = [Self::Agents, Self::Rooms, Self::Tasks, Self::Team];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.label() == value)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Agents => "agents",
             Self::Rooms => "rooms",
             Self::Tasks => "tasks",
+            Self::Team => "team",
         }
     }
 }
@@ -72,6 +80,7 @@ pub struct Rows {
     pub agents: Option<Vec<agents::AgentRow>>,
     pub rooms: Option<Vec<rooms::RoomRow>>,
     pub tasks: Option<Vec<tasks::TaskRow>>,
+    pub team: Option<Vec<agents::TeamRow>>,
 }
 impl Rows {
     pub fn tabs(&self) -> Vec<Tab> {
@@ -79,6 +88,7 @@ impl Rows {
             (Tab::Agents, self.agents.is_some()),
             (Tab::Rooms, self.rooms.is_some()),
             (Tab::Tasks, self.tasks.is_some()),
+            (Tab::Team, self.team.is_some()),
         ]
         .into_iter()
         .filter_map(|(tab, exists)| exists.then_some(tab))
@@ -89,6 +99,7 @@ impl Rows {
             Tab::Agents => self.agents.as_ref().map_or(0, Vec::len),
             Tab::Rooms => self.rooms.as_ref().map_or(0, Vec::len),
             Tab::Tasks => self.tasks.as_ref().map_or(0, Vec::len),
+            Tab::Team => self.team.as_ref().map_or(0, Vec::len),
         }
     }
     pub fn identity(&self, tab: Tab, at: usize) -> String {
@@ -108,6 +119,11 @@ impl Rows {
                 .as_ref()
                 .and_then(|r| r.get(at))
                 .map(|r| r.id.to_string()),
+            Tab::Team => self
+                .team
+                .as_ref()
+                .and_then(|r| r.get(at))
+                .map(|r| r.role.clone()),
         }
         .unwrap_or_default()
     }
@@ -118,6 +134,14 @@ pub async fn read(host: &HostHandle, session: &SessionId) -> Result<Rows, Kernel
         rows.agents = Some(
             service
                 .roster(agents::Session {
+                    session: session.clone(),
+                })
+                .await
+                .map_err(crate::error)?,
+        );
+        rows.team = Some(
+            service
+                .team(agents::Session {
                     session: session.clone(),
                 })
                 .await

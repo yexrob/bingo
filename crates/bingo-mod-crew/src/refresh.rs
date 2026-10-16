@@ -66,5 +66,10 @@ pub fn dependencies(owner: &SessionId, rows: &crate::state::Rows) -> BTreeSet<Se
     for row in rows.rooms.iter().flatten() {
         ids.insert(row.id.clone());
     }
+    for row in rows.team.iter().flatten() {
+        if let Some(summary) = &row.summary {
+            ids.insert(summary.id.clone());
+        }
+    }
     ids
 }

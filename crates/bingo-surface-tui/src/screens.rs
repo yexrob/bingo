@@ -535,7 +535,7 @@ fn a_child_transcript() {
 fn the_command_dropdown() {
     let state = folded(answered());
     let (mut ui, now) = scene();
-    ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
+    ui.catalogs.commands = crate::commands::entries(vec![bingo_sdk::CommandSpec {
         opens: false,
         keys: vec![],
         hidden: false,
@@ -547,7 +547,7 @@ fn the_command_dropdown() {
         },
         instant: true,
         family: "kernel".into(),
-    }];
+    }]);
     write(&mut ui, &state, "/", now);
     both("dropdown", &solo(&state), &mut ui, now);
 }

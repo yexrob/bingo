@@ -37,6 +37,7 @@ fn rows() -> Rows {
             holder: "parent".into(),
             closed: false,
         }]),
+        team: None,
         tasks: Some(vec![TaskRow {
             id: 1,
             subject: "Review the boundary".into(),
@@ -81,6 +82,7 @@ fn crew_scenes_at_both_terminal_sizes() {
                     agents: Some(vec![]),
                     rooms: Some(vec![]),
                     tasks: Some(vec![]),
+                    team: None,
                 }
             } else {
                 rows()
@@ -115,26 +117,28 @@ fn ctrl_n_is_bound_only_when_the_command_is_installed() {
     bingo_mod_crew::Crew::default()
         .register(&mut registrar)
         .unwrap();
-    ui.catalogs.commands = registrar
-        .into_contributions()
-        .into_iter()
-        .filter_map(|c| {
-            if let Contribution::Command(c) = c {
-                Some(c.spec())
-            } else {
-                None
-            }
-        })
-        .collect();
+    ui.catalogs.commands = crate::commands::entries(
+        registrar
+            .into_contributions()
+            .into_iter()
+            .filter_map(|c| {
+                if let Contribution::Command(c) = c {
+                    Some(c.spec())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    );
     assert!(
         ui.catalogs
-            .commands
+            .specs()
             .iter()
             .all(|spec| spec.foreign_handler("bingo.mod.crew").is_none())
     );
     assert!(
         ui.catalogs
-            .commands
+            .specs()
             .iter()
             .any(|spec| spec.name == CommandSpec::ui_name("bingo.mod.crew"))
     );
@@ -217,4 +221,57 @@ fn escape_is_delivered_to_the_confirmation_instead_of_closing_the_pane() {
         );
         assert!(matches!(ui.focus, crate::focus::Focus::Pane(_)));
     }
+}
+
+#[test]
+fn room_enter_steps_into_its_chat_and_escape_returns() {
+    let mut rows = rows();
+    rows.rooms.as_mut().unwrap()[0].id = log_id();
+    let panel = Panel {
+        tab: Tab::Rooms,
+        ..Default::default()
+    };
+    let mut root = state();
+    placed(&mut root, draw::tree(&panel, &rows, &[], 18));
+    let mut tree = solo(&root);
+    tree.fold.apply(&log_frame(1, log_announced("#design")));
+    tree.fold.apply(&posted(
+        2,
+        "itm_room_post",
+        "reviewer",
+        "Keep the room conversation reachable.",
+    ));
+    let (mut ui, now) = scene();
+    ui.focus = crate::focus::Focus::Pane(format!("{}/bingo.mod.crew/crew", root.summary.id));
+    draw_tree(108, 30, &tree, &mut ui, now);
+    let effects = crate::input::on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+    let [crate::effect::Effect::SiteKey { action, .. }] = effects.as_slice() else {
+        panic!("the room row receives Enter");
+    };
+    let bingo_mod_crew::keys::Operation::View(id) = bingo_mod_crew::keys::operation(
+        &panel,
+        &rows,
+        action.args["value"]["key"].as_str().unwrap(),
+    ) else {
+        panic!("the selected room opens");
+    };
+    assert_eq!(id, log_id());
+    tree.show(&id);
+    ui.focus = crate::focus::Focus::Composer;
+    for (width, height) in [(108, 30), (80, 24)] {
+        let screen = draw_tree(width, height, &tree, &mut ui, now);
+        assert!(screen.contains("#design · session"), "{screen}");
+        assert!(
+            screen.contains("Keep the room conversation reachable."),
+            "{screen}"
+        );
+        insta::assert_snapshot!(format!("crew_room_in_view_{width}x{height}"), screen);
+    }
+    let effects = crate::input::on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+    assert_eq!(
+        effects,
+        [crate::effect::Effect::View(root.summary.id.clone())]
+    );
+    tree.show(&root.summary.id);
+    assert_eq!(tree.view(), tree.root_id());
 }

@@ -3,6 +3,7 @@
 `/memory` opens memories, loaded instruction files and this project's
 experience in one panel. Arrow keys select a row; Enter reads its full text
 in the pager. Escape returns from the pager, then closes the panel.
+Typed `/experience` opens this panel on its experience group.
 
 `d` asks to forget a memory or experience entry. Enter confirms; Escape
 cancels. Instruction files cannot be forgotten here: edit the file itself.

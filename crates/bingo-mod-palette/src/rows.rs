@@ -96,7 +96,7 @@ pub fn rows(
             recent_first(&mut groups, recent);
         }
     } else {
-        searched(&mut groups, query);
+        searched(&mut groups, query, commands);
     }
     groups.retain(|group| !group.rows.is_empty());
     groups
@@ -104,22 +104,38 @@ pub fn rows(
 /// Every group cut to the rows that match, the commands and the skills best
 /// first; the skills lead only when their best is strictly better, so a
 /// command wins a tie.
-fn searched(groups: &mut [Group], query: &str) {
+fn searched(groups: &mut [Group], query: &str, commands: &[CatalogEntry]) {
     for group in groups.iter_mut() {
         group.rows = group
             .rows
             .drain(..)
-            .filter_map(|row| filter(row, query))
+            .filter_map(|row| {
+                if folded_match(&row, commands, query).is_some() {
+                    Some(row)
+                } else {
+                    filter(row, query)
+                }
+            })
             .collect();
         if matches!(group.name.as_str(), "commands" | "skills") {
-            group.rows.sort_by_key(|row| score(row, query));
+            group
+                .rows
+                .sort_by_key(|row| search_score(row, commands, query));
         }
     }
     let best = |name: &str| {
         groups
             .iter()
             .position(|group| group.name == name)
-            .and_then(|at| Some((at, groups[at].rows.first().map(|row| score(row, query))?)))
+            .and_then(|at| {
+                Some((
+                    at,
+                    groups[at]
+                        .rows
+                        .first()
+                        .map(|row| search_score(row, commands, query))?,
+                ))
+            })
     };
     if let (Some((commands, command)), Some((skills, skill))) = (best("commands"), best("skills"))
         && skill < command
@@ -128,6 +144,28 @@ fn searched(groups: &mut [Group], query: &str) {
         groups[commands..=skills].rotate_right(1);
     }
 }
+fn search_score(row: &Row, commands: &[CatalogEntry], query: &str) -> (bool, bool, bool) {
+    folded_match(row, commands, query)
+        .map_or_else(|| score(row, query), |fold| fold.min(score(row, query)))
+}
+
+/// A folded spelling finds the place that replaced its row, without giving
+/// the destination a second label or a second catalogue entry.
+fn folded_match(row: &Row, commands: &[CatalogEntry], query: &str) -> Option<(bool, bool, bool)> {
+    let Target::Command(target) = &row.target else {
+        return None;
+    };
+    commands
+        .iter()
+        .filter(|entry| entry.meta["foldedInto"].as_str() == Some(target.as_str()))
+        .filter_map(|entry| serde_json::from_value::<CommandSpec>(entry.meta.clone()).ok())
+        .filter(|spec| !spec.hidden)
+        .flat_map(|spec| std::iter::once(spec.name).chain(spec.aliases))
+        .filter(|name| matched(name, query).is_some())
+        .map(|name| (name != query, !name.starts_with(query), false))
+        .min()
+}
+
 /// Lower is better: the name itself, then a name it begins, then any match
 /// in the name before one in the description alone.
 fn score(row: &Row, query: &str) -> (bool, bool, bool) {
@@ -205,7 +243,7 @@ pub(crate) fn filter(mut row: Row, query: &str) -> Option<Row> {
 fn command(entry: &CatalogEntry, query: &str) -> Option<Row> {
     let spec: CommandSpec = serde_json::from_value(entry.meta.clone()).ok()?;
     let shelf = spec.family.strip_prefix(SKILL_FAMILY).map(str::to_owned);
-    (!spec.hidden).then(|| Row {
+    (!spec.hidden && entry.meta["foldedInto"].as_str().is_none()).then(|| Row {
         label: format!("/{}", spelling(&spec, query)),
         hint: spec.hint.clone(),
         alert: None,
@@ -236,8 +274,15 @@ fn binding(key: &str, line: &str, commands: &[CatalogEntry]) -> Option<Row> {
         .split_whitespace()
         .next()
         .unwrap_or_default();
-    let entry = commands.iter().find(|entry| entry.id == name)?;
-    if entry.meta["hidden"].as_bool().unwrap_or(false) {
+    let entry = commands.iter().find(|entry| {
+        entry.id == name
+            || entry.meta["aliases"]
+                .as_array()
+                .is_some_and(|aliases| aliases.iter().any(|alias| alias == name))
+    })?;
+    if entry.meta["hidden"].as_bool().unwrap_or(false)
+        || entry.meta["foldedInto"].as_str().is_some()
+    {
         return None;
     }
     Some(Row {
@@ -497,5 +542,117 @@ pub(crate) fn all_sessions() -> Row {
         marks: vec![],
         hint_marks: vec![],
         target: Target::Run("/sessions".into()),
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn catalogue() -> Vec<CatalogEntry> {
+        [
+            ("crew", None),
+            ("agents", Some("crew")),
+            ("tasks", Some("crew")),
+            ("room", Some("crew")),
+            ("team", Some("crew")),
+            ("browse", None),
+            ("rewind", Some("browse")),
+            ("memory", None),
+            ("experience", Some("memory")),
+            ("schedule", None),
+            ("wake", Some("schedule")),
+            ("model", None),
+            ("models", Some("model")),
+            ("provider", Some("model")),
+            ("plugins", None),
+            ("mcp", Some("plugins")),
+        ]
+        .map(|(name, into)| CatalogEntry {
+            id: name.into(),
+            label: name.into(),
+            meta: json!({"name":name,"hint":"open a place","family":"fixture",
+                    "args":{"kind":"none"},"foldedInto":into,
+                    "aliases":if name == "room" { vec!["rooms"] } else { vec![] }}),
+        })
+        .to_vec()
+    }
+
+    #[test]
+    fn folded_commands_leave_one_row_per_place_and_return_without_the_fold() {
+        let mut entries = catalogue();
+        let names = |entries: &[CatalogEntry]| {
+            command_rows(entries, "")
+                .into_iter()
+                .map(|row| row.label)
+                .collect::<Vec<_>>()
+        };
+        let shown = names(&entries);
+        assert_eq!(shown.len(), 6);
+        for entry in &entries {
+            assert_eq!(
+                shown.contains(&format!("/{}", entry.id)),
+                entry.meta["foldedInto"].is_null()
+            );
+        }
+        for entry in &mut entries {
+            entry.meta.as_object_mut().unwrap().remove("foldedInto");
+        }
+        assert_eq!(names(&entries).len(), entries.len());
+    }
+
+    #[test]
+    fn disabling_each_owner_returns_only_its_folded_commands() {
+        for into in ["crew", "browse", "memory", "schedule", "model", "plugins"] {
+            let mut entries = catalogue();
+            for entry in &mut entries {
+                if entry.meta["foldedInto"] == into {
+                    entry.meta.as_object_mut().unwrap().remove("foldedInto");
+                }
+            }
+            let shown = command_rows(&entries, "");
+            for entry in &entries {
+                assert_eq!(
+                    shown
+                        .iter()
+                        .any(|row| row.label == format!("/{}", entry.id)),
+                    entry.meta["foldedInto"].is_null(),
+                    "{into}: {}",
+                    entry.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn folded_names_and_aliases_find_the_destination_once() {
+        for query in ["agents", "room", "rooms", "roo", "rms"] {
+            let found = rows(
+                PaletteOpen::Commands,
+                query,
+                &catalogue(),
+                &BTreeMap::new(),
+                &[],
+                &[],
+                "s",
+            );
+            let offered = found
+                .iter()
+                .flat_map(|group| &group.rows)
+                .collect::<Vec<_>>();
+            assert_eq!(offered.len(), 1, "{query}");
+            assert_eq!(offered[0].label, "/crew");
+            assert_eq!(offered[0].target, Target::Command("crew".into()));
+        }
+    }
+
+    #[test]
+    fn folded_bindings_do_not_reappear_in_keys() {
+        let keys = BTreeMap::from([
+            ("alt+a".into(), "/agents".into()),
+            ("alt+r".into(), "/rooms".into()),
+        ]);
+        assert!(rows(PaletteOpen::Keys, "", &catalogue(), &keys, &[], &[], "s").is_empty());
     }
 }

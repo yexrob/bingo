@@ -110,9 +110,8 @@ fn sources(ui: &Ui, query: &str) -> Vec<String> {
         return Vec::new();
     };
     ui.catalogs
-        .commands
-        .iter()
-        .cloned()
+        .specs()
+        .into_iter()
         .chain(crate::commands::local_specs())
         .filter(|spec| spec.name == name || spec.aliases.iter().any(|alias| alias == name))
         .flat_map(|spec| {
@@ -129,18 +128,12 @@ fn command_entries(
     state: &SessionState,
     catalogs: &std::collections::BTreeMap<String, Vec<CatalogEntry>>,
 ) -> Vec<CatalogEntry> {
-    let mut commands = ui
-        .catalogs
-        .commands
-        .iter()
-        .cloned()
-        .chain(crate::commands::local_specs())
-        .map(|spec| CatalogEntry {
-            id: spec.name.clone(),
-            label: spec.hint.clone(),
-            meta: serde_json::to_value(spec).unwrap_or_default(),
-        })
-        .collect();
+    let mut commands = ui.catalogs.commands.clone();
+    commands.extend(
+        crate::commands::local_specs()
+            .into_iter()
+            .map(crate::commands::entry),
+    );
     if let Some(reader) = &ui.catalogs.current {
         let providers = catalogs
             .get("providers")
@@ -287,7 +280,7 @@ pub fn key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
 /// is theirs and the history keeps it, as it keeps one sent from the box.
 fn run(ui: &mut Ui, tree: &Tree, line: &str, vouched: bool, now: Now) -> Vec<Effect> {
     close(ui, now);
-    if !vouched && crate::commands::privileged(&ui.catalogs.commands, line) {
+    if !vouched && crate::commands::privileged(&ui.catalogs.specs(), line) {
         return refuse(ui, line.into(), now);
     }
     crate::input::typed_line(ui, tree, now, line.into())
@@ -309,7 +302,7 @@ pub fn result(ui: &mut Ui, tree: &Tree, action: &Action, vouched: bool, now: Now
     }
     if let Some(key) = value["key"].as_str().and_then(crate::keys::commands::event) {
         close(ui, now);
-        if !vouched && crate::commands::privileged(&ui.catalogs.commands, ui.composer.text()) {
+        if !vouched && crate::commands::privileged(&ui.catalogs.specs(), ui.composer.text()) {
             return refuse(ui, ui.composer.text().to_string(), now);
         }
         return crate::input::on_key(ui, tree, key, now);
@@ -347,7 +340,7 @@ pub(crate) mod tests;
 /// The client keeps its native doors when the built-in command is absent.
 pub fn command(ui: &mut Ui, line: &str, now: Now) -> Option<Vec<Effect>> {
     let (name, args) = crate::commands::split(line)?;
-    if ui.catalogs.commands.iter().any(|spec| spec.name == name) {
+    if ui.catalogs.commands.iter().any(|entry| entry.id == name) {
         return None;
     }
     match name {

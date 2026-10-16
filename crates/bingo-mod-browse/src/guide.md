@@ -9,7 +9,8 @@ Escape clears the query first; another Escape leaves Browse and restores every
 temporary fold. Escape from the pager returns to Browse at the same match.
 Search keeps up to 1000 matching lines, shown as `1000+` at the limit.
 
-Press `r` to preview a rewind to the selected turn. The sheet lists each
+Press `r` to preview a rewind to the selected turn. Typed `/rewind` opens
+Browse with this sheet ready. The sheet lists each
 tracked file and whether it will be restored, removed or skipped. Files
 written by shell commands are not tracked. A file marked **changed since the
 turn** may contain later edits: confirming still replaces those edits. Old

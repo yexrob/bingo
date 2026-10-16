@@ -1,0 +1,30 @@
+[
+  {
+    "role": "reviewer",
+    "agent": "reviewer",
+    "summary": {
+      "id": "ses_1",
+      "title": "reviewer",
+      "cwd": "/tmp/p",
+      "driver": "model",
+      "model": "fake-1",
+      "provider": "fake",
+      "createdAt": "2023-11-14T22:13:20Z",
+      "updatedAt": "2023-11-14T22:13:20Z",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0
+      },
+      "busy": false,
+      "asking": false
+    }
+  },
+  {
+    "role": "scout",
+    "agent": null,
+    "summary": null
+  }
+]

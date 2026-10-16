@@ -7,8 +7,12 @@ mod guide;
 mod keys;
 mod live;
 mod panel;
+mod rows;
 mod whole;
-use bingo_sdk::*;
+use bingo_sdk::{
+    CancellationToken, CommandFold, Contribution, ErrorCode, HostHandle, Interceptor, KernelError,
+    Plugin, PluginError, PluginManifest, Registrar, SessionId, plugin,
+};
 use bingo_services::schedule;
 use std::{
     collections::BTreeMap,
@@ -23,7 +27,7 @@ pub struct SchedulePanel {
 }
 #[derive(Default)]
 pub(crate) struct Cursor {
-    selected: String,
+    selected: Option<rows::Selection>,
     confirming: Option<Confirmation>,
     seen: Option<std::time::Instant>,
 }
@@ -49,10 +53,13 @@ impl Plugin for SchedulePanel {
         registrar.add(Contribution::Command(Arc::new(keys::Handler(
             shared.clone(),
         ))));
+        registrar.add(Contribution::Lifecycle(Arc::new(disable::Disable(
+            shared.clone(),
+        ))));
         for link in [
-            Arc::new(panel::Open(shared.clone())) as Arc<dyn Interceptor>,
+            Arc::new(panel::Open(shared.clone(), "schedule")) as Arc<dyn Interceptor>,
+            Arc::new(panel::Open(shared.clone(), "wake")),
             Arc::new(draw::Drawing(shared.clone())),
-            Arc::new(disable::Disable(shared.clone())),
         ] {
             registrar.add(Contribution::Interceptor {
                 placement: plugin::Placement::Builtin,
@@ -60,6 +67,10 @@ impl Plugin for SchedulePanel {
                 link,
             });
         }
+        registrar.add(Contribution::CommandFold(CommandFold {
+            into: "schedule".into(),
+            names: vec!["wake".into()],
+        }));
         registrar.add(Contribution::Hook(Arc::new(live::Refresh(shared))));
         registrar.add(guide::contribution(registrar));
         Ok(())
@@ -76,9 +87,13 @@ impl Plugin for SchedulePanel {
 fn error(error: impl std::fmt::Display) -> KernelError {
     KernelError::new(ErrorCode::Internal, error.to_string())
 }
-async fn listing(host: &HostHandle) -> Result<schedule::Listing, KernelError> {
-    schedule::find(host)
-        .ok_or_else(|| error("schedule service unavailable"))?
-        .list()
-        .await
+async fn listing(
+    host: &HostHandle,
+    session: &SessionId,
+) -> Result<(schedule::Listing, Option<schedule::Pending>), KernelError> {
+    let service = schedule::find(host).ok_or_else(|| error("schedule service unavailable"))?;
+    Ok((
+        service.list().await?,
+        service.pending(session.clone()).await?,
+    ))
 }

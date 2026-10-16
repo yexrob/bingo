@@ -136,6 +136,8 @@ role keeps its memory across a resumed root, and creating one opens no turn.
 A `norms` file, or `team-norms.md` beside the team file, is prepended to every
 role's system prompt. The file's `rooms` key belongs to rooms.
 
-`/agents` is the roster of this session (and `/agents stop|dismiss <name>`
-ends one), `/team` what the project declared and which roles are seated. In the composer, `@name rest` sends that line to the
+In the terminal, `/crew agents` shows the roster and `/crew team` shows the
+roles the project declared and which are seated. Bare `/agents` and `/team`
+open those tabs. In text clients, or with the crew mod disabled, they remain
+tables. `/agents stop|dismiss <name>` still ends one. In the composer, `@name rest` sends that line to the
 child of that name instead of to the session it was typed in.

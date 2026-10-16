@@ -96,6 +96,7 @@ pub(super) async fn catalogue_answer(
         catalog
             .entries
             .retain(|entry| entry.meta["hidden"].as_bool() != Some(true));
+        catalog::command_folds(&host.registry, &mut catalog.entries);
     }
     for notice in report.take() {
         if let ItemBody::Notice { level, code, text } = notice {

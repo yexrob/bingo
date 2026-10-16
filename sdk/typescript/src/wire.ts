@@ -152,6 +152,14 @@ export type Classify = {
 };
 export type ClientIdentity = { "name": string; "surface": string; [key: string]: unknown; };
 export type CloseReason = ({ "kind": "client"; [key: string]: unknown; } | { "kind": "shutdown"; [key: string]: unknown; } | { "kind": "deleted"; [key: string]: unknown; } | { "kind": "error"; "message": string; [key: string]: unknown; });
+/** Commands presented through one destination while their dispatch stays intact. */
+export type CommandFold = {
+  /** Destination command shown in the palette for the folded names. */
+  "into": string;
+  /** Command names or aliases found through the destination without changing dispatch. */
+  "names": Array<string>;
+  [key: string]: unknown;
+};
 export type CommandOutcome = ({ "kind": "acknowledged"; "result": unknown; [key: string]: unknown; } | { "action": Action; "fallback"?: (string | null); "kind": "surface"; [key: string]: unknown; } | { "answer": Answer; "kind": "answer"; [key: string]: unknown; } | { "handled": boolean; "kind": "handled"; [key: string]: unknown; } | { "kind": "applied"; "message"?: (string | null); [key: string]: unknown; } | { "kind": "view"; "view": View; [key: string]: unknown; } | { "kind": "prompt"; "text": string; [key: string]: unknown; } | { "body": ItemBody; "kind": "record"; [key: string]: unknown; });
 export type CommandOutputProps = { "args": string; "command": string; "isErrored": boolean; "text": string; [key: string]: unknown; };
 export type CommandReply = (CommandOutcome | { "text": string; [key: string]: unknown; });

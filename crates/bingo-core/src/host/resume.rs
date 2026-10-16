@@ -101,6 +101,7 @@ impl Host {
         let _ = self.gateway.send(GatewayEvent::SessionCreated {
             summary: Box::new(summary),
         });
+        super::registry_folds::report(self, &live.mailbox).await;
         report_lost_turns(store.as_ref(), &live.mailbox).await;
         Ok(live.mailbox)
     }

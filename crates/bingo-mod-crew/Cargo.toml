@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Agents, rooms and tasks in one pane"
+description = "Agents, rooms, tasks and team roles in one pane"
 
 [lints]
 workspace = true

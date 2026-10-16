@@ -3,15 +3,19 @@ use bingo_sdk::*;
 use bingo_services::{experience, memory};
 use serde_json::{Value, json};
 
-pub struct Open(pub Shared, pub std::path::PathBuf);
+pub struct Open(pub Shared, pub std::path::PathBuf, pub &'static str);
 #[async_trait::async_trait]
 impl Interceptor for Open {
     fn id(&self) -> &str {
-        "memory:open"
+        if self.2 == "experience" {
+            "memory:experience"
+        } else {
+            "memory:open"
+        }
     }
     fn matcher(&self) -> LinkMatcher {
         LinkMatcher {
-            prefilter: json!({"command":"memory","args":""}),
+            prefilter: json!({"command":self.2,"args":""}),
             ..LinkMatcher::at(catalogue::COMMAND_RUN)
         }
     }
@@ -24,13 +28,15 @@ impl Interceptor for Open {
     ) -> Result<Value, KernelError> {
         let input: catalogue::CommandRun =
             serde_json::from_value(value.clone()).map_err(crate::error)?;
-        if input.name != "memory"
+        if input.name != self.2
             || !input.args.trim().is_empty()
-            || memory::find(&cx.host).is_none()
+            || input.surface != Some(render::SurfaceName::Terminal)
+            || !available(&cx.host, &input.name)
         {
             return next.run(value).await;
         }
         let groups = groups(&cx.host, &cx.cwd, &self.1).await?;
+        let selected = selected(&groups, &input.name);
         let fallback: catalogue::CommandReply =
             serde_json::from_value(next.run(value).await?).map_err(crate::error)?;
         let fallback = match CommandOutcome::from(fallback) {
@@ -43,6 +49,7 @@ impl Interceptor for Open {
             cx.session.clone(),
             crate::Cursor {
                 groups,
+                selected,
                 ..Default::default()
             },
         );
@@ -56,15 +63,33 @@ impl Interceptor for Open {
         .map_err(crate::error)
     }
 }
+fn available(host: &HostHandle, command: &str) -> bool {
+    match command {
+        "memory" => memory::find(host).is_some(),
+        "experience" => experience::find(host).is_some(),
+        _ => false,
+    }
+}
+fn selected(groups: &[Group], command: &str) -> usize {
+    if command == "experience" {
+        groups
+            .iter()
+            .take_while(|group| group.name != "experience")
+            .map(|group| group.rows.len())
+            .sum()
+    } else {
+        0
+    }
+}
 pub async fn groups(
     host: &HostHandle,
     cwd: &std::path::Path,
     home: &std::path::Path,
 ) -> Result<Vec<Group>, KernelError> {
-    let listing = memory::find(host)
-        .ok_or_else(crate::unavailable)?
-        .list(memory::List { cwd: cwd.into() })
-        .await?;
+    let listing = match memory::find(host) {
+        Some(service) => service.list(memory::List { cwd: cwd.into() }).await?,
+        None => memory::Listing::default(),
+    };
     let entries = match experience::find(host) {
         Some(service) => service.list(experience::List { cwd: cwd.into() }).await?,
         None => vec![],
@@ -114,21 +139,23 @@ mod tests {
     use super::*;
     #[test]
     fn only_the_bare_command_is_wrapped() {
-        let matcher = Open(Shared::default(), Default::default()).matcher();
-        for (command, args, expected) in [
-            ("memory", "", true),
-            ("memory", "forget rule", false),
-            ("think", "maximum", false),
-            ("bash", "", false),
-            ("plugins", "disable bingo.mod.memory", false),
-        ] {
-            assert_eq!(
-                matcher.matches(
-                    catalogue::COMMAND_RUN,
-                    &json!({"command":command,"args":args})
-                ),
-                expected
-            );
+        for name in ["memory", "experience"] {
+            let matcher = Open(Shared::default(), Default::default(), name).matcher();
+            for (command, args, expected) in [
+                (name, "", true),
+                (name, "forget rule", false),
+                ("think", "maximum", false),
+                ("bash", "", false),
+                ("plugins", "disable bingo.mod.memory", false),
+            ] {
+                assert_eq!(
+                    matcher.matches(
+                        catalogue::COMMAND_RUN,
+                        &json!({"command":command,"args":args})
+                    ),
+                    expected
+                );
+            }
         }
     }
 }

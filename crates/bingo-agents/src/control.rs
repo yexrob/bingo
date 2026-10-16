@@ -1,11 +1,19 @@
 use bingo_sdk::*;
-use bingo_services::agents_control::{AgentRow, AgentsControl, Message, Named, Session};
+use bingo_services::agents_control::{AgentRow, AgentsControl, Message, Named, Session, TeamRow};
 
 #[async_trait::async_trait]
 impl AgentsControl for crate::service::AgentService {
     async fn roster(&self, request: Session) -> Result<Vec<AgentRow>, ServiceError> {
         roster(&self.host()?, &request.session)
             .await
+            .map_err(failed)
+    }
+    async fn team(&self, request: Session) -> Result<Vec<TeamRow>, ServiceError> {
+        let host = self.host()?;
+        let summary = host.summary(&request.session).await.map_err(failed)?;
+        crate::team::roster::read(&host, std::path::Path::new(&summary.cwd), &request.session)
+            .await
+            .map(Option::unwrap_or_default)
             .map_err(failed)
     }
     async fn stop(&self, request: Named) -> Result<String, ServiceError> {

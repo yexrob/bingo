@@ -18,6 +18,7 @@ use crate::wire::{METHODS, NOTIFICATIONS, PROTOCOL, Ref, schema_of};
 /// Types the method table does not name. The manifest is the first thing a
 /// plugin author writes and the last thing the wire mentions.
 static UNNAMED: &[Ref] = &[
+    schema_of::<bingo_sdk::CommandFold>,
     schema_of::<bingo_sdk::PluginState>,
     schema_of::<bingo_sdk::Approval>,
     schema_of::<Manifest>,
@@ -128,6 +129,23 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn command_folds_are_part_of_the_plugin_contract() {
+        let schema = document();
+        let fold = &schema["$defs"]["CommandFold"];
+        assert_eq!(fold["properties"]["into"]["type"], "string");
+        assert_eq!(fold["properties"]["names"]["items"]["type"], "string");
+        for field in ["into", "names"] {
+            assert!(
+                fold["properties"][field]["description"]
+                    .as_str()
+                    .is_some_and(|description| !description.trim().is_empty()),
+                "CommandFold.{field} must document the generated contract"
+            );
+        }
+        assert_eq!(fold["required"], json!(["into", "names"]));
+    }
 
     #[test]
     fn protocol_two_names_the_new_doors() {

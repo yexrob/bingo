@@ -1,7 +1,7 @@
 # Sessions
 
-`/sessions` or `bingo --resume` opens the session directory. Ctrl+R keeps
-its recent-session palette; choose **All sessions…** for the directory.
+`/sessions` or `bingo --resume` opens the session directory. `/resume` and
+Ctrl+R keep their recent-session palette; choose **All sessions…** for the directory.
 
 Type to filter titles and first asks. Tab switches this directory/all.
 Choose **more…** to load another 50 sessions. Children sit below parents;

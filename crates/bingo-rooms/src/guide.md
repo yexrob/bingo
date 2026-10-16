@@ -78,7 +78,7 @@ answering for someone else.
 
 A debt nobody answers is chased: after 300 seconds the member is nudged, at
 most three times, and after that the debt simply stands where a person can see
-it — the `owed` column of `/room`, and a card on the room's parent. A nudge is
+it — the rooms tab of `/crew`, and a card on the room's parent. A nudge is
 not a post: it says there is something to read, opens no debt of its own, and
 counts as nothing read.
 
@@ -94,9 +94,12 @@ not counted against you.
 A person is never bounced: a person watches the room live and outranks the
 protocol.
 
-## `/room`
+## Crew rooms
 
-`/room` lists the rooms under this session: `room`, `purpose`, `members`,
+In the terminal, `/crew rooms` lists rooms. Enter opens the selected room
+and Escape returns to the parent conversation. Bare `/room` and `/rooms`
+open that tab too. In text clients, or with the crew mod disabled, `/room`
+lists the rooms under this session: `room`, `purpose`, `members`,
 `owed`. `/room design reviewer scout` opens `#design` under it — or resets who
 is in the one that stands, which is the person's lever and no agent's — with
 `name:120` for a seat's patience and `name:0` for a live one. `/room close

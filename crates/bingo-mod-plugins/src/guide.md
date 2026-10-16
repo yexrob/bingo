@@ -1,7 +1,8 @@
 # Plugins and MCP servers
 
-`/plugins` (also `/modules`) and `/mcp` open the same panel. The opener's group
-comes first. Built-ins start folded; Enter expands them. At narrow widths the
+`/plugins` (also `/modules`) opens plugins and MCP servers in one panel.
+Typed `/mcp` opens it with the MCP group first and its first server selected.
+Built-ins start folded; Enter expands them. At narrow widths the
 selected card is below the list. Escape closes the panel.
 
 Use Up/Down to select. Space switches the selected entry. A plugin with tools

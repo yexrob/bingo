@@ -218,7 +218,7 @@ async fn commands(registry: &Registry, cwd: &std::path::Path) -> Vec<CatalogEntr
         all.extend(source.commands(cwd).await);
     }
     all.iter()
-        .map(|c| c.spec())
+        .map(|command| command.spec())
         .filter(|spec| !spec.hidden)
         .map(|spec| CatalogEntry {
             id: spec.name.clone(),
@@ -226,6 +226,33 @@ async fn commands(registry: &Registry, cwd: &std::path::Path) -> Vec<CatalogEntr
             meta: serde_json::to_value(spec).unwrap_or(Value::Null),
         })
         .collect()
+}
+
+/// Description links rewrite specs, so derived catalogue facts are applied last.
+pub(super) fn command_folds(registry: &Registry, entries: &mut [CatalogEntry]) {
+    let available: std::collections::BTreeSet<_> =
+        entries.iter().map(|entry| entry.id.clone()).collect();
+    for entry in entries {
+        let Some(meta) = entry.meta.as_object_mut() else {
+            continue;
+        };
+        meta.remove("foldedInto");
+        let Some(name) = meta.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let aliases = match meta.get("aliases") {
+            None => &[][..],
+            Some(Value::Array(aliases)) if aliases.iter().all(Value::is_string) => {
+                aliases.as_slice()
+            }
+            _ => continue,
+        };
+        if let Some(into) = registry.folded_into(name, aliases.iter().filter_map(Value::as_str))
+            && available.contains(into)
+        {
+            meta.insert("foldedInto".into(), json!(into));
+        }
+    }
 }
 
 /// What this build registered, then what every source found (ADR-0057 §5):
@@ -673,6 +700,7 @@ impl command::CommandCatalog for Scoped {
         let commands = host
             .registry
             .commands
+            .entries
             .iter()
             .map(|command| (command.spec().name, command))
             .collect::<std::collections::HashMap<_, _>>();
@@ -766,7 +794,7 @@ mod current_values {
             providers: &providers,
             models: &[],
         };
-        for command in &host.registry.commands {
+        for command in &host.registry.commands.entries {
             let value = command.now(&view);
             if command.spec().name == "login" {
                 assert_eq!(value.as_deref(), Some("2 signed out"));
@@ -858,3 +886,89 @@ mod linear_values {
 
 mod details;
 pub(super) use details::details;
+
+#[cfg(test)]
+mod command_fold_tests {
+    use super::*;
+
+    fn registry() -> Registry {
+        let mut registry = Registry::default();
+        registry.add_command_fold(
+            "fixture",
+            CommandFold {
+                into: "panel".into(),
+                names: vec!["first".into()],
+            },
+        );
+        registry.validate_command_folds();
+        registry
+    }
+
+    fn entries(meta: Value) -> [CatalogEntry; 2] {
+        [
+            CatalogEntry {
+                id: "first".into(),
+                label: "A command".into(),
+                meta,
+            },
+            CatalogEntry {
+                id: "panel".into(),
+                label: "A destination".into(),
+                meta: json!({"name":"panel", "aliases":["first"]}),
+            },
+        ]
+    }
+
+    #[test]
+    fn fold_projection_reads_only_the_final_name_and_aliases() {
+        for meta in [
+            json!({"name":"first"}),
+            json!({"name":"renamed", "aliases":["first"]}),
+        ] {
+            let mut entries = entries(meta.clone());
+            command_folds(&registry(), &mut entries);
+            assert_eq!(entries[0].meta["foldedInto"], "panel");
+            entries[0]
+                .meta
+                .as_object_mut()
+                .unwrap()
+                .remove("foldedInto");
+            assert_eq!(entries[0].meta, meta);
+            assert!(entries[1].meta.get("foldedInto").is_none());
+        }
+    }
+
+    #[test]
+    fn malformed_command_identities_never_keep_a_fold_mark() {
+        for mut meta in [
+            json!({}),
+            json!({"name":false}),
+            json!({"name":"first", "aliases":null}),
+            json!({"name":"first", "aliases":"first"}),
+            json!({"name":"first", "aliases":["first", false]}),
+        ] {
+            meta["foldedInto"] = json!("stale");
+            let mut entries = entries(meta);
+            command_folds(&registry(), &mut entries);
+            assert!(entries[0].meta.get("foldedInto").is_none());
+        }
+    }
+
+    #[test]
+    fn a_missing_destination_or_disabled_owner_removes_the_fold_mark() {
+        let registry = registry();
+        let mut entries = entries(json!({"name":"first", "foldedInto":"stale"}));
+        command_folds(&registry, &mut entries[..1]);
+        assert!(entries[0].meta.get("foldedInto").is_none());
+        command_folds(&registry, &mut entries);
+        assert_eq!(entries[0].meta["foldedInto"], "panel");
+        registry
+            .switches
+            .running
+            .write()
+            .unwrap()
+            .insert("fixture".into());
+        command_folds(&registry, &mut entries);
+        assert!(entries[0].meta.get("foldedInto").is_none());
+    }
+}

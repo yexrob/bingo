@@ -128,7 +128,7 @@ impl MemoryFixture {
             .chain(
                 catalogue::COMMAND_RUN,
                 &self.cx(),
-                json!({"command":"memory","args":""}),
+                json!({"command":"memory","args":"","surface":"terminal"}),
                 Next::new(|_| {
                     Box::pin(async { Ok(json!({"kind":"applied","message":"fallback"})) })
                 }),

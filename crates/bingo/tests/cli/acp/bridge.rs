@@ -454,12 +454,40 @@ fn answered(ack: Value) -> Value {
 /// Whether `/mcp`'s table says this server is up. Its columns are the server,
 /// its state and how many tools it brought.
 fn connected(answered: &Value, server: &str) -> bool {
+    if let Ok(bingo_sdk::View::Table { rows, .. }) =
+        serde_json::from_value(answered["view"].clone())
+    {
+        return rows.iter().any(|row| {
+            row.first().map(String::as_str) == Some(server)
+                && row.get(1).map(String::as_str) == Some("connected")
+        });
+    }
     answered["message"].as_str().is_some_and(|table| {
         table.lines().any(|line| {
             let cells = line.split('|').map(str::trim).collect::<Vec<_>>();
             cells.get(1) == Some(&server) && cells.get(2) == Some(&"connected")
         })
     })
+}
+
+#[test]
+fn connected_reads_original_views_and_text_fallbacks_without_guessing() {
+    for state in ["connected", "connecting", "failed", "disabled"] {
+        let view = bingo_sdk::View::Table {
+            headers: ["server", "status", "tools", "auth"]
+                .map(str::to_string)
+                .to_vec(),
+            rows: vec![["echo", state, "5", "-"].map(str::to_string).to_vec()],
+        };
+        for reply in [
+            json!({"view":view}),
+            json!({"message":view.fold_markdown()}),
+        ] {
+            assert_eq!(connected(&reply, "echo"), state == "connected", "{reply}");
+            assert!(!connected(&reply, "absent"), "{reply}");
+        }
+    }
+    assert!(!connected(&json!({}), "echo"));
 }
 
 /// The rows a `session/new` carried.

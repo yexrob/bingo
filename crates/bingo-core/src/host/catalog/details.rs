@@ -17,6 +17,7 @@ pub(in crate::host) async fn details(host: &Host, catalog: &mut Catalog) {
         entry.meta["commands"] = json!(
             host.registry
                 .commands
+                .entries
                 .iter()
                 .filter(|command| command.plugin == entry.id)
                 .map(|command| command.spec())

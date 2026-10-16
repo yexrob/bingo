@@ -2,7 +2,7 @@
 
 `/model` opens the model picker. `/model <filter>` narrows the list; an exact
 model id switches immediately. Provider prefixes such as `openai/` filter one
-provider. `/models` opens the complete list, including snapshots and non-chat
+provider. Select a provider's hidden-model row to include snapshots and non-chat
 models. Non-chat models cannot be selected for a conversation.
 
 Use ↑↓ to select, ←→ to choose an offered thinking effort, Tab to keep the
@@ -17,6 +17,10 @@ configure `keys` to rebind them. Ctrl+P has no model binding.
 Select a provider to test its connection, refresh models, replace its key or
 sign out. Named instances also offer an address editor and removal with
 confirmation. An environment credential must be unset in the shell.
+
+The palette has one `/model` entry. Typed `/models` still opens its complete
+list; bare `/provider` opens the same picker. Their argument-taking commands
+continue to work, including `/models refresh` and `/provider remove <name>`.
 
 `+` adds a provider. Paste a key or address into the sealed, masked sign-in
 field. Review the inferred name, shape and address before adding. Credentials

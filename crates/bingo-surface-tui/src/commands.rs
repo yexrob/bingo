@@ -2,7 +2,7 @@
 //! §6) and the names-only fallback for the shared catalogue. Every
 //! other `/name` and every `!line` is submitted verbatim — the actor parses it.
 
-use bingo_sdk::{ArgSpec, Catalog, CommandSpec};
+use bingo_sdk::{ArgSpec, CatalogEntry, CommandSpec};
 
 use crate::matching;
 
@@ -41,14 +41,26 @@ pub fn local_specs() -> Vec<CommandSpec> {
         .collect()
 }
 
-/// The kernel's command catalogue, as specs. An entry whose `meta` is not a
-/// spec is skipped rather than failing the fetch.
-pub fn specs_from(catalog: &Catalog) -> Vec<CommandSpec> {
-    catalog
-        .entries
+/// Decode specifications where needed, keeping the catalogue metadata at
+/// the surface boundary intact.
+pub fn specs(entries: &[CatalogEntry]) -> Vec<CommandSpec> {
+    entries
         .iter()
         .filter_map(|entry| serde_json::from_value(entry.meta.clone()).ok())
         .collect()
+}
+
+pub fn entry(spec: CommandSpec) -> CatalogEntry {
+    CatalogEntry {
+        id: spec.name.clone(),
+        label: spec.hint.clone(),
+        meta: serde_json::to_value(spec).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+pub fn entries(specs: Vec<CommandSpec>) -> Vec<CatalogEntry> {
+    specs.into_iter().map(entry).collect()
 }
 
 /// Which local command a line is, if any.

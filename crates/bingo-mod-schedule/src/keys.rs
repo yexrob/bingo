@@ -1,6 +1,7 @@
+use crate::rows::{self, Row};
 use crate::{Confirmation, Cursor, ID, REQUEST, Shared};
 use bingo_sdk::*;
-use bingo_services::schedule::Row;
+use bingo_services::schedule::Row as ScheduleRow;
 use serde_json::{Value, json};
 pub struct Handler(pub Shared);
 fn press(
@@ -16,15 +17,12 @@ fn press(
     if matches!(key, "esc" | "ctrl+c") {
         return json!({"close":true});
     }
-    let at = rows
-        .iter()
-        .position(|r| r.id == cursor.selected)
-        .unwrap_or(0);
+    let at = rows::selected(rows, cursor.selected.as_ref());
     if matches!(key, "up" | "down") {
         let at = at
             .saturating_add_signed(if key == "up" { -1 } else { 1 })
             .min(rows.len().saturating_sub(1));
-        cursor.selected = rows.get(at).map(|r| r.id.clone()).unwrap_or_default();
+        cursor.selected = rows.get(at).map(Row::selection);
         cursor.confirming = None;
         return json!({});
     }
@@ -34,7 +32,7 @@ fn press(
     };
     if cursor.confirming.is_some() {
         if key == "enter"
-            && confirming.is_some_and(|shown| shown.row() == row)
+            && confirming.is_some_and(|shown| Some(shown.row()) == row.schedule())
             && cursor.confirming.as_ref() == confirming
         {
             let Some(confirmation) = cursor.confirming.take() else {
@@ -44,7 +42,11 @@ fn press(
         }
         return json!({});
     }
-    operation(cursor, row, key)
+    match row {
+        Row::Schedule(row) => operation(cursor, row, key),
+        Row::Wake(_) if key == "d" => json!({"run":"/wake off"}),
+        Row::Wake(_) => json!({}),
+    }
 }
 fn confirmed(confirmation: &Confirmation) -> Value {
     let row = confirmation.row();
@@ -58,7 +60,7 @@ fn confirmed(confirmation: &Confirmation) -> Value {
     operation
 }
 
-fn operation(cursor: &mut Cursor, row: &Row, key: &str) -> Value {
+fn operation(cursor: &mut Cursor, row: &ScheduleRow, key: &str) -> Value {
     match key {
         "space" | " " => run(if row.enabled { "pause" } else { "resume" }, &row.id),
         "r" => run("run", &row.id),
@@ -113,7 +115,8 @@ impl Command for Handler {
             serde_json::from_value(args["row"].clone()).map_err(crate::error)?;
         let confirming: Option<Confirmation> =
             serde_json::from_value(args["confirming"].clone()).map_err(crate::error)?;
-        let listing = crate::listing(&cx.host).await?;
+        let (listing, wake) = crate::listing(&cx.host, &cx.session).await?;
+        let rows = rows::rows(&listing, wake.as_ref());
         let operation = {
             let mut shared = self.0.lock().map_err(crate::error)?;
             let Some(cursor) = shared.get_mut(&cx.session) else {
@@ -121,7 +124,7 @@ impl Command for Handler {
             };
             press(
                 cursor,
-                &listing.entries,
+                &rows,
                 shown.as_ref(),
                 confirming.as_ref(),
                 args["value"]["key"].as_str().unwrap_or_default(),

@@ -50,7 +50,9 @@ server, and anything nested is declined rather than half-answered.
 
 ## `/mcp`
 
-`/mcp` alone is a table: server, status, tools, auth. The status is
+In the terminal, `/plugins` includes MCP servers; bare `/mcp` opens at that
+group. In text clients, or with the plugins mod disabled, `/mcp` alone is a
+table: server, status, tools, auth. The status is
 `connecting`, `connected`, `needs authentication`, `failed: <why>` or
 `disabled`; the auth column is `-`, `signed in` or `expired`.
 

@@ -12,6 +12,12 @@ pub struct AgentRow {
     pub summary: bingo_sdk::SessionSummary,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TeamRow {
+    pub role: String,
+    pub agent: Option<String>,
+    pub summary: Option<bingo_sdk::SessionSummary>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Session {
     pub session: SessionId,
 }
@@ -29,6 +35,7 @@ pub struct Message {
 #[async_trait]
 pub trait AgentsControl: Send + Sync {
     async fn roster(&self, request: Session) -> Result<Vec<AgentRow>, ServiceError>;
+    async fn team(&self, request: Session) -> Result<Vec<TeamRow>, ServiceError>;
     async fn stop(&self, request: Named) -> Result<String, ServiceError>;
     async fn dismiss(&self, request: Named) -> Result<String, ServiceError>;
     async fn message(&self, request: Message) -> Result<String, ServiceError>;
@@ -53,6 +60,7 @@ impl WireService for ToWire {
     fn face(&self) -> Option<Face> {
         let mut face = Face::new("agents-control")
             .method::<Session, Vec<AgentRow>>("roster", false)
+            .method::<Session, Vec<TeamRow>>("team", false)
             .method::<Named, String>("stop", true)
             .method::<Named, String>("dismiss", true)
             .method::<Message, String>("message", true)
@@ -67,6 +75,12 @@ impl WireService for ToWire {
             "roster" => serde_json::to_value(
                 self.0
                     .roster(serde_json::from_value(params).map_err(error)?)
+                    .await?,
+            )
+            .map_err(error),
+            "team" => serde_json::to_value(
+                self.0
+                    .team(serde_json::from_value(params).map_err(error)?)
                     .await?,
             )
             .map_err(error),
@@ -104,6 +118,13 @@ impl AgentsControl for FromWire {
         let answer = self
             .0
             .call("roster", serde_json::to_value(request).map_err(error)?)
+            .await?;
+        serde_json::from_value(answer).map_err(error)
+    }
+    async fn team(&self, request: Session) -> Result<Vec<TeamRow>, ServiceError> {
+        let answer = self
+            .0
+            .call("team", serde_json::to_value(request).map_err(error)?)
             .await?;
         serde_json::from_value(answer).map_err(error)
     }

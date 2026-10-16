@@ -46,7 +46,8 @@ pub use agent::{
     Agent, AgentEvent, AgentStream, AgentTurn, CallKind, CallLocation, ExternalCall, Judge,
 };
 pub use command::{
-    ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, KeyBinding, split_verb,
+    ArgSpec, Command, CommandContext, CommandFold, CommandOutcome, CommandSpec, KeyBinding,
+    split_verb,
 };
 pub use compactor::{CompactContext, CompactError, CompactReason, Compaction, Compactor};
 pub use contributor::{
@@ -62,9 +63,9 @@ pub use model::*;
 pub use page::{Page, Pages};
 pub use plugin::{
     BUILT_IN, CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, HookSource,
-    Merge, Plugin, PluginDecision, PluginError, PluginExecution, PluginGrant, PluginManifest,
-    PluginOrigin, PluginPlacement, PluginRegistration, PluginReload, PluginRuntime, PluginSource,
-    PluginState, PluginStatus, ProviderSource, Registrar, SWITCHED_OFF, ToolSource,
+    Merge, Plugin, PluginDecision, PluginError, PluginExecution, PluginGrant, PluginLifecycle,
+    PluginManifest, PluginOrigin, PluginPlacement, PluginRegistration, PluginReload, PluginRuntime,
+    PluginSource, PluginState, PluginStatus, ProviderSource, Registrar, SWITCHED_OFF, ToolSource,
 };
 pub use policy::{Decision, PermissionPolicy, PolicyInput, Reason, Stance, Verdict};
 pub use provider::{

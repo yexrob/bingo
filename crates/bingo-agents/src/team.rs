@@ -9,6 +9,7 @@
 
 mod command;
 mod file;
+pub(crate) mod roster;
 mod seat;
 mod service;
 

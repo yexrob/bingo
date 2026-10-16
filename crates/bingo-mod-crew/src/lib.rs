@@ -6,10 +6,15 @@ mod dispatch;
 pub mod draw;
 mod guide;
 pub mod keys;
+mod lifecycle;
 mod live;
+mod opening;
 mod refresh;
 pub mod state;
-use bingo_sdk::*;
+use bingo_sdk::{
+    CommandFold, Contribution, ErrorCode, KernelError, Plugin, PluginError, PluginManifest,
+    Registrar, SessionId, plugin,
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -49,11 +54,32 @@ impl Plugin for Crew {
         registrar.add(Contribution::Command(Arc::new(actions::Handler(
             self.shared.clone(),
         ))));
+        registrar.add(Contribution::CommandFold(CommandFold {
+            into: "crew".into(),
+            names: opening::FOLDED
+                .into_iter()
+                .map(|(name, _)| name.into())
+                .collect(),
+        }));
+        for (name, tab) in opening::FOLDED {
+            registrar.add(Contribution::Interceptor {
+                placement: plugin::Placement::Builtin,
+                external: None,
+                link: Arc::new(opening::Opening {
+                    shared: self.shared.clone(),
+                    name,
+                    tab,
+                }),
+            });
+        }
         registrar.add(Contribution::Interceptor {
             placement: plugin::Placement::Builtin,
             external: None,
             link: Arc::new(draw::Drawing(self.shared.clone())),
         });
+        registrar.add(Contribution::Lifecycle(Arc::new(lifecycle::Disable(
+            self.shared.clone(),
+        ))));
         registrar.add(Contribution::Hook(Arc::new(refresh::Refresh(
             self.shared.clone(),
         ))));
@@ -82,3 +108,9 @@ mod live_tests;
 
 #[cfg(test)]
 mod dispatch_tests;
+
+#[cfg(test)]
+mod opening_tests;
+
+#[cfg(test)]
+mod lifecycle_tests;

@@ -90,7 +90,7 @@ fn body() -> &'static str {
 #[test]
 fn a_skill_command() {
     let (mut ui, now) = scene();
-    ui.catalogs.commands = skills_in_the_catalogue();
+    ui.catalogs.commands = crate::commands::entries(skills_in_the_catalogue());
     both("skill_command", &solo(&typed()), &mut ui, now);
 }
 
@@ -108,6 +108,6 @@ fn a_skill_the_model_called() {
 #[test]
 fn a_skill_without_the_glyphs() {
     let (mut ui, now) = scene();
-    ui.catalogs.commands = skills_in_the_catalogue();
+    ui.catalogs.commands = crate::commands::entries(skills_in_the_catalogue());
     without_glyphs("ascii_skill", &solo(&typed()), &mut ui, now);
 }

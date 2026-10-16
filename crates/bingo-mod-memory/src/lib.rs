@@ -43,13 +43,25 @@ impl Plugin for MemoryPanel {
     }
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let shared = Shared::default();
+        registrar.add(Contribution::CommandFold(CommandFold {
+            into: "memory".into(),
+            names: vec!["experience".into()],
+        }));
         registrar.add(Contribution::Command(Arc::new(keys::Handler(
             shared.clone(),
             registrar.env().home.clone(),
         ))));
         for link in [
-            Arc::new(panel::Open(shared.clone(), registrar.env().home.clone()))
-                as Arc<dyn Interceptor>,
+            Arc::new(panel::Open(
+                shared.clone(),
+                registrar.env().home.clone(),
+                "memory",
+            )) as Arc<dyn Interceptor>,
+            Arc::new(panel::Open(
+                shared.clone(),
+                registrar.env().home.clone(),
+                "experience",
+            )),
             Arc::new(draw::Drawing(shared.clone())),
             Arc::new(lifecycle::Lifecycle(shared.clone())),
             Arc::new(lifecycle::Disable(shared)),
@@ -70,3 +82,6 @@ fn error(error: impl std::fmt::Display) -> KernelError {
 fn unavailable() -> KernelError {
     KernelError::new(ErrorCode::NotFound, "the owning service is unavailable")
 }
+
+#[cfg(test)]
+mod opening_tests;

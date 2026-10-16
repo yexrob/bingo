@@ -492,11 +492,12 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Layout, area: Rect, now: 
     let rows = area.height as usize;
     let state = tree.viewed();
     let browse_folds = crate::browse::folds(ui, tree);
+    let commands = ui.catalogs.specs();
     let rows_config = transcript::Rows::of(
         state,
         area.width as usize,
         &browse_folds,
-        &ui.catalogs.commands,
+        &commands,
         &frame.measurements,
         &ui.linked,
         now,
@@ -1030,7 +1031,7 @@ mod tests {
     fn dropdown() {
         let state = state();
         let (mut ui, now) = scene();
-        ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
+        ui.catalogs.commands = crate::commands::entries(vec![bingo_sdk::CommandSpec {
             opens: false,
             keys: vec![],
             hidden: false,
@@ -1042,7 +1043,7 @@ mod tests {
             },
             instant: true,
             family: "kernel".into(),
-        }];
+        }]);
         write(&mut ui, &state, "/", now);
         insta::assert_snapshot!(render(&state, &mut ui, now));
     }

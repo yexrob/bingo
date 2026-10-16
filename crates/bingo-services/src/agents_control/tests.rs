@@ -7,6 +7,10 @@ impl AgentsControl for Owner {
         assert_eq!(request.session.as_str(), "ses_parent");
         Ok(vec![])
     }
+    async fn team(&self, request: Session) -> Result<Vec<TeamRow>, ServiceError> {
+        assert_eq!(request.session.as_str(), "ses_parent");
+        Ok(serde_json::from_str(include_str!("../../fixtures/agents_control/team.json")).unwrap())
+    }
     async fn stop(&self, request: Named) -> Result<String, ServiceError> {
         assert_eq!(request.session.as_str(), "ses_parent");
         Ok("stop accepted".into())
@@ -67,7 +71,23 @@ fn every_person_only_write_is_unsafe_on_the_wire() {
     for method in face.methods {
         assert_eq!(
             method.unsafe_call,
-            method.entry.name != "agents-control.roster"
+            !matches!(
+                method.entry.name.as_ref(),
+                "agents-control.roster" | "agents-control.team"
+            )
         );
     }
+}
+
+#[test]
+fn team_rows_keep_declared_roles_and_derive_seating_from_summaries() {
+    let expected: Value =
+        serde_json::from_str(include_str!("../../fixtures/agents_control/team.json")).unwrap();
+    let rows: Vec<TeamRow> = serde_json::from_value(expected.clone()).unwrap();
+    assert_eq!(rows[0].role, "reviewer");
+    assert!(rows[0].summary.is_some());
+    assert_eq!(rows[1].role, "scout");
+    assert!(rows[1].summary.is_none());
+    assert_eq!(serde_json::to_value(rows).unwrap(), expected);
+    assert!(expected[0].get("state").is_none());
 }

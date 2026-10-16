@@ -484,6 +484,7 @@ fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         card: tree.open_interaction().is_some(),
         dropdown: !suggestions(ui, tree).is_empty(),
         busy: tree.viewed().busy(),
+        subsession: !tree.is_root(tree.view()) && ui.composer.is_empty(),
     };
     // An `esc` that closed something is not half of a gesture.
     let rung = keys::escape(open);
@@ -493,6 +494,15 @@ fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         Some(keys::Escape::Card) => return cancel(ui, tree),
         Some(keys::Escape::Dropdown) => ui.menu.dismissed = true,
         Some(keys::Escape::Interrupt) => return ask_to_stop(ui, tree.viewed()),
+        Some(keys::Escape::Back) => {
+            let parent = tree
+                .viewed()
+                .summary
+                .parent
+                .as_ref()
+                .map_or_else(|| tree.root_id().clone(), |parent| parent.session.clone());
+            return vec![Effect::View(parent)];
+        }
         // The stack was empty, so this `esc` is one of `esc esc`.
         None => twice(ui, tree, now),
     }
@@ -1135,7 +1145,7 @@ mod tests {
         let (state, commands) = rewindable();
         let tree = solo(&state);
         let (mut ui, now) = scene();
-        ui.catalogs.commands = commands;
+        ui.catalogs.commands = crate::commands::entries(commands);
         on_key(&mut ui, &tree, key(KeyCode::Esc), now);
         assert!(ui.esc_armed, "the first one arms it and closes nothing");
         on_key(&mut ui, &tree, key(KeyCode::Esc), now);
@@ -1158,7 +1168,7 @@ mod tests {
         let (state, commands) = rewindable();
         let tree = solo(&state);
         let (mut ui, now) = scene();
-        ui.catalogs.commands = commands;
+        ui.catalogs.commands = crate::commands::entries(commands);
         on_key(&mut ui, &tree, key(KeyCode::Esc), now);
         on_key(&mut ui, &tree, typed('a'), now);
         assert!(!ui.esc_armed);
@@ -3198,7 +3208,7 @@ mod tests {
     #[test]
     fn tab_completes_before_it_queues_and_queues_only_while_a_turn_runs() {
         let (mut ui, now) = scene();
-        ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
+        ui.catalogs.commands = crate::commands::entries(vec![bingo_sdk::CommandSpec {
             opens: false,
             keys: vec![],
             hidden: false,
@@ -3208,7 +3218,7 @@ mod tests {
             args: bingo_sdk::ArgSpec::None,
             instant: false,
             family: "kernel".into(),
-        }];
+        }]);
         write(&mut ui, &busy(), "/comp", now);
         assert!(
             press(&mut ui, &busy(), key(KeyCode::Tab), now).is_empty(),
@@ -3358,5 +3368,31 @@ mod paste_focus_tests {
         ui.focus = crate::focus::Focus::Pane("picker".into());
         super::on_paste(&mut ui, "sk-dummy-never-unmasked");
         assert!(ui.composer.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod return_tests {
+    use super::*;
+    use crate::test_support::*;
+
+    #[test]
+    fn escape_returns_only_after_overlays_and_work_and_keeps_a_draft() {
+        let mut tree = room_tree(vec![]);
+        let (mut ui, now) = scene();
+        ui.composer.set("a draft");
+        assert!(on_key(&mut ui, &tree, key(KeyCode::Esc), now).is_empty());
+        ui.composer.clear();
+        crate::palette::open(&mut ui, bingo_sdk::component::PaletteOpen::Sessions, now);
+        assert!(on_key(&mut ui, &tree, key(KeyCode::Esc), now).is_empty());
+        assert_eq!(
+            on_key(&mut ui, &tree, key(KeyCode::Esc), now),
+            [Effect::View(tree.root_id().clone())]
+        );
+        tree.fold.apply(&log_frame(2, started("trn_room")));
+        assert_eq!(
+            on_key(&mut ui, &tree, key(KeyCode::Esc), now),
+            [Effect::Interrupt]
+        );
     }
 }

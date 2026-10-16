@@ -17,6 +17,16 @@ use crate::host::HostHandle;
 use crate::ids::SessionId;
 use crate::view::View;
 
+/// Commands presented through one destination while their dispatch stays intact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandFold {
+    /// Destination command shown in the palette for the folded names.
+    pub into: String,
+    /// Command names or aliases found through the destination without changing dispatch.
+    pub names: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandSpec {

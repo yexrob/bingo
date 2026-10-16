@@ -97,19 +97,19 @@ fold one into the other by the rule below, else leave both.
 
 ## Exit criteria
 
-- [ ] Contract test: a registry with the crew fold marks `agents tasks room team`
+- [x] Contract test: a registry with the crew fold marks `agents tasks room team`
       `foldedInto: "crew"`; without the crew mod, no marks.
-- [ ] Palette test: bare `/` lists none of `agents tasks room rooms team rewind
+- [x] Palette test: bare `/` lists none of `agents tasks room rooms team rewind
       experience wake models provider mcp`; with each owning mod off, they return.
-- [ ] Each folded name typed bare opens its panel at its place (one test each);
+- [x] Each folded name typed bare opens its panel at its place (one test each);
       `/agents stop x`, `/room close x`, `/wake off`, `/rewind <id> both` still
       run their commands.
-- [ ] `/crew rooms` opens on rooms; `⏎` on a room steps into its chat; esc back.
-- [ ] Channel menu test: folded commands kept, `terminal` family dropped.
-- [ ] `/permission`, `/rename` bare open their inline level; `/mcp` cursor on MCP.
+- [x] `/crew rooms` opens on rooms; `⏎` on a room steps into its chat; esc back.
+- [x] Channel menu test: folded commands kept, `terminal` family dropped.
+- [x] `/permission`, `/rename` bare open their inline level; `/mcp` cursor on MCP.
 - [ ] tmux drive (own `tmux -L`, `-f /dev/null`, temp HOME, fake provider,
       `OPENAI_*`/`ANTHROPIC_*` unset): bare `/`, `/agents`, `/crew rooms` → `⏎`
-      → esc, `/rewind`, `/mcp`; captures in `docs/verification/m191/`.
+      → esc, `/rewind`, `/mcp`; capture evidence belongs in the PR review.
 - [ ] Gates: `cargo fmt --all -- --check`, `cargo check --workspace --all-targets
       --locked`, `cargo clippy … -D warnings`, `cargo test --workspace --locked`,
       `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`,
@@ -130,3 +130,25 @@ fold one into the other by the rule below, else leave both.
   refuse the second fold with a warn notice instead.
 - A guide page or skill still telling the person to type `/agents`: it still
   works, but grep anyway so the docs name the panel.
+
+## Verified
+
+Verification evidence is in the PR review, outside the code repository.
+Terminal checks remain incomplete; further Windows verification is deferred.
+The unchecked exit criteria above are not claimed complete.
+
+## Implementation decisions
+
+- Fold contributions remain owned by their registering mod. Catalogue projection
+  runs after description middleware and refuses conflicting or hidden chains.
+- `/sessions` remains the all-directory site; `/resume` remains the recent and
+  workspace palette plus direct-ID reopening. They serve different places.
+- Team is a read-only fourth crew tab using the shared typed seating service.
+- Concrete passive Event-only hooks use the existing owner running set for live
+  delivery. Mixed, empty, decision and source hooks remain restart-only; the
+  ADR-0088 amendment reconciles this with ADR-0090's crew live-switch intent.
+- Owner-directed lifecycle callbacks replace command-string disable observers
+  in crew, model and schedule (ADR-0096). Only effective disable clears transient
+  panes; refused, pending and overridden switch outcomes preserve them.
+- No dependencies, transcript or glyph changes were introduced. The frozen
+  plugin schema remains unchanged.

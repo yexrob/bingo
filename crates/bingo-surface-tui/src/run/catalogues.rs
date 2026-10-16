@@ -52,14 +52,14 @@ pub(super) fn view_changed(run: &mut Run) {
 async fn request_commands(
     host: HostHandle,
     session: SessionId,
-) -> Result<Vec<CommandSpec>, KernelError> {
+) -> Result<Vec<bingo_sdk::CatalogEntry>, KernelError> {
     tokio::time::timeout(
         COMMAND_WAIT,
         host.catalog_for(&session, CatalogKind::Commands),
     )
     .await
     .map_err(|_| KernelError::new(bingo_sdk::ErrorCode::Timeout, "command catalogue timed out"))?
-    .map(|catalog| commands::specs_from(&catalog))
+    .map(|catalog| catalog.entries)
 }
 
 fn next_fetch(run: &mut Run) -> u64 {
@@ -67,14 +67,19 @@ fn next_fetch(run: &mut Run) -> u64 {
     run.command_fetch
 }
 
-pub(super) fn received(run: &mut Run, fetch: u64, result: Result<Vec<CommandSpec>, KernelError>) {
+pub(super) fn received(
+    run: &mut Run,
+    fetch: u64,
+    result: Result<Vec<bingo_sdk::CatalogEntry>, KernelError>,
+) {
     if fetch != run.command_fetch {
         return;
     }
     run.typeahead.catalogue_pending = false;
     match result {
-        Ok(specs) => {
-            run.ui.catalogs.commands = specs;
+        Ok(entries) => {
+            run.ui.catalogs.commands = entries;
+            run.ui.placed.pulled.invalidate();
             site_keys::notices(run);
         }
         Err(error) => run.ui.notify(

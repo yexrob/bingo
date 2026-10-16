@@ -3,7 +3,7 @@ use crate::{
     doubles::{Recorder, TestSession},
     test_support::*,
 };
-use bingo_sdk::{Contribution, Plugin, Registrar, View};
+use bingo_sdk::{CommandSpec, Contribution, Plugin, Registrar, View};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -73,7 +73,7 @@ async fn default_rebound_and_static_keys_use_the_command_catalogue() {
         let now = scene().1;
         let mut run = tests::idle_in(state, session.clone(), now.instant);
         run.data_dir = home.path().into();
-        run.ui.catalogs.commands = specs();
+        run.ui.catalogs.commands = crate::commands::entries(specs());
         run.ui.composer.set("draft");
         site_keys::notices(&mut run);
         let mut screen = Recorder::default();
@@ -867,12 +867,12 @@ async fn a_synchronous_browse_projection_owes_the_frame_with_its_matches() {
     let mut run = tests::idle(now.instant);
     run.session.tree = solo(&state);
     run.host = host.handle();
-    run.ui.catalogs.commands.push(
+    run.ui.catalogs.commands.push(crate::commands::entry(
         serde_json::from_value(
             json!({"name":"browse","hint":"browse","args":{"kind":"none"},"family":"terminal"}),
         )
         .unwrap(),
-    );
+    ));
     crate::browse::open(&mut run.ui, &run.session.tree, None, false, now);
     let mut screen = Recorder::default();
     run.paint(&mut screen, Wake::Frame, now).unwrap();

@@ -176,8 +176,29 @@ async fn disabled_crew_retains_tables_and_no_key() {
         .unwrap();
     let catalog = host.catalog(CatalogKind::Commands).await.unwrap();
     assert!(!catalog.entries.iter().any(|e| e.id == "crew"));
-    for line in ["/agents", "/rooms", "/tasks"] {
-        assert_eq!(command(&mut root, line).await["kind"], "applied");
+    for name in ["agents", "room", "tasks", "team"] {
+        let entry = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id == name)
+            .unwrap();
+        assert!(entry.meta.get("foldedInto").is_none());
+    }
+    for line in ["/agents", "/room", "/rooms", "/tasks", "/team"] {
+        let receipt = command(&mut root, line).await;
+        assert_eq!(receipt["kind"], "applied", "{line}: {receipt}");
+        if line == "/agents" {
+            assert_eq!(
+                receipt["result"]["message"],
+                "no agents are running in this session"
+            );
+        } else {
+            assert!(receipt["result"].get("view").is_some(), "{line}: {receipt}");
+        }
+        assert!(
+            receipt["result"].get("surface").is_none(),
+            "{line}: {receipt}"
+        );
     }
     host.shutdown().await.unwrap();
     assert!(
@@ -236,3 +257,6 @@ async fn model_picker(host: &impl HostApi, root: &mut Attachment, child: &Sessio
 
 #[path = "crew_panel/actions.rs"]
 mod actions;
+
+#[path = "crew_panel/folds.rs"]
+mod folds;

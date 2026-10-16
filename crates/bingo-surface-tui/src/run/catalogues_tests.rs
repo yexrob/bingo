@@ -107,7 +107,7 @@ async fn a_background_error_releases_held_input_and_allows_a_later_refresh() {
     assert!(run.typeahead.is_empty());
     assert_eq!(run.ui.composer.text(), "a");
     run.reply(
-        Reply::Commands(0, Ok(commands::specs_from(&answer(CatalogKind::Commands)))),
+        Reply::Commands(0, Ok(answer(CatalogKind::Commands).entries)),
         &mut None,
     );
     assert_eq!(
@@ -263,4 +263,73 @@ async fn command_requests_follow_the_viewed_session() {
         bingo_sdk::testing::HostCall::CatalogFor { session, kind: CatalogKind::Commands }
         if session == &child_id()
     )));
+}
+
+#[tokio::test]
+async fn a_disabled_panel_restores_its_folded_names_on_the_next_palette_open() {
+    let now = still(scene().1);
+    let mut state = state();
+    state.config.kernel["render"] = serde_json::json!({"Palette":[{}]});
+    let mut run =
+        super::super::tests::idle_in(state, Arc::new(TestSession::default()), now.instant);
+    let host = TestHost::default();
+    let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let live = enabled.clone();
+    host.on_catalog(move |kind| {
+        let enabled = live.load(std::sync::atomic::Ordering::SeqCst);
+        async move {
+            let entries = if kind == CatalogKind::Commands {
+                ["crew", "agents"].into_iter().filter(|name| enabled || *name != "crew")
+                    .map(|name| bingo_sdk::CatalogEntry {
+                        id: name.into(), label: name.into(),
+                        meta: serde_json::json!({"name":name,"hint":"fixture","family":"session",
+                            "args":{"kind":"none"},"foldedInto":if enabled && name == "agents" {Some("crew")} else {None}}),
+                    }).collect()
+            } else { vec![] };
+            Ok(Catalog { kind, entries })
+        }
+    });
+    run.host = host.handle();
+    fetch_all(&mut run).await;
+    run.ui.composer.set("/a");
+    assert!(
+        run.ui
+            .suggestions("/tmp", &[])
+            .iter()
+            .all(|row| row.label != "/agents")
+    );
+    let fixture = crate::palette::tests::Fixture::new();
+    crate::palette::open(
+        &mut run.ui,
+        bingo_sdk::component::PaletteOpen::Commands,
+        now,
+    );
+    let shown = fixture
+        .paint_tree(&mut run.ui, &run.session.tree, now, 108, 30)
+        .await;
+    assert!(shown.contains("/crew"), "{shown}");
+    assert!(!shown.contains("/agents"), "{shown}");
+    crate::palette::close(&mut run.ui, now);
+    enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+    let (tx, mut replies) = mpsc::channel(16);
+    run.replies = tx;
+    changed(&mut run, CatalogKind::Commands);
+    run.reply(replies.recv().await.unwrap(), &mut None);
+    run.ui.composer.set("/a");
+    assert!(
+        run.ui
+            .suggestions("/tmp", &[])
+            .iter()
+            .any(|row| row.label == "/agents")
+    );
+    crate::palette::open(
+        &mut run.ui,
+        bingo_sdk::component::PaletteOpen::Commands,
+        now,
+    );
+    let shown = fixture
+        .paint_tree(&mut run.ui, &run.session.tree, now, 108, 30)
+        .await;
+    assert!(shown.contains("/agents"), "{shown}");
+    assert!(!shown.contains("/crew"), "{shown}");
 }

@@ -31,7 +31,7 @@ pub const BINDINGS: &[Binding] = &[
         // The stack of [`ESCAPES`], in the order it is obeyed; a test holds
         // the two together.
         keys: "esc",
-        description: "sheet → card → dropdown → interrupt",
+        description: "sheet → card → dropdown → interrupt → back",
     },
     Binding {
         keys: "esc esc",
@@ -145,6 +145,8 @@ pub enum Escape {
     Dropdown,
     /// Nothing is open, so the turn is what `esc` stops.
     Interrupt,
+    /// An idle sub-session with an empty composer returns to its parent.
+    Back,
 }
 
 /// The stack, in the order it is closed, with the word the help prints.
@@ -153,6 +155,7 @@ pub const ESCAPES: &[(Escape, &str)] = &[
     (Escape::Card, "card"),
     (Escape::Dropdown, "dropdown"),
     (Escape::Interrupt, "interrupt"),
+    (Escape::Back, "back"),
 ];
 
 /// What is open when `esc` is pressed.
@@ -162,6 +165,7 @@ pub struct Open {
     pub card: bool,
     pub dropdown: bool,
     pub busy: bool,
+    pub subsession: bool,
 }
 
 impl Open {
@@ -171,6 +175,7 @@ impl Open {
             Escape::Card => self.card,
             Escape::Dropdown => self.dropdown,
             Escape::Interrupt => self.busy,
+            Escape::Back => self.subsession,
         }
     }
 }
@@ -291,6 +296,7 @@ mod tests {
             card: true,
             dropdown: true,
             busy: true,
+            subsession: true,
         };
         assert_eq!(escape(all), Some(Escape::Sheet));
         assert_eq!(
@@ -314,6 +320,13 @@ mod tests {
                 ..Open::default()
             }),
             Some(Escape::Interrupt)
+        );
+        assert_eq!(
+            escape(Open {
+                subsession: true,
+                ..Open::default()
+            }),
+            Some(Escape::Back)
         );
         assert_eq!(escape(Open::default()), None, "and nothing to close");
     }

@@ -496,11 +496,23 @@ async fn outside_mod_wraps_the_plugins_site_and_disabled_commands_keep_tables() 
     assert!(tree.fold().contains("one list"));
     let opened = command(
         &mut attachment,
-        Input::text("/modules", Origin::surface("rpc")),
+        Input::text(
+            "/modules",
+            Origin::surface("tui").on(render::SurfaceName::Terminal),
+        ),
     )
     .await;
     assert!(
         matches!(opened,IntentOutcome::Applied {result} if result["surface"]["name"]=="Plugins")
+    );
+    let rpc = command(
+        &mut attachment,
+        Input::text("/plugins", Origin::surface("rpc")),
+    )
+    .await;
+    assert!(
+        matches!(rpc,IntentOutcome::Applied {ref result} if result["view"]["kind"]=="table"),
+        "{rpc:?}"
     );
     command(
         &mut attachment,
@@ -509,7 +521,10 @@ async fn outside_mod_wraps_the_plugins_site_and_disabled_commands_keep_tables() 
     .await;
     let plain = command(
         &mut attachment,
-        Input::text("/plugins", Origin::surface("rpc")),
+        Input::text(
+            "/plugins",
+            Origin::surface("tui").on(render::SurfaceName::Terminal),
+        ),
     )
     .await;
     assert!(

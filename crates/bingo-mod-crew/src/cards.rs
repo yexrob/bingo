@@ -127,3 +127,23 @@ pub fn task_card(row: &TaskRow) -> Card {
         )],
     }
 }
+
+pub fn team_card(row: &bingo_services::agents_control::TeamRow) -> Card {
+    let state = row
+        .summary
+        .as_ref()
+        .map_or(Some(Lifecycle::Unseated), Lifecycle::of_summary)
+        .map_or("", Lifecycle::word);
+    Card {
+        line: format!("{}   {state}", row.role),
+        details: vec![
+            format!("agent    {}", row.agent.as_deref().unwrap_or("-")),
+            format!(
+                "session  {}",
+                row.summary
+                    .as_ref()
+                    .map_or("-", |summary| summary.id.as_str())
+            ),
+        ],
+    }
+}

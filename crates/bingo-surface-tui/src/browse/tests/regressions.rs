@@ -196,12 +196,12 @@ fn busy_notices(ui: &Ui) -> usize {
 async fn busy_card_refuses_preview_without_reading_files() {
     let fixture = Fixture::new();
     let (mut state, mut ui, now) = setup(&fixture);
-    ui.catalogs.commands.push(
+    ui.catalogs.commands.push(crate::commands::entry(
         serde_json::from_value(
             json!({"name":"rewind","hint":"rewind","args":{"kind":"none"},"family":"session"}),
         )
         .unwrap(),
-    );
+    ));
     state.apply(&frame(1, started("running")));
     ui.focus
         .show(Open::Rewind(crate::rewind::Rewind::default()), now.instant);

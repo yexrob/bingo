@@ -281,17 +281,19 @@ fn live_faces_pulse_through_the_cache_and_stillness_preserves_words() {
 fn strip_scopes_overflows_finishes_and_clicks() {
     let mut tree = crew();
     let (mut ui, now) = scene();
-    ui.catalogs.commands.push(bingo_sdk::CommandSpec {
-        opens: false,
-        name: "resume".into(),
-        keys: vec!["ctrl+r".into()],
-        aliases: vec![],
-        hint: String::new(),
-        args: bingo_sdk::ArgSpec::None,
-        instant: true,
-        hidden: false,
-        family: "session".into(),
-    });
+    ui.catalogs
+        .commands
+        .push(crate::commands::entry(bingo_sdk::CommandSpec {
+            opens: false,
+            name: "resume".into(),
+            keys: vec!["ctrl+r".into()],
+            aliases: vec![],
+            hint: String::new(),
+            args: bingo_sdk::ArgSpec::None,
+            instant: true,
+            hidden: false,
+            family: "session".into(),
+        }));
     let tiny = crate::crew::spans(&tree, 120, 14, now);
     assert_eq!(
         tiny.iter()

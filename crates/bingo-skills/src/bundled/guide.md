@@ -45,14 +45,14 @@ A line starting with `/` is a command, a line starting with `!` a shell line;
 the session actor parses both, and no surface parses a command it does not own.
 These are the kernel's and the surface's — every other is a plugin's.
 
-- `/model [<provider>/]<model>` — what the next turn runs on. There is no
-  `/provider`: `anthropic/claude-x` names both.
+- `/model [<provider>/]<model>` — what the next turn runs on. Bare `/model`
+  opens the terminal panel; `/provider` and `/models` verbs stay available.
 - `/think minimal|low|medium|high|xhigh|max|off` — saved effort for any model;
   `off` omits the parameter, leaving the server's default in place.
 - `/compact [instructions]` — summarise the conversation so far and keep going.
 - `/permission [mode]` — read or set this session's permission mode.
-- `/plugins [enable|disable <name>]`, alias `/modules` — a table of every
-  plugin's version, state, reason and origin. Switches save `enabledPlugins`;
+- `/plugins [enable|disable <name>]`, alias `/modules` — the terminal panel
+  for plugins and MCP; text clients show their table. Switches save `enabledPlugins`;
   eligible plugins switch now, others at next start with a reason. See
   `guide-mods-switches`. `bingo plugins list|enable|disable` manages the wish.
 - `/status` — cwd, provider and model, mode, context against the window, tokens.

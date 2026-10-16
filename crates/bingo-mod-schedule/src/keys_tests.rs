@@ -1,4 +1,21 @@
 use super::*;
+use bingo_services::schedule::Row;
+
+fn press(
+    cursor: &mut Cursor,
+    rows: &[Row],
+    shown: Option<&Row>,
+    confirming: Option<&Confirmation>,
+    key: &str,
+) -> Value {
+    let rows = rows
+        .iter()
+        .cloned()
+        .map(crate::rows::Row::Schedule)
+        .collect::<Vec<_>>();
+    let shown = shown.cloned().map(crate::rows::Row::Schedule);
+    super::press(cursor, &rows, shown.as_ref(), confirming, key)
+}
 fn row() -> Row {
     Row {
         id: "abcd".into(),
@@ -177,5 +194,70 @@ fn an_id_no_command_line_can_carry_runs_nothing() {
     assert_eq!(
         run("run", "01hz-x_9"),
         json!({"run":"/schedule run 01hz-x_9"})
+    );
+}
+
+fn wake() -> crate::rows::Row {
+    crate::rows::Row::Wake(bingo_services::schedule::Pending {
+        at: "2026-10-16T12:05:00Z".into(),
+        note: "check the build".into(),
+    })
+}
+
+#[test]
+fn a_wake_only_offers_ending_the_currently_shown_wake() {
+    let row = wake();
+    let rows = std::slice::from_ref(&row);
+    let mut cursor = Cursor {
+        selected: Some(crate::rows::Selection::Wake),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::press(&mut cursor, rows, Some(&row), None, "d"),
+        json!({"run":"/wake off"})
+    );
+    for key in ["space", "r", "c", "right", "enter"] {
+        assert_eq!(
+            super::press(&mut cursor, rows, Some(&row), None, key),
+            json!({})
+        );
+    }
+    let changed = crate::rows::Row::Wake(bingo_services::schedule::Pending {
+        at: "2026-10-16T12:10:00Z".into(),
+        note: "another wake".into(),
+    });
+    assert_eq!(
+        super::press(&mut cursor, &[changed], Some(&row), None, "d"),
+        json!({"message":"the list changed; look again"})
+    );
+    assert_eq!(
+        super::press(&mut cursor, &[], Some(&row), None, "d"),
+        json!({"message":"the list changed; look again"})
+    );
+}
+
+#[test]
+fn navigation_distinguishes_a_schedule_named_wake_from_the_pending_wake() {
+    let schedule = crate::rows::Row::Schedule(Row {
+        id: "wake".into(),
+        ..row()
+    });
+    let wake = wake();
+    let rows = [schedule.clone(), wake.clone()];
+    let mut cursor = Cursor::default();
+    super::press(&mut cursor, &rows, Some(&schedule), None, "down");
+    assert_eq!(cursor.selected, Some(crate::rows::Selection::Wake));
+    assert_eq!(
+        super::press(&mut cursor, &rows, Some(&wake), None, "d"),
+        json!({"run":"/wake off"})
+    );
+    super::press(&mut cursor, &rows, Some(&wake), None, "up");
+    assert_eq!(
+        cursor.selected,
+        Some(crate::rows::Selection::Schedule("wake".into()))
+    );
+    assert_eq!(
+        super::press(&mut cursor, &rows, Some(&schedule), None, "r"),
+        json!({"run":"/schedule run wake"})
     );
 }

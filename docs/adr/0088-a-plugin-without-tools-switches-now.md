@@ -55,3 +55,13 @@ added; the ratchet question does not arise.
 - The headless `bingo plugins` subcommand still writes the wish only.
 
 Refs: ADR-0009, ADR-0048, ADR-0057, ADR-0074, ADR-0086, ADR-0087.
+
+## Amendment — 2026-10-16 (M191)
+
+Concrete in-process hooks with a nonempty matcher containing only `Event` are
+passive observers and may accompany hot contributions. Their owner is checked
+against the existing running switch set on each delivery, including observers
+held in snapshots; already-running calls are not cancelled. Empty, mixed or
+other hook matchers and `HookSource` retain next-start behavior. Request-shaping
+turn chains keep their existing snapshot semantics. This restores ADR-0090's
+live-switch intent without adding an SDK or wire contract.

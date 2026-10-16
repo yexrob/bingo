@@ -103,11 +103,15 @@ pub struct Card {
 pub struct Catalogs {
     pub current: Option<crate::palette::Current>,
     pub plugins: Vec<bingo_sdk::CatalogEntry>,
-    pub commands: Vec<CommandSpec>,
+    pub commands: Vec<bingo_sdk::CatalogEntry>,
     pub values: std::collections::BTreeMap<String, Vec<bingo_sdk::CatalogEntry>>,
 }
 
 impl Catalogs {
+    pub(crate) fn specs(&self) -> Vec<CommandSpec> {
+        commands::specs(&self.commands)
+    }
+
     pub(crate) fn values(
         &self,
     ) -> std::collections::BTreeMap<String, Vec<bingo_sdk::CatalogEntry>> {
@@ -417,7 +421,7 @@ impl Ui {
     /// kernel's, in that order.
     pub fn commands(&self) -> Vec<CommandSpec> {
         let mut all = commands::local_specs();
-        all.extend(self.catalogs.commands.iter().cloned());
+        all.extend(self.catalogs.specs());
         all
     }
 
@@ -435,7 +439,17 @@ impl Ui {
         let line = self.composer.text();
         match complete::mention(line) {
             Some(partial) => self.mentioned(cwd, partial, line, mentions),
-            None => commands::suggestions(line, &self.commands()),
+            None => {
+                let mut offered = commands::local_specs();
+                offered.extend(
+                    self.catalogs
+                        .commands
+                        .iter()
+                        .filter(|entry| entry.meta["foldedInto"].as_str().is_none())
+                        .filter_map(|entry| serde_json::from_value(entry.meta.clone()).ok()),
+                );
+                commands::suggestions(line, &offered)
+            }
         }
     }
 

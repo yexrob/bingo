@@ -36,6 +36,22 @@ fn groups_keep_the_opener_first_and_cursor_on_its_name() {
     );
 }
 #[test]
+fn mcp_opens_with_its_first_server_selected_before_builtins() {
+    let (plugins, servers) = fixture();
+    let mut cursor = Cursor::default();
+    let props = component::PluginsProps {
+        open: component::PluginsOpen::Mcp,
+        session: SessionId::from_raw("s"),
+        plugins,
+        action: Action {
+            name: "client".into(),
+            args: json!({}),
+        },
+    };
+    draw::tree(&props, &servers, &mut cursor, "mcp", 108, 20);
+    assert_eq!(cursor.selected, format!("m:{}", servers[0].name));
+}
+#[test]
 fn every_server_primary_action_is_a_command_and_reconnect_is_guarded() {
     let (_, mut servers) = fixture();
     let server = &mut servers[0];

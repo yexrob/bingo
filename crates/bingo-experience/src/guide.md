@@ -66,9 +66,11 @@ reads differently in two places. Ranking is BM25 over four fields, and a
 trigger word weighs three times what a note does: a trigger says what an entry
 is *for*.
 
-## `/experience`
+## Memory and experience
 
-The library as a table — `id`, `status`, `summary`, `outcomes`, `age` — in
+In the terminal, `/memory` includes the experience group; bare `/experience`
+opens that group. Text clients and terminals with the memory mod disabled
+keep `/experience` as a table — `id`, `status`, `summary`, `outcomes`, `age` — in
 that same order, with a line for any file that was meant to be an entry and
 could not be read. It runs while a turn is busy.
 

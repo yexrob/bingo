@@ -204,7 +204,7 @@ async fn switch_owned(
         host.plugins_changed();
         return Ok(Switched::Overridden(effective, source));
     }
-    let result = apply(host.registry(), target, effective).await;
+    let result = apply(host, target, effective).await;
     host.plugins_changed();
     result.map(|kind| Switched::Applied(effective, kind))
 }
@@ -250,23 +250,15 @@ fn effective_wish(
 }
 
 async fn apply(
-    registry: &Registry,
+    host: &crate::host::Host,
     name: &str,
     enabled: bool,
 ) -> Result<bingo_sdk::plugin::PluginSwitch, bingo_sdk::KernelError> {
     use bingo_sdk::plugin::PluginSwitch;
+    let registry = host.registry();
     if let Some(kind) = registry.switch_kind(name) {
-        if kind == PluginSwitch::Now {
-            let mut off = registry
-                .switches
-                .running
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            if enabled {
-                off.remove(name);
-            } else {
-                off.insert(name.into());
-            }
+        if kind == PluginSwitch::Now && switch_running(registry, name, enabled) {
+            crate::host::plugin_lifecycle::disabled(host, name).await;
         }
         return Ok(kind.clone());
     }
@@ -287,6 +279,20 @@ async fn apply(
     Ok(PluginSwitch::NextStart {
         why: "plugin unavailable".into(),
     })
+}
+
+fn switch_running(registry: &Registry, name: &str, enabled: bool) -> bool {
+    let mut off = registry
+        .switches
+        .running
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    if enabled {
+        off.remove(name);
+        false
+    } else {
+        off.insert(name.into())
+    }
 }
 
 /// What the user layer already says about the plugins, read to be written

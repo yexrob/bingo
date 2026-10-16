@@ -54,7 +54,9 @@ impl Fixture {
         let link = contributions
             .iter()
             .find_map(|c| {
-                if let Contribution::Interceptor { link, .. } = c {
+                if let Contribution::Interceptor { link, .. } = c
+                    && link.id() == "browse"
+                {
                     Some(link.clone())
                 } else {
                     None
@@ -212,7 +214,7 @@ fn setup(fixture: &Fixture) -> (SessionState, Ui, Now) {
     }
     state.transcript = items.into_iter().collect();
     let (mut ui, now) = scene();
-    ui.catalogs.commands = fixture.commands.clone();
+    ui.catalogs.commands = crate::commands::entries(fixture.commands.clone());
     (state, ui, still(now))
 }
 #[tokio::test]
@@ -327,12 +329,12 @@ async fn double_escape_card_confirms_and_disabled_card_submits_directly() {
     for enabled in [true, false] {
         let fixture = Fixture::new();
         let (mut state, mut ui, now) = setup(&fixture);
-        ui.catalogs.commands.push(
+        ui.catalogs.commands.push(crate::commands::entry(
             serde_json::from_value(
                 json!({"name":"rewind","hint":"rewind","args":{"kind":"none"},"family":"session"}),
             )
             .unwrap(),
-        );
+        ));
         if !enabled {
             disable(&mut state);
         }
@@ -439,12 +441,12 @@ fn an_unmatched_browse_replacement_cannot_wait_for_a_drawing() {
 fn an_unvouched_answer_runs_no_line_only_the_person_may_write() {
     let fixture = Fixture::new();
     let (state, mut ui, now) = setup(&fixture);
-    ui.catalogs.commands.push(
+    ui.catalogs.commands.push(crate::commands::entry(
         serde_json::from_value(
             json!({"name":"rewind","hint":"rewind","args":{"kind":"none"},"family":"session"}),
         )
         .unwrap(),
-    );
+    ));
     for (line, vouched, runs) in [
         ("/rewind t2", false, true),
         ("/plugins trust lift full", false, false),

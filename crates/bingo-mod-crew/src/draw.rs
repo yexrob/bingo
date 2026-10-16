@@ -146,6 +146,7 @@ fn empty(tab: Tab) -> &'static str {
         Tab::Agents => "No agents here yet.",
         Tab::Rooms => "No rooms here yet.",
         Tab::Tasks => "No tasks here yet.",
+        Tab::Team => "This project declares no team roles.",
     }
 }
 fn header(panel: &Panel, rows: &Rows) -> String {
@@ -204,6 +205,13 @@ fn cards(panel: &Panel, rows: &Rows, models: &[CatalogEntry]) -> Vec<Card> {
             .iter()
             .map(cards::task_card)
             .collect(),
+        Tab::Team => rows
+            .team
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(cards::team_card)
+            .collect(),
     }
 }
 fn hint(tab: Tab) -> Vec<component::KeyPair> {
@@ -218,6 +226,7 @@ fn hint(tab: Tab) -> Vec<component::KeyPair> {
             Pair::new("←→", "model"),
         ],
         Tab::Rooms => vec![
+            Pair::new("⏎", "open"),
             Pair::new("p", "purpose"),
             Pair::new("a", "seat"),
             Pair::new("u", "unseat"),
@@ -228,6 +237,7 @@ fn hint(tab: Tab) -> Vec<component::KeyPair> {
             Pair::new("space", "done/open"),
             Pair::new("o", "owner"),
         ],
+        Tab::Team => vec![],
     });
     pairs.push(Pair::new("esc", "close"));
     pairs
@@ -238,7 +248,7 @@ mod chrome_tests {
     use super::*;
     #[test]
     fn all_tabs_keep_hints_out_of_the_body() {
-        for tab in [Tab::Agents, Tab::Rooms, Tab::Tasks] {
+        for tab in Tab::ALL {
             let panel = Panel {
                 tab,
                 ..Default::default()

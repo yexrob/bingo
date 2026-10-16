@@ -7,6 +7,8 @@ mod catalogue;
 mod channel_claim;
 #[path = "../channels.rs"]
 mod channels;
+#[path = "../command_folds.rs"]
+mod command_folds;
 #[path = "../crew_panel.rs"]
 mod crew_panel;
 #[path = "../instances.rs"]

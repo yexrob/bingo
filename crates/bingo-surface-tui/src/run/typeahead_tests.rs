@@ -127,17 +127,20 @@ async fn a_command_typed_in_one_burst_runs_once_the_palette_answers() {
 async fn keys_typed_behind_a_command_reach_the_site_it_opens() {
     let now = still(scene().1);
     let (_home, mut run, session) = palette_run(now);
-    run.ui.catalogs.commands.push(bingo_sdk::CommandSpec {
-        name: "sessions".into(),
-        opens: true,
-        keys: vec![],
-        aliases: vec![],
-        hint: String::new(),
-        args: bingo_sdk::ArgSpec::None,
-        instant: true,
-        hidden: false,
-        family: "session".into(),
-    });
+    run.ui
+        .catalogs
+        .commands
+        .push(crate::commands::entry(bingo_sdk::CommandSpec {
+            name: "sessions".into(),
+            opens: true,
+            keys: vec![],
+            aliases: vec![],
+            hint: String::new(),
+            args: bingo_sdk::ArgSpec::None,
+            instant: true,
+            hidden: false,
+            family: "session".into(),
+        }));
     type_burst(&mut run, "/sessions\nabc");
     run.terminal_event(Term::Paste("X".into()));
     type_burst(&mut run, "de");

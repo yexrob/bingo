@@ -11,6 +11,7 @@ use bingo_services::{
 
 fn rows() -> Rows {
     Rows {
+        team: None,
         agents: Some(vec![AgentRow {
             summary: serde_json::from_value(serde_json::json!({
                 "id":"ses_child","title":"reviewer","cwd":"/work",
@@ -37,7 +38,7 @@ fn rows() -> Rows {
 #[test]
 fn navigation_and_empty_board_keys_are_total() {
     let rows = Rows::default();
-    for tab in [Tab::Agents, Tab::Rooms, Tab::Tasks] {
+    for tab in [Tab::Agents, Tab::Rooms, Tab::Tasks, Tab::Team] {
         let panel = Panel {
             tab,
             ..Default::default()
@@ -102,6 +103,10 @@ fn room_keys_prefill_or_confirm() {
         tab: Tab::Rooms,
         ..Default::default()
     };
+    assert_eq!(
+        operation(&panel, &rows, "enter"),
+        Operation::View(SessionId::from_raw("ses_room"))
+    );
     for (key, verb) in [("p", "purpose"), ("a", "seat"), ("u", "unseat")] {
         assert_eq!(
             operation(&panel, &rows, key),
@@ -128,6 +133,28 @@ fn task_keys_change_status_or_prefill_owner() {
         operation(&panel, &rows, "o"),
         Operation::Fill("/tasks assign 1 ".into())
     );
+}
+
+#[test]
+fn declared_team_roles_are_read_only() {
+    let rows = Rows {
+        team: Some(vec![bingo_services::agents_control::TeamRow {
+            role: "reviewer".into(),
+            agent: None,
+            summary: None,
+        }]),
+        ..Default::default()
+    };
+    assert_eq!(rows.tabs(), [Tab::Team]);
+    assert_eq!(rows.len(Tab::Team), 1);
+    assert_eq!(rows.identity(Tab::Team, 0), "reviewer");
+    let panel = Panel {
+        tab: Tab::Team,
+        ..Default::default()
+    };
+    for key in ["enter", "s", "x", "m", "+", "space"] {
+        assert_eq!(operation(&panel, &rows, key), Operation::None);
+    }
 }
 #[test]
 fn confirmations_hold_the_target_and_require_enter() {

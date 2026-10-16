@@ -24,7 +24,7 @@ expression: screen
 "   keys                                                                                                     "
 "   shift+tab     cycle permission mode                                                             default  "
 "   /             commands, in this list                                                                     "
-"   esc           sheet → card → dropdown → interrupt                                                        "
+"   esc           sheet → card → dropdown → interrupt → back                                                 "
 "   ctrl+o        expand result · then all                                                                   "
 "   ctrl+t        tasks band on and off                                                                      "
 "   1-9 · y/a/n   answer the open dialog                                                                     "

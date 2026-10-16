@@ -132,7 +132,7 @@ fn model_chords_submit_their_bound_lines_without_opening() {
             chord: chord.into(),
             args: "next".into(),
         }];
-        ui.catalogs.commands.push(spec);
+        ui.catalogs.commands.push(crate::commands::entry(spec));
     }
     for (letter, line) in [('m', "/model next"), ('t', "/think next")] {
         let effects = crate::input::on_key(

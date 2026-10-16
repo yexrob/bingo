@@ -7,10 +7,10 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{
-    Attachment, CatalogKind, ClientIdentity, CloseReason, CommandSpec, Event, Exit, FrameStream,
-    GatewayEvent, GatewayStream, HostHandle, Input, IntentId, IntentOutcome, InterruptScope,
-    KernelError, Level, OpenOptions, SessionFilter, SessionHandle, SessionId, SessionSelector,
-    SessionState, SessionSummary, SurfaceOptions, View,
+    Attachment, CatalogKind, ClientIdentity, CloseReason, Event, Exit, FrameStream, GatewayEvent,
+    GatewayStream, HostHandle, Input, IntentId, IntentOutcome, InterruptScope, KernelError, Level,
+    OpenOptions, SessionFilter, SessionHandle, SessionId, SessionSelector, SessionState,
+    SessionSummary, SurfaceOptions, View,
 };
 use crossterm::event::Event as Term;
 use futures::{Stream, StreamExt};
@@ -51,7 +51,7 @@ use crate::graphics::{Stored, decoded, linked};
 use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Ui};
-use crate::{SURFACE_ID, clipboard, commands, history, input, late, pictures, pointer, viewer};
+use crate::{SURFACE_ID, clipboard, history, input, late, pictures, pointer, viewer};
 
 /// How often a frame is redrawn *while something is moving*: thirty a second
 /// (§6). Nothing moves when nothing is happening, and then there is no tick at
@@ -84,7 +84,7 @@ enum Reply {
     Resume(SessionId, Option<Box<SessionSummary>>),
     /// What the store holds, for the switcher's stored rows.
     Stored(String, Vec<SessionSummary>),
-    Commands(u64, Result<Vec<CommandSpec>, KernelError>),
+    Commands(u64, Result<Vec<bingo_sdk::CatalogEntry>, KernelError>),
     /// One catalogue's ids, by the source name a command's argument gives.
     Catalogue(String, Vec<bingo_sdk::CatalogEntry>),
     /// A line whose pictures have been read in (ADR-0041): the loop asked for

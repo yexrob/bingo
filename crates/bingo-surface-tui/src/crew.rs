@@ -76,12 +76,7 @@ fn entry(tree: &Tree, state: &SessionState, narrow: bool, now: Now) -> Vec<Span<
 
 /// The strip uses the installed command; disabling the mod restores the palette.
 pub fn open(ui: &mut crate::ui::Ui, tree: &Tree, now: Now) -> Vec<crate::effect::Effect> {
-    if ui
-        .catalogs
-        .commands
-        .iter()
-        .any(|command| command.name == "crew")
-    {
+    if ui.catalogs.commands.iter().any(|entry| entry.id == "crew") {
         crate::input::command_line(ui, tree, now, "/crew".into())
     } else {
         crate::palette::open(ui, bingo_sdk::component::PaletteOpen::Sessions, now)

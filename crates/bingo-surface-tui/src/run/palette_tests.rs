@@ -238,13 +238,13 @@ fn a_press_carries_only_the_catalogue_its_command_completes_from() {
     let mut state = state();
     state.config.kernel["render"] = json!({"Palette":[{}]});
     let mut run = tests::idle_in(state, Arc::new(TestSession::default()), now.instant);
-    run.ui.catalogs.commands = vec![
+    run.ui.catalogs.commands = crate::commands::entries(vec![
         serde_json::from_value(json!({
             "name":"model","hint":"","family":"session",
             "args":{"kind":"options","args":{"kind":"catalog","source":"models"},"flags":[]}
         }))
         .unwrap(),
-    ];
+    ]);
     for kind in ["models", "providers"] {
         run.ui.catalogs.values.insert(
             kind.into(),

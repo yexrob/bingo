@@ -26,7 +26,11 @@ fn rows(props: &PaletteProps) -> Vec<(String, Value)> {
         PaletteOpen::Commands => props
             .commands
             .iter()
-            .filter(|entry| entry.meta["hidden"] != true && entry.id.starts_with(&query))
+            .filter(|entry| {
+                entry.meta["hidden"] != true
+                    && entry.meta["foldedInto"].as_str().is_none()
+                    && entry.id.starts_with(&query)
+            })
             .map(|entry| {
                 (
                     format!("/{}", entry.id),

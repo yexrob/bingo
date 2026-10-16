@@ -123,7 +123,11 @@ pub fn offered(ui: &Ui, tree: &Tree) -> bool {
         && bingo_sdk::render::matched(&tree.viewed().config)
             .0
             .contains_key(&render::Component::Browse)
-        && ui.catalogs.commands.iter().any(|s| s.name == "browse")
+        && ui
+            .catalogs
+            .commands
+            .iter()
+            .any(|entry| entry.id == "browse")
 }
 pub fn draw(
     ui: &Ui,

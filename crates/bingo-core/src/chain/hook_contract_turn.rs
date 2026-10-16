@@ -13,7 +13,7 @@ impl Hook for Observer {
     fn matcher(&self) -> HookMatcher {
         HookMatcher {
             points: vec![self.point],
-            tool: Some("Echo*".into()).filter(|_| self.point == HookPoint::AfterTool),
+            tool: (self.point == HookPoint::AfterTool).then_some("Echo*".into()),
         }
     }
     async fn after_tool(&self, call: &ToolCall, _: &ToolOutput, _: &HookContext) -> HookOutcome {

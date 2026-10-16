@@ -6,6 +6,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+#[derive(Default)]
+pub struct RegisteredCommands {
+    pub entries: Vec<OwnedCommand>,
+    pub(super) folds: Vec<super::registry_folds::OwnedCommandFold>,
+}
+
 #[derive(Clone)]
 pub struct OwnedCommand {
     pub plugin: String,

@@ -183,7 +183,7 @@ fn setup() -> (SessionState, Ui, Now) {
         ),
     );
     let (mut ui, now) = scene();
-    ui.catalogs.commands=[("model",json!({"kind":"catalog","source":"models"})),("think",json!({"kind":"words","values":["off","low","high"]})),("rename",json!({"kind":"free","hint":"a name for this session"})),("permission",json!({"kind":"words","values":["default","acceptEdits","plan"]})),("resume",json!({"kind":"none"})),("login",json!({"kind":"catalog","source":"providers"}))].into_iter().map(|(name,args)|serde_json::from_value(json!({"name":name,"hint":format!("choose {name}"),"args":args,"family":"session","keys":if name=="resume"{vec!["ctrl+r"]}else{vec![]}})).unwrap()).collect();
+    ui.catalogs.commands=crate::commands::entries([("model",json!({"kind":"catalog","source":"models"})),("think",json!({"kind":"words","values":["off","low","high"]})),("rename",json!({"kind":"free","hint":"a name for this session"})),("permission",json!({"kind":"words","values":["default","acceptEdits","plan"]})),("resume",json!({"kind":"none"})),("login",json!({"kind":"catalog","source":"providers"}))].into_iter().map(|(name,args)|serde_json::from_value(json!({"name":name,"hint":format!("choose {name}"),"args":args,"family":"session","keys":if name=="resume"{vec!["ctrl+r"]}else{vec![]}})).unwrap()).collect());
     ui.catalogs.values.insert(
         "models".into(),
         ["fake/small", "fake/large"]
@@ -263,17 +263,19 @@ fn skills(ui: &mut Ui, count: usize) {
             "project",
         ),
     });
-    ui.catalogs
-        .commands
-        .extend(skills.map(|(name, hint, shelf)| {
-            serde_json::from_value::<bingo_sdk::CommandSpec>(json!({
-                "name": name,
-                "hint": hint,
-                "args": {"kind": "free", "hint": ""},
-                "family": format!("skill/{shelf}"),
-            }))
-            .unwrap()
-        }));
+    ui.catalogs.commands.extend(
+        skills
+            .map(|(name, hint, shelf)| {
+                serde_json::from_value::<bingo_sdk::CommandSpec>(json!({
+                    "name": name,
+                    "hint": hint,
+                    "args": {"kind": "free", "hint": ""},
+                    "family": format!("skill/{shelf}"),
+                }))
+                .unwrap()
+            })
+            .map(crate::commands::entry),
+    );
 }
 #[tokio::test]
 async fn the_skills_group_at_zero_three_and_twenty() {
@@ -351,11 +353,13 @@ async fn search_arguments_escape_and_resume_use_the_same_site() {
 fn help_resume_and_shift_tab_keep_their_own_routes() {
     let (state, mut ui, now) = setup();
     let tree = solo(&state);
-    ui.catalogs.commands.push(CommandSpec {
-        opens: false,
-        name: "help".into(),
-        ..crate::commands::local_specs()[0].clone()
-    });
+    ui.catalogs
+        .commands
+        .push(crate::commands::entry(CommandSpec {
+            opens: false,
+            name: "help".into(),
+            ..crate::commands::local_specs()[0].clone()
+        }));
     for (key, line) in [(typed('?'), "/help"), (ctrl('r'), "/resume")] {
         let effects = crate::input::on_key(&mut ui, &tree, key, now);
         assert_eq!(effects[0], Effect::Run(line.into()));
@@ -588,4 +592,29 @@ async fn pending_queries_keep_the_accepted_drawing_and_its_height() {
     let moved = crate::input::on_key(&mut ui, &tree, key(KeyCode::Left), now);
     assert!(moved.is_empty());
     assert_eq!(draw_tree(80, 24, &tree, &mut ui, now), current);
+}
+
+#[tokio::test]
+async fn bare_permission_and_rename_enter_draw_their_inline_arguments() {
+    let fixture = Fixture::new();
+    let (state, mut ui, now) = setup();
+    for (name, offered) in [
+        ("permission", "acceptEdits"),
+        ("rename", "a name for this session"),
+    ] {
+        open(&mut ui, PaletteOpen::Commands, now);
+        ui.composer.set(&format!("/{name}"));
+        fixture.paint(&mut ui, &state, now, 80, 24).await;
+        let effects = fixture
+            .press(&mut ui, &state, key(KeyCode::Enter), now)
+            .await;
+        assert!(effects.is_empty());
+        assert_eq!(ui.composer.text(), format!("/{name} "));
+        let screen = fixture.paint(&mut ui, &state, now, 80, 24).await;
+        assert!(screen.contains(offered), "{screen}");
+        if name == "permission" {
+            assert!(screen.contains("now"), "{screen}");
+        }
+        close(&mut ui, now);
+    }
 }

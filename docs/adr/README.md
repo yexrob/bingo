@@ -79,3 +79,4 @@ first record; 0036 §2 answered it before it was named).
 - [0093 — Schedules are the person's too](0093-schedules-are-the-persons-too.md) — proposed
 - [0094 — A schedule carries who asked for it](0094-a-schedule-carries-who-asked.md)
 - [0095 — The frame follows the approved prototype](0095-the-frame-follows-the-prototype.md) — proposed
+- [0096 — The owner hears its disable](0096-the-owner-hears-its-disable.md)

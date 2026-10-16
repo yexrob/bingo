@@ -43,3 +43,23 @@ fn an_interrupted_fold_is_stopped_without_a_second_flag() {
             .contains("■ stopped")
     );
 }
+
+#[test]
+fn team_cards_include_seated_and_unseated_roles() {
+    let seated = bingo_services::agents_control::TeamRow {
+        role: "reviewer".into(),
+        agent: Some("reviewer".into()),
+        summary: Some(row("reviewer", "working").summary),
+    };
+    let card = team_card(&seated);
+    assert_eq!(card.line, "reviewer   working");
+    assert_eq!(card.details, ["agent    reviewer", "session  ses_child"]);
+    let unseated = bingo_services::agents_control::TeamRow {
+        role: "scout".into(),
+        agent: None,
+        summary: None,
+    };
+    let card = team_card(&unseated);
+    assert_eq!(card.line, "scout   not seated");
+    assert_eq!(card.details, ["agent    -", "session  -"]);
+}

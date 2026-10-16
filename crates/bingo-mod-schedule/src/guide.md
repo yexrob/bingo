@@ -2,6 +2,9 @@
 
 `/schedule` opens the panel. The top line names the runner holding the store.
 The `by` column says `you`, `model`, or `unconfirmed` (ADR-0094).
+A pending wake on this session appears after the schedules; `d` ends it.
+`/wake` opens the panel on that row; `/wake off` still ends it directly.
+The wake also appears in `/status`.
 Schedules fire only while bingo runs. Another process may hold the store;
 this panel can still run an enabled schedule now.
 
@@ -19,4 +22,4 @@ Forgetting leaves the session and its transcript intact. A fire in another
 process can add one extra turn when you run now.
 
 With `bingo.mod.schedule` disabled, `/schedule` shows the plain table and
-all command lines still work. The wake row belongs to `/status` independently.
+`/wake` shows its text view. All command lines still work.

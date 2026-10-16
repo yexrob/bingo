@@ -62,7 +62,7 @@ fn probe(host: &HostHandle, session: &SessionId, providers: &[CatalogEntry]) {
 }
 async fn opens(name: &str, args: &str, host: &HostHandle) -> Result<bool, KernelError> {
     match name {
-        "think" | "models" => Ok(args.is_empty()),
+        "think" | "models" | "provider" => Ok(args.is_empty()),
         "login" | "logout" => Ok(args.is_empty()),
         "model" if args.is_empty() => Ok(true),
         "model" if filters(args) => {
@@ -89,10 +89,12 @@ fn filters(args: &str) -> bool {
 
 async fn fallback(args: &str, value: &Value, next: Next<'_, Value, Value>) -> String {
     if args.is_empty() {
-        next.run(value.clone())
+        let plain = next
+            .run(value.clone())
             .await
+            .unwrap_or_else(|error| json!({"text":error.message}));
+        serde_json::from_value::<catalogue::CommandReply>(plain)
             .ok()
-            .and_then(|value| serde_json::from_value::<catalogue::CommandReply>(value).ok())
             .map(CommandOutcome::from)
             .and_then(|outcome| match outcome {
                 CommandOutcome::View { view } => Some(view.fold()),
@@ -174,6 +176,104 @@ fn start_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn model_aliases_open_the_picker_and_keep_each_original_fallback() {
+        for name in ["models", "provider"] {
+            let (host, command) = crate::test_support::host();
+            let (models, providers) = crate::test_support::entries();
+            host.on_catalog(move |kind| {
+                let entries = if kind == CatalogKind::Models {
+                    models.clone()
+                } else {
+                    providers.clone()
+                };
+                async move { Ok(Catalog { kind, entries }) }
+            });
+            let cx = HookContext {
+                session: command.session,
+                cwd: command.cwd,
+                host: command.host,
+                item: None,
+                turn: None,
+                provider: None,
+                model: None,
+            };
+            let shared = crate::Shared::default();
+            let opener = Commands(shared.clone());
+            let input = json!({"command":name,"args":"","surface":"terminal"});
+            let expected = input.clone();
+            let reply = opener
+                .chain(
+                    catalogue::COMMAND_RUN,
+                    &cx,
+                    input,
+                    Next::new(move |input| {
+                        assert_eq!(input, expected);
+                        Box::pin(async move {
+                            if name == "provider" {
+                                Err(KernelError::new(ErrorCode::InvalidInput, "provider usage"))
+                            } else {
+                                Ok(json!(CommandOutcome::View {
+                                    view: View::text("all models")
+                                }))
+                            }
+                        })
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply["action"]["name"], "Pane");
+            assert_eq!(reply["action"]["args"]["plugin"], "bingo.mod.models");
+            assert_eq!(
+                reply["fallback"],
+                if name == "models" {
+                    "all models"
+                } else {
+                    "provider usage"
+                }
+            );
+            assert_eq!(shared.lock().unwrap()[&cx.session].all, name == "models");
+        }
+    }
+
+    #[tokio::test]
+    async fn alias_arguments_and_other_surfaces_are_passed_through_unchanged() {
+        let (_, command) = crate::test_support::host();
+        let cx = HookContext {
+            session: command.session,
+            cwd: command.cwd,
+            host: command.host,
+            item: None,
+            turn: None,
+            provider: None,
+            model: None,
+        };
+        for (name, args, surface) in [
+            ("models", "refresh p", Some("terminal")),
+            ("provider", "remove p", Some("terminal")),
+            ("models", "", Some("text")),
+            ("provider", "", Some("chat")),
+            ("provider", "", None),
+        ] {
+            let input = json!({"command":name,"args":args,"surface":surface});
+            let expected = input.clone();
+            let reply = Commands(crate::Shared::default())
+                .chain(
+                    catalogue::COMMAND_RUN,
+                    &cx,
+                    input,
+                    Next::new(move |input| {
+                        assert_eq!(input, expected);
+                        Box::pin(async { Ok(json!({"text":"original command"})) })
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply, json!({"text":"original command"}));
+        }
+    }
+
     #[test]
     fn a_bare_word_or_a_provider_prefix_filters_and_a_path_switches() {
         assert!(filters("opus"));

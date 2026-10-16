@@ -185,7 +185,7 @@ mod publish_tests {
 mod terminal_commands {
     use super::*;
     #[test]
-    fn terminal_commands_are_not_published_to_chat() {
+    fn terminal_commands_are_absent_but_folded_text_commands_stay() {
         let catalog = Catalog {
             kind: CatalogKind::Commands,
             entries: vec![
@@ -199,6 +199,11 @@ mod terminal_commands {
                     label: "status".into(),
                     meta: serde_json::json!({"family":"session"}),
                 },
+                bingo_sdk::CatalogEntry {
+                    id: "agents".into(),
+                    label: "list agents".into(),
+                    meta: serde_json::json!({"family":"session","foldedInto":"crew"}),
+                },
             ],
         };
         let (menu, _) = entries(&catalog, vec![]);
@@ -206,7 +211,7 @@ mod terminal_commands {
             menu.iter()
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
-            ["status"]
+            ["status", "agents"]
         );
     }
 }

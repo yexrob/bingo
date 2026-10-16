@@ -28,10 +28,12 @@ The snapshots live under `<data_dir>/checkpoints/<session>/<turn>/`. One that
 cannot be taken is a log line, never a refused edit: a checkpoint is what
 makes an edit undoable, not what makes it allowed.
 
-## `/rewind`
+## Browse and rewind
 
-Bare, it is a table of this session's turns, newest first: the turn's id, the
-line that opened it, and the files that turn touched.
+In the terminal, `/browse` lists turns and `r` opens the rewind sheet. Bare
+`/rewind` opens that sheet directly. In text clients, or with the browse mod
+disabled, `/rewind` lists this session's turns, newest first: the turn's id,
+the line that opened it, and the files that turn touched.
 
 `/rewind <turn>` takes an id from that table and goes back to it immediately,
 without confirmation. The optional mode defaults to `both`:

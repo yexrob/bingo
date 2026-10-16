@@ -15,6 +15,8 @@ pub enum ContributionKind {
     Service,
     Context,
     Policy,
+    EventHooks,
+    Lifecycle,
     Hooks,
     Compactor,
     Source,
@@ -34,6 +36,8 @@ fn reason(kind: &ContributionKind) -> Option<&'static str> {
     Some(match kind {
         ContributionKind::Commands
         | ContributionKind::Catalogue
+        | ContributionKind::EventHooks
+        | ContributionKind::Lifecycle
         | ContributionKind::Interceptor {
             request_point: None,
         } => return None,
@@ -82,6 +86,8 @@ mod tests {
             (Service, Some("services")),
             (Context, Some("context contributors")),
             (Policy, Some("permission policy")),
+            (EventHooks, None),
+            (Lifecycle, None),
             (Hooks, Some("legacy hooks")),
             (Compactor, Some("compactor")),
             (Source, Some("late contributions")),

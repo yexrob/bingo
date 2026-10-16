@@ -111,6 +111,9 @@ fn group_lines(groups: &[Group], selected: usize) -> (Vec<View>, usize) {
     let mut index = 0;
     let mut at = 0;
     for group in groups {
+        if group.rows.is_empty() && index == selected {
+            at = lines.len();
+        }
         lines.push(dim(format!(" {} ({})", group.name, group.rows.len())));
         for row in &group.rows {
             if index == selected {

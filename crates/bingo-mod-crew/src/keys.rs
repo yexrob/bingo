@@ -42,6 +42,7 @@ pub fn operation(panel: &Panel, rows: &Rows, key: &str) -> Operation {
         Tab::Agents => agent(panel, rows, key),
         Tab::Rooms => room(panel, rows, key),
         Tab::Tasks => task(panel, rows, key),
+        Tab::Team => Operation::None,
     }
 }
 fn agent(panel: &Panel, rows: &Rows, key: &str) -> Operation {
@@ -76,6 +77,7 @@ fn room(panel: &Panel, rows: &Rows, key: &str) -> Operation {
         return Operation::None;
     };
     match key {
+        "enter" => Operation::View(row.id.clone()),
         "p" => Operation::Fill(format!("/rooms purpose {} ", row.name)),
         "a" => Operation::Fill(format!("/rooms seat {} ", row.name)),
         "u" => Operation::Fill(format!("/rooms unseat {} ", row.name)),

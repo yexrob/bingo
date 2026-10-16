@@ -81,6 +81,7 @@ pub fn chord(key: KeyEvent) -> Option<String> {
 pub fn bindings(ui: &Ui, state: &SessionState) -> Bindings {
     let settings: std::collections::BTreeMap<String, String> =
         serde_json::from_value(state.config.kernel["keys"].clone()).unwrap_or_default();
+    let commands = ui.catalogs.specs();
     let static_keys: Vec<_> = STATIC
         .iter()
         .copied()
@@ -89,8 +90,7 @@ pub fn bindings(ui: &Ui, state: &SessionState) -> Bindings {
                 .keys()
                 .map(String::as_str)
                 .chain(
-                    ui.catalogs
-                        .commands
+                    commands
                         .iter()
                         .flat_map(|command| &command.keys)
                         .map(bingo_sdk::KeyBinding::chord),
@@ -98,7 +98,7 @@ pub fn bindings(ui: &Ui, state: &SessionState) -> Bindings {
                 .filter(|key| editing(key)),
         )
         .collect();
-    bingo_sdk::keys::bindings(&ui.catalogs.commands, &settings, &static_keys)
+    bingo_sdk::keys::bindings(&commands, &settings, &static_keys)
 }
 
 fn editing(key: &str) -> bool {

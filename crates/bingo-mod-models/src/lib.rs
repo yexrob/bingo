@@ -3,6 +3,7 @@ mod bridge;
 pub mod card;
 mod commands;
 mod describe;
+mod disable;
 pub mod draw;
 pub mod guess;
 mod guide;
@@ -15,7 +16,10 @@ pub mod rows;
 pub mod sheet;
 mod sheet_actions;
 pub mod state;
-use bingo_sdk::*;
+use bingo_sdk::{
+    CommandFold, Contribution, ErrorCode, Interceptor, KernelError, Plugin, PluginError,
+    PluginManifest, Registrar, SessionId, plugin, render,
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -40,10 +44,17 @@ impl Plugin for Models {
     }
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let state = Shared::default();
+        registrar.add(Contribution::CommandFold(CommandFold {
+            into: "model".into(),
+            names: vec!["models".into(), "provider".into()],
+        }));
         registrar.add(Contribution::Command(Arc::new(keys::Handler(
             state.clone(),
         ))));
         registrar.add(Contribution::Hook(Arc::new(lifecycle::Lifecycle(
+            state.clone(),
+        ))));
+        registrar.add(Contribution::Lifecycle(Arc::new(disable::Disable(
             state.clone(),
         ))));
         for link in [

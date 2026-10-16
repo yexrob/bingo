@@ -130,6 +130,9 @@ fn surface(props: &PaletteProps, operation: Value) -> Result<CommandOutcome, Ker
 fn activate(target: Target, props: &PaletteProps) -> Value {
     match target {
         Target::Command(name) => {
+            if folded_typed(&name, props) {
+                return json!({"run":props.query.trim()});
+            }
             let spec = props
                 .commands
                 .iter()
@@ -141,7 +144,9 @@ fn activate(target: Target, props: &PaletteProps) -> Value {
                         .as_ref()
                         .is_some_and(|spec| spec.aliases.iter().any(|alias| alias == query))
             });
-            if !exact && spec.is_some_and(|spec| !spec.opens && !matches!(spec.args, ArgSpec::None))
+            if matches!(name.as_str(), "permission" | "rename")
+                || (!exact
+                    && spec.is_some_and(|spec| !spec.opens && !matches!(spec.args, ArgSpec::None)))
             {
                 json!({"edit":format!("/{name} ")})
             } else {
@@ -161,6 +166,19 @@ fn activate(target: Target, props: &PaletteProps) -> Value {
         Target::View(id) => json!({"view":id}),
         Target::Inert | Target::Expand(_) => Value::Null,
     }
+}
+
+fn folded_typed(destination: &str, props: &PaletteProps) -> bool {
+    let Some(name) = props.query.trim().strip_prefix('/') else {
+        return false;
+    };
+    props.commands.iter().any(|entry| {
+        entry.meta["foldedInto"].as_str() == Some(destination)
+            && (entry.id == name
+                || entry.meta["aliases"]
+                    .as_array()
+                    .is_some_and(|aliases| aliases.iter().any(|alias| alias == name)))
+    })
 }
 
 /// A skill runs as soon as it is chosen unless it asks for an argument the
@@ -628,5 +646,96 @@ pub(crate) mod review_tests {
             activate(Target::Command("permission".into()), &props),
             json!({"edit":"/permission "})
         );
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn props(query: &str) -> PaletteProps {
+        let mut props = super::review_tests::props();
+        props.open = component::PaletteOpen::Commands;
+        props.query = query.into();
+        props.commands = [
+            ("crew", None),
+            ("agents", Some("crew")),
+            ("room", Some("crew")),
+            ("permission", None),
+            ("rename", None),
+        ]
+        .map(|(name, into)| CatalogEntry {
+            id: name.into(),
+            label: name.into(),
+            meta: json!({"name":name,"hint":"fixture","family":"session",
+                    "foldedInto":into,"aliases":if name == "room" {vec!["rooms"]} else {vec![]},
+                    "args":if name == "rename" {json!({"kind":"free","hint":"session name"})}
+                        else {json!({"kind":"words","values":["default","acceptEdits","plan"]})}}),
+        })
+        .to_vec();
+        props
+    }
+
+    fn enter(query: &str) -> Value {
+        let props = props(query);
+        let (groups, selected) = crate::draw::groups(&props, &[], &Default::default());
+        let rows = groups
+            .iter()
+            .flat_map(|group| &group.rows)
+            .collect::<Vec<_>>();
+        let target = rows.get(selected).map(|row| row.target.clone());
+        let mut cursor = crate::Cursor {
+            selected,
+            ..Default::default()
+        };
+        operation(&mut cursor, &rows, target, "enter", &props)
+            .1
+            .unwrap()
+    }
+
+    #[test]
+    fn a_fully_typed_folded_name_dispatches_its_original_command() {
+        for line in [
+            "/agents",
+            "/room",
+            "/rooms",
+            "/agents stop scout",
+            "/room close design",
+        ] {
+            assert_eq!(enter(line), json!({"run":line}));
+        }
+        assert_eq!(enter("/agen"), json!({"edit":"/crew "}));
+    }
+
+    #[test]
+    fn bare_permission_and_rename_open_their_inline_levels() {
+        for name in ["permission", "rename"] {
+            assert_eq!(
+                enter(&format!("/{name}")),
+                json!({"edit":format!("/{name} ")})
+            );
+        }
+        assert_eq!(
+            enter("/rename release notes"),
+            json!({"run":"/rename release notes"})
+        );
+        let mut props = props("/permission ");
+        let entry = props
+            .commands
+            .iter_mut()
+            .find(|entry| entry.id == "permission")
+            .unwrap();
+        entry.meta["args"]["values"] = json!([
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
+        ]);
+        entry.meta["now"] = json!("plan");
+        let (groups, selected) = crate::draw::groups(&props, &[], &Default::default());
+        assert_eq!(groups[0].rows.len(), 5);
+        assert_eq!(groups[0].rows[selected].label, "plan");
+        assert_eq!(groups[0].rows[selected].now, "now");
     }
 }
