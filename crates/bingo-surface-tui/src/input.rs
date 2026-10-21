@@ -1101,6 +1101,7 @@ mod tests {
         );
         on_key(&mut ui, &tree, key(KeyCode::Enter), now);
         assert_eq!(ui.composer.text(), "@Cargo.toml ");
+        assert!(render(&state, &mut ui, still(now)).contains("@Cargo.toml ▍"));
         assert!(
             mention_list::offered(&ui, &tree).is_empty(),
             "a finished mention offers nothing more"
