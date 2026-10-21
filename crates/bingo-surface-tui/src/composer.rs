@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::pictures;
 
+pub const ROWS: usize = 8;
 pub const CARET_COLUMNS: usize = 1;
 pub const COLUMN: usize = crate::layout::grid::TX;
 pub const CARET_REST: std::time::Duration = std::time::Duration::from_secs(10);
@@ -16,6 +17,8 @@ pub fn width(width: usize) -> usize {
 }
 
 pub mod fill;
+mod viewport;
+pub use viewport::Hitbox;
 
 /// Where the editor's text sits on screen once it is folded into a box.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,8 +121,15 @@ impl Composer {
     /// The byte boundary at a visual row and terminal column.
     pub fn offset_at(&self, width: usize, row: usize, column: usize) -> Option<usize> {
         let lines = self.visual_lines(width);
-        let line = lines.get(row)?;
-        Some(offset_in_line(&line.text, line.start, column))
+        if let Some(line) = lines.get(row) {
+            return Some(offset_in_line(&line.text, line.start, column));
+        }
+        // An EOF caret row may still be on screen after another gesture moves it.
+        (row == lines.len()
+            && lines
+                .last()
+                .is_some_and(|line| line.text.width() >= width.max(1)))
+        .then_some(self.text.len())
     }
 
     pub fn picture(&mut self, number: u32, held: &pictures::Held) {
@@ -289,12 +299,13 @@ impl Composer {
     }
 
     fn delete_selection(&mut self) -> bool {
-        let Some(range) = self.selection_range() else {
+        let range = self.selection_range();
+        self.clear_selection();
+        let Some(range) = range.filter(|range| !range.is_empty()) else {
             return false;
         };
         self.text.replace_range(range.clone(), "");
         self.cursor = range.start;
-        self.clear_selection();
         true
     }
 
@@ -694,5 +705,38 @@ mod tests {
         c.pointer_release();
         assert_eq!(c.selected_text(), Some("你好"));
         assert_eq!(c.layout(10).selection, vec![Some(1..5), None]);
+    }
+
+    #[test]
+    fn empty_selections_fall_through_to_every_delete_operation() {
+        let operations: [fn(&mut Composer); 5] = [
+            Composer::backspace,
+            Composer::delete,
+            Composer::delete_word_left,
+            Composer::delete_to_line_start,
+            Composer::delete_to_line_end,
+        ];
+        for operation in operations {
+            for cursor in [0, 4, "one 你好".len()] {
+                let mut expected = at("one 你好", cursor);
+                let mut selected = expected.clone();
+                selected.select_right();
+                if selected.cursor != cursor {
+                    selected.select_left();
+                }
+                operation(&mut expected);
+                operation(&mut selected);
+                assert_eq!(selected, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn the_wrapped_caret_row_maps_back_to_the_end_of_the_draft() {
+        let c = at("a你", "a你".len());
+        assert_eq!(c.layout(3).cursor, (1, 0));
+        assert_eq!(c.offset_at(3, 1, 0), Some("a你".len()));
+        assert_eq!(c.offset_at(3, 1, 8), Some("a你".len()));
+        assert_eq!(c.offset_at(3, 2, 0), None);
     }
 }

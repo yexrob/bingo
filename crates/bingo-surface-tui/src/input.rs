@@ -2373,7 +2373,11 @@ mod tests {
         let (mut ui, now) = scene();
         ui.composer.set("a你好b\nnext");
         render(&state, &mut ui, now);
-        let area = ui.shown.composer_text.expect("the visible draft cells");
+        let area = ui
+            .shown
+            .composer_text
+            .expect("the visible draft cells")
+            .area;
         let mouse = |kind, column, row| MouseEvent {
             kind,
             column,
@@ -3506,3 +3510,6 @@ pub(crate) fn open_detail(ui: &mut Ui, state: &bingo_sdk::SessionState, now: Now
     crate::detail::open(ui, state, &frame, now);
     ui.shown = frame;
 }
+
+#[cfg(test)]
+mod composer_tests;

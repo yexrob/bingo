@@ -18,9 +18,6 @@ use crate::{
     transcript, views, window, wrap,
 };
 
-/// How tall the composer box may grow before it scrolls internally.
-const COMPOSER_ROWS: usize = 8;
-
 /// One render path for the whole tree: it paints the session in view and
 /// derives everything about the others — the counts in the footer, the
 /// `↳` rows, the switcher — from their states.
@@ -115,8 +112,8 @@ struct Draft {
 }
 impl Draft {
     fn rows(&self) -> usize {
-        self.layout.lines.len().clamp(1, COMPOSER_ROWS)
-            + usize::from(self.layout.lines.len() > COMPOSER_ROWS)
+        self.layout.lines.len().clamp(1, prompt::ROWS)
+            + usize::from(self.layout.lines.len() > prompt::ROWS)
     }
 }
 
@@ -845,23 +842,8 @@ fn render_draft(
         return;
     }
     let props = crate::keybar::composer(state, ui, frame);
-    let overflow =
-        usize::from(layout.lines.len() > COMPOSER_ROWS && area.height as usize > COMPOSER_ROWS);
-    let count = area
-        .height
-        .saturating_sub(overflow as u16)
-        .min(COMPOSER_ROWS as u16)
-        .min(u16::try_from(layout.lines.len()).unwrap_or(u16::MAX));
-    let prefix = prompt::COLUMN.saturating_add(props.tag.width());
-    let x = area
-        .x
-        .saturating_add(u16::try_from(prefix).unwrap_or(u16::MAX));
-    frame.composer_text = Some(Rect {
-        x,
-        y: area.y.saturating_add(overflow as u16),
-        width: area.right().saturating_sub(x),
-        height: count,
-    });
+    let hitbox = layout.hitbox(area, props.tag.width());
+    frame.composer_text = Some(hitbox);
     let active = matches!(ui.focus, crate::focus::Focus::Composer)
         || matches!(&ui.focus, crate::focus::Focus::Layer(layer) if !layer.showing() || matches!(layer.open, Open::Palette(_)));
     let drawing = prompt::drawing(
@@ -878,23 +860,8 @@ fn render_draft(
     );
     frame.place(drawing, area);
     if active {
-        frame.cursor = composer_cursor(area, &layout, &props);
+        frame.cursor = hitbox.cursor;
     }
-}
-
-fn composer_cursor(
-    area: Rect,
-    layout: &prompt::Layout,
-    props: &bingo_sdk::component::ComposerProps,
-) -> Option<ratatui::layout::Position> {
-    let row = u16::try_from(layout.cursor.0).ok()?;
-    let column = prompt::COLUMN
-        .checked_add(props.tag.width())?
-        .checked_add(layout.cursor.1)?;
-    let column = u16::try_from(column).ok()?;
-    let x = area.x.checked_add(column)?;
-    let y = area.y.checked_add(row)?;
-    (x < area.right() && y < area.bottom()).then_some((x, y).into())
 }
 
 #[cfg(test)]
@@ -927,7 +894,7 @@ mod tests {
             placeholder: String::new(),
         };
         assert_eq!(
-            super::composer_cursor(area, &layout, &props),
+            layout.hitbox(area, props.tag.width()).cursor,
             Some((19, 6).into())
         );
     }

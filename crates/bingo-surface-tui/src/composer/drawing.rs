@@ -16,9 +16,8 @@ pub fn draw(
     now: clock::Now,
 ) -> Drawing {
     let (now, rest) = rested(now, keyed_at);
-    let overflow = usize::from(layout.lines.len() > 8 && rows >= 9);
-    let count = rows.saturating_sub(overflow).min(8);
-    let start = layout.lines.len().saturating_sub(count);
+    let viewport = layout.viewport(rows);
+    let start = viewport.lines.start;
     let caret = if active {
         theme::glyphs::get("caret")
     } else {
@@ -29,7 +28,7 @@ pub fn draw(
         theme::caret_ink(now, "glow", "you").unwrap_or_default(),
     );
     let mut lines = Vec::new();
-    if overflow > 0 {
+    if viewport.overflow > 0 {
         lines.push(Line::from(vec![
             Span::raw(" ".repeat(super::COLUMN)),
             Span::styled(
@@ -38,7 +37,13 @@ pub fn draw(
             ),
         ]));
     }
-    for (index, text) in layout.lines.iter().enumerate().skip(start).take(count) {
+    for (index, text) in layout
+        .lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(viewport.lines.len())
+    {
         let mut spans = vec![Span::raw(" ".repeat(super::COLUMN))];
         if !props.tag.is_empty() {
             spans.push(Span::styled(props.tag.clone(), theme::text()));
@@ -62,7 +67,7 @@ pub fn draw(
     Drawing {
         lines,
         // Without an input row there is no visible caret whose ink can change.
-        next: (active && now.motion && layout.cursor.0 >= start && count > 0)
+        next: (active && now.motion && viewport.lines.contains(&layout.cursor.0))
             .then_some((now.instant + clock::FRAME).min(rest)),
     }
 }

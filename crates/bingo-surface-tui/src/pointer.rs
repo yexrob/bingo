@@ -104,20 +104,12 @@ fn composer_mouse(ui: &mut Ui, mouse: MouseEvent) -> bool {
 
 /// The current byte boundary under a visible composer cell.
 fn composer_offset(ui: &Ui, mouse: MouseEvent) -> Option<usize> {
-    let area = ui.shown.composer_text?;
-    let at = Position::new(mouse.column, mouse.row);
-    if !area.contains(at) {
-        return None;
-    }
+    let (row, column) = ui
+        .shown
+        .composer_text?
+        .cell(Position::new(mouse.column, mouse.row))?;
     let width = crate::composer::width(usize::from(ui.shown.regions.composer.width));
-    let layout = ui.composer.layout(width);
-    let row = layout
-        .lines
-        .len()
-        .saturating_sub(usize::from(area.height))
-        .saturating_add(usize::from(mouse.row - area.y));
-    ui.composer
-        .offset_at(width, row, usize::from(mouse.column - area.x))
+    ui.composer.offset_at(width, row, column)
 }
 
 /// A press while an ask is open: an option of the dialog, a question's

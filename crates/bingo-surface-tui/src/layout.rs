@@ -35,7 +35,7 @@ pub struct Layout {
     pub renders: [usize; 4],
     pub regions: Regions,
     /// The exact text cells of the composer in this frame, when it drew one.
-    pub composer_text: Option<ratatui::layout::Rect>,
+    pub composer_text: Option<crate::composer::Hitbox>,
     /// The transcript's height in wrapped lines.
     pub height: usize,
     /// The first transcript line the frame showed.
