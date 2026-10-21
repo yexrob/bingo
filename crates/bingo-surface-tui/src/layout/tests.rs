@@ -246,8 +246,8 @@ fn idle_nonterminal_item_schedules_nothing() {
         assert!(drawn.blocks.height() > 0);
         assert_eq!(
             drawn.deadline(),
-            motion.then_some(now.instant + crate::clock::FRAME),
-            "only the visible caret schedules, motion={motion}"
+            (motion && !cfg!(windows)).then_some(now.instant + crate::clock::FRAME),
+            "only an animated visible caret schedules, motion={motion}"
         );
     }
 }

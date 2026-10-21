@@ -111,7 +111,7 @@ fn arriving_words_hold_the_caret_steady_while_tools_breathe() {
 }
 
 #[test]
-fn the_input_box_glows_on_the_same_breath_and_is_dim_when_idle() {
+fn the_composer_caret_respects_the_platform_motion_policy() {
     let (mut ui, now) = scene();
     theme::with(crate::painted::truecolor(), || {
         let idle = solo(&state());
@@ -119,10 +119,16 @@ fn the_input_box_glows_on_the_same_breath_and_is_dim_when_idle() {
             composer_style(&idle, &mut ui, now),
             composer_style(&turning(), &mut ui, now)
         );
-        assert_ne!(
-            composer_style(&idle, &mut ui, now),
-            composer_style(&idle, &mut ui, later(now, 300))
-        );
+        let first = composer_style(&idle, &mut ui, now);
+        let next = composer_style(&idle, &mut ui, later(now, 300));
+        if cfg!(windows) {
+            assert_eq!(
+                first, next,
+                "the Windows caret stays steady to avoid flashing"
+            );
+        } else {
+            assert_ne!(first, next, "the caret animates while motion is enabled");
+        }
         assert_eq!(
             composer_style(&idle, &mut ui, still(now)),
             composer_style(&idle, &mut ui, still(later(now, 300)))
