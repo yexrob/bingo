@@ -34,6 +34,8 @@ pub struct Layout {
     #[cfg(test)]
     pub renders: [usize; 4],
     pub regions: Regions,
+    /// The exact text cells of the composer in this frame, when it drew one.
+    pub composer_text: Option<ratatui::layout::Rect>,
     /// The transcript's height in wrapped lines.
     pub height: usize,
     /// The first transcript line the frame showed.

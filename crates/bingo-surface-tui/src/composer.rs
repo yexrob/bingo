@@ -22,6 +22,8 @@ pub mod fill;
 pub struct Layout {
     pub lines: Vec<String>,
     pub images: Vec<u32>,
+    /// The terminal columns selected in each visual line.
+    pub selection: Vec<Option<std::ops::Range<usize>>>,
     /// Row and column of the caret within `lines`.
     pub cursor: (usize, usize),
 }
@@ -38,6 +40,10 @@ pub struct Composer {
     text: String,
     /// Byte offset, always on a grapheme boundary.
     cursor: usize,
+    /// The fixed end of a composer-local selection, when one is active.
+    anchor: Option<usize>,
+    /// A pointer press in the composer is still held down.
+    dragging: bool,
 }
 
 impl Composer {
@@ -53,10 +59,12 @@ impl Composer {
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.clear_selection();
     }
 
     pub fn take(&mut self) -> String {
         self.cursor = 0;
+        self.clear_selection();
         std::mem::take(&mut self.text)
     }
 
@@ -64,15 +72,58 @@ impl Composer {
     pub fn set(&mut self, text: &str) {
         self.text = text.to_string();
         self.cursor = self.text.len();
+        self.clear_selection();
     }
 
     /// Insert verbatim: a bracketed paste keeps its newlines and its spaces.
     pub fn insert(&mut self, text: &str) {
+        self.delete_selection();
         self.text.insert_str(self.cursor, text);
         self.cursor += text.len();
     }
 
+    pub fn selected_text(&self) -> Option<&str> {
+        let range = self.selection_range()?;
+        (!range.is_empty()).then(|| &self.text[range])
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+        self.dragging = false;
+    }
+
+    pub fn pointer_press(&mut self, offset: usize) {
+        self.cursor = offset;
+        self.anchor = Some(offset);
+        self.dragging = true;
+    }
+
+    pub fn pointer_drag(&mut self, offset: usize) {
+        if self.dragging {
+            self.cursor = offset;
+        }
+    }
+
+    pub fn pointer_release(&mut self) {
+        self.dragging = false;
+        if self.selected_text().is_none() {
+            self.anchor = None;
+        }
+    }
+
+    pub fn pointer_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// The byte boundary at a visual row and terminal column.
+    pub fn offset_at(&self, width: usize, row: usize, column: usize) -> Option<usize> {
+        let lines = self.visual_lines(width);
+        let line = lines.get(row)?;
+        Some(offset_in_line(&line.text, line.start, column))
+    }
+
     pub fn picture(&mut self, number: u32, held: &pictures::Held) {
+        self.delete_selection();
         let mut end = 0;
         for (range, token) in pictures::spans(&self.text) {
             if range.start != end || held.under(token).is_none() {
@@ -93,6 +144,9 @@ impl Composer {
     }
 
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if let Some(start) = self.prev() {
             self.text.replace_range(start..self.cursor, "");
             self.cursor = start;
@@ -100,52 +154,86 @@ impl Composer {
     }
 
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if let Some(end) = self.next() {
             self.text.replace_range(self.cursor..end, "");
         }
     }
 
     pub fn left(&mut self) {
-        if let Some(start) = self.prev() {
-            self.cursor = start;
-        }
+        self.clear_selection();
+        self.move_left();
     }
 
     pub fn right(&mut self) {
-        if let Some(end) = self.next() {
-            self.cursor = end;
-        }
+        self.clear_selection();
+        self.move_right();
     }
 
     pub fn home(&mut self) {
-        self.cursor = self.line_start();
+        self.clear_selection();
+        self.move_home();
     }
 
     pub fn end(&mut self) {
-        self.cursor = self.line_end();
+        self.clear_selection();
+        self.move_end();
+    }
+
+    pub fn select_left(&mut self) {
+        self.begin_selection();
+        self.move_left();
+    }
+
+    pub fn select_right(&mut self) {
+        self.begin_selection();
+        self.move_right();
+    }
+
+    pub fn select_home(&mut self) {
+        self.begin_selection();
+        self.move_home();
+    }
+
+    pub fn select_end(&mut self) {
+        self.begin_selection();
+        self.move_end();
     }
 
     pub fn word_left(&mut self) {
+        self.clear_selection();
         self.cursor = self.word_start();
     }
 
     pub fn word_right(&mut self) {
+        self.clear_selection();
         self.cursor = self.word_end();
     }
 
     pub fn delete_word_left(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let start = self.word_start();
         self.text.replace_range(start..self.cursor, "");
         self.cursor = start;
     }
 
     pub fn delete_to_line_start(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let start = self.line_start();
         self.text.replace_range(start..self.cursor, "");
         self.cursor = start;
     }
 
     pub fn delete_to_line_end(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let end = self.line_end();
         self.text.replace_range(self.cursor..end, "");
     }
@@ -153,6 +241,91 @@ impl Composer {
     /// Move one logical line up. `false` when there is none, which is what
     /// lets the caller walk the prompt history instead.
     pub fn up(&mut self) -> bool {
+        self.clear_selection();
+        self.move_up()
+    }
+
+    pub fn down(&mut self) -> bool {
+        self.clear_selection();
+        self.move_down()
+    }
+
+    pub fn select_up(&mut self) -> bool {
+        self.begin_selection();
+        self.move_up()
+    }
+
+    pub fn select_down(&mut self) -> bool {
+        self.begin_selection();
+        self.move_down()
+    }
+
+    /// The wrapped rows and the caret cell, for a box `width` columns wide.
+    pub fn layout(&self, width: usize) -> Layout {
+        crate::layout::count::band(0);
+        let width = width.max(1);
+        let mut lines = self.visual_lines(width);
+        let mut cursor = self.cursor_cell(&lines, width);
+        if cursor.1 >= width {
+            cursor = (cursor.0 + 1, 0);
+            if lines.len() <= cursor.0 {
+                lines.push(VisualLine::empty(self.text.len()));
+            }
+        }
+        let selection = lines
+            .iter()
+            .map(|line| self.selection_columns(line))
+            .collect();
+        Layout {
+            lines: lines.into_iter().map(|line| line.text).collect(),
+            cursor,
+            images: Vec::new(),
+            selection,
+        }
+    }
+
+    fn begin_selection(&mut self) {
+        self.anchor.get_or_insert(self.cursor);
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        self.text.replace_range(range.clone(), "");
+        self.cursor = range.start;
+        self.clear_selection();
+        true
+    }
+
+    fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        let anchor = self.anchor?;
+        let start = anchor.min(self.cursor);
+        let end = anchor.max(self.cursor);
+        Some(start..end)
+    }
+
+    fn move_left(&mut self) {
+        if let Some(start) = self.prev() {
+            self.cursor = start;
+        }
+    }
+
+    fn move_right(&mut self) {
+        if let Some(end) = self.next() {
+            self.cursor = end;
+        }
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = self.line_start();
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.line_end();
+    }
+
+    fn move_up(&mut self) -> bool {
         let start = self.line_start();
         if start == 0 {
             return false;
@@ -163,7 +336,7 @@ impl Composer {
         true
     }
 
-    pub fn down(&mut self) -> bool {
+    fn move_down(&mut self) -> bool {
         let end = self.line_end();
         if end == self.text.len() {
             return false;
@@ -177,45 +350,53 @@ impl Composer {
         true
     }
 
-    /// The wrapped rows and the caret cell, for a box `width` columns wide.
-    pub fn layout(&self, width: usize) -> Layout {
-        crate::layout::count::band(0);
+    fn visual_lines(&self, width: usize) -> Vec<VisualLine> {
         let width = width.max(1);
-        let mut lines = vec![String::new()];
-        let mut column = 0usize;
-        let mut cursor = (0usize, 0usize);
+        let mut lines = vec![VisualLine::empty(0)];
+        let mut column = 0;
         for (offset, grapheme) in self.text.grapheme_indices(true) {
-            if offset == self.cursor {
-                cursor = (lines.len() - 1, column);
-            }
             if grapheme == "\n" {
-                lines.push(String::new());
+                lines.push(VisualLine::empty(offset + grapheme.len()));
                 column = 0;
                 continue;
             }
             if column + grapheme.width() > width {
-                lines.push(String::new());
+                lines.push(VisualLine::empty(offset));
                 column = 0;
             }
             if let Some(last) = lines.last_mut() {
-                last.push_str(grapheme);
+                last.text.push_str(grapheme);
             }
             column += grapheme.width();
         }
-        if self.cursor >= self.text.len() {
-            cursor = (lines.len() - 1, trim_tail(&mut lines));
-        }
-        if cursor.1 >= width {
-            cursor = (cursor.0 + 1, 0);
-            if lines.len() <= cursor.0 {
-                lines.push(String::new());
+        lines
+    }
+
+    fn cursor_cell(&self, lines: &[VisualLine], width: usize) -> (usize, usize) {
+        for (row, line) in lines.iter().enumerate() {
+            let end = line.start + line.text.len();
+            if self.cursor >= line.start && self.cursor <= end {
+                return (row, self.text[line.start..self.cursor].width());
             }
         }
-        Layout {
-            lines,
-            cursor,
-            images: Vec::new(),
+        (lines.len().saturating_sub(1), width)
+    }
+
+    fn selection_columns(&self, line: &VisualLine) -> Option<std::ops::Range<usize>> {
+        let selection = self.selection_range()?;
+        let mut columns = 0;
+        let mut first = None;
+        let mut last = 0;
+        for (offset, grapheme) in line.text.grapheme_indices(true) {
+            let start = line.start + offset;
+            let end = start + grapheme.len();
+            if start < selection.end && end > selection.start {
+                first.get_or_insert(columns);
+                last = columns + grapheme.width();
+            }
+            columns += grapheme.width();
         }
+        first.map(|first| first..last)
     }
 
     /// Where one step back lands: over a whole `[image N]` when the caret
@@ -276,14 +457,34 @@ impl Composer {
     }
 }
 
-/// The prototype's wrap drops the last row's trailing blanks, so a caret at
-/// the end of the text stands over the first of them. The column it returns.
-fn trim_tail(lines: &mut [String]) -> usize {
-    let Some(last) = lines.last_mut() else {
-        return 0;
-    };
-    last.truncate(last.trim_end_matches(' ').len());
-    last.width()
+#[derive(Clone, Debug)]
+struct VisualLine {
+    start: usize,
+    text: String,
+}
+
+impl VisualLine {
+    fn empty(start: usize) -> Self {
+        Self {
+            start,
+            text: String::new(),
+        }
+    }
+}
+
+/// The first grapheme boundary at or beyond a terminal column.
+fn offset_in_line(text: &str, start: usize, column: usize) -> usize {
+    let mut at = 0;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        if column <= at {
+            return start + offset;
+        }
+        at += grapheme.width();
+        if column < at {
+            return start + offset + grapheme.len();
+        }
+    }
+    start + text.len()
 }
 
 /// The offset `column` graphemes into `start..end`, clamped to the line's end.
@@ -305,6 +506,8 @@ mod tests {
         Composer {
             text: text.into(),
             cursor,
+            anchor: None,
+            dragging: false,
         }
     }
 
@@ -430,6 +633,7 @@ mod tests {
             c.layout(3),
             Layout {
                 lines: vec!["abc".into(), "def".into()],
+                selection: vec![None, None],
                 cursor: (1, 1),
                 images: Vec::new(),
             }
@@ -443,7 +647,22 @@ mod tests {
             c.layout(10),
             Layout {
                 lines: vec!["ab".into(), "cd".into()],
+                selection: vec![None, None],
                 cursor: (1, 2),
+                images: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn layout_keeps_trailing_spaces_before_the_caret() {
+        let c = at("word  ", 6);
+        assert_eq!(
+            c.layout(10),
+            Layout {
+                lines: vec!["word  ".into()],
+                selection: vec![None],
+                cursor: (0, 6),
                 images: Vec::new(),
             }
         );
@@ -453,5 +672,27 @@ mod tests {
     fn a_caret_at_the_right_edge_shows_on_the_next_row() {
         let c = at("abc", 3);
         assert_eq!(c.layout(3).cursor, (1, 0));
+    }
+
+    #[test]
+    fn shifted_motion_marks_a_run_and_editing_replaces_it() {
+        let mut c = at("one\ntwo", 7);
+        c.select_home();
+        c.select_up();
+        assert_eq!(c.selected_text(), Some("one\ntwo"));
+        assert_eq!(c.layout(10).selection, vec![Some(0..3), Some(0..3)]);
+        c.insert("draft");
+        assert_eq!(c.text(), "draft");
+        assert_eq!(c.selected_text(), None);
+    }
+
+    #[test]
+    fn pointer_columns_select_whole_wide_graphemes() {
+        let mut c = at("a你好b\nnext", 0);
+        c.pointer_press(c.offset_at(10, 0, 1).expect("first Chinese boundary"));
+        c.pointer_drag(c.offset_at(10, 0, 4).expect("second Chinese boundary"));
+        c.pointer_release();
+        assert_eq!(c.selected_text(), Some("你好"));
+        assert_eq!(c.layout(10).selection, vec![Some(1..5), None]);
     }
 }

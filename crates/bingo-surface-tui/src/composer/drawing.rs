@@ -52,6 +52,7 @@ pub fn draw(
             spans.extend(input_with_images(
                 text,
                 &layout.images,
+                layout.selection.get(index).and_then(Option::as_ref),
                 (index == layout.cursor.0).then_some(layout.cursor.1),
                 &caret,
             ));
@@ -70,7 +71,9 @@ fn rested(now: clock::Now, keyed_at: std::time::Instant) -> (clock::Now, std::ti
     let rest = keyed_at + super::CARET_REST;
     (
         clock::Now {
-            motion: now.motion && now.instant < rest,
+            // The Windows console redraws a changing caret as a visible flash.
+            // Keep it steady there while the rest of the surface may still move.
+            motion: now.motion && now.instant < rest && !cfg!(windows),
             ..now
         },
         rest,
@@ -79,12 +82,13 @@ fn rested(now: clock::Now, keyed_at: std::time::Instant) -> (clock::Now, std::ti
 
 #[cfg(test)]
 fn input(text: &str, cursor: Option<usize>, caret: &Span<'static>) -> Vec<Span<'static>> {
-    input_with_images(text, &[], cursor, caret)
+    input_with_images(text, &[], None, cursor, caret)
 }
 
 fn input_with_images(
     text: &str,
     images: &[u32],
+    selection: Option<&std::ops::Range<usize>>,
     cursor: Option<usize>,
     caret: &Span<'static>,
 ) -> Vec<Span<'static>> {
@@ -123,6 +127,13 @@ fn input_with_images(
             }
             if mention { ink("plan") } else { theme::text() }
         };
+        let selected =
+            selection.is_some_and(|range| range.start < column + ch.width() && column < range.end);
+        let style = if selected {
+            style.patch(theme::raised().patch(theme::presence()))
+        } else {
+            style
+        };
         spans.push(Span::styled(ch.to_owned(), style));
         column += ch.width();
     }
@@ -154,6 +165,17 @@ mod tests {
     }
 
     #[test]
+    fn input_marks_each_cell_of_a_selected_wide_grapheme() {
+        let selection = 1..5;
+        let spans = input_with_images("a你好b", &[], Some(&selection), None, &Span::raw(" "));
+        let selected = theme::text().patch(theme::raised().patch(theme::presence()));
+        assert_eq!(spans[0].style, theme::text());
+        assert_eq!(spans[1].style, selected);
+        assert_eq!(spans[2].style, selected);
+        assert_eq!(spans[3].style, theme::text());
+    }
+
+    #[test]
     fn input_keeps_eight_tail_rows_and_only_a_visible_caret_schedules() {
         let now = scene().1;
         let mut editor = super::super::Composer::default();
@@ -170,7 +192,7 @@ mod tests {
         assert!(drawn.lines[0].to_string().contains("4 lines above"));
         assert!(drawn.lines[1].to_string().contains("line 4"));
         assert!(drawn.lines[8].to_string().contains("line 11▍"));
-        assert!(drawn.next.is_some());
+        assert_eq!(drawn.next.is_some(), !cfg!(windows));
         assert!(
             draw(&layout, &props, false, 9, false, now.instant, now)
                 .next

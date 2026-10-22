@@ -28,6 +28,6 @@
    cargo test -p bingo-core queue：12 个全部通过。                                                  
                                                                                                     
                                                                                                     
-   看一下 @crates/bingo-core/src/session/queue.rs▍                                                  
+   看一下 @crates/bingo-core/src/session/queue.rs ▍                                                 
                                                                                                     
    opus-5.5 high                                                               ⏎ send   ⇧⏎ newline  

@@ -1,3 +1,5 @@
 # The tree is LF everywhere; a Windows checkout must not turn the committed
 # contracts and snapshots into CRLF and then call them drifted.
 * text=auto eol=lf
+# Terminal-frame fixtures use trailing spaces as visible cells.
+docs/design/ember/scenes/*.txt whitespace=-trailing-space

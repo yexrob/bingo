@@ -53,6 +53,9 @@ pub fn on_mouse(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Ef
         crate::focus::Owner::Interaction => return on_ask(ui, tree, mouse, now),
         _ => {}
     }
+    if composer_mouse(ui, mouse) {
+        return Vec::new();
+    }
     if let Some(effects) = crate::pane::mouse(ui, tree.viewed(), mouse, now) {
         return effects;
     }
@@ -68,6 +71,53 @@ pub fn on_mouse(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Ef
         _ => {}
     }
     Vec::new()
+}
+
+/// Answer a pointer gesture that began in the composer's visible text cells.
+fn composer_mouse(ui: &mut Ui, mouse: MouseEvent) -> bool {
+    if ui.focus.showing() {
+        return false;
+    }
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(offset) = composer_offset(ui, mouse) else {
+                return false;
+            };
+            ui.clear_selection();
+            ui.focus = crate::focus::Focus::Composer;
+            ui.composer.pointer_press(offset);
+            true
+        }
+        MouseEventKind::Drag(MouseButton::Left) if ui.composer.pointer_dragging() => {
+            if let Some(offset) = composer_offset(ui, mouse) {
+                ui.composer.pointer_drag(offset);
+            }
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) if ui.composer.pointer_dragging() => {
+            ui.composer.pointer_release();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The current byte boundary under a visible composer cell.
+fn composer_offset(ui: &Ui, mouse: MouseEvent) -> Option<usize> {
+    let area = ui.shown.composer_text?;
+    let at = Position::new(mouse.column, mouse.row);
+    if !area.contains(at) {
+        return None;
+    }
+    let width = crate::composer::width(usize::from(ui.shown.regions.composer.width));
+    let layout = ui.composer.layout(width);
+    let row = layout
+        .lines
+        .len()
+        .saturating_sub(usize::from(area.height))
+        .saturating_add(usize::from(mouse.row - area.y));
+    ui.composer
+        .offset_at(width, row, usize::from(mouse.column - area.x))
 }
 
 /// A press while an ask is open: an option of the dialog, a question's
