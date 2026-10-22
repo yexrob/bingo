@@ -381,19 +381,25 @@ fn fire(ui: &mut Ui, tree: &Tree, key: char) -> Option<Vec<Effect>> {
     Some(vec![Effect::Submit(crate::pressed(plugin, action))])
 }
 
-/// A bracketed paste lands verbatim wherever the caret is.
+/// A bracketed paste lands at the caret, retaining each logical line.
 pub fn on_paste(ui: &mut Ui, text: &str) {
+    let text = pasted_text(text);
     if ui.dialog.current().is_some() && !ui.dialog.aside {
         if let Some(words) = &mut ui.dialog.words {
-            words.insert(text);
+            words.insert(&text);
         }
         return;
     }
     if matches!(ui.focus, crate::focus::Focus::Pane(_)) {
         return;
     }
-    ui.composer.insert(text);
+    ui.composer.insert(&text);
     ui.edited();
+}
+
+/// Windows clipboards use CRLF while terminal paste streams may use LF or CR.
+fn pasted_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// The two chords that can end the run, checked before anything may swallow
@@ -403,7 +409,9 @@ fn leaving(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
         return None;
     }
     match key.code {
-        KeyCode::Char('c') => Some(interrupt_or_exit(ui, tree, now)),
+        KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(interrupt_or_exit(ui, tree, now))
+        }
         KeyCode::Char('d') if ui.composer.is_empty() => Some(vec![Effect::Exit]),
         _ => None,
     }
@@ -637,7 +645,8 @@ fn selecting(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Down => walk_run(ui, 1, 0, now),
         KeyCode::Left => walk_run(ui, 0, -1, now),
         KeyCode::Right => walk_run(ui, 0, 1, now),
-        KeyCode::Char('y') | KeyCode::Char('c') => return copy(ui),
+        KeyCode::Char('y') => return copy(ui),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return copy(ui),
         KeyCode::Esc => ui.clear_selection(),
         _ => {
             ui.clear_selection();
@@ -746,23 +755,49 @@ fn control(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('w') => edit(ui, |c| c.delete_word_left()),
         KeyCode::Char('u') => edit(ui, |c| c.delete_to_line_start()),
         KeyCode::Char('k') => edit(ui, |c| c.delete_to_line_end()),
+        KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            return copy_composer(ui);
+        }
         KeyCode::Char('v') => return vec![Effect::PasteImage],
         _ => {}
     }
     Vec::new()
 }
 
+/// `ctrl+shift+c` copies the entire draft without taking `ctrl+c` from
+/// interruption. This is the terminal's conventional copy chord.
+fn copy_composer(ui: &Ui) -> Vec<Effect> {
+    (!ui.composer.is_empty())
+        .then(|| Effect::Copy(ui.composer.text().to_owned()))
+        .into_iter()
+        .collect()
+}
+
 fn alt(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
     match key.code {
         KeyCode::Char('b') => ui.composer.word_left(),
         KeyCode::Char('f') => ui.composer.word_right(),
+        KeyCode::Char('c' | 'C') => return copy_composer_selection(ui),
         KeyCode::Enter => newline(ui),
         _ => return crate::component::band::hotkey(ui, key).unwrap_or_default(),
     }
     Vec::new()
 }
 
+/// `alt+c` copies precisely the run the composer itself is holding. It does
+/// not borrow the transcript's selection state, and an empty run is no copy.
+fn copy_composer_selection(ui: &Ui) -> Vec<Effect> {
+    ui.composer
+        .selected_text()
+        .map(|text| Effect::Copy(text.to_owned()))
+        .into_iter()
+        .collect()
+}
+
 fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    if key.modifiers == KeyModifiers::SHIFT && extend_composer_selection(ui, key.code) {
+        return Vec::new();
+    }
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => newline(ui),
         KeyCode::Enter => return enter(ui, tree, now),
@@ -802,6 +837,24 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         _ => {}
     }
     Vec::new()
+}
+
+/// Extend the composer's own run. Shifted vertical keys never enter history.
+fn extend_composer_selection(ui: &mut Ui, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Left => ui.composer.select_left(),
+        KeyCode::Right => ui.composer.select_right(),
+        KeyCode::Up => {
+            ui.composer.select_up();
+        }
+        KeyCode::Down => {
+            ui.composer.select_down();
+        }
+        KeyCode::Home => ui.composer.select_home(),
+        KeyCode::End => ui.composer.select_end(),
+        _ => return false,
+    }
+    true
 }
 
 /// Enter sends, unless the line ends in a backslash — the newline chord for
@@ -1010,7 +1063,7 @@ mod tests {
     use crate::pointer::{WHEEL, on_mouse};
     use crate::test_support::*;
     use bingo_sdk::{Activation, Answer, TurnId, TurnStatus};
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// A session whose own directory has two files a mention could name.
     fn with_files() -> (tempfile::TempDir, SessionState) {
@@ -1048,6 +1101,7 @@ mod tests {
         );
         on_key(&mut ui, &tree, key(KeyCode::Enter), now);
         assert_eq!(ui.composer.text(), "@Cargo.toml ");
+        assert!(render(&state, &mut ui, still(now)).contains("@Cargo.toml ▍"));
         assert!(
             mention_list::offered(&ui, &tree).is_empty(),
             "a finished mention offers nothing more"
@@ -1086,6 +1140,29 @@ mod tests {
         let effects = on_key(&mut ui, &tree, ctrl('v'), now);
         assert_eq!(effects, vec![Effect::PasteImage]);
         assert!(ui.composer.is_empty());
+    }
+
+    #[test]
+    fn a_windows_paste_keeps_each_line() {
+        let (mut ui, _) = scene();
+        on_paste(&mut ui, "第一行\r\n第二行\r第三行");
+        assert_eq!(ui.composer.text(), "第一行\n第二行\n第三行");
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_the_composer_without_interrupting() {
+        let (mut ui, now) = scene();
+        let tree = solo(&state());
+        ui.composer.set("copy this draft");
+        let copy = KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            on_key(&mut ui, &tree, copy, now),
+            vec![Effect::Copy("copy this draft".into())]
+        );
+        assert_eq!(ui.composer.text(), "copy this draft");
     }
 
     /// The line goes as typed, tokens and all, and carries no picture of its
@@ -2122,6 +2199,40 @@ mod tests {
         assert!(ui.focus.selection().is_none(), "copying lets it go");
     }
 
+    #[test]
+    fn shifted_composer_motion_and_alt_c_copy_only_its_run() {
+        let (mut ui, now) = scene();
+        write(&mut ui, &state(), "one\ntwo", now);
+        for code in [KeyCode::Home, KeyCode::Up] {
+            press(
+                &mut ui,
+                &state(),
+                KeyEvent::new(code, KeyModifiers::SHIFT),
+                now,
+            );
+        }
+        assert_eq!(
+            press(
+                &mut ui,
+                &state(),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
+                now,
+            ),
+            vec![Effect::Copy("one\ntwo".into())]
+        );
+        press(&mut ui, &state(), key(KeyCode::Right), now);
+        assert!(
+            press(
+                &mut ui,
+                &state(),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
+                now,
+            )
+            .is_empty(),
+            "an unselected composer never copies"
+        );
+    }
+
     /// A page back, settled, so a run started at the top of the screen has
     /// transcript on either side of it.
     fn reading_back(state: &SessionState) -> (Ui, Now) {
@@ -2254,6 +2365,58 @@ mod tests {
     }
 
     // ---- the mouse ------------------------------------------------------
+
+    #[test]
+    fn dragging_the_composer_selects_multiline_wide_text_without_copying() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let state = state();
+        let (mut ui, now) = scene();
+        ui.composer.set("a你好b\nnext");
+        render(&state, &mut ui, now);
+        let area = ui
+            .shown
+            .composer_text
+            .expect("the visible draft cells")
+            .area;
+        let mouse = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        on_mouse(
+            &mut ui,
+            &solo(&state),
+            mouse(MouseEventKind::Down(MouseButton::Left), area.x + 1, area.y),
+            now,
+        );
+        on_mouse(
+            &mut ui,
+            &solo(&state),
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                area.x + 4,
+                area.y + 1,
+            ),
+            now,
+        );
+        assert!(
+            on_mouse(
+                &mut ui,
+                &solo(&state),
+                mouse(
+                    MouseEventKind::Up(MouseButton::Left),
+                    area.x + 4,
+                    area.y + 1
+                ),
+                now,
+            )
+            .is_empty(),
+            "composer release preserves the run for alt+c rather than copying it"
+        );
+        assert_eq!(ui.composer.selected_text(), Some("你好b\nnext"));
+    }
 
     #[test]
     fn the_wheel_scrolls_the_transcript_and_the_foot_takes_it_back() {
@@ -3348,3 +3511,6 @@ pub(crate) fn open_detail(ui: &mut Ui, state: &bingo_sdk::SessionState, now: Now
     crate::detail::open(ui, state, &frame, now);
     ui.shown = frame;
 }
+
+#[cfg(test)]
+mod composer_tests;

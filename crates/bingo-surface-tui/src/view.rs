@@ -7,6 +7,7 @@ use bingo_sdk::SessionState;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{Clear, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
 use crate::frame::{self, Demand, Regions};
@@ -16,9 +17,6 @@ use crate::{
     activity, composer as prompt, dialog, graphics, layers, pill, search, select, theme,
     transcript, views, window, wrap,
 };
-
-/// How tall the composer box may grow before it scrolls internally.
-const COMPOSER_ROWS: usize = 8;
 
 /// One render path for the whole tree: it paints the session in view and
 /// derives everything about the others — the counts in the footer, the
@@ -114,8 +112,8 @@ struct Draft {
 }
 impl Draft {
     fn rows(&self) -> usize {
-        self.layout.lines.len().clamp(1, COMPOSER_ROWS)
-            + usize::from(self.layout.lines.len() > COMPOSER_ROWS)
+        self.layout.lines.len().clamp(1, prompt::ROWS)
+            + usize::from(self.layout.lines.len() > prompt::ROWS)
     }
 }
 
@@ -844,6 +842,8 @@ fn render_draft(
         return;
     }
     let props = crate::keybar::composer(state, ui, frame);
+    let hitbox = layout.hitbox(area, props.tag.width());
+    frame.composer_text = Some(hitbox);
     let active = matches!(ui.focus, crate::focus::Focus::Composer)
         || matches!(&ui.focus, crate::focus::Focus::Layer(layer) if !layer.showing() || matches!(layer.open, Open::Palette(_)));
     let drawing = prompt::drawing(
@@ -859,6 +859,9 @@ fn render_draft(
         },
     );
     frame.place(drawing, area);
+    if active {
+        frame.cursor = hitbox.cursor;
+    }
 }
 
 #[cfg(test)]
@@ -875,6 +878,25 @@ mod tests {
     fn render(state: &SessionState, ui: &mut Ui, now: Now) -> String {
         catalogue(ui);
         crate::test_support::render(state, ui, now)
+    }
+
+    #[test]
+    fn composer_cursor_uses_the_drawn_text_position() {
+        let area = Rect::new(10, 5, 30, 3);
+        let layout = prompt::Layout {
+            lines: vec!["first".into(), "second".into()],
+            images: Vec::new(),
+            selection: vec![None, None],
+            cursor: (1, 4),
+        };
+        let props = bingo_sdk::component::ComposerProps {
+            tag: "@ ".into(),
+            placeholder: String::new(),
+        };
+        assert_eq!(
+            layout.hitbox(area, props.tag.width()).cursor,
+            Some((19, 6).into())
+        );
     }
 
     fn item_frame(seq: u64, item: bingo_sdk::Item) -> bingo_sdk::Frame {

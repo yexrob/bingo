@@ -230,11 +230,20 @@ fn every_token_is_spent_where_the_design_says() {
                 "window.rs",
             ],
         ),
-        ("raised", &["layers.rs", "select.rs", "views/code.rs"]),
+        (
+            "raised",
+            &[
+                "composer/drawing.rs",
+                "layers.rs",
+                "select.rs",
+                "views/code.rs",
+            ],
+        ),
         (
             "presence",
             &[
                 "activity.rs",
+                "composer/drawing.rs",
                 "dialog.rs",
                 "form.rs",
                 "select.rs",
