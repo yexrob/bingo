@@ -31,6 +31,8 @@ use crate::graphics::tmux;
 use crate::layout::{self, Layout};
 use crate::render::{Detection, Render};
 
+#[cfg(any(windows, test))]
+mod image_paste;
 mod probe;
 #[cfg(test)]
 mod resizing;
@@ -135,6 +137,10 @@ impl Tui {
                 viewport: Viewport::Fullscreen,
             },
         )?;
+        #[cfg(windows)]
+        image_paste::start(|marker| {
+            out_of_band(&osc_title(&image_paste::title("bingo", Some(marker))))
+        });
         Ok(Self {
             terminal,
             detection,
@@ -171,14 +177,19 @@ impl Screen for Tui {
     }
 
     fn title(&mut self, text: &str) -> io::Result<()> {
-        if !io::stdout().is_terminal()
-            || !ENTERED.load(Ordering::SeqCst)
-            || self.title.as_deref() == Some(text)
-        {
+        if !io::stdout().is_terminal() || !ENTERED.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.title = Some(text.to_string());
-        out_of_band(&osc_title(text))
+        #[cfg(windows)]
+        let text = image_paste::marked_title(text);
+        #[cfg(not(windows))]
+        let text = text.to_owned();
+        if self.title.as_deref() == Some(text.as_str()) {
+            return Ok(());
+        }
+        out_of_band(&osc_title(&text))?;
+        self.title = Some(text);
+        Ok(())
     }
 
     fn bell(&mut self) -> io::Result<()> {
@@ -376,6 +387,8 @@ pub fn restore() {
     if !ENTERED.swap(false, Ordering::SeqCst) {
         return;
     }
+    #[cfg(windows)]
+    image_paste::stop();
     let mut out = io::stdout();
     if PUSHED.swap(false, Ordering::SeqCst) {
         let _ = crossterm::execute!(out, PopKeyboardEnhancementFlags);

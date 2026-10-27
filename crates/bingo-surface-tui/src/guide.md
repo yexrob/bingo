@@ -80,6 +80,34 @@ derived from the tokens still in it, so deleting a token takes its picture with
 it, and `@shot.png` is the other spelling of the same thing — a word that names
 a file.
 
+### Experimental Windows image Ctrl+V
+
+Native Windows interactive TUI only: set `$env:BINGO_WINDOWS_IMAGE_PASTE = '1'`
+in PowerShell before launching `bingo` to opt in; remove that variable to disable.
+Default runs and non-Windows/headless runs start no companion. This does not
+require changing Ctrl+C/Ctrl+V or Windows Terminal settings.
+
+The opt-in starts a persistent system Windows PowerShell process and compiles
+bundled managed C# at runtime. It installs a desktop keyboard hook, but only
+physical Ctrl+V with an image and a proven live, raw, focused Bingo console/pane
+may be translated into console input. Ordinary text, Ctrl+C, other modifiers,
+injected keys and uncertain focus pass through untouched. Mixed text+image
+clipboards preserve normal text paste. UIA reads only
+non-document focus metadata, not terminal content. Clipboard bytes still use
+Bingo's existing image reader; the helper never changes the clipboard or logs keys.
+
+An identifying marker is visible in the title while the helper is active; the
+terminal restores the previous title on exit. The helper stops with the TUI or
+its owner/parent, even if the owner dies during compilation. Startup waits at
+most eight seconds, plus bounded shutdown. The launcher uses inline Add-Type
+over extracted C# source, not a .ps1; execution policy settings are unchanged.
+Constrained Language/AppLocker, missing UI Automation, inaccessible console or
+ambiguous/stale pane focus can disable interception; normal terminal paste
+continues unchanged. No policy setting change, elevation or settings change is attempted.
+WSL, remote/multiplexed terminals and other terminal hosts are not supported.
+This is experimental: automated isolated-console tests do not establish real
+Windows Terminal split-pane correctness.
+
 ## Pictures
 
 Whether this terminal draws pixels is asked at start-up, never assumed from
