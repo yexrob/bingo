@@ -30,6 +30,7 @@ mod registry;
 mod registry_commands;
 mod registry_folds;
 mod registry_hooks;
+pub(crate) mod remembered;
 mod render;
 mod render_queue;
 mod resume;
@@ -88,6 +89,7 @@ pub enum HostError {
 pub struct Host {
     config: HostConfig,
     settings: Merged,
+    remembered: std::sync::OnceLock<crate::models::selection::Selection>,
     approvals: Arc<crate::approval::Authority>,
     registry: Registry,
     plugins: Vec<Box<dyn Plugin>>,
@@ -167,6 +169,7 @@ impl Host {
             Host {
                 config,
                 settings,
+                remembered: std::sync::OnceLock::new(),
                 approvals,
                 registry,
                 plugins,
@@ -181,7 +184,10 @@ impl Host {
                 trust_unread: Mutex::new(None),
             }
         });
+        let remembered = remembered::load_model(&host);
+        remembered::restore_model(&host, remembered.as_ref()).await;
         plugin::start(&host).await?;
+        remembered::restore_model(&host, remembered.as_ref()).await;
         interception::register_pending(&host).await;
         refresh::in_background(&host);
         Ok(host)
@@ -525,9 +531,16 @@ impl Host {
             self.check_parent_limits(&parent.session)?;
         }
         self.check_key_free(spec.key.as_deref())?;
-        let spec = self.inherited(spec);
+        let mut spec = self.inherited(spec);
         let choice = self.model_for(&spec).await?;
         let summary = crate::spec::stated(&spec, choice.as_ref(), live::summarize());
+        if let Some(choice) = &choice {
+            // A plugin can open a root before later plugins publish providers.
+            // Its spec must keep the choice its actor actually received.
+            spec.provider = Some(choice.endpoint.id().into());
+            spec.model = Some(choice.id.clone());
+            spec.model_scope = summary.model_scope;
+        }
         if let Some(store) = &self.registry.store {
             store.create(&summary).await?;
             store.acquire(&summary.id).await?;

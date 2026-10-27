@@ -93,6 +93,7 @@ async fn a_smaller_window_compacts_on_the_old_model_before_switching() {
 async fn unsuccessful_compaction_preserves_the_choice_and_settings() {
     for answer in [
         Err(KernelError::new(ErrorCode::ProviderUnavailable, "offline")),
+        Err(KernelError::new(ErrorCode::Interrupted, "cancelled")),
         ScriptedCompactor::cut("itm_none", 9000, 8000),
     ] {
         let home = tempfile::tempdir().unwrap();
@@ -101,7 +102,11 @@ async fn unsuccessful_compaction_preserves_the_choice_and_settings() {
         let mut client = Client::open(&host).await;
         client.ack("hello").await;
         client.until_turn_completed().await;
+        client.ack("/model large").await;
+        let path = host.env().data_dir.join("last-model.json");
+        let remembered = std::fs::read(&path).unwrap();
         let (ack, _) = client.ack("/model small --keep").await;
+        assert_eq!(std::fs::read(&path).unwrap(), remembered);
         assert!(matches!(ack, IntentOutcome::Rejected { .. }), "{ack:?}");
         assert_eq!(
             host.session_model(&client.state.summary.id)
@@ -431,7 +436,12 @@ async fn next_walks_the_pins_in_their_setting_order() {
         let (ack, _) = client.ack("/model next").await;
         assert!(matches!(ack, IntentOutcome::Applied { .. }), "{ack:?}");
         let model = host.session_model(&client.state.summary.id).await;
-        walked.push(model.unwrap().unwrap().id);
+        let model = model.unwrap().unwrap().id;
+        let saved =
+            crate::models::selection::load(&host.env().data_dir.join("last-model.json")).unwrap();
+        assert_eq!(saved.provider, "scripted");
+        assert_eq!(saved.model, model);
+        walked.push(model);
     }
     assert_eq!(walked, ["tiny", "small", "large"]);
     host.shutdown().await;

@@ -81,3 +81,4 @@ first record; 0036 §2 answered it before it was named).
 - [0095 — The frame follows the approved prototype](0095-the-frame-follows-the-prototype.md) — proposed; amended by 0097
 - [0096 — The owner hears its disable](0096-the-owner-hears-its-disable.md)
 - [0097 — Where bingo looks, something glows](0097-where-bingo-looks-something-glows.md)
+- [0099 — Remember the last model](0099-remember-the-last-model.md)

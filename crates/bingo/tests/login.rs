@@ -90,6 +90,6 @@ async fn a_pasted_credential_is_stored_and_the_provider_is_usable_at_once() {
     };
     assert_eq!(
         result["message"],
-        "⇄ gpt-5.4 · codex · thinking off · this session"
+        "⇄ gpt-5.4 · codex · thinking off · this session · next-start default"
     );
 }

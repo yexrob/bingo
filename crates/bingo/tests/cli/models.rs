@@ -166,23 +166,26 @@ fn models_refuses_an_argument_it_does_not_know() {
     assert!(err.contains("unknown argument `everything`"), "{err}");
 }
 
-/// `--model` is a layer, not a decision. `/model` inside a session writes the
-/// user settings so the next start opens on it; a flag names the model for
-/// this run and leaves the file exactly as it found it — the same bargain
-/// Claude Code's `--model` and Codex's `-c model=…` make.
+/// `--model` is a one-run layer, not a deliberate `/model` choice. Neither
+/// settings nor the next-start preference are written by a CLI override.
 #[test]
 fn a_model_flag_is_not_remembered() {
     let home = tempfile::tempdir().unwrap();
     let script = script(r#"{"responses":[{"steps":[{"text":"ok"}]}]}"#);
     let out = scripted_run(home.path(), &script, &["--model", "fake-1"], "hello");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    let settings = home.path().join(".bingo/settings.json");
-    assert!(
-        !settings.exists(),
-        "a one-run override wrote {}: {}",
-        settings.display(),
-        std::fs::read_to_string(&settings).unwrap_or_default()
-    );
+    for relative in [
+        ".bingo/settings.json",
+        ".bingo/settings.toml",
+        ".bingo/data/last-model.json",
+    ] {
+        let path = home.path().join(relative);
+        assert!(
+            !path.exists(),
+            "a one-run override wrote {}",
+            path.display()
+        );
+    }
 }
 
 const THINKING_SETTINGS: &str = r#"# Keep the user's settings and model notes.
@@ -358,13 +361,13 @@ fn thinking_off_and_invalid_levels_preserve_model_overrides() {
 }
 
 #[test]
-fn model_and_thinking_are_session_only_unless_kept() {
+fn model_is_a_next_start_default_but_only_keep_writes_settings() {
     let home = thinking_home("");
     let path = home.path().join(".bingo/settings.toml");
     for (command, expected) in [
         (
             "/model fake/another",
-            "⇄ another · fake · thinking low · this session\n",
+            "⇄ another · fake · thinking low · this session · next-start default\n",
         ),
         ("/think high", "⇄ thinking high · this session\n"),
     ] {
@@ -383,6 +386,87 @@ fn model_and_thinking_are_session_only_unless_kept() {
     assert_eq!(saved["provider"], "fake");
     assert_eq!(saved["model"], "another");
     assert_eq!(saved["thinking"], "low");
+}
+
+fn model_run(home: &std::path::Path, flags: &[&str], command: &str) -> Output {
+    let script = script(r#"{"responses":[]}"#);
+    run_within(
+        bingo()
+            .envs(home_env(home))
+            .env("BINGO_FAKE_SCRIPT", script.path())
+            .args(["--print", "--cwd"])
+            .arg(home.join("project"))
+            .args(flags)
+            .arg(command),
+        PATIENCE,
+    )
+}
+
+fn model_report(home: &std::path::Path, flags: &[&str], model: &str) {
+    let out = model_run(home, flags, "/model");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with(&format!("model: fake/{model}\n")),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn deliberate_model_choices_survive_restart_but_flags_and_bad_state_do_not_replace_them() {
+    let home = thinking_home("");
+    let path = home.path().join(".bingo/data/last-model.json");
+    let selected = model_run(home.path(), &[], "/model fake/org/chosen");
+    assert_eq!(selected.status.code(), Some(0), "{}", stderr(&selected));
+    let before = std::fs::read(&path).unwrap();
+    model_report(home.path(), &[], "org/chosen");
+    model_report(home.path(), &["--model", "cli-choice"], "cli-choice");
+    model_report(home.path(), &["--provider", "fake"], "new-model");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    model_report(home.path(), &[], "org/chosen");
+    let rejected = model_run(home.path(), &[], "/model fake/");
+    assert_eq!(rejected.status.code(), Some(1));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    for text in [
+        "broken",
+        r#"{"version":1,"provider":"removed","model":"stale"}"#,
+    ] {
+        std::fs::write(&path, text).unwrap();
+        model_report(home.path(), &[], "new-model");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(".bingo/settings.toml")).unwrap(),
+        THINKING_SETTINGS
+    );
+}
+
+#[test]
+fn settings_precedence_suppresses_remembered_pairs_without_changing_other_merges() {
+    let home = thinking_home("");
+    let selected = model_run(home.path(), &[], "/model fake/remembered");
+    assert_eq!(selected.status.code(), Some(0), "{}", stderr(&selected));
+    let path = home.path().join(".bingo/data/last-model.json");
+    let before = std::fs::read(&path).unwrap();
+    let project = home.path().join("project/.bingo");
+    std::fs::create_dir_all(&project).unwrap();
+    let extra = home.path().join("explicit.toml");
+    std::fs::write(&extra, "thinking = \"high\"\n").unwrap();
+    let settings = ["--settings", extra.to_str().unwrap()];
+    model_report(home.path(), &settings, "remembered");
+    std::fs::write(project.join("settings.toml"), "provider = \"fake\"\n").unwrap();
+    model_report(home.path(), &settings, "new-model");
+    std::fs::write(project.join("settings.toml"), "model = \"project\"\n").unwrap();
+    model_report(home.path(), &settings, "project");
+    std::fs::write(project.join("settings.local.toml"), "model = \"local\"\n").unwrap();
+    model_report(home.path(), &settings, "local");
+    std::fs::write(&extra, "model = \"explicit\"\nthinking = \"high\"\n").unwrap();
+    model_report(home.path(), &settings, "explicit");
+    let cli = ["--settings", extra.to_str().unwrap(), "--model", "cli"];
+    model_report(home.path(), &cli, "cli");
+    let report = stdout(&model_run(home.path(), &cli, "/model"));
+    assert!(report.contains("thinking: high"), "{report}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 /// `provider/` names no model: print refuses it on stderr instead of setting a

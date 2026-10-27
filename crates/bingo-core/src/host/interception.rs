@@ -56,7 +56,7 @@ pub(super) async fn catalogue_answer(
         entries: catalog::entries(
             &host.registry,
             &resolved,
-            host.settings.kernel.model.as_deref(),
+            super::choose::configured_model(host).as_deref(),
             &host.served,
             kind,
             &cx.cwd,

@@ -34,12 +34,19 @@ impl Interceptor for Receipts {
         if !sheets || !choosing {
             crate::toast::announce(cx, &command).await?;
         }
-        if sheets {
+        if sheets && !persistence_warning(&value) {
             return Ok(serde_json::json!({"kind":"applied"}));
         }
         serde_json::to_value(record).map_err(crate::error)
     }
 }
+fn persistence_warning(value: &Value) -> bool {
+    value["message"].as_str().is_some_and(|message| {
+        message.contains("could not remember next-start default")
+            || message.contains("user settings not kept")
+    })
+}
+
 /// The transcript line a switch leaves; anything else the command said is not one.
 fn receipt(value: &Value) -> Option<CommandOutcome> {
     if value["kind"] != "applied" {
@@ -71,6 +78,58 @@ mod tests {
         );
         assert!(receipt(&json!({"kind":"applied","message":"pinned"})).is_none());
     }
+    #[tokio::test]
+    async fn neither_sheets_nor_text_clients_hide_failed_model_persistence() {
+        for (surface, choosing) in [("terminal", true), ("terminal", false), ("text", false)] {
+            for warning in [
+                "could not remember next-start default: locked",
+                "user settings not kept: read-only",
+            ] {
+                let outcome = warning_receipt(surface, choosing, warning).await;
+                assert!(
+                    matches!(outcome, CommandOutcome::Record { body } if matches!(body.as_ref(), ItemBody::Notice {text, ..} if text.contains(warning)))
+                );
+            }
+        }
+    }
+
+    async fn warning_receipt(surface: &str, choosing: bool, warning: &str) -> CommandOutcome {
+        let (host, command) = crate::test_support::host();
+        host.on_catalog(|kind| async move {
+            Ok(Catalog {
+                kind,
+                entries: vec![],
+            })
+        });
+        let shared = crate::Shared::default();
+        if choosing {
+            shared
+                .lock()
+                .unwrap()
+                .insert(command.session.clone(), Default::default());
+        }
+        let cx = HookContext {
+            session: command.session,
+            cwd: command.cwd,
+            host: command.host,
+            turn: None,
+            item: None,
+            provider: None,
+            model: None,
+        };
+        let message = format!("⇄ chosen · this session · {warning}");
+        let result = Receipts(shared)
+            .chain(
+                catalogue::COMMAND_RUN,
+                &cx,
+                json!({"command":"model","args":"chosen","surface":surface}),
+                Next::new(|_| Box::pin(async { Ok(json!({"kind":"applied","message":message})) })),
+            )
+            .await
+            .unwrap();
+        serde_json::from_value(result).unwrap()
+    }
+
     #[tokio::test]
     async fn sheet_choice_receipts_leave_no_notice_or_duplicate_toast() {
         let (host, command) = crate::test_support::host();

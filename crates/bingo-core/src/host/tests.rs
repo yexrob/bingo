@@ -27,6 +27,7 @@ mod policy;
 mod providers;
 mod question_receipt;
 mod queue;
+mod remembered;
 mod reserved;
 mod resting;
 mod resume;
@@ -138,7 +139,9 @@ async fn one_turn(attachment: &mut Attachment, prompt: &str) -> Seq {
 fn env() -> Env {
     static DIR: std::sync::LazyLock<tempfile::TempDir> =
         std::sync::LazyLock::new(|| tempfile::tempdir().expect("a scratch home"));
-    env_in(DIR.path())
+    let mut env = env_in(DIR.path());
+    env.data_dir = env.data_dir.join(SessionId::mint().as_str());
+    env
 }
 
 fn env_in(dir: &std::path::Path) -> Env {

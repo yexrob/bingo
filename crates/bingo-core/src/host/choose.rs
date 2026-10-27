@@ -54,12 +54,20 @@ impl Host {
         )
     }
 
+    pub(super) async fn restorable_provider(&self, id: &str) -> bool {
+        self.providers()
+            .await
+            .iter()
+            .any(|provider| provider.id() == id && auth::signed_in(provider.as_ref()))
+            || self.registry.agents.iter().any(|agent| agent.id() == id)
+    }
+
     /// The provider `id` names; with none, the settings' provider; with
     /// neither, the first that can actually answer.
     pub async fn provider(&self, id: Option<&str>) -> Result<Arc<dyn Provider>, KernelError> {
+        let named = id.or_else(|| configured_provider(self)).map(str::to_owned);
         let providers = self.providers().await;
-        let named = id.or_else(|| configured_provider(self));
-        match named {
+        match named.as_deref() {
             Some(wanted) => by_id(&providers, wanted),
             None => default_provider(&providers),
         }
@@ -70,11 +78,8 @@ impl Host {
         provider: &dyn Provider,
         wanted: Option<&str>,
     ) -> Result<String, KernelError> {
-        if let Some(model) = wanted
-            .map(str::to_string)
-            .or_else(|| configured_model(self))
-        {
-            return Ok(model);
+        if let Some(model) = wanted {
+            return Ok(model.into());
         }
         let models = provider
             .models()
@@ -106,28 +111,35 @@ impl Host {
         &self,
         spec: &SessionSpec,
     ) -> Result<ModelChoice, KernelError> {
+        // Startup may publish a late provider between awaits. Capture both
+        // defaults together, including absence, before gathering any source.
+        let (provider_default, model_default) = configured_pair(self);
         let named = spec
             .provider
             .as_deref()
-            .or_else(|| configured_provider(self));
+            .or(provider_default)
+            .map(str::to_owned);
+        let model = spec.model.as_deref().or(model_default).map(str::to_owned);
+        let providers = self.providers().await;
         let agent = self
             .registry
             .agents
             .iter()
-            .find(|a| named.is_some_and(|n| n == a.id()));
+            .find(|a| named.as_deref().is_some_and(|n| n == a.id()));
         let agent = match agent {
             Some(agent) => Some(agent),
-            None if named.is_none() && self.providers().await.is_empty() => {
-                self.registry.agents.first()
-            }
+            None if named.is_none() && providers.is_empty() => self.registry.agents.first(),
             None => None,
         };
         if let Some(agent) = agent {
-            return self.choose_agent(agent.clone(), spec).await;
+            return self.choose_agent(agent.clone(), spec, model).await;
         }
-        let provider = self.provider(spec.provider.as_deref()).await?;
+        let provider = match named.as_deref() {
+            Some(id) => by_id(&providers, id),
+            None => default_provider(&providers),
+        }?;
         auth::check(provider.as_ref())?;
-        let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
+        let model = self.model(provider.as_ref(), model.as_deref()).await?;
         let models::Resolved {
             capabilities,
             window_known,
@@ -147,8 +159,9 @@ impl Host {
         &self,
         agent: Arc<dyn Agent>,
         spec: &SessionSpec,
+        wanted: Option<String>,
     ) -> Result<ModelChoice, KernelError> {
-        let id = match spec.model.clone().or_else(|| configured_model(self)) {
+        let id = match wanted {
             Some(id) => id,
             None => agent
                 .models()
@@ -218,17 +231,8 @@ fn by_id(providers: &[Arc<dyn Provider>], wanted: &str) -> Result<Arc<dyn Provid
 /// whose credentials are in place. Registration order alone would hand a
 /// person the provider they have never signed in to while another is ready
 /// and waiting, and [`auth::check`] would then refuse the run outright.
-fn configured_provider(host: &Host) -> Option<&str> {
-    if host
-        .registry
-        .provider_state
-        .default_cleared
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        None
-    } else {
-        host.settings.kernel.provider.as_deref()
-    }
+pub(super) fn configured_provider(host: &Host) -> Option<&str> {
+    configured_pair(host).0
 }
 
 fn default_provider(providers: &[Arc<dyn Provider>]) -> Result<Arc<dyn Provider>, KernelError> {
@@ -245,15 +249,24 @@ fn default_provider(providers: &[Arc<dyn Provider>]) -> Result<Arc<dyn Provider>
         .ok_or_else(|| auth::nobody_signed_in(providers))
 }
 
-fn configured_model(host: &Host) -> Option<String> {
+pub(super) fn configured_model(host: &Host) -> Option<String> {
+    configured_pair(host).1.map(str::to_owned)
+}
+
+fn configured_pair(host: &Host) -> (Option<&str>, Option<&str>) {
     if host
         .registry
         .provider_state
         .default_cleared
         .load(std::sync::atomic::Ordering::Relaxed)
     {
-        None
-    } else {
-        host.settings.kernel.model.clone()
+        return (None, None);
+    }
+    match host.remembered.get() {
+        Some(choice) => (Some(&choice.provider), Some(&choice.model)),
+        None => (
+            host.settings.kernel.provider.as_deref(),
+            host.settings.kernel.model.as_deref(),
+        ),
     }
 }

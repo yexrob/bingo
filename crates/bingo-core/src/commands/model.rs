@@ -1,4 +1,4 @@
-//! `/model` chooses for this session; `--keep` also writes the user layer.
+//! `/model` remembers root choices for next startup; `--keep` writes settings too.
 
 use std::sync::{Arc, Weak};
 
@@ -186,18 +186,20 @@ async fn apply_choice(
     host.reconfigure(&cx.session, change(ChoiceScope::Session))
         .await?;
     if !keep {
-        return Ok("this session".into());
+        return crate::host::remembered::remember_model(host, &cx.session, false).await;
     }
     let keys = [
         ("provider", json!(choice.endpoint.id())),
         ("model", json!(choice.id)),
     ];
-    if let Some(error) = super::remember(host, &keys) {
-        return Ok(error);
+    let path = crate::settings::user_path(host.env());
+    if let Err(error) = crate::settings::remember(&path, &keys) {
+        let remembered = crate::host::remembered::remember_model(host, &cx.session, false).await?;
+        return Ok(format!("{remembered} · user settings not kept: {error}"));
     }
     host.reconfigure(&cx.session, change(ChoiceScope::Default))
         .await?;
-    Ok("kept for new sessions".into())
+    crate::host::remembered::remember_model(host, &cx.session, true).await
 }
 
 /// What the session's next turn runs on, resolved as the turn will resolve

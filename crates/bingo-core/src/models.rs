@@ -21,3 +21,6 @@ pub use resolve::{DEFAULT_MAX_TOKENS, Resolved, max_tokens, resolve};
 pub use served::{Offer, Served, ServedModels, Source};
 
 mod persist;
+pub(crate) mod selection;
+#[cfg(test)]
+mod selection_tests;

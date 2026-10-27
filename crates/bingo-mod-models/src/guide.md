@@ -5,13 +5,17 @@ model id switches immediately. Provider prefixes such as `openai/` filter one
 provider. Select a provider's hidden-model row to include snapshots and non-chat
 models. Non-chat models cannot be selected for a conversation.
 
-Use ↑↓ to select, ←→ to choose an offered thinking effort, Tab to keep the
-choice for new sessions, and * to pin or unpin. Enter acts; Escape returns one
-sheet or closes the picker. Typing only changes the filter.
+Use ↑↓ to select, ←→ to choose an offered thinking effort, Tab to also save the
+choice in user settings (`--keep`), and * to pin or unpin. Enter acts; Escape
+returns one sheet or closes the picker. Typing only changes the filter.
+
+Successful model choices in main sessions become next-start defaults without
+rewriting settings. Project settings, explicit settings and CLI overrides take
+priority. Child choices and thinking remain session-only unless kept.
 
 Alt+M runs `/model next`, cycling the pins in their saved order. Alt+T runs
-`/think next`, cycling this model's offered efforts. Both changes belong to
-this session. Command bindings take priority over a plugin band's hotkey;
+`/think next`, cycling this model's offered efforts. Command bindings take
+priority over a plugin band's hotkey;
 configure `keys` to rebind them. Ctrl+P has no model binding.
 
 Select a provider to test its connection, refresh models, replace its key or

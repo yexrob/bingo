@@ -282,7 +282,7 @@ async fn an_instance_is_reachable_by_provider_and_by_model() {
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
         stdout(&out),
-        "⇄ gpt-5.4 · proxy1 · thinking off · this session\n"
+        "⇄ gpt-5.4 · proxy1 · thinking off · this session · next-start default\n"
     );
 
     let (h, f) = (home.path().to_path_buf(), file);

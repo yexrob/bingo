@@ -25,7 +25,7 @@ pub fn label(model: &CatalogEntry, provider: &CatalogEntry, keep: bool) -> Strin
         Reach::Down => format!("fix {}", provider.id),
         Reach::Unchecked => "check, then use".into(),
         Reach::Ready if compacts(model) => "compact, then use".into(),
-        Reach::Ready => if keep { "use and keep" } else { "use here" }.into(),
+        Reach::Ready => if keep { "use and keep" } else { "use" }.into(),
     }
 }
 /// The kernel's decision for this session (`bingo_sdk::switch`); the picker
@@ -65,7 +65,7 @@ mod tests {
             ("ready", "unchecked", true, true, "check, then use"),
             ("ready", "ok", true, true, "compact, then use"),
             ("ready", "ok", false, true, "use and keep"),
-            ("ready", "ok", false, false, "use here"),
+            ("ready", "ok", false, false, "use"),
         ] {
             let model = CatalogEntry {
                 id: "p/m".into(),

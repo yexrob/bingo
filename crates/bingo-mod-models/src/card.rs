@@ -152,12 +152,13 @@ fn append_controls(
     });
     lines.push(
         if keep {
-            "applies   ○ here   ● here and new sessions"
+            "settings  ○ unchanged   ● keep choice"
         } else {
-            "applies   ● here   ○ here and new sessions"
+            "settings  ● unchanged   ○ keep choice"
         }
         .into(),
     );
+    lines.push("model     next-start default in main sessions".into());
     if crate::label::compacts(model) {
         lines.push("▲ compacts the chat first, then switches".into());
     }
@@ -202,5 +203,10 @@ mod tests {
                 && lines.contains("[high]")
         );
         assert!(!lines.contains("medium"));
+        assert!(lines.contains("settings  ○ unchanged   ● keep choice"));
+        let ordinary = card(&model, &chat, Some(Effort::High), false).join("\n");
+        assert!(ordinary.contains("settings  ● unchanged   ○ keep choice"));
+        assert!(!ordinary.contains("here and new sessions"));
+        assert!(ordinary.contains("model     next-start default in main sessions"));
     }
 }

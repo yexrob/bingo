@@ -124,7 +124,7 @@ async fn model_and_think_change_the_next_turn_and_are_announced() {
     let (ack, before) = client.ack("/model m2").await;
     assert_eq!(
         message(&ack),
-        "⇄ m2 · scripted · thinking off · this session"
+        "⇄ m2 · scripted · thinking off · this session · next-start default"
     );
     assert_eq!(client.state.summary.model.as_deref(), Some("m2"));
     assert!(
@@ -205,7 +205,7 @@ async fn think_reaches_an_unknown_model_at_every_level_and_off_omits_it() {
     let (ack, _) = client.ack("/model plain").await;
     assert_eq!(
         message(&ack),
-        "⇄ plain · scripted · thinking off · this session"
+        "⇄ plain · scripted · thinking off · this session · next-start default"
     );
 
     for (index, word) in Effort::words().enumerate() {
@@ -350,9 +350,9 @@ async fn status_answers_with_the_session_s_facts() {
     assert_eq!(row("tokens"), "0 in · 0 out");
 }
 
-/// `/model` outlives the session it was typed in: the next start opens on it
-/// (user-reported: "应该是记住上次设置的"). It is written into the user layer,
-/// which is the file the loader reads first — so a project layer or a
+/// `/model --keep` explicitly writes the user layer as before, in addition
+/// to remembering the next-start fallback. The loader reads user settings
+/// first — so a project layer or a
 /// `--model` on the command line still wins over it.
 #[tokio::test]
 async fn model_is_remembered_in_the_user_settings() {
